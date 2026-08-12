@@ -536,6 +536,14 @@ add_example_test(
 )
 add_example_test(
     TestClothExamples,
+    name="cloth.example_cloth_plastic_fold",
+    devices=test_devices,
+    test_options={"num-frames": 240},
+    test_options_cpu={"num-frames": 150},
+    use_viewer=True,
+)
+add_example_test(
+    TestClothExamples,
     name="cloth.example_cloth_hanging",
     devices=test_devices,
     test_options={},

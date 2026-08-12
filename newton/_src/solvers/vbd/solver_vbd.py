@@ -42,9 +42,11 @@ from .particle_vbd_kernels import (
     apply_truncation_ts,
     # Solver kernels (particle VBD)
     forward_step,
+    reset_edge_plastic_state,
     reset_particle_state,
     solve_elasticity,
     solve_elasticity_tile,
+    update_plastic_rest_angles,
     update_velocity,
 )
 from .rigid_vbd_kernels import (
@@ -505,6 +507,8 @@ class SolverVBD(SolverBase, CouplingInterface):
               ``model.vbd.dahl_eps_max`` and ``model.vbd.dahl_tau``. Register them with
               ``SolverVBD.register_custom_attributes`` before building the model. Dahl friction is
               enabled only when positive Dahl parameters are authored.
+            - Cloth bending plasticity is configured with :class:`~newton.ClothPlasticity` when adding
+              a cloth mesh or grid. Its evolving rest and yield angles are stored in :class:`~newton.State`.
 
         """
         integrates_rigid_bodies = model.body_count > 0 and not integrate_with_external_rigid_solver
@@ -549,6 +553,9 @@ class SolverVBD(SolverBase, CouplingInterface):
 
         super().__init__(model)
 
+        self._edge_plasticity_enabled = bool(
+            model.edge_plastic_mask is not None and np.any(model.edge_plastic_mask.numpy())
+        )
         effective_deterministic = deterministic if deterministic is not None else wp.config.deterministic
         particle_deterministic_max_records = 0
         coupling_deterministic_max_records = 0
@@ -2037,7 +2044,7 @@ class SolverVBD(SolverBase, CouplingInterface):
         The solver follows a 3-phase structure:
         1. Initialize: Forward integrate particles and rigid bodies, detect collisions, initialize contact state
         2. Iterate: Interleave particle and rigid-body VBD iterations
-        3. Finalize: Update velocities and persistent state (Dahl friction)
+        3. Finalize: Update velocities and persistent state (Dahl friction and cloth bending plasticity)
 
         To control rigid body substepping behavior, call set_rigid_history_update().
         When True (default), the step rebuilds rigid contact lists, re-initializes
@@ -2076,6 +2083,7 @@ class SolverVBD(SolverBase, CouplingInterface):
         self._snapshot_rigid_contact_history(contacts)
         self._finalize_rigid_bodies(state_in, state_out, dt)
         self._finalize_particles(state_out, dt)
+        self._finalize_edge_plasticity(state_in, state_out)
 
     @override
     def reset(
@@ -2124,6 +2132,9 @@ class SolverVBD(SolverBase, CouplingInterface):
         and :meth:`rebuild_bvh` are graph-capturable, so either may run inside a
         captured episode-reset graph.
 
+        Cloth bending-plastic rest and yield angles are solver history, so they
+        are restored from the model for selected worlds regardless of *flags*.
+
         Reset does not run collision detection, and :meth:`step` consumes the
         supplied contacts rather than rerunning
         :meth:`~newton.CollisionPipeline.collide`. After moving bodies or
@@ -2166,6 +2177,30 @@ class SolverVBD(SolverBase, CouplingInterface):
         world_mask = self._normalize_reset_world_mask(world_mask)
 
         flags_value = int(StateFlags.ALL if flags is None else flags)
+
+        if self._edge_plasticity_enabled:
+            if state.edge_rest_angle is None or state.edge_plastic_yield_angle is None:
+                raise ValueError("Plasticity-enabled VBD reset requires edge plastic state arrays.")
+            if state.edge_rest_angle.device != self.device or state.edge_plastic_yield_angle.device != self.device:
+                raise ValueError(f"Edge plastic state must be on solver device {self.device}.")
+            wp.launch(
+                kernel=reset_edge_plastic_state,
+                dim=model.edge_count,
+                inputs=[
+                    world_mask,
+                    world_mask is None,
+                    model.world_count,
+                    model.particle_world,
+                    model.edge_indices,
+                    model.edge_rest_angle,
+                    model.edge_plastic_yield_angle,
+                ],
+                outputs=[
+                    state.edge_rest_angle,
+                    state.edge_plastic_yield_angle,
+                ],
+                device=self.device,
+            )
 
         # Only requested BODY flags reach the launch as actionable arrays; everything
         # else stays None so an unrequested (possibly wrong-device) State array never
@@ -2864,6 +2899,8 @@ class SolverVBD(SolverBase, CouplingInterface):
         if model.particle_count == 0:
             return
 
+        edge_rest_angle = state_in.edge_rest_angle if self._edge_plasticity_enabled else model.edge_rest_angle
+
         # Update collision detection if needed (penetration-free mode only)
         if self.particle_enable_self_contact:
             if (self.particle_collision_detection_interval == 0 and iter_num == 0) or (
@@ -2980,7 +3017,7 @@ class SolverVBD(SolverBase, CouplingInterface):
                         self.model.tri_materials,
                         self.model.tri_areas,
                         self.model.edge_indices,
-                        self.model.edge_rest_angle,
+                        edge_rest_angle,
                         self.model.edge_rest_length,
                         self.model.edge_bending_properties,
                         self.model.tet_indices,
@@ -3012,7 +3049,7 @@ class SolverVBD(SolverBase, CouplingInterface):
                         self.model.tri_materials,
                         self.model.tri_areas,
                         self.model.edge_indices,
-                        self.model.edge_rest_angle,
+                        edge_rest_angle,
                         self.model.edge_rest_length,
                         self.model.edge_bending_properties,
                         self.model.tet_indices,
@@ -3513,6 +3550,35 @@ class SolverVBD(SolverBase, CouplingInterface):
             kernel=update_velocity,
             inputs=[dt, self.particle_q_prev, state_out.particle_q, state_out.particle_qd],
             dim=self.model.particle_count,
+            device=self.device,
+        )
+
+    def _finalize_edge_plasticity(self, state_in: State, state_out: State) -> None:
+        """Propagate and update cloth bending-plastic state after a VBD step."""
+        if not self._edge_plasticity_enabled:
+            return
+
+        assert state_in.edge_rest_angle is not None
+        assert state_in.edge_plastic_yield_angle is not None
+        assert state_out.edge_rest_angle is not None
+        assert state_out.edge_plastic_yield_angle is not None
+
+        wp.copy(state_out.edge_rest_angle, state_in.edge_rest_angle)
+        wp.copy(state_out.edge_plastic_yield_angle, state_in.edge_plastic_yield_angle)
+
+        wp.launch(
+            kernel=update_plastic_rest_angles,
+            dim=self.model.edge_count,
+            inputs=[
+                state_out.particle_q,
+                self.model.edge_indices,
+                self.model.edge_plastic_mask,
+                self.model.edge_plastic_hardening,
+            ],
+            outputs=[
+                state_out.edge_rest_angle,
+                state_out.edge_plastic_yield_angle,
+            ],
             device=self.device,
         )
 

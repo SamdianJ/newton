@@ -29,6 +29,7 @@ newton
 
    Axis
    BodyFlags
+   ClothPlasticity
    CollisionPipeline
    Contacts
    Control

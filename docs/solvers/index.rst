@@ -414,6 +414,52 @@ constraints, with opt-in unified compliant ALM and a deprecated legacy AVBD path
 | :sup:`4` VBD interprets ``joint_target_kd`` and ``joint_limit_kd`` as absolute damping coefficients in physical units.
 
 
+VBD Cloth Bending Plasticity
+----------------------------
+
+:class:`~newton.solvers.SolverVBD` can model permanent cloth folds by evolving
+the rest angle of selected bending edges. Configure the feature with
+:class:`~newton.ClothPlasticity` when calling
+:meth:`~newton.ModelBuilder.add_cloth_mesh` or
+:meth:`~newton.ModelBuilder.add_cloth_grid`. Plasticity is rate independent:
+the final plastic update for a step depends on the converged bend angle, not on
+the number of VBD iterations.
+
+For bend angle :math:`\theta`, plastic rest angle :math:`\theta_p`, and current
+yield angle :math:`y`, the wrapped trial strain is
+:math:`\delta=\operatorname{wrap}(\theta-\theta_p)`. When
+:math:`|\delta|>y`, isotropic hardening uses
+
+.. math::
+
+   \Delta\gamma = \frac{|\delta|-y}{1+H}, \qquad
+   \theta_p \leftarrow \operatorname{wrap}(\theta_p+
+   \operatorname{sign}(\delta)\Delta\gamma), \qquad
+   y \leftarrow y+H\Delta\gamma,
+
+where :math:`H` is ``hardening_modulus``. Set ``H=0`` for perfect
+plasticity. ``yield_angle`` controls how far an edge bends elastically before
+flow begins, and ``mask`` restricts plastic flow to selected generated edges.
+
+.. code-block:: python
+
+    plasticity = newton.ClothPlasticity(
+        yield_angle=0.12,
+        hardening_modulus=0.02,
+        mask=crease_mask,
+    )
+    builder.add_cloth_mesh(
+        # Other mesh and material arguments omitted.
+        bending_plasticity=plasticity,
+    )
+
+The evolving rest and yield angles live in :class:`~newton.State`, so pass the
+output state into the next step. :meth:`~newton.solvers.SolverVBD.reset`
+restores this history from the model for each selected world. The update is
+nonsmooth at yielding and is not currently supported for differentiable
+simulation. See ``cloth_plastic_fold`` for a complete example.
+
+
 
 .. _Differentiability:
 

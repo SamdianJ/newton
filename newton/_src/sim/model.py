@@ -550,6 +550,9 @@ class Model:
         "edge_rest_angle": AttributeSpec(AttributeFrequency.EDGE),
         "edge_rest_length": AttributeSpec(AttributeFrequency.EDGE),
         "edge_bending_properties": AttributeSpec(AttributeFrequency.EDGE),
+        "edge_plastic_mask": AttributeSpec(AttributeFrequency.EDGE),
+        "edge_plastic_yield_angle": AttributeSpec(AttributeFrequency.EDGE),
+        "edge_plastic_hardening": AttributeSpec(AttributeFrequency.EDGE),
         "edge_constraint_lambdas": AttributeSpec(AttributeFrequency.EDGE),
         "tet_indices": AttributeSpec(
             AttributeFrequency.TETRAHEDRON,
@@ -1025,6 +1028,12 @@ class Model:
         self.edge_bending_properties: wp.array2d[wp.float32] | None = None
         """Bending edge stiffness and damping, shape [edge_count, 2], float.
         Components: [0] stiffness [N·m/rad], [1] damping [N·s]."""
+        self.edge_plastic_mask: wp.array[wp.int32] | None = None
+        """Plastic-flow enable flags, shape [edge_count], int."""
+        self.edge_plastic_yield_angle: wp.array[wp.float32] | None = None
+        """Initial plastic yield angles [rad], shape [edge_count], float."""
+        self.edge_plastic_hardening: wp.array[wp.float32] | None = None
+        """Plastic hardening moduli [rad/rad], shape [edge_count], float."""
         self.edge_constraint_lambdas: wp.array[wp.float32] | None = None
         """Lagrange multipliers for edge constraints (internal use)."""
         self.soft_mesh_adjacency: MeshAdjacency | None = None
@@ -1799,6 +1808,10 @@ class Model:
             s.particle_q = wp.clone(self.particle_q, requires_grad=requires_grad)
             s.particle_qd = wp.clone(self.particle_qd, requires_grad=requires_grad)
             s.particle_f = wp.zeros_like(self.particle_qd, requires_grad=requires_grad)
+
+        if self.edge_plastic_mask is not None:
+            s.edge_rest_angle = wp.clone(self.edge_rest_angle, requires_grad=requires_grad)
+            s.edge_plastic_yield_angle = wp.clone(self.edge_plastic_yield_angle, requires_grad=requires_grad)
 
         # rigid bodies
         if self.body_count:

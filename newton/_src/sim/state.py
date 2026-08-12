@@ -125,6 +125,12 @@ class State:
         self.particle_f: wp.array | None = None
         """3D forces on particles [N], shape (particle_count,), dtype :class:`vec3`."""
 
+        self.edge_rest_angle: wp.array[wp.float32] | None = None
+        """Evolving bending edge rest angles [rad], shape [edge_count], dtype float, or ``None`` without plasticity."""
+
+        self.edge_plastic_yield_angle: wp.array[wp.float32] | None = None
+        """Current bending-plastic yield angles [rad], shape [edge_count], dtype float, or ``None`` without plasticity."""
+
         self.body_q: wp.array | None = None
         """Rigid body transforms (7-DOF) [m, unitless quaternion], shape (body_count,), dtype :class:`transform`."""
 

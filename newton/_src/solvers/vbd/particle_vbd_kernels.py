@@ -719,7 +719,7 @@ def evaluate_dihedral_angle_based_bending_force_hessian(
     theta = wp.atan2(sin_theta, cos_theta)
 
     k = stiffness * edge_rest_length[bending_index]
-    dE_dtheta = k * (theta - edge_rest_angle[bending_index])
+    dE_dtheta = k * _wrap_angle(theta - edge_rest_angle[bending_index])
 
     # Pre-compute skew matrices (shared across all angle derivative computations)
     skew_e = wp.skew(e)
@@ -815,6 +815,108 @@ def evaluate_dihedral_angle_based_bending_force_hessian(
         bending_hessian = bending_hessian + damping_hessian
 
     return bending_force, bending_hessian
+
+
+@wp.func
+def _wrap_angle(angle: float) -> float:
+    pi = 3.141592653589793
+    two_pi = 6.283185307179586
+
+    while angle > pi:
+        angle = angle - two_pi
+    while angle < -pi:
+        angle = angle + two_pi
+
+    return angle
+
+
+@wp.kernel
+def update_plastic_rest_angles(
+    particle_q: wp.array[wp.vec3],
+    edge_indices: wp.array2d[wp.int32],
+    edge_plastic_mask: wp.array[wp.int32],
+    edge_plastic_hardening: wp.array[wp.float32],
+    # In/out
+    edge_rest_angle: wp.array[wp.float32],
+    edge_plastic_yield_angle: wp.array[wp.float32],
+):
+    """Persist bending deformation after an edge exceeds its yield angle."""
+    edge_index = wp.tid()
+    if edge_plastic_mask[edge_index] == 0:
+        return
+
+    opposite0 = edge_indices[edge_index, 0]
+    opposite1 = edge_indices[edge_index, 1]
+    vertex0 = edge_indices[edge_index, 2]
+    vertex1 = edge_indices[edge_index, 3]
+    if opposite0 < 0 or opposite1 < 0 or vertex0 < 0 or vertex1 < 0:
+        return
+
+    yield_angle = edge_plastic_yield_angle[edge_index]
+    rest_angle = edge_rest_angle[edge_index]
+    hardening = edge_plastic_hardening[edge_index]
+    if not (wp.isfinite(yield_angle) and wp.isfinite(rest_angle) and wp.isfinite(hardening)):
+        return
+    if yield_angle < 0.0 or hardening < 0.0:
+        return
+
+    x0 = particle_q[opposite0]
+    x1 = particle_q[opposite1]
+    x2 = particle_q[vertex0]
+    x3 = particle_q[vertex1]
+    normal0 = wp.cross(x2 - x0, x3 - x0)
+    normal1 = wp.cross(x3 - x1, x2 - x1)
+    edge = x3 - x2
+    normal0_length = wp.length(normal0)
+    normal1_length = wp.length(normal1)
+    edge_length = wp.length(edge)
+    if normal0_length <= 1.0e-12 or normal1_length <= 1.0e-12 or edge_length <= 1.0e-12:
+        return
+
+    normal0 = normal0 / normal0_length
+    normal1 = normal1 / normal1_length
+    edge = edge / edge_length
+    angle = wp.atan2(wp.dot(wp.cross(normal0, normal1), edge), wp.clamp(wp.dot(normal0, normal1), -1.0, 1.0))
+    if not wp.isfinite(angle):
+        return
+
+    delta = _wrap_angle(angle - rest_angle)
+    trial_excess = wp.abs(delta) - yield_angle
+    if not wp.isfinite(trial_excess) or trial_excess <= 1.0e-6:
+        return
+
+    direction = float(1.0)
+    if delta < 0.0:
+        direction = -1.0
+
+    # Consistency return for isotropic hardening:
+    # |delta| - plastic_increment = yield_angle + hardening * plastic_increment.
+    plastic_increment = trial_excess / (1.0 + hardening)
+    edge_rest_angle[edge_index] = _wrap_angle(rest_angle + direction * plastic_increment)
+
+    edge_plastic_yield_angle[edge_index] = yield_angle + hardening * plastic_increment
+
+
+@wp.kernel
+def reset_edge_plastic_state(
+    world_mask: wp.array[wp.bool],
+    reset_all: bool,
+    world_count: int,
+    particle_world: wp.array[wp.int32],
+    edge_indices: wp.array2d[wp.int32],
+    model_edge_rest_angle: wp.array[wp.float32],
+    model_edge_plastic_yield_angle: wp.array[wp.float32],
+    edge_rest_angle: wp.array[wp.float32],
+    edge_plastic_yield_angle: wp.array[wp.float32],
+):
+    """Restore cloth plastic history for edges in selected worlds."""
+    edge_index = wp.tid()
+    vertex = edge_indices[edge_index, 2]
+    if vertex < 0 or not _reset_world_selected(particle_world[vertex], world_mask, reset_all, world_count):
+        return
+
+    edge_rest_angle[edge_index] = model_edge_rest_angle[edge_index]
+    edge_plastic_yield_angle[edge_index] = model_edge_plastic_yield_angle[edge_index]
 
 
 @wp.func

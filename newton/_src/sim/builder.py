@@ -102,6 +102,37 @@ not show up in builder-state comparisons or survive past either builder's lifeti
 
 
 @dataclass(frozen=True)
+class ClothPlasticity:
+    """Configure rate-independent bending plasticity for a cloth mesh.
+
+    .. experimental::
+
+    The configuration applies to bending edges generated for one call to
+    :meth:`ModelBuilder.add_cloth_mesh` or :meth:`ModelBuilder.add_cloth_grid`.
+    Plastic state is stored in :class:`State` and is currently advanced by
+    :class:`newton.solvers.SolverVBD`.
+
+    Args:
+        yield_angle: Elastic bending strain allowed before plastic flow [rad]. A scalar applies to every
+            generated edge; a sequence or array supplies one value per generated edge.
+        hardening_modulus: Yield-angle increase per radian of plastic flow [rad/rad]. A scalar applies to every
+            generated edge; a sequence or array supplies one value per generated edge.
+        mask: Optional per-generated-edge mask. Zero disables plastic flow for
+            that edge; nonzero enables it.
+    """
+
+    yield_angle: float | int | Sequence[float | int] | np.ndarray
+    hardening_modulus: float | int | Sequence[float | int] | np.ndarray = 0.0
+    mask: Sequence[int] | np.ndarray | None = None
+
+    def __post_init__(self) -> None:
+        for name, values in (("yield_angle", self.yield_angle), ("hardening_modulus", self.hardening_modulus)):
+            values_array = np.asarray(values, dtype=np.float32)
+            if not np.all(np.isfinite(values_array)) or np.any(values_array < 0.0):
+                raise ValueError(f"{name} must contain only finite, nonnegative values.")
+
+
+@dataclass(frozen=True)
 class _ShapeCollisionFilterBlock:
     """Compact replicated collision-filter block."""
 
@@ -1346,6 +1377,12 @@ class ModelBuilder:
         """Edge rest lengths [m] accumulated for :attr:`Model.edge_rest_length`."""
         self.edge_bending_properties: list[tuple[float, float]] = []
         """Bending stiffness/damping rows accumulated for :attr:`Model.edge_bending_properties`."""
+        self.edge_plastic_mask: list[int] = []
+        """Plastic-flow masks accumulated for :attr:`Model.edge_plastic_mask`."""
+        self.edge_plastic_yield_angle: list[float] = []
+        """Initial plastic yield angles [rad] accumulated for :attr:`Model.edge_plastic_yield_angle`."""
+        self.edge_plastic_hardening: list[float] = []
+        """Plastic hardening moduli accumulated for :attr:`Model.edge_plastic_hardening`."""
 
         # tetrahedra
         self.tet_indices: list[tuple[int, int, int, int]] = []
@@ -8828,6 +8865,9 @@ class ModelBuilder:
         self.edge_rest_angle.append(rest)
         self.edge_rest_length.append(wp.length(x4 - x3))
         self.edge_bending_properties.append((edge_ke, edge_kd))
+        self.edge_plastic_mask.append(0)
+        self.edge_plastic_yield_angle.append(0.0)
+        self.edge_plastic_hardening.append(0.0)
         edge_index = len(self.edge_indices) - 1
 
         # Process custom attributes
@@ -8929,6 +8969,10 @@ class ModelBuilder:
         edge_kd = init_if_none(edge_kd, self.default_edge_kd)
 
         self.edge_bending_properties.extend(zip(edge_ke, edge_kd, strict=False))
+        edge_count = len(inds)
+        self.edge_plastic_mask.extend([0] * edge_count)
+        self.edge_plastic_yield_angle.extend([0.0] * edge_count)
+        self.edge_plastic_hardening.extend([0.0] * edge_count)
 
         # Process custom attributes
         if custom_attributes and len(i) > 0:
@@ -8986,6 +9030,36 @@ class ModelBuilder:
                 )
         return range(edge_start, len(self.edge_indices))
 
+    def _configure_cloth_plasticity(self, edge_range: range, plasticity: ClothPlasticity) -> None:
+        """Apply a cloth plasticity configuration to one generated edge range."""
+        edge_count = len(edge_range)
+
+        def expand_parameter(name: str, values: float | int | Sequence[float | int] | np.ndarray) -> list[float]:
+            values_array = np.asarray(values, dtype=np.float32)
+            if values_array.ndim == 0:
+                return [float(values_array)] * edge_count
+            values_flat = values_array.reshape(-1)
+            if values_flat.size != edge_count:
+                raise ValueError(
+                    f"ClothPlasticity.{name} must be scalar or contain {edge_count} values, got {values_flat.size}."
+                )
+            return values_flat.tolist()
+
+        if plasticity.mask is None:
+            mask = np.ones(edge_count, dtype=np.int32)
+        else:
+            mask = np.asarray(plasticity.mask, dtype=np.int32).reshape(-1)
+            if mask.shape != (edge_count,):
+                raise ValueError(f"ClothPlasticity.mask must have shape ({edge_count},), got {mask.shape}.")
+
+        self.edge_plastic_mask[edge_range.start : edge_range.stop] = mask.tolist()
+        self.edge_plastic_yield_angle[edge_range.start : edge_range.stop] = expand_parameter(
+            "yield_angle", plasticity.yield_angle
+        )
+        self.edge_plastic_hardening[edge_range.start : edge_range.stop] = expand_parameter(
+            "hardening_modulus", plasticity.hardening_modulus
+        )
+
     @deprecate_nonkeyword_arguments
     def add_cloth_grid(
         self,
@@ -9010,6 +9084,7 @@ class ModelBuilder:
         tri_lift: float | None = None,
         edge_ke: float | None = None,
         edge_kd: float | None = None,
+        bending_plasticity: ClothPlasticity | None = None,
         add_springs: bool = False,
         spring_ke: float | None = None,
         spring_kd: float | None = None,
@@ -9038,6 +9113,7 @@ class ModelBuilder:
             fix_right: Make the right-most edge of particles kinematic
             fix_top: Make the top-most edge of particles kinematic
             fix_bottom: Make the bottom-most edge of particles kinematic
+            bending_plasticity: Optional rate-independent bending plasticity.
             label: Optional name forwarded to :func:`newton.utils.validate_triangle_mesh`
                 via :meth:`add_cloth_mesh` so a mesh-quality warning can identify
                 this cloth.
@@ -9084,6 +9160,7 @@ class ModelBuilder:
             tri_lift=tri_lift,
             edge_ke=edge_ke,
             edge_kd=edge_kd,
+            bending_plasticity=bending_plasticity,
             add_springs=add_springs,
             spring_ke=spring_ke,
             spring_kd=spring_kd,
@@ -9131,6 +9208,7 @@ class ModelBuilder:
         tri_lift: float | None = None,
         edge_ke: float | None = None,
         edge_kd: float | None = None,
+        bending_plasticity: ClothPlasticity | None = None,
         add_springs: bool = False,
         spring_ke: float | None = None,
         spring_kd: float | None = None,
@@ -9154,6 +9232,7 @@ class ModelBuilder:
             vertices: A list of vertex positions
             indices: A list of triangle indices, 3 entries per-face
             density: The density per-area of the mesh
+            bending_plasticity: Optional rate-independent bending plasticity.
             particle_radius: The particle_radius which controls particle based collisions.
             custom_attributes_particles: Dictionary of custom attribute names to values for the particles.
             custom_attributes_edges: Dictionary of custom attribute names to values for the edges.
@@ -9246,6 +9325,9 @@ class ModelBuilder:
             custom_attributes=custom_attributes_edges,
         )
         edge_indices = np.asarray(self.edge_indices[edge_range.start : edge_range.stop], dtype=np.int32)
+
+        if bending_plasticity is not None:
+            self._configure_cloth_plasticity(edge_range, bending_plasticity)
 
         if add_springs:
             spring_indices = set()
@@ -11987,6 +12069,17 @@ class ModelBuilder:
             m.edge_bending_properties = _to_wp_array(
                 self.edge_bending_properties, wp.float32, requires_grad=requires_grad
             )
+            plasticity_configured = (
+                any(self.edge_plastic_mask) or any(self.edge_plastic_yield_angle) or any(self.edge_plastic_hardening)
+            )
+            if plasticity_configured:
+                m.edge_plastic_mask = _to_wp_array(self.edge_plastic_mask, wp.int32, requires_grad=False)
+                m.edge_plastic_yield_angle = _to_wp_array(
+                    self.edge_plastic_yield_angle, wp.float32, requires_grad=requires_grad
+                )
+                m.edge_plastic_hardening = _to_wp_array(
+                    self.edge_plastic_hardening, wp.float32, requires_grad=requires_grad
+                )
             # Build the soft-mesh adjacency from the accumulated bending edges and triangles:
             # keep the builder's edge numbering (it stays aligned with the bending materials) and
             # derive the edge/triangle maps against the final triangles.

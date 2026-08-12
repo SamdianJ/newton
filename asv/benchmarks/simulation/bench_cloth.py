@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import warp as wp
-from asv_runner.benchmarks.mark import skip_benchmark_if
+from asv_runner.benchmarks.mark import SkipNotImplemented, skip_benchmark_if
 
 wp.config.log_level = wp.LOG_WARNING
 
@@ -51,6 +51,32 @@ class FastExampleClothTwist:
         wp.synchronize_device()
 
 
+class FastExampleClothPlasticFold:
+    timeout = 300
+    repeat = 3
+    number = 1
+
+    def setup(self):
+        if not hasattr(newton, "ClothPlasticity"):
+            raise SkipNotImplemented
+
+        from newton.examples.cloth.example_cloth_plastic_fold import Example  # noqa: PLC0415
+
+        self.num_frames = 60
+        if hasattr(newton.examples, "default_args"):
+            args = newton.examples.default_args()
+        else:
+            args = None
+        self.example = Example(ViewerNull(num_frames=self.num_frames), args)
+
+    @skip_benchmark_if(wp.get_cuda_device_count() == 0)
+    def time_simulate(self):
+        for _ in range(self.num_frames):
+            self.example.simulate()
+
+        wp.synchronize_device()
+
+
 if __name__ == "__main__":
     import argparse
 
@@ -58,6 +84,7 @@ if __name__ == "__main__":
 
     benchmark_list = {
         "FastExampleClothManipulation": FastExampleClothManipulation,
+        "FastExampleClothPlasticFold": FastExampleClothPlasticFold,
         "FastExampleClothTwist": FastExampleClothTwist,
     }
 
