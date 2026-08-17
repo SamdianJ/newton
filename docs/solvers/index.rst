@@ -415,6 +415,56 @@ constraints, with opt-in unified compliant ALM and a deprecated legacy AVBD path
 
 
 
+VBD Cable Viscoelasticity
+-------------------------
+
+.. experimental::
+
+   VBD cable bending-viscoelasticity behavior and the ``visco_bend_ke`` and
+   ``visco_bend_tau`` custom attributes may change without prior notice.
+
+:class:`~newton.solvers.SolverVBD` optionally augments soft CABLE bend slots with a
+standard-linear-solid branch. Register the VBD custom attributes before adding the
+cable, then author positive parameters before constructing the solver:
+
+.. code-block:: python
+
+   builder = newton.ModelBuilder()
+   newton.solvers.SolverVBD.register_custom_attributes(builder, dahl_defaults_enabled=False)
+
+   _bodies, _joints = builder.add_rod(
+       positions=points,
+       radius=radius,
+       bend_stiffness=relaxed_bend_stiffness,
+       body_frame_origin="com",
+   )
+   builder.color()
+   model = builder.finalize()
+   model.vbd.visco_bend_ke.fill_(transient_bend_stiffness)
+   model.vbd.visco_bend_tau.fill_(relaxation_time)
+   solver = newton.solvers.SolverVBD(model, rigid_compliant_alm=True)
+
+``bend_stiffness`` is the relaxed per-joint stiffness :math:`K_\infty`
+[N·m/rad], ``visco_bend_ke`` is the transient branch stiffness :math:`K_1`
+[N·m/rad], and ``visco_bend_tau`` is the relaxation time :math:`\tau` [s].
+The instantaneous stiffness is :math:`K_0 = K_\infty + K_1`. For a rod segment
+of length :math:`\ell`, convert continuum bending rigidity with
+:math:`K = EI / \ell`.
+
+The branch uses a backward-Euler update with a consistent tangent during VBD
+iterations. :meth:`~newton.solvers.SolverVBD.reset` clears its moment when the
+next input pose is rebaselined, treating that pose as relaxed. Disabling a
+temporary end joint to release a cable does not reset the cable's material
+history.
+
+The ``cable_viscoelastic_release`` example demonstrates the model with
+illustrative parameters:
+
+.. code-block:: console
+
+   python -m newton.examples cable_viscoelastic_release
+
+
 .. _Differentiability:
 
 Differentiability

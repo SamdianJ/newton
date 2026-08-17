@@ -59,6 +59,7 @@ from .rigid_vbd_kernels import (
     build_body_particle_contact_lists,
     check_contact_overflow,
     compute_cable_dahl_parameters,
+    compute_cable_viscoelastic_parameters,
     compute_rigid_contact_forces,
     forward_step_rigid_bodies,
     init_body_body_contact_materials,
@@ -73,6 +74,7 @@ from .rigid_vbd_kernels import (
     step_joint_C0_lambda_rho,
     update_body_velocity,
     update_cable_dahl_state,
+    update_cable_viscoelastic_state,
     update_duals_body_body_contacts,
     update_duals_body_particle_contacts,
     update_duals_joint,
@@ -505,6 +507,11 @@ class SolverVBD(SolverBase, CouplingInterface):
               ``model.vbd.dahl_eps_max`` and ``model.vbd.dahl_tau``. Register them with
               ``SolverVBD.register_custom_attributes`` before building the model. Dahl friction is
               enabled only when positive Dahl parameters are authored.
+            - Standard-linear-solid cable bending is controlled by ``model.vbd.visco_bend_ke``
+              [N·m/rad] and ``model.vbd.visco_bend_tau`` [s]. The cable's bend stiffness is the
+              relaxed stiffness, while ``visco_bend_ke`` is the transient branch stiffness.
+              Register the attributes before building the model and author positive values before
+              constructing the solver. The viscoelastic branch affects bending but not twist.
 
         """
         integrates_rigid_bodies = model.body_count > 0 and not integrate_with_external_rigid_solver
@@ -966,6 +973,33 @@ class SolverVBD(SolverBase, CouplingInterface):
                 self.joint_dahl_eps_max = wp.zeros(model.joint_count, dtype=float, device=self.device)
                 self.joint_dahl_tau = wp.zeros(model.joint_count, dtype=float, device=self.device)
                 self.enable_dahl_friction = False
+
+            # Standard-linear-solid cable bending state and frozen per-step response.
+            self.joint_visco_moment_prev = wp.zeros(model.joint_count, dtype=wp.vec3, device=self.device)
+            self.joint_visco_kappa_prev = wp.zeros(model.joint_count, dtype=wp.vec3, device=self.device)
+            self.joint_visco_bias = wp.zeros(model.joint_count, dtype=wp.vec3, device=self.device)
+            self.joint_visco_tangent = wp.zeros(model.joint_count, dtype=float, device=self.device)
+
+            has_viscoelasticity = (
+                model.joint_count > 0
+                and vbd_attrs is not None
+                and hasattr(vbd_attrs, "visco_bend_ke")
+                and hasattr(vbd_attrs, "visco_bend_tau")
+            )
+            if has_viscoelasticity:
+                self.joint_visco_bend_ke = vbd_attrs.visco_bend_ke
+                self.joint_visco_bend_tau = vbd_attrs.visco_bend_tau
+                visco_bend_ke = self._to_numpy(self.joint_visco_bend_ke, dtype=float)
+                visco_bend_tau = self._to_numpy(self.joint_visco_bend_tau, dtype=float)
+                if not np.all(np.isfinite(visco_bend_ke)) or np.any(visco_bend_ke < 0.0):
+                    raise ValueError("model.vbd.visco_bend_ke values must be finite and >= 0.")
+                if not np.all(np.isfinite(visco_bend_tau)) or np.any(visco_bend_tau < 0.0):
+                    raise ValueError("model.vbd.visco_bend_tau values must be finite and >= 0.")
+                self.enable_viscoelasticity = bool(np.any((visco_bend_ke > 0.0) & (visco_bend_tau > 0.0)))
+            else:
+                self.joint_visco_bend_ke = wp.zeros(model.joint_count, dtype=float, device=self.device)
+                self.joint_visco_bend_tau = wp.zeros(model.joint_count, dtype=float, device=self.device)
+                self.enable_viscoelasticity = False
 
             # Per-joint DER rest invariants, refreshed at init and on model change
             # (see _refresh_cable_rest_bend_twist_cache): the parent-local rest
@@ -1776,6 +1810,7 @@ class SolverVBD(SolverBase, CouplingInterface):
         Currently registers:
           - ``vbd:joint_is_hard`` for per-joint hard/soft constraint mode (non-cable joints)
           - ``vbd:dahl_eps_max`` and ``vbd:dahl_tau`` for optional cable angular Dahl friction
+          - ``vbd:visco_bend_ke`` and ``vbd:visco_bend_tau`` for optional cable bending relaxation
 
         Attributes are declared in the ``vbd`` namespace so they can be authored
         in scenes and in USD as ``newton:vbd:<attr>``.
@@ -1822,6 +1857,26 @@ class SolverVBD(SolverBase, CouplingInterface):
                 assignment=Model.AttributeAssignment.MODEL,
                 dtype=wp.float32,
                 default=dahl_tau_default,
+                namespace="vbd",
+            )
+        )
+        builder.add_custom_attribute(
+            ModelBuilder.CustomAttribute(
+                name="visco_bend_ke",
+                frequency=Model.AttributeFrequency.JOINT,
+                assignment=Model.AttributeAssignment.MODEL,
+                dtype=wp.float32,
+                default=0.0,
+                namespace="vbd",
+            )
+        )
+        builder.add_custom_attribute(
+            ModelBuilder.CustomAttribute(
+                name="visco_bend_tau",
+                frequency=Model.AttributeFrequency.JOINT,
+                assignment=Model.AttributeAssignment.MODEL,
+                dtype=wp.float32,
+                default=0.0,
                 namespace="vbd",
             )
         )
@@ -2037,7 +2092,7 @@ class SolverVBD(SolverBase, CouplingInterface):
         The solver follows a 3-phase structure:
         1. Initialize: Forward integrate particles and rigid bodies, detect collisions, initialize contact state
         2. Iterate: Interleave particle and rigid-body VBD iterations
-        3. Finalize: Update velocities and persistent state (Dahl friction)
+        3. Finalize: Update velocities and persistent cable material state
 
         To control rigid body substepping behavior, call set_rigid_history_update().
         When True (default), the step rebuilds rigid contact lists, re-initializes
@@ -2088,9 +2143,10 @@ class SolverVBD(SolverBase, CouplingInterface):
 
         Body fields selected by *flags* are copied from the model defaults.
         Joint penalty is restored to its minimum; joint C0 and AVBD dual history
-        is zeroed immediately. Pose and enabled-cable friction history (curvature,
-        stress, and increment) are rebaselined together from the next :meth:`step`
-        input pose, after any intervening state edits or forward kinematics.
+        is zeroed immediately. Pose and enabled-cable material history are
+        rebaselined together from the next :meth:`step` input pose, after any
+        intervening state edits or forward kinematics. Rebaselining clears the
+        cable viscoelastic branch moment, treating the authored pose as relaxed.
         Selected-world contact warm-start is cold-started when fresh rigid contacts
         are next processed. Internal rigid history is reset regardless of *flags*.
         When an external solver integrates the bodies, reset performs no rigid
@@ -2772,6 +2828,39 @@ class SolverVBD(SolverBase, CouplingInterface):
                     device=self.device,
                 )
 
+            # Freeze the SLS history moment and consistent tangent for all VBD iterations.
+            if self.enable_viscoelasticity and model.joint_count > 0:
+                wp.launch(
+                    kernel=compute_cable_viscoelastic_parameters,
+                    inputs=[
+                        dt,
+                        model.joint_type,
+                        model.joint_enabled,
+                        model.joint_world,
+                        self._rigid_pose_rebaseline_mask,
+                        model.joint_parent,
+                        model.joint_child,
+                        model.joint_X_p,
+                        model.joint_X_c,
+                        self.joint_constraint_start,
+                        self.joint_is_hard,
+                        self.rigid_compliant_alm,
+                        self.joint_cable_rest_kb_local,
+                        self.joint_cable_rest_twist,
+                        self.body_q_prev,
+                        self.joint_visco_moment_prev,
+                        self.joint_visco_kappa_prev,
+                        self.joint_visco_bend_ke,
+                        self.joint_visco_bend_tau,
+                    ],
+                    outputs=[
+                        self.joint_visco_bias,
+                        self.joint_visco_tangent,
+                    ],
+                    dim=model.joint_count,
+                    device=self.device,
+                )
+
             # The forward step and any enabled cable update have consumed the mask.
             self._rigid_pose_rebaseline_mask.zero_()
 
@@ -3215,6 +3304,8 @@ class SolverVBD(SolverBase, CouplingInterface):
                     self.joint_penalty_kd,
                     self.joint_sigma_start,
                     self.joint_C_fric,
+                    self.joint_visco_bias,
+                    self.joint_visco_tangent,
                     model.joint_target_ke,
                     model.joint_target_kd,
                     control.joint_target_q,
@@ -3517,10 +3608,10 @@ class SolverVBD(SolverBase, CouplingInterface):
         )
 
     def _finalize_rigid_bodies(self, state_in: State, state_out: State, dt: float):
-        """Finalize rigid body velocities and Dahl friction state after VBD iterations (post-iteration phase).
+        """Finalize rigid velocities and persistent cable material state after AVBD iterations.
 
-        Updates rigid body velocities using BDF1 and updates Dahl hysteresis state for cable bend/twist.
-        Also transfers the final body poses from state_in to state_out.
+        Updates rigid body velocities using BDF1, updates cable Dahl and viscoelastic
+        state, and transfers final body poses from state_in to state_out.
         """
         model = self.model
 
@@ -3563,6 +3654,35 @@ class SolverVBD(SolverBase, CouplingInterface):
                     self.joint_sigma_prev,
                     self.joint_kappa_prev,
                     self.joint_dkappa_prev,
+                ],
+                dim=model.joint_count,
+                device=self.device,
+            )
+
+        if self.enable_viscoelasticity and model.joint_count > 0:
+            wp.launch(
+                kernel=update_cable_viscoelastic_state,
+                inputs=[
+                    model.joint_type,
+                    model.joint_enabled,
+                    model.joint_parent,
+                    model.joint_child,
+                    model.joint_X_p,
+                    model.joint_X_c,
+                    self.joint_constraint_start,
+                    self.joint_is_hard,
+                    self.rigid_compliant_alm,
+                    self.joint_cable_rest_kb_local,
+                    self.joint_cable_rest_twist,
+                    state_out.body_q,
+                    self.joint_visco_bend_ke,
+                    self.joint_visco_bend_tau,
+                    self.joint_visco_bias,
+                    self.joint_visco_tangent,
+                ],
+                outputs=[
+                    self.joint_visco_moment_prev,
+                    self.joint_visco_kappa_prev,
                 ],
                 dim=model.joint_count,
                 device=self.device,
