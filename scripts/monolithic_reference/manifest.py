@@ -9,8 +9,9 @@ import math
 import re
 import struct
 import subprocess
+import tempfile
 from collections import Counter
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Literal
 
@@ -87,16 +88,21 @@ def _validate(value, schema, path, *, frozen):
         raise ValueError(f"{path}: invalid enum value {value!r}")
     kind = schema.get("type")
     types = {"object": dict, "array": list, "string": str, "boolean": bool, "integer": int, "number": (int, float)}
+    if isinstance(kind, list):
+        if value is None and "null" in kind:
+            return
+        kind = next((item for item in kind if item != "null"), None)
     if kind and (not isinstance(value, types[kind]) or (kind in ("integer", "number") and isinstance(value, bool))):
         raise ValueError(f"{path}: expected {kind}")
     if kind == "object":
-        properties = schema["properties"]
+        properties = schema.get("properties", {})
         unknown = value.keys() - properties.keys()
-        missing = set(schema["required"]) - value.keys()
-        if unknown or (frozen and missing):
+        missing = set(schema.get("required", ())) - value.keys()
+        additional = schema.get("additionalProperties", False)
+        if (unknown and not additional) or (frozen and missing):
             raise ValueError(f"{path}: unknown {sorted(unknown)}; missing required {sorted(missing)}")
         for key, child in value.items():
-            _validate(child, properties[key], f"{path}.{key}", frozen=frozen)
+            _validate(child, properties.get(key, additional), f"{path}.{key}", frozen=frozen)
     elif kind == "array":
         if len(value) < schema.get("minItems", 0) or len(value) > schema.get("maxItems", math.inf):
             raise ValueError(f"{path}: invalid array length")
@@ -169,6 +175,8 @@ def validate_manifest(manifest: ComparisonManifest, *, require_frozen: bool) -> 
     tets, materials = physics.get("tet_indices"), physics.get("tet_materials_pa_pa_pas")
     if tets is not None and materials is not None and len(tets) != len(materials):
         raise ValueError("physics: expected one material per tet")
+    if frozen and not physics.get("shapes"):
+        raise ValueError("FROZEN benchmark requires collision shapes")
     if frozen:
         _validate_frozen_physics(physics, data["benchmark"])
 
@@ -191,7 +199,7 @@ def _require_unit(vector, path):
         raise ValueError(f"{path}: expected a unit vector or quaternion")
 
 
-def _validate_frozen_physics(physics, benchmark):
+def _validate_body_and_mesh_inputs(physics):
     joints, links, initial = physics["joints"], physics["links"], physics["initial"]
     dof_count = sum(joint["type"] != "FIXED" for joint in joints)
     for key in ("q", "qd"):
@@ -253,6 +261,12 @@ def _validate_frozen_physics(physics, benchmark):
     if any(_stored_float32(material[0]) <= 0 for material in physics["tet_materials_pa_pa_pas"]):
         raise ValueError("physics.tet_materials_pa_pa_pas: shear modulus must be positive")
 
+
+def _validate_frozen_physics(physics, benchmark):
+    _validate_body_and_mesh_inputs(physics)
+    joints, links = physics["joints"], physics["links"]
+    dof_count = sum(joint["type"] != "FIXED" for joint in joints)
+    rest = physics["rest_positions_m"]
     for shape in physics["shapes"]:
         if shape["link"] >= len(links):
             raise ValueError("physics.shapes.link: out-of-range link")
@@ -338,6 +352,29 @@ def validate_step_record(record: dict) -> None:
         raise ValueError("converged records cannot roll back or commit an unconverged candidate")
     if record["rolled_back"] and record["committed_unconverged"]:
         raise ValueError("a rolled-back record cannot commit an unconverged candidate")
+    nulls = set()
+
+    def collect_nulls(value, path):
+        if value is None:
+            nulls.add(path)
+        elif isinstance(value, dict):
+            for key, child in value.items():
+                if key != "unavailable_fields":
+                    collect_nulls(child, f"{path}.{key}" if path else key)
+
+    collect_nulls(record, "")
+    if nulls != set(record.get("unavailable_fields", {})):
+        raise ValueError("unavailable_fields must explain exactly the unavailable null measurements")
+    for transform in record["link_xform"]:
+        _require_unit(transform[3:], "step_record.link_xform.rotation")
+    residual = record["residual_contribution"]
+    generalized = record["generalized_physical_force"]
+    if residual is not None and (
+        len(residual["q"]) != len(record["joint_q"])
+        or len(residual["x"]) > len(record["node_positions_m"])
+        or (generalized is not None and len(generalized) != len(residual["q"]) + 3 * len(residual["x"]))
+    ):
+        raise ValueError("step record residual/generalized force dimension mismatch")
 
 
 def run_adapter(
@@ -349,13 +386,202 @@ def run_adapter(
     device: str,
     build_type: str,
     timeout_s: int,
+    python_executable: Path | None = None,
 ) -> int:
-    """Reserve the offline adapter interface without producing simulation evidence."""
-    raise NotImplementedError("PR-0 provides manifest and worktree checks; physics adapters are not implemented")
+    """Run an isolated adapter against exact clean source and validate its records."""
+    if implementation not in ("newton", "superdex") or timeout_s <= 0:
+        raise ValueError("Invalid implementation or adapter timeout")
+    manifest = load_manifest(manifest_path)
+    expected = manifest.data["repositories"][f"{implementation}_sha"]
+    identity = require_reference_worktree(worktree, expected_sha=expected)
+    python_executable = python_executable or identity.path / ".venv/bin/python"
+    if not python_executable.is_file():
+        raise ValueError("Adapter Python environment is absent; provide python_executable")
+    if output_dir.exists():
+        raise ValueError("Adapter output directory already exists")
+    output_dir.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix="monolithic-adapter-", dir=output_dir.parent) as temporary_name:
+        temporary = Path(temporary_name)
+        records = temporary / "records.jsonl"
+        command = [
+            str(python_executable.absolute()),
+            "-B",
+            str(Path(__file__).with_name("adapter.py").resolve()),
+            "--implementation",
+            implementation,
+            "--manifest",
+            str(manifest_path.resolve()),
+            "--worktree",
+            str(identity.path),
+            "--output",
+            str(records),
+            "--device",
+            device,
+            "--build-type",
+            build_type,
+        ]
+        result = subprocess.run(
+            command, cwd=identity.path, capture_output=True, text=True, timeout=timeout_s, check=False
+        )
+        if result.returncode:
+            raise RuntimeError(f"{implementation} adapter failed ({result.returncode}): {result.stderr[-8000:]}")
+        measured = _read_step_records(records, implementation)
+        for record in measured:
+            if record["manifest_sha256"] != compute_manifest_sha256(manifest) or any(
+                record[key] != value for key, value in manifest.data["repositories"].items()
+            ):
+                raise ValueError("Adapter records do not match the requested manifest/source identities")
+        _validate_run_request(measured, manifest, device=device, build_type=build_type)
+        require_reference_worktree(identity.path, expected_sha=expected)
+        (temporary / "stdout.log").write_text(result.stdout)
+        (temporary / "stderr.log").write_text(result.stderr)
+        (temporary / "manifest.json").write_bytes(canonical_manifest_bytes(manifest) + b"\n")
+        temporary.rename(output_dir)
+    return 0
+
+
+def _validate_run_request(records, manifest, *, device, build_type):
+    physics = manifest.data["physics"]
+    if len(records) != physics["substeps"]:
+        raise ValueError("Adapter record count differs from requested substeps")
+    nq = sum(joint["type"] != "FIXED" for joint in physics["joints"])
+    nx = sum(not fixed for fixed in physics["fixed_nodes"])
+    dimensions = {
+        "joint_q": nq,
+        "link_xform": len(physics["links"]),
+        "node_positions_m": len(physics["rest_positions_m"]),
+        "physical_world_force_or_wrench": len(physics["links"]),
+        "generalized_physical_force": nq + 3 * nx,
+    }
+    for step, record in enumerate(records, 1):
+        expected_time = step * physics["dt_s"]
+        if record["step"] != step or not math.isclose(
+            record["time_s"], expected_time, rel_tol=0, abs_tol=4 * math.ulp(expected_time)
+        ):
+            raise ValueError("Adapter step/time differs from requested timestep sequence")
+        if record["device"] != device or record["build_type"] != build_type:
+            raise ValueError("Adapter device/build differs from runtime request")
+        if json.loads(record["actual_parameters_json"]).get("dt_s") != physics["dt_s"]:
+            raise ValueError("Adapter effective dt differs from manifest")
+        for field, size in dimensions.items():
+            if record[field] is not None and len(record[field]) != size:
+                raise ValueError(f"Adapter {field} dimensions differ from manifest")
+        residual = record["residual_contribution"]
+        if residual is not None and (len(residual["q"]) != nq or len(residual["x"]) != nx):
+            raise ValueError("Adapter residual dimensions differ from manifest")
+
+
+def _read_step_records(path: Path, implementation: str) -> list[dict]:
+    records = [
+        json.loads(line, object_pairs_hook=_unique_object) for line in path.read_text().splitlines() if line.strip()
+    ]
+    if not records:
+        raise ValueError("Adapter output contains no step records")
+    for index, record in enumerate(records):
+        validate_step_record(record)
+        if record["implementation"] != implementation:
+            raise ValueError("Adapter output implementation mismatch")
+        if index and (record["step"] <= records[index - 1]["step"] or record["time_s"] <= records[index - 1]["time_s"]):
+            raise ValueError("Adapter step/time indices must strictly increase")
+        for key in ("manifest_sha256", "newton_sha", "superdex_sha", "device", "build_type", "actual_parameters_json"):
+            if record[key] != records[0][key]:
+                raise ValueError(f"Adapter metadata changes within a run: {key}")
+    return records
 
 
 def compare_runs(
     newton_output: Path, superdex_output: Path, mapping_report: list[MappingEntry], output_path: Path
 ) -> int:
-    """Reserve mapped comparison until actual adapters and evidence are available."""
-    raise NotImplementedError("PR-0 cannot compare physics outputs before reference adapters exist")
+    """Report observed differences and mapping blockers, never infer an equality gate."""
+    left, right = _read_step_records(newton_output, "newton"), _read_step_records(superdex_output, "superdex")
+    if not mapping_report or len({entry.mapping_id for entry in mapping_report}) != len(mapping_report):
+        raise ValueError("Comparison requires unique, explicit mapping entries")
+    if len(left) != len(right):
+        raise ValueError("Comparison run lengths differ")
+    for entry in mapping_report:
+        if entry.status not in ("MATCHED", "INTENTIONALLY_DIFFERENT", "UNMAPPED") or not entry.rationale.strip():
+            raise ValueError("Invalid mapping status or rationale")
+    blocked = sorted({item for entry in mapping_report if entry.status == "UNMAPPED" for item in entry.blocks})
+
+    def flat(value):
+        if isinstance(value, list):
+            return [scalar for child in value for scalar in flat(child)]
+        return [value]
+
+    quality_fields = (
+        "convergence_status",
+        "converged",
+        "committed_unconverged",
+        "rolled_back",
+        "nonlinear_iterations",
+        "linear_iterations",
+        "min_det_f",
+        "penetration_m",
+    )
+
+    def quality(records):
+        result = {
+            "record_count": len(records),
+            "status_counts": dict(Counter(record["convergence_status"] for record in records)),
+            "nonfinite_status_count": sum("NONFINITE" in record["convergence_status"].upper() for record in records),
+            "unavailable_fields": dict(
+                Counter(field for record in records for field in record.get("unavailable_fields", {}))
+            ),
+            "nonfinite_numeric_policy": "Nonfinite numeric values are rejected before comparison",
+        }
+        for field in ("converged", "committed_unconverged", "rolled_back"):
+            result[field] = {
+                "true": sum(record[field] is True for record in records),
+                "false": sum(record[field] is False for record in records),
+                "unavailable": sum(record[field] is None for record in records),
+            }
+        return result
+
+    differences = []
+    for a, b in zip(left, right, strict=True):
+        for key in ("manifest_sha256", "newton_sha", "superdex_sha", "step", "time_s"):
+            if a[key] != b[key]:
+                raise ValueError(f"Comparison {key} mismatch")
+        row = {"step": a["step"], "time_s": a["time_s"]}
+        for key in (
+            "joint_q",
+            "node_positions_m",
+            "soft_com_m",
+            "normal_physical_force_n",
+            "min_det_f",
+            "penetration_m",
+        ):
+            if a[key] is None or b[key] is None:
+                row[f"{key}_max_absolute"] = None
+                continue
+            av, bv = flat(a[key]), flat(b[key])
+            if len(av) != len(bv):
+                raise ValueError(f"Comparison {key} dimensions differ")
+            row[f"{key}_max_absolute"] = max((abs(x - y) for x, y in zip(av, bv, strict=True)), default=0.0)
+        if len(a["link_xform"]) != len(b["link_xform"]):
+            raise ValueError("Comparison link_xform dimensions differ")
+        translations, rotations = [], []
+        for ta, tb in zip(a["link_xform"], b["link_xform"], strict=True):
+            translations.append(math.dist(ta[:3], tb[:3]))
+            qa, qb = ta[3:], tb[3:]
+            denominator = math.sqrt(sum(x * x for x in qa) * sum(x * x for x in qb))
+            cosine = abs(sum(x * y for x, y in zip(qa, qb, strict=True))) / denominator
+            rotations.append(2 * math.acos(min(1.0, cosine)))
+        row["link_translation_max_m"] = max(translations, default=0.0)
+        row["link_rotation_max_rad"] = max(rotations, default=0.0)
+        row["newton_quality"] = {field: a[field] for field in quality_fields}
+        row["superdex_quality"] = {field: b[field] for field in quality_fields}
+        differences.append(row)
+    report = {
+        "status": "BLOCKED" if blocked else "OBSERVED",
+        "manifest_sha256": left[0]["manifest_sha256"],
+        "blocked_conclusions": blocked,
+        "differences": differences,
+        "quality": {"newton": quality(left), "superdex": quality(right)},
+        "mapping_status": {entry.mapping_id: entry.status for entry in mapping_report},
+        "mappings": [asdict(entry) for entry in mapping_report],
+        "limitations": "Observed differences are not numerical acceptance or performance-equality gates; interpret all mappings.",
+    }
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text(json.dumps(report, indent=2, allow_nan=False) + "\n")
+    return 2 if blocked else 0

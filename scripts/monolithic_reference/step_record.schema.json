@@ -52,12 +52,12 @@
     "link_xform": {"type": "array", "items": {"type": "array", "items": {"type": "number"}, "minItems": 7, "maxItems": 7}},
     "soft_com_m": {"type": "array", "items": {"type": "number"}, "minItems": 3, "maxItems": 3},
     "node_positions_m": {"type": "array", "items": {"type": "array", "items": {"type": "number"}, "minItems": 3, "maxItems": 3}},
-    "min_det_f": {"type": "number"},
-    "penetration_m": {"type": "number", "minimum": 0},
-    "normal_physical_force_n": {"type": "array", "items": {"type": "number"}, "minItems": 3, "maxItems": 3},
-    "tangential_physical_force_n": {"type": "array", "items": {"type": "number"}, "minItems": 3, "maxItems": 3},
+    "min_det_f": {"type": ["number", "null"]},
+    "penetration_m": {"type": ["number", "null"], "minimum": 0},
+    "normal_physical_force_n": {"type": ["array", "null"], "items": {"type": "number"}, "minItems": 3, "maxItems": 3},
+    "tangential_physical_force_n": {"type": ["array", "null"], "items": {"type": "number"}, "minItems": 3, "maxItems": 3},
     "residual_contribution": {
-      "type": "object",
+      "type": ["object", "null"],
       "required": ["q", "x"],
       "additionalProperties": false,
       "properties": {
@@ -65,25 +65,26 @@
         "x": {"type": "array", "items": {"type": "array", "items": {"type": "number"}, "minItems": 3, "maxItems": 3}}
       }
     },
-    "physical_world_force_or_wrench": {"type": "array", "items": {"type": "array", "items": {"type": "number"}, "minItems": 6, "maxItems": 6}},
-    "generalized_physical_force": {"type": "array", "items": {"type": "number"}},
-    "q_sign_projection_error": {"type": "number", "minimum": 0},
-    "x_sign_projection_error": {"type": "number", "minimum": 0},
-    "nonlinear_iterations": {"type": "integer", "minimum": 0},
-    "linear_iterations": {"type": "integer", "minimum": 0},
+    "physical_world_force_or_wrench": {"type": ["array", "null"], "items": {"type": "array", "items": {"type": "number"}, "minItems": 6, "maxItems": 6}},
+    "generalized_physical_force": {"type": ["array", "null"], "items": {"type": "number"}},
+    "q_sign_projection_error": {"type": ["number", "null"], "minimum": 0},
+    "x_sign_projection_error": {"type": ["number", "null"], "minimum": 0},
+    "nonlinear_iterations": {"type": ["integer", "null"], "minimum": 0},
+    "linear_iterations": {"type": ["integer", "null"], "minimum": 0},
     "convergence_status": {"type": "string", "minLength": 1},
-    "converged": {"type": "boolean"},
-    "committed_unconverged": {"type": "boolean"},
-    "rolled_back": {"type": "boolean"},
+    "converged": {"type": ["boolean", "null"]},
+    "committed_unconverged": {"type": ["boolean", "null"]},
+    "rolled_back": {"type": ["boolean", "null"]},
+    "unavailable_fields": {"type": "object", "properties": {}, "additionalProperties": {"type": "string", "minLength": 1}},
     "timing_s": {
       "type": "object",
       "required": ["assembly", "collision", "linear_solve", "total"],
       "additionalProperties": false,
       "properties": {
-        "assembly": {"type": "number", "minimum": 0},
-        "collision": {"type": "number", "minimum": 0},
-        "linear_solve": {"type": "number", "minimum": 0},
-        "total": {"type": "number", "minimum": 0}
+        "assembly": {"type": ["number", "null"], "minimum": 0},
+        "collision": {"type": ["number", "null"], "minimum": 0},
+        "linear_solve": {"type": ["number", "null"], "minimum": 0},
+        "total": {"type": ["number", "null"], "minimum": 0}
       }
     }
   },
