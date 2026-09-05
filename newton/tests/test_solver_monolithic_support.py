@@ -8,7 +8,14 @@ import unittest
 import numpy as np
 
 from newton.tests.unittest_utils import add_function_test, get_test_devices
-from scripts.monolithic_reference.calibrate_p1q3 import measure_motion, measure_static, refined_tetrahedron
+from scripts.monolithic_reference.calibrate_p1q3 import (
+    calibrate,
+    measure_motion,
+    measure_motion_comparison,
+    measure_static,
+    refined_tetrahedron,
+)
+from scripts.monolithic_reference.p1q3_oracle import integrate_contact_over_mesh
 
 
 def test_uniform_plane_refinement(test, device):
@@ -20,6 +27,9 @@ def test_uniform_plane_refinement(test, device):
     test.assertLessEqual(float(np.max(np.abs(forces / forces[-1] - 1.0))), 0.05)
     np.testing.assert_allclose(forces, 0.176, rtol=2e-5)
     for row in rows:
+        test.assertEqual(row["support_envelope"], "SUPPORTED")
+        test.assertEqual(row["same_mesh_quadrature_gate"], "PASS")
+        test.assertLessEqual(row["same_mesh_oracle"]["relative_force_error"], 0.05)
         test.assertEqual(row["evaluation_status"], 0)
         test.assertLess(row["contact_sign_error"], 1e-4)
         test.assertGreater(row["active_sample_count"], 0)
@@ -38,9 +48,99 @@ def test_sharp_feature_envelope(test, device):
     test.assertEqual(sharp["active_sample_count"], 0)
     test.assertEqual(sharp["normal_force_n"], 0.0)
     test.assertEqual(sharp["sampling_classification"], "UNSUPPORTED_SAMPLING_MISS")
+    test.assertEqual(sharp["support_envelope"], "UNSUPPORTED")
+    test.assertEqual(sharp["support_reason"], "inter_sample_local_feature")
     test.assertGreater(broad["active_sample_count"], 0)
     test.assertGreater(broad["normal_force_n"], 0.0)
     test.assertEqual(broad["evaluation_status"], 0)
+    test.assertEqual(broad["support_envelope"], "SUPPORTED")
+    test.assertEqual(broad["same_mesh_quadrature_gate"], "PASS")
+    resolved = [measure_static(device, level=level, case="resolved_sharp_box") for level in (2, 3, 4)]
+    test.assertEqual([row["surface_multiplier"] for row in resolved], [1, 4, 16])
+    for row in resolved:
+        test.assertEqual(row["support_envelope"], "SUPPORTED")
+        test.assertEqual(row["sampling_classification"], "DETECTED")
+        test.assertGreater(row["same_mesh_oracle"]["active_area_m2"], 0.0)
+        test.assertGreater(row["active_sample_count"], 0)
+        test.assertEqual(row["same_mesh_quadrature_gate"], "PASS")
+
+
+def test_independent_plane_oracle(test, device):
+    """Integrate the hinge independently of Warp records and P1Q3 slots."""
+    del device
+    points, _ = refined_tetrahedron(0)
+    faces = np.array(((0, 2, 1),), dtype=np.int32)
+    oracle = integrate_contact_over_mesh(
+        points,
+        faces,
+        shape="plane",
+        center=np.array((0.0, 0.0, 0.001)),
+        scale=np.zeros(3),
+        particle_radius=0.0001,
+        stiffness=2.0e5,
+    )
+    test.assertAlmostEqual(oracle.force_magnitude, 0.176, delta=1.0e-11)
+    test.assertLessEqual(oracle.force_magnitude_absolute_error, 1.0e-11)
+
+
+def test_independent_oracle_resolves_sample_between_box(test, device):
+    """Do not infer zero contact when all three production samples miss."""
+    del device
+    points, _ = refined_tetrahedron(0)
+    oracle = integrate_contact_over_mesh(
+        points,
+        np.array(((0, 2, 1),), dtype=np.int32),
+        shape="box",
+        center=np.array((0.04 / 3, 0.04 / 3, -0.0004)),
+        scale=np.array((0.001, 0.001, 0.0006)),
+        particle_radius=0.0001,
+        stiffness=2.0e5,
+    )
+    test.assertGreater(oracle.force_magnitude, 0.0)
+    test.assertGreater(oracle.active_area, 0.0)
+    shallower = integrate_contact_over_mesh(
+        points,
+        np.array(((0, 2, 1),), dtype=np.int32),
+        shape="box",
+        center=np.array((0.04 / 3, 0.04 / 3, -0.0004)),
+        scale=np.array((0.001, 0.001, 0.0006)),
+        particle_radius=0.0001,
+        stiffness=2.0e5,
+        max_depth=6,
+    )
+    test.assertLess(abs(shallower.force_magnitude / oracle.force_magnitude - 1.0), 1.0e-3)
+
+
+def test_c4_gate_is_scoped_and_machine_readable(test, device):
+    """Never freeze C4 without the required dynamic trial."""
+    result = calibrate(device, steps=0, dt=0.001)
+    test.assertEqual(result["c4_gate"], "FAIL")
+    test.assertEqual(result["same_mesh_quadrature_gate"], "PASS")
+    test.assertEqual(result["sampling_detection_gate"], "PASS")
+    test.assertEqual(result["supported_local_motion_gate"], "NOT_RUN")
+    test.assertEqual(result["support_envelope"]["status"], "CANDIDATE")
+    test.assertEqual(result["dirichlet_mass_audit_gate"], "PASS")
+    unsupported = {row["case"] for row in result["static"] if row["support_envelope"] == "UNSUPPORTED"}
+    test.assertTrue({"shared_edge", "shared_vertex", "sharp_box"}.issubset(unsupported))
+
+
+def test_supported_shared_feature_motion(test, device):
+    """Meet the 10% motion gate for resolved shared-edge and shared-vertex contact."""
+    for case in ("supported_edge", "supported_vertex"):
+        static = [measure_static(device, level=level, case=case) for level in (2, 3, 4)]
+        test.assertEqual([row["surface_multiplier"] for row in static], [1, 4, 16])
+        test.assertEqual([row["boundary_face_count"] for row in static], [64, 256, 1024])
+        for row in static:
+            test.assertEqual(row["support_envelope"], "SUPPORTED")
+            test.assertEqual(row["sampling_classification"], "DETECTED")
+            test.assertLessEqual(row["manifest"]["maximum_boundary_edge_to_shape_radius"], 0.4715)
+            test.assertLessEqual(row["same_mesh_oracle"]["relative_force_error"], 0.1)
+        rows, comparison = measure_motion_comparison(device, case=case, steps=20, dt=0.001)
+        test.assertEqual(comparison["gate"], "PASS")
+        test.assertTrue(all(row["all_steps_success"] for row in rows))
+        for metric in comparison["metrics"].values():
+            test.assertEqual(metric["normalization"], "RESOLVED")
+            test.assertLessEqual(max(metric["relative_difference_from_finest"]), 0.1)
 
 
 def test_broad_curvature_control(test, device):
@@ -61,7 +161,15 @@ class TestMonolithicSupport(unittest.TestCase):
     """Verify CPU and CUDA measurement behavior without claiming unsupported cases pass."""
 
 
-for function in (test_uniform_plane_refinement, test_sharp_feature_envelope, test_broad_curvature_control):
+for function in (
+    test_uniform_plane_refinement,
+    test_sharp_feature_envelope,
+    test_independent_plane_oracle,
+    test_independent_oracle_resolves_sample_between_box,
+    test_c4_gate_is_scoped_and_machine_readable,
+    test_supported_shared_feature_motion,
+    test_broad_curvature_control,
+):
     add_function_test(TestMonolithicSupport, function.__name__, function, devices=get_test_devices())
 
 if __name__ == "__main__":
