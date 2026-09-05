@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 The Newton Developers
 # SPDX-License-Identifier: Apache-2.0
 
-"""Measure DRAFT component precision; never freeze P0 tolerances.
+"""Measure component precision and fail closed when aggregating freeze evidence.
 
 Run from the repository root with ``uv run -m
 scripts.monolithic_reference.calibrate_components --output evidence.json``.
@@ -9,6 +9,10 @@ The output separates repeated reduction noise from coordinate quantization:
 the latter is not permission to increase line-search merit noise.
 Use ``--matrix`` for the explicit PR-5 material/contact/coordinate sample matrix.
 Without that flag, the original tiny no-contact CLI and evidence remain available.
+The versioned freeze aggregator is intentionally separate from measurement: it
+cannot freeze unless every declared device/case key is present, measured from one
+clean source set, and passes its raw gates.  A frozen calibration sub-artifact
+does not freeze the V0.1 product or trajectory fixture.
 """
 
 import argparse
@@ -47,6 +51,7 @@ from newton._src.solvers.monolithic.tet import (
     mat99,
 )
 from newton.tests.monolithic_test_utils import build_tiny_cpu_fixture
+from scripts.monolithic_reference.calibrate_p1q3 import refined_tetrahedron
 
 
 @wp.kernel
@@ -261,12 +266,39 @@ def main():
     parser.add_argument("--repeats", type=int, default=100)
     parser.add_argument("--devices", nargs="+", default=["cpu", "cuda:0"])
     parser.add_argument("--matrix", action="store_true", help="Measure the explicit PR-5 discrete parameter matrix")
+    parser.add_argument("--profile", choices=("quick", "freeze"), default="quick")
+    parser.add_argument("--batch-index", type=int, default=0)
+    parser.add_argument("--batch-count", type=int, default=1)
+    parser.add_argument("--aggregate", type=Path, nargs="+", help="Aggregate version-2 raw freeze batches")
+    parser.add_argument(
+        "--freeze", action="store_true", help="Require complete passing evidence and freeze calibration"
+    )
     parser.add_argument("--seed", type=int, default=20260905)
     args = parser.parse_args()
     if not math.isfinite(args.dt) or args.dt <= 0 or args.repeats < 2:
         parser.error("dt must be positive and finite; repeats must be at least two")
+    if args.aggregate:
+        if args.matrix:
+            parser.error("--aggregate and --matrix are mutually exclusive")
+        payload = aggregate_calibration_evidence(
+            [json.loads(path.read_text()) for path in args.aggregate], freeze=args.freeze
+        )
+        args.output.parent.mkdir(parents=True, exist_ok=True)
+        args.output.write_text(json.dumps(payload, indent=2, allow_nan=False) + "\n")
+        return
+    if args.freeze:
+        parser.error("--freeze requires --aggregate")
     if args.matrix:
-        payload = calibrate_matrix(args.devices, seed=args.seed, repeats=args.repeats)
+        if args.batch_count <= 0 or not 0 <= args.batch_index < args.batch_count:
+            parser.error("batch-count must be positive and batch-index must select an existing batch")
+        payload = calibrate_matrix(
+            args.devices,
+            seed=args.seed,
+            repeats=args.repeats,
+            profile=args.profile,
+            batch_index=args.batch_index,
+            batch_count=args.batch_count,
+        )
         args.output.parent.mkdir(parents=True, exist_ok=True)
         args.output.write_text(json.dumps(payload, indent=2, allow_nan=False) + "\n")
         return
@@ -335,13 +367,34 @@ class CalibrationCase:
     world_offset: float
     active_contact: bool
     seed: int
+    direction_index: int = 0
+    mesh_level: int = 0
+    boundary_mode: str = "all_dynamic"
+    contact_stiffness: float = 2e5
+    requested_contact_cardinality: int = -1
+    coordinate_role: str = "supported"
+    coordinate_pattern: str = "diagonal_positive"
 
     def __post_init__(self):
-        values = (self.young_modulus, self.dt, self.coordinate_scale)
+        values = (self.young_modulus, self.dt, self.coordinate_scale, self.contact_stiffness)
         if any(not math.isfinite(value) or value <= 0 for value in values):
             raise ValueError("Material, dt and coordinate scale must be finite and positive")
         if not -1 < self.poisson_ratio < 0.5 or not math.isfinite(self.world_offset):
             raise ValueError("Poisson ratio or world offset is invalid")
+        if self.direction_index not in (0, 1, 2) or self.mesh_level not in (0, 1, 2):
+            raise ValueError("Direction and mesh refinement indices must be 0, 1 or 2")
+        if self.boundary_mode not in ("all_dynamic", "fixed_opposite"):
+            raise ValueError("Unknown boundary mode")
+        if self.requested_contact_cardinality not in (-1, 0, 3, 12, 48):
+            raise ValueError("Unsupported requested contact cardinality")
+        if self.coordinate_role not in ("supported", "coordinate_sweep", "outside_control"):
+            raise ValueError("Unknown coordinate role")
+        if self.coordinate_pattern not in ("positive_axis", "negative_axis", "mixed", "diagonal_positive"):
+            raise ValueError("Unknown coordinate pattern")
+
+    @property
+    def tet_count(self):
+        return 8**self.mesh_level
 
 
 def calibration_cases(*, seed):
@@ -357,12 +410,274 @@ def calibration_cases(*, seed):
     return [CalibrationCase(f"case_{index:02d}", *values, seed) for index, values in enumerate(parameters)]
 
 
+_FREEZE_SEEDS = (20260905, 20260917, 20260929)
+_COORDINATE_SWEEP_MAGNITUDES = (0.0, 0.1, 0.25, 0.5, 1.0, 2.0, 5.0, 10.0)
+_OUTSIDE_WORLD_OFFSET = 10.0
+
+
+def freeze_calibration_cases():
+    """Return the finite C2/C3 freeze design; values are points, not intervals.
+
+    The four core cases are a predeclared minimal coverage design rather than a
+    Cartesian product.  Coordinate controls form a separate ordered sweep so
+    that a 10 m failure cannot be averaged into, or skipped when claiming, a
+    wider range.
+    """
+    cases = []
+    core = (
+        # seed, direction, level, boundary, stiffness, active, E, nu, dt, scale
+        (_FREEZE_SEEDS[0], 0, 0, "all_dynamic", 2e5, True, 1e3, 0.2, 0.001, 0.5),
+        (_FREEZE_SEEDS[1], 1, 1, "fixed_opposite", 1e7, True, 1e4, 0.3, 0.01, 1.0),
+        (_FREEZE_SEEDS[2], 2, 2, "all_dynamic", 2e5, True, 1e5, 0.45, 0.001, 2.0),
+        (_FREEZE_SEEDS[0], 2, 2, "fixed_opposite", 1e7, False, 1e5, 0.45, 0.01, 0.5),
+    )
+    for seed, direction, level, boundary, stiffness, active, young, poisson, dt, scale in core:
+        cardinality = 3 * 4**level if active else 0
+        cases.append(
+            CalibrationCase(
+                case_id=(f"core_s{seed}_d{direction}_l{level}_{boundary}_k{int(stiffness)}_c{cardinality}"),
+                young_modulus=young,
+                poisson_ratio=poisson,
+                dt=dt,
+                coordinate_scale=scale,
+                world_offset=0.0,
+                active_contact=active,
+                seed=seed,
+                direction_index=direction,
+                mesh_level=level,
+                boundary_mode=boundary,
+                contact_stiffness=stiffness,
+                requested_contact_cardinality=cardinality,
+            )
+        )
+    for magnitude in _COORDINATE_SWEEP_MAGNITUDES:
+        patterns = ("mixed",) if magnitude == 0 else ("positive_axis", "negative_axis", "mixed")
+        for pattern in patterns:
+            role = "outside_control" if magnitude == _OUTSIDE_WORLD_OFFSET else "coordinate_sweep"
+            cases.append(
+                CalibrationCase(
+                    case_id=f"coordinate_{magnitude:g}_{pattern}",
+                    young_modulus=1e4,
+                    poisson_ratio=0.3,
+                    dt=0.001,
+                    coordinate_scale=1.0,
+                    world_offset=magnitude,
+                    active_contact=True,
+                    seed=_FREEZE_SEEDS[0],
+                    direction_index=0,
+                    mesh_level=0,
+                    boundary_mode="all_dynamic",
+                    contact_stiffness=2e5,
+                    requested_contact_cardinality=3,
+                    coordinate_role=role,
+                    coordinate_pattern=pattern,
+                )
+            )
+    return cases
+
+
+class CalibrationFreezeError(ValueError):
+    """Raised when an artifact violates the fail-closed freeze contract."""
+
+
+def _device_class(name):
+    name = str(name)
+    if name == "cpu":
+        return "cpu"
+    if name == "cuda" or name.startswith("cuda:"):
+        return "cuda"
+    raise CalibrationFreezeError(f"Unsupported calibration device: {name}")
+
+
+def _case_key(case):
+    return case.case_id
+
+
+def _record_failure(record, case):
+    if record.get("status") != "RAW_MEASUREMENT":
+        return "record is not raw measurement"
+    if len(record.get("fixture_sha256", "")) != 64:
+        return "missing fixture identity"
+    observed = record.get("observed", {})
+    if observed.get("tet_count") != case.tet_count:
+        return "observed tet count differs from declaration"
+    if observed.get("active_sample_count") != case.requested_contact_cardinality:
+        return "observed contact cardinality differs from declaration"
+    gates = record.get("gates", {})
+    if case.coordinate_role == "outside_control":
+        if record.get("coordinate_support_status") != "OUTSIDE_MEASURED_GATE":
+            return "10 m control was not rejected"
+        return None
+    if case.coordinate_role == "coordinate_sweep":
+        required = ("finite_difference", "reduction", "linear")
+        if any(gates.get(name) not in ("PASS", "FAIL") for name in required):
+            return "coordinate sweep is missing a measured gate result"
+        return None
+    required = ("finite_difference", "reduction", "linear", "trajectory")
+    if any(gates.get(name) != "PASS" for name in required):
+        return "one or more required raw gates failed"
+    return None
+
+
+def _aggregate_parameters(records):
+    result = {}
+    for device in ("cpu", "cuda"):
+        supported = [
+            record
+            for record in records
+            if record["device_class"] == device and record["case"].coordinate_role == "supported"
+        ]
+        if not supported:
+            continue
+        draft = [record["raw"].get("draft_parameters", {}) for record in supported]
+
+        def maxima(name, rows=draft):
+            values = [row.get(name) for row in rows]
+            if not values or any(value is None or len(value) != 3 for value in values):
+                return None
+            return np.max(np.asarray(values, dtype=np.float64), axis=0).tolist()
+
+        force_floors = [
+            record["raw"].get("force_noise", {}).get("recommended_force_detection_floor") for record in supported
+        ]
+        residual, merit, step = (maxima(name) for name in ("residual_floors", "merit_absolute", "small_scaled_step"))
+        result[device] = {
+            "epsilon_d": 1e-6,
+            "residual_floor_global": None if residual is None else residual[0],
+            "residual_floor_q": None if residual is None else residual[1],
+            "residual_floor_x": None if residual is None else residual[2],
+            "merit_noise": max((row.get("merit_noise", 0.0) for row in draft), default=0.0),
+            "merit_absolute_global": None if merit is None else merit[0],
+            "merit_absolute_q": None if merit is None else merit[1],
+            "merit_absolute_x": None if merit is None else merit[2],
+            "merit_relative_global": 1e-4,
+            "merit_relative_q": 1e-4,
+            "merit_relative_x": 1e-4,
+            "step_tolerance_global": None if step is None else step[0],
+            "step_tolerance_q": None if step is None else step[1],
+            "step_tolerance_x": None if step is None else step[2],
+            "force_detection_floor_n": (
+                max(force_floors) if force_floors and all(value is not None for value in force_floors) else None
+            ),
+        }
+    return result
+
+
+def _coordinate_envelope(records):
+    by_key = {
+        (record["device_class"], record["case"].world_offset, record["case"].coordinate_pattern): record["raw"]
+        for record in records
+        if record["case"].coordinate_role == "coordinate_sweep"
+    }
+    passing_prefix = []
+    first_failed = None
+    passed_after_failure = []
+    for magnitude in _COORDINATE_SWEEP_MAGNITUDES[:-1]:
+        patterns = ("mixed",) if magnitude == 0 else ("positive_axis", "negative_axis", "mixed")
+        rows = [by_key.get((device, magnitude, pattern)) for device in ("cpu", "cuda") for pattern in patterns]
+        passed = bool(rows) and all(
+            row is not None
+            and row.get("coordinate_support_status") == "PASS"
+            and all(row.get("gates", {}).get(name) == "PASS" for name in ("finite_difference", "reduction", "linear"))
+            for row in rows
+        )
+        if first_failed is None and passed:
+            passing_prefix.append(magnitude)
+        elif first_failed is None:
+            first_failed = magnitude
+        elif passed:
+            passed_after_failure.append(magnitude)
+    return {
+        "measured_magnitudes_m": list(_COORDINATE_SWEEP_MAGNITUDES),
+        "required_patterns": ["positive_axis", "negative_axis", "mixed"],
+        "max_supported_abs_coordinate_m": max(passing_prefix, default=None),
+        "first_failed_magnitude_m": first_failed,
+        "passing_points_after_first_failure_not_used": passed_after_failure,
+        "minimum_freeze_envelope_m": 0.1,
+        "method": "CPU/CUDA common contiguous passing prefix; no recovery after first failed magnitude",
+    }
+
+
+def aggregate_calibration_evidence(artifacts, *, freeze=False):
+    """Aggregate raw batches and optionally freeze the calibration sub-state.
+
+    This validates evidence completeness and identity.  It deliberately leaves
+    ``v01_status`` as DRAFT because reference/E2E acceptance is a separate gate.
+    """
+    expected_cases = {_case_key(case): case for case in freeze_calibration_cases()}
+    expected_keys = {(device, key) for device in ("cpu", "cuda") for key in expected_cases}
+    sources, records, seen = set(), [], set()
+    for artifact in artifacts:
+        if artifact.get("artifact_kind") != "raw_measurement" or artifact.get("calibration_schema_version") != 2:
+            raise CalibrationFreezeError("Only version-2 raw measurement artifacts may be aggregated")
+        if artifact.get("profile") != "freeze" or artifact.get("git_dirty") is not False:
+            raise CalibrationFreezeError("Freeze evidence must use the freeze profile from a clean tree")
+        source = artifact.get("source_set_sha256", "")
+        if len(source) != 64:
+            raise CalibrationFreezeError("Missing source-set identity")
+        sources.add(source)
+        for raw in artifact.get("evidence", []):
+            try:
+                case = CalibrationCase(**raw["parameters"])
+                device = _device_class(raw.get("device", artifact.get("device", "")))
+            except (KeyError, TypeError, ValueError) as error:
+                raise CalibrationFreezeError(f"Invalid raw record: {error}") from error
+            key = (device, _case_key(case))
+            if key not in expected_keys:
+                raise CalibrationFreezeError(f"Unexpected freeze case: {key}")
+            if case != expected_cases[case.case_id]:
+                raise CalibrationFreezeError(f"Freeze case parameters differ from the declared design: {key}")
+            if key in seen:
+                raise CalibrationFreezeError(f"Duplicate freeze case: {key}")
+            seen.add(key)
+            records.append({"device_class": device, "case": case, "raw": raw})
+    if len(sources) > 1:
+        raise CalibrationFreezeError("Raw batches were measured from different source sets")
+    failures = []
+    for record in records:
+        reason = _record_failure(record["raw"], record["case"])
+        if reason:
+            failures.append({"device": record["device_class"], "case_id": record["case"].case_id, "reason": reason})
+    missing = sorted(f"{device}:{case}" for device, case in expected_keys - seen)
+    coordinate = _coordinate_envelope(records)
+    coordinate_ready = (
+        coordinate["max_supported_abs_coordinate_m"] is not None
+        and coordinate["max_supported_abs_coordinate_m"] >= coordinate["minimum_freeze_envelope_m"]
+    )
+    ready = not missing and not failures and len(sources) == 1 and coordinate_ready
+    if freeze and not ready:
+        raise CalibrationFreezeError("Calibration evidence is incomplete or contains failed gates")
+    return {
+        "artifact_kind": "calibration_freeze",
+        "calibration_schema_version": 2,
+        "calibration_status": "FROZEN" if freeze else "CANDIDATE" if ready else "INCOMPLETE",
+        "v01_status": "DRAFT",
+        "source_set_sha256": next(iter(sources), None),
+        "coordinate_envelope": coordinate,
+        "outside_coordinate_controls_m": [_OUTSIDE_WORLD_OFFSET],
+        "expected_case_count": len(expected_keys),
+        "observed_case_count": len(seen),
+        "missing_case_keys": missing,
+        "failed_records": failures,
+        "candidate_private_config": _aggregate_parameters(records),
+    }
+
+
 def _hash_json(value):
     return hashlib.sha256(json.dumps(value, sort_keys=True, allow_nan=False).encode()).hexdigest()
 
 
 def _matrix_fixture(device, case):
-    scale, offset = case.coordinate_scale, case.world_offset
+    scale, magnitude = case.coordinate_scale, case.world_offset
+    freeze_profile = case.requested_contact_cardinality >= 0
+    if case.coordinate_pattern == "positive_axis":
+        offset = np.array((magnitude, 0.0, 0.0))
+    elif case.coordinate_pattern == "negative_axis":
+        offset = np.array((-magnitude, 0.0, 0.0))
+    elif case.coordinate_pattern == "mixed":
+        offset = np.array((magnitude, -0.5 * magnitude, 0.25 * magnitude))
+    else:
+        offset = np.full(3, magnitude)
     builder = newton.ModelBuilder(gravity=(0, 0, -9.81), up_axis=newton.Axis.Z)
     passive = {
         "armature": 0.0,
@@ -389,24 +704,33 @@ def _matrix_fixture(device, case):
             -1,
             bodies[0],
             axis=newton.Axis.Y,
-            parent_xform=wp.transform((offset, offset, offset), wp.quat_identity()),
+            parent_xform=wp.transform(offset, wp.quat_identity()),
             **passive,
         ),
         builder.add_joint_prismatic(bodies[0], bodies[1], axis=newton.Axis.Z, **passive),
     ]
     builder.add_articulation(joints)
-    builder.joint_q[:] = [0.02, 0.001 * scale]
+    builder.joint_q[:] = [0.0, 0.0] if freeze_profile else [0.02, 0.001 * scale]
     builder.joint_qd[:] = [0.1, -0.02 * scale]
-    builder.add_shape_plane(body=bodies[1], width=0.0, length=0.0, cfg=builder.ShapeConfig(margin=0.006 * scale))
+    margin = 0.006 * scale if case.requested_contact_cardinality < 0 else 0.0
+    builder.add_shape_plane(body=bodies[1], width=0.0, length=0.0, cfg=builder.ShapeConfig(margin=margin))
+    if freeze_profile:
+        points, tets = refined_tetrahedron(case.mesh_level)
+    else:
+        points = np.asarray(((0, 0, 0), (0.04, 0, 0), (0, 0.03, 0), (0, 0, 0.02)))
+        tets = np.asarray(((0, 1, 2, 3),), dtype=np.int32)
     mu = case.young_modulus / (2 * (1 + case.poisson_ratio))
     lam = case.young_modulus * case.poisson_ratio / ((1 + case.poisson_ratio) * (1 - 2 * case.poisson_ratio))
+    height = (
+        (0.0005 if case.active_contact else 0.1) if freeze_profile else (0.002 if case.active_contact else 0.1)
+    ) * scale
     builder.add_soft_mesh(
-        pos=(offset, offset, offset + (0.002 if case.active_contact else 0.1) * scale),
+        pos=(offset[0], offset[1], offset[2] + height),
         rot=wp.quat_identity(),
         scale=scale,
         vel=(0, 0, 0),
-        vertices=[(0, 0, 0), (0.04, 0, 0), (0, 0.03, 0), (0, 0, 0.02)],
-        indices=[0, 1, 2, 3],
+        vertices=points.tolist(),
+        indices=tets.ravel().tolist(),
         density=1000.0,
         k_mu=mu,
         k_lambda=lam,
@@ -420,10 +744,19 @@ def _matrix_fixture(device, case):
         edge_ke=0.0,
         edge_kd=0.0,
     )
+    if case.boundary_mode == "fixed_opposite":
+        fixed = np.isclose(points.sum(axis=1), 0.04, rtol=0, atol=1e-9)
+        for index in np.flatnonzero(fixed):
+            builder.particle_mass[index] = 0.0
     model = builder.finalize(device=device)
     state = model.state()
     deformation = np.array([[1.06, 0.02, -0.01], [0.01, 0.96, 0.03], [0.02, -0.01, 1.03]])
-    deformation += np.random.default_rng(case.seed).normal(scale=0.002, size=(3, 3))
+    rng = np.random.default_rng(case.seed + 1009 * case.direction_index)
+    if freeze_profile:
+        deformation[2, :2] = 0.0
+        deformation[:2] += rng.normal(scale=0.002, size=(2, 3))
+    else:
+        deformation += rng.normal(scale=0.002, size=(3, 3))
     rest = state.particle_q.numpy().astype(np.float64)
     state.particle_q.assign(((rest - rest[0]) @ deformation.T + rest[0]).astype(np.float32))
     newton.eval_fk(model, state.joint_q, state.joint_qd, state)
@@ -476,11 +809,12 @@ def _matrix_constitutive(
     projected: wp.array[mat99],
     dc: wp.array[mat99],
 ):
-    e, p, h = _evaluate_stable_neo_hookean(f[0], 1.0, mu, lam)
-    energy[0] = e
-    stress[0] = p
-    projected[0] = h
-    dc[0] = _compute_cofactor_derivative(f[0])
+    index = wp.tid()
+    e, p, h = _evaluate_stable_neo_hookean(f[index], 1.0, mu, lam)
+    energy[index] = e
+    stress[index] = p
+    projected[index] = h
+    dc[index] = _compute_cofactor_derivative(f[index])
 
 
 @wp.kernel
@@ -501,13 +835,16 @@ class _MatrixProbe:
     def __init__(self, device, case):
         self.case = case
         self.model, state, self.stored = _matrix_fixture(device, case)
-        pipeline = MonolithicCollisionPipeline(self.model, soft_contact_gap=0.02 * case.coordinate_scale)
-        self.solver = SolverMonolithic(self.model, collision_pipeline=pipeline, contact_stiffness=2e5)
+        gap = (0.02 if case.requested_contact_cardinality < 0 else 0.0002) * case.coordinate_scale
+        pipeline = MonolithicCollisionPipeline(self.model, soft_contact_gap=gap)
+        self.solver = SolverMonolithic(
+            self.model, collision_pipeline=pipeline, contact_stiffness=case.contact_stiffness
+        )
         self.solver._transaction.begin(state, self.model.state(), self.model.control(), case.dt)
         self.solver._metrics = {"nonlinear_iterations": 0, "matrix_assembly_count": 0}
         self.candidate = self.solver._transaction.accepted
         self.force_result = wp.empty(6, dtype=float, device=device)
-        self.force_residual = wp.zeros(14, dtype=float, device=device)
+        self.force_residual = wp.zeros(self.solver._layout.scalar_dof_count, dtype=float, device=device)
         self.force_status = wp.zeros(1, dtype=int, device=device)
 
     def set_z(self, z):
@@ -638,12 +975,15 @@ def _tet_nodal_sweep(probe):
     """Differentiate the production elastic energy/force at actual world coordinates."""
     model, case, device = probe.model, probe.case, probe.model.device
     positions = probe.candidate.state.particle_q.numpy().copy()
-    x = wp.empty(4, dtype=wp.vec3, device=device)
-    residual = wp.empty(4, dtype=wp.vec3, device=device)
-    energy = wp.empty(1, dtype=float, device=device)
+    particle_count, tet_count = len(positions), len(model.tet_indices)
+    dynamic_ids = probe.solver._layout.dynamic_particle_ids.numpy()
+    dynamic_count = len(dynamic_ids)
+    x = wp.empty(particle_count, dtype=wp.vec3, device=device)
+    residual = wp.empty(dynamic_count, dtype=wp.vec3, device=device)
+    energy = wp.empty(tet_count, dtype=float, device=device)
     minimum = wp.empty(1, dtype=float, device=device)
     flags = wp.empty(1, dtype=int, device=device)
-    mapping = wp.array(np.arange(4, dtype=np.int32), dtype=int, device=device)
+    mapping = probe.solver._layout.particle_to_dynamic
 
     def evaluate(values):
         x.assign(values)
@@ -669,31 +1009,46 @@ def _tet_nodal_sweep(probe):
         )
         if flags.numpy()[0]:
             raise AssertionError("Elastic FD probe left the valid determinant domain")
-        return float(energy.numpy()[0]), residual.numpy().astype(np.float64)
+        return float(np.sum(energy.numpy().astype(np.float64))), residual.numpy().astype(np.float64)
 
     _, analytic = evaluate(positions)
-    rest_inverse = model.tet_poses.numpy()[0].astype(np.float64)
-    f = (positions[1:] - positions[0]).astype(np.float64).T @ rest_inverse
+    indices = model.tet_indices.numpy()
+    rest_inverse = model.tet_poses.numpy().astype(np.float64)
+    f = np.asarray(
+        [
+            (positions[tet[1:]] - positions[tet[0]]).astype(np.float64).T @ rest
+            for tet, rest in zip(indices, rest_inverse, strict=True)
+        ]
+    )
     arrays = [
-        wp.array([f], dtype=wp.mat33, device=device),
-        wp.empty(1, dtype=float, device=device),
-        wp.empty(1, dtype=wp.mat33, device=device),
-        wp.empty(1, dtype=mat99, device=device),
-        wp.empty(1, dtype=mat99, device=device),
+        wp.array(f, dtype=wp.mat33, device=device),
+        wp.empty(tet_count, dtype=float, device=device),
+        wp.empty(tet_count, dtype=wp.mat33, device=device),
+        wp.empty(tet_count, dtype=mat99, device=device),
+        wp.empty(tet_count, dtype=mat99, device=device),
     ]
     mu, lam, _ = model.tet_materials.numpy()[0]
-    wp.launch(_matrix_constitutive, 1, [arrays[0], mu, lam, *arrays[1:]], device=device)
-    raw = (
-        arrays[3].numpy()[0].astype(np.float64)
-        + ((float(mu) + float(lam)) * (np.linalg.det(f) - 1) - float(mu)) * arrays[4].numpy()[0]
+    wp.launch(_matrix_constitutive, tet_count, [arrays[0], mu, lam, *arrays[1:]], device=device)
+    raw = arrays[3].numpy().astype(np.float64)
+    raw += ((float(mu) + float(lam)) * (np.linalg.det(f) - 1) - float(mu))[:, None, None] * arrays[4].numpy().astype(
+        np.float64
     )
-    gradients = np.vstack((-rest_inverse.sum(axis=0), rest_inverse))
-    volume = 1 / (6 * np.linalg.det(rest_inverse))
-    direction = np.random.default_rng(case.seed).normal(size=(4, 3))
+    direction = np.random.default_rng(case.seed + 1009 * case.direction_index).normal(size=(particle_count, 3))
+    fixed = np.ones(particle_count, dtype=bool)
+    fixed[dynamic_ids] = False
+    direction[fixed] = 0.0
     direction /= np.linalg.norm(direction)
-    df = (direction[1:] - direction[0]).T @ rest_inverse
-    stress_derivative = (raw @ df.flatten(order="F")).reshape((3, 3), order="F")
-    derivative = volume * (stress_derivative @ gradients.T).T
+    derivative = np.zeros((dynamic_count, 3))
+    for tet_index, (tet, rest) in enumerate(zip(indices, rest_inverse, strict=True)):
+        gradients = np.vstack((-rest.sum(axis=0), rest))
+        volume = 1 / (6 * np.linalg.det(rest))
+        df = (direction[tet[1:]] - direction[tet[0]]).T @ rest
+        stress_derivative = (raw[tet_index] @ df.flatten(order="F")).reshape((3, 3), order="F")
+        nodal = volume * (stress_derivative @ gradients.T).T
+        for local, particle in enumerate(tet):
+            dynamic = int(probe.solver._layout.particle_to_dynamic.numpy()[particle])
+            if dynamic >= 0:
+                derivative[dynamic] += nodal[local]
     records = []
     for step in (0.1, 0.03, 0.01, 0.003, 0.001, 0.0003, 0.0001):
         h = step * 0.01 * case.coordinate_scale
@@ -703,7 +1058,7 @@ def _tet_nodal_sweep(probe):
             {
                 "step": step,
                 "step_metres": h,
-                "energy_gradient": _error(np.sum(analytic * direction), (ep - em) / (2 * h)),
+                "energy_gradient": _error(np.sum(analytic * direction[dynamic_ids]), (ep - em) / (2 * h)),
                 "physical_force_raw_derivative": _error(-derivative, -(rp - rm) / (2 * h)),
             }
         )
@@ -712,11 +1067,11 @@ def _tet_nodal_sweep(probe):
         variable_scale_metres=0.01 * case.coordinate_scale,
         seed=case.seed,
         direction=direction.tolist(),
-        condition_indicator=float(np.linalg.cond(raw)),
+        condition_indicator=float(np.max(np.linalg.cond(raw))),
         residual_contribution=analytic.tolist(),
         physical_world_force_or_wrench=(-analytic).tolist(),
         generalized_physical_force=(-analytic).tolist(),
-        projection="Identity: all four nodal world translations are dynamic",
+        projection=("Identity on dynamic nodal world translations; fixed-node direction entries are exactly zero"),
         sign_error_q=0.0,
         sign_error_x=0.0,
         constitutive_probe=_material_sweep(device, case),
@@ -746,7 +1101,7 @@ def _fk_sweep(probe):
     for h in (0.01, 0.003, 0.001, 0.0003, 0.0001, 0.00003, 0.00001):
         fd = np.zeros((3, 2))
         for dof, unit in enumerate((1.0, case.coordinate_scale)):
-            delta = np.zeros(14, dtype=np.float32)
+            delta = np.zeros_like(base)
             delta[dof] = h * unit
             probe.set_z(base + delta)
             plus = _point(probe, local)
@@ -779,7 +1134,7 @@ def _frozen_contact_data(probe):
         "normal": contacts.soft_contact_normal.numpy()[:count].copy(),
         "local": contacts.soft_contact_body_pos.numpy()[:count].copy(),
         "shape": contacts.soft_contact_shape.numpy()[:count].copy(),
-        "weight": 2e5 * areas / 3,
+        "weight": probe.case.contact_stiffness * areas / 3,
     }
 
 
@@ -802,6 +1157,7 @@ def _frozen_gaps(probe, data):
 
 def _contact_sweep(probe):
     solver, device = probe.solver, probe.model.device
+    nq, size = solver._layout.q_dof_count, solver._layout.scalar_dof_count
     count = int(solver._linear._factors.count.numpy()[0])
     if not count:
         return {
@@ -814,20 +1170,20 @@ def _contact_sweep(probe):
     active_records = solver._contact.factor_contact_record.numpy()[:count].copy()
     gaps = _frozen_gaps(probe, data)
     factors = solver._linear._factors
-    analytic = np.zeros((count, 14))
-    analytic[:, :2] = factors.gq.numpy()[:count]
+    analytic = np.zeros((count, size))
+    analytic[:, :nq] = factors.gq.numpy()[:count]
     for row in range(count):
         for column, value in zip(factors.gx_columns.numpy()[row], factors.gx_values.numpy()[row], strict=True):
             if column >= 0:
-                analytic[row, 2 + column] += value
+                analytic[row, nq + column] += value
     residual = solver._contact._residual[0].numpy().astype(np.float64)
     records = []
-    units = np.r_[0.01, np.full(13, 0.001 * probe.case.coordinate_scale)]
+    units = np.r_[np.full(nq, 0.01), np.full(size - nq, 0.001 * probe.case.coordinate_scale)]
     for h in (0.2, 0.06, 0.02, 0.006, 0.002):
-        gradient, derivative = np.zeros(14), np.zeros_like(analytic)
+        gradient, derivative = np.zeros(size), np.zeros_like(analytic)
         smooth = True
-        for dof in range(14):
-            delta = np.zeros(14, dtype=np.float32)
+        for dof in range(size):
+            delta = np.zeros(size, dtype=np.float32)
             delta[dof] = h * units[dof]
             probe.set_z(base + delta)
             plus = _frozen_gaps(probe, data)
@@ -843,10 +1199,10 @@ def _contact_sweep(probe):
             {
                 "step": h,
                 "fixed_active_set": smooth,
-                "gap_q": _error(analytic[:, :2], derivative[:, :2]),
-                "gap_x": _error(analytic[:, 2:], derivative[:, 2:]),
-                "energy_q": _error(residual[:2], gradient[:2]),
-                "energy_x": _error(residual[2:], gradient[2:]),
+                "gap_q": _error(analytic[:, :nq], derivative[:, :nq]),
+                "gap_x": _error(analytic[:, nq:], derivative[:, nq:]),
+                "energy_q": _error(residual[:nq], gradient[:nq]),
+                "energy_x": _error(residual[nq:], gradient[nq:]),
             }
         )
     probe.set_z(base)
@@ -867,7 +1223,9 @@ def _project_world_forces(probe):
     solver, device = probe.solver, probe.model.device
     data = _frozen_contact_data(probe)
     force = solver._contact.final_force_linear.numpy().astype(np.float64)
-    result = np.zeros(14)
+    nq, size = solver._layout.q_dof_count, solver._layout.scalar_dof_count
+    particle_to_dynamic = solver._layout.particle_to_dynamic.numpy()
+    result = np.zeros(size)
     columns = wp.empty(2, dtype=wp.vec3, device=device)
     for record, (ids, bary, local) in enumerate(zip(data["ids"], data["bary"], data["local"], strict=True)):
         wp.launch(
@@ -882,18 +1240,22 @@ def _project_world_forces(probe):
             ],
             device=device,
         )
-        result[:2] += columns.numpy().astype(np.float64) @ force[record]
+        result[:nq] += columns.numpy().astype(np.float64) @ force[record]
         for particle, weight in zip(ids, bary, strict=True):
-            result[2 + 3 * particle : 5 + 3 * particle] -= float(weight) * force[record]
+            dynamic = int(particle_to_dynamic[particle])
+            if dynamic >= 0:
+                start = nq + 3 * dynamic
+                result[start : start + 3] -= float(weight) * force[record]
     return result
 
 
-def calibrate_case(device, *, case, repeats):
+def calibrate_case(device, *, case, repeats, profile="quick"):
     """Measure production reductions, force resolution, cancellation and exact FD."""
     if repeats < 2:
         raise ValueError("At least two repeated measurements are required")
     probe = _MatrixProbe(device, case)
     solver = probe.solver
+    nq, size = solver._layout.q_dof_count, solver._layout.scalar_dof_count
     residual, baseline_force, evaluation = probe.evaluate()
     base = probe.candidate.z.numpy().copy()
     scale = solver._linear.scale.numpy().copy()
@@ -917,7 +1279,7 @@ def calibrate_case(device, *, case, repeats):
         solver._contact.final_force_moment.numpy().astype(np.float64).sum(axis=0),
     ]
     quantization = []
-    for dof in range(14):
+    for dof in range(size):
         for direction in (-math.inf, math.inf):
             changed = base.copy()
             changed[dof] = np.nextafter(base[dof], np.float32(direction))
@@ -944,9 +1306,9 @@ def calibrate_case(device, *, case, repeats):
         for zero_block in ("none", "q", "x"):
             rhs = -(scale.astype(np.float64) * residual)
             if zero_block == "q":
-                rhs[:2] = 0
+                rhs[:nq] = 0
             elif zero_block == "x":
-                rhs[2:] = 0
+                rhs[nq:] = 0
             rhs = rhs.astype(np.float32)
             solver._rhs_hat.assign(rhs)
             solver._y.assign(np.linalg.solve(matrix, rhs.astype(np.float64)).astype(np.float32))
@@ -980,10 +1342,18 @@ def calibrate_case(device, *, case, repeats):
     x_floor = 2e4 * max(row["true_norm_max"][2] for row in cancellation if row["zero_rhs_block"] == "x")
     merit_jump = np.max([row["scaled_residual_change_rms"] for row in quantization], axis=0)
     step_jump = np.max([row["scaled_step_rms"] for row in quantization], axis=0)
+    observed_contacts = contact._diagnostics(2)["active_sample_count"]
+    fd_gate = "PASS" if all(value["status"] in ("PASS", "NOT_APPLICABLE") for value in fd.values()) else "FAIL"
+    cardinality_gate = (
+        "PASS"
+        if case.requested_contact_cardinality < 0 or observed_contacts == case.requested_contact_cardinality
+        else "FAIL"
+    )
+    coordinate_support_status = "OUTSIDE_MEASURED_GATE" if case.coordinate_role == "outside_control" else "PASS"
     return {
-        "status": "DRAFT",
-        "parameters": asdict(case),
+        "status": "RAW_MEASUREMENT" if profile == "freeze" else "DRAFT",
         "device": str(device),
+        "parameters": asdict(case),
         "device_name": wp.get_device(device).name,
         "fixture_sha256": _hash_json({"parameters": asdict(case), "stored": probe.stored}),
         "stored_fixture": probe.stored,
@@ -1002,15 +1372,15 @@ def calibrate_case(device, *, case, repeats):
         "linear_cancellation": cancellation,
         "finite_difference": fd,
         "force_noise": {
-            "active_sample_count": contact._diagnostics(2)["active_sample_count"],
+            "active_sample_count": observed_contacts,
             "physical_world_force_or_wrench": baseline_force.tolist(),
             "physical_rigid_sample_forces": physical.tolist(),
             "generalized_physical_force": generalized.tolist(),
             "residual_contribution": contact_residual.tolist(),
-            "scaled_projection_error_q": _error(scale[:2] * projected_world[:2], scale[:2] * generalized[:2]),
-            "scaled_projection_error_x": _error(scale[2:] * projected_world[2:], scale[2:] * generalized[2:]),
-            "scaled_sign_error_q": _error(scale[:2] * contact_residual[:2], -scale[:2] * generalized[:2]),
-            "scaled_sign_error_x": _error(scale[2:] * contact_residual[2:], -scale[2:] * generalized[2:]),
+            "scaled_projection_error_q": _error(scale[:nq] * projected_world[:nq], scale[:nq] * generalized[:nq]),
+            "scaled_projection_error_x": _error(scale[nq:] * projected_world[nq:], scale[nq:] * generalized[nq:]),
+            "scaled_sign_error_q": _error(scale[:nq] * contact_residual[:nq], -scale[:nq] * generalized[:nq]),
+            "scaled_sign_error_x": _error(scale[nq:] * contact_residual[nq:], -scale[nq:] * generalized[nq:]),
             "resultant_samples": forces.tolist(),
             "repeated_resultant_peak_to_peak": force_spread,
             "float64_sum_reference_error": force_reduction_error,
@@ -1024,7 +1394,18 @@ def calibrate_case(device, *, case, repeats):
             "merit_noise": float(2 * np.ptp(samples[:, 0])),
             "linear_tolerance_target": 1e-4,
         },
-        "scope_note": "One discrete seeded N=14 infinite-plane fixture; no interval, trajectory or P0 freeze claim",
+        "observed": {"tet_count": len(probe.model.tet_indices), "active_sample_count": observed_contacts},
+        "gates": {
+            "finite_difference": fd_gate,
+            "contact_cardinality": cardinality_gate,
+            "reduction": "PASS" if np.isfinite(samples).all() else "FAIL",
+            "linear": "PASS" if all(np.isfinite(row["true_norm_max"]).all() for row in cancellation) else "FAIL",
+            "trajectory": "NOT_MEASURED",
+        },
+        "coordinate_support_status": coordinate_support_status,
+        "scope_note": (
+            "Discrete component measurement; complete trajectory evidence is deliberately separate and required before freeze"
+        ),
     }
 
 
@@ -1034,31 +1415,44 @@ def _scale_calibration_vector(scale: wp.array[float], values: wp.array[float], o
     out[i] = scale[i] * values[i]
 
 
-def calibrate_matrix(devices, *, seed, repeats):
+def calibrate_matrix(devices, *, seed, repeats, profile="quick", batch_index=0, batch_count=1):
     """Capture source identity and refuse mixed-source measurement artifacts."""
+    if profile not in ("quick", "freeze"):
+        raise ValueError("Unknown calibration profile")
+    if batch_count <= 0 or not 0 <= batch_index < batch_count:
+        raise ValueError("Invalid batch selection")
     root = Path(__file__).resolve().parents[2]
     paths = [Path(__file__), *sorted((root / "newton/_src/solvers/monolithic").glob("*.py"))]
     before = {str(path.relative_to(root)): hashlib.sha256(path.read_bytes()).hexdigest() for path in paths}
     evidence = []
-    for device in devices:
-        for case in calibration_cases(seed=seed):
-            evidence.append(calibrate_case(device, case=case, repeats=repeats))
-            print(
-                f"Measured {device} {case.case_id}: {[value['status'] for value in evidence[-1]['finite_difference'].values()]}",
-                flush=True,
-            )
+    cases = calibration_cases(seed=seed) if profile == "quick" else freeze_calibration_cases()
+    work = [(device, case) for device in devices for case in cases]
+    selected = work[batch_index::batch_count]
+    for device, case in selected:
+        evidence.append(calibrate_case(device, case=case, repeats=repeats, profile=profile))
+        print(
+            f"Measured {device} {case.case_id}: {[value['status'] for value in evidence[-1]['finite_difference'].values()]}",
+            flush=True,
+        )
     after = {str(path.relative_to(root)): hashlib.sha256(path.read_bytes()).hexdigest() for path in paths}
     if before != after:
         raise RuntimeError("Calibration sources changed during measurement")
     return {
-        "status": "DRAFT",
-        "scope": "28 discrete material/dt/coordinate/contact points per requested device",
+        "status": "DRAFT" if profile == "quick" else "RAW_MEASUREMENT",
+        "artifact_kind": "draft_measurement" if profile == "quick" else "raw_measurement",
+        "calibration_schema_version": 2,
+        "profile": profile,
+        "scope": (
+            "28 discrete material/dt/coordinate/contact points per requested device"
+            if profile == "quick"
+            else "finite C2/C3 freeze design; no continuous interval claim"
+        ),
         "excluded": [
             "continuous parameter intervals",
             "larger meshes",
             "non-plane SDFs",
             "trajectory convergence",
-            "P0/C3 freeze",
+            "V0.1 product freeze",
         ],
         "seed": seed,
         "repeats": repeats,
@@ -1066,6 +1460,11 @@ def calibrate_matrix(devices, *, seed, repeats):
         "warp_version": wp.__version__,
         "git_sha": subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=root, text=True).strip(),
         "git_dirty": bool(subprocess.check_output(["git", "status", "--porcelain"], cwd=root, text=True)),
+        "devices": list(devices),
+        "batch_index": batch_index,
+        "batch_count": batch_count,
+        "selected_case_count": len(selected),
+        "total_case_count": len(work),
         "source_sha256": before,
         "source_set_sha256": _hash_json(before),
         "evidence": evidence,
