@@ -16,7 +16,8 @@ import math
 import platform
 import subprocess
 from collections.abc import Mapping
-from dataclasses import fields
+from dataclasses import fields, replace
+from itertools import pairwise
 from pathlib import Path
 
 import numpy as np
@@ -59,7 +60,16 @@ def _valid_sha256(value):
 def _validate_status_axes(fixture):
     for axis in _STATUS_AXES:
         status = _axis_status(fixture, axis)
-        if status not in ("UNFROZEN", "FROZEN"):
+        allowed = (
+            ("UNFROZEN", "CANDIDATE", "BLOCKED", "FROZEN")
+            if axis == "reference"
+            else (
+                "UNFROZEN",
+                "CANDIDATE",
+                "FROZEN",
+            )
+        )
+        if status not in allowed:
             raise ValueError(f"Invalid {axis}_status")
         provenance = _axis_provenance(fixture, axis)
         if provenance is not None and not isinstance(provenance, dict):
@@ -72,6 +82,10 @@ def _validate_status_axes(fixture):
                 or not _valid_sha256(provenance.get("sha256"))
             ):
                 raise ValueError(f"Frozen {axis} evidence requires a nonempty version and SHA-256")
+        if status == "BLOCKED" and (
+            provenance is None or not isinstance(provenance.get("reason"), str) or not provenance["reason"].strip()
+        ):
+            raise ValueError(f"Blocked {axis} evidence requires a nonempty reason")
     calibration = _axis_provenance(fixture, "calibration")
     if calibration is not None and calibration.get("candidate_private_config") is not None:
         candidate = calibration["candidate_private_config"]
@@ -464,9 +478,49 @@ def _v01_exit(gates):
     return all(gates.get(name) is True for name in required)
 
 
-def run_loading(fixture, *, device="cpu", substeps=None):
+def _apply_candidate_internal_config(solver, requested):
+    if not isinstance(requested, Mapping):
+        raise ValueError("candidate_internal_config must be a mapping")
+    config_fields = fields(solver._config)
+    expected = {field.name for field in config_fields}
+    supplied = set(requested)
+    if supplied != expected:
+        missing = sorted(expected - supplied)
+        unknown = sorted(supplied - expected)
+        raise ValueError(
+            f"candidate_internal_config must specify every known field; missing={missing}, unknown={unknown}"
+        )
+    normalized = {}
+    for field in config_fields:
+        value = requested[field.name]
+        if field.name == "regularization_values":
+            if (
+                not isinstance(value, (list, tuple))
+                or not value
+                or any(
+                    isinstance(item, bool) or not isinstance(item, (int, float)) or not math.isfinite(item)
+                    for item in value
+                )
+            ):
+                raise ValueError("regularization_values must be a nonempty finite numeric sequence")
+            value = tuple(float(item) for item in value)
+            if value[0] != 0.0 or any(left >= right for left, right in pairwise(value)):
+                raise ValueError("regularization_values must start at zero and be strictly increasing")
+        else:
+            if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+                raise ValueError(f"{field.name} must be finite")
+            value = float(value)
+            if value < 0.0 or (field.name != "merit_noise" and value == 0.0):
+                raise ValueError(f"{field.name} must be positive; merit_noise may be zero")
+        normalized[field.name] = value
+    solver._config = replace(solver._config, **normalized)
+
+
+def run_loading(fixture, *, device="cpu", substeps=None, candidate_internal_config=None):
     """Run the fixed input, preserving every unsuccessful substep in the evidence."""
     model, state, control, solver = build_scene(fixture, device=device)
+    if candidate_internal_config is not None:
+        _apply_candidate_internal_config(solver, candidate_internal_config)
     records = []
     execution_error = None
     dt = fixture["dt_s"]
@@ -503,6 +557,7 @@ def run_loading(fixture, *, device="cpu", substeps=None):
         "candidate_solver_internal_config": (_axis_provenance(fixture, "calibration") or {}).get(
             "candidate_private_config"
         ),
+        "requested_solver_internal_config": _json_value(candidate_internal_config),
         "input_sha256": hashlib.sha256(serialized).hexdigest(),
         "actual_parameters": fixture,
         "execution_error": execution_error,
@@ -522,7 +577,9 @@ def run_loading(fixture, *, device="cpu", substeps=None):
         "hardware": model.device.name,
         "platform": platform.platform(),
         "warp_version": wp.__version__,
-        "solver_internal_config": {field.name: getattr(solver._config, field.name) for field in fields(solver._config)},
+        "solver_internal_config": _json_value(
+            {field.name: getattr(solver._config, field.name) for field in fields(solver._config)}
+        ),
         "normal_force_side": "physical force on rigid finger; compressive scalar is minus its projection on approach axis",
         "scope": "C5/C6/C7 measurement; status axes are reported independently",
     }
@@ -537,10 +594,16 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--fixture", type=Path, default=DEFAULT_FIXTURE)
     parser.add_argument("--device", default="cpu")
+    parser.add_argument(
+        "--candidate-internal-config",
+        type=Path,
+        help="Explicitly apply a complete solver-private config JSON object for this calibration run",
+    )
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
     args.output.mkdir(parents=True, exist_ok=True)
-    result = run_loading(load_fixture(args.fixture), device=args.device)
+    candidate = json.loads(args.candidate_internal_config.read_text()) if args.candidate_internal_config else None
+    result = run_loading(load_fixture(args.fixture), device=args.device, candidate_internal_config=candidate)
     for key in ("metadata", "summary"):
         (args.output / f"{key}.json").write_text(json.dumps(result[key], indent=2, allow_nan=False) + "\n")
     (args.output / "steps.jsonl").write_text("".join(json.dumps(r, allow_nan=False) + "\n" for r in result["records"]))

@@ -4,10 +4,12 @@
   "status": "DRAFT",
   "calibration_status": "UNFROZEN",
   "support_status": "UNFROZEN",
-  "reference_status": "UNFROZEN",
+  "reference_status": "BLOCKED",
   "calibration_provenance": null,
   "support_provenance": null,
-  "reference_provenance": null,
+  "reference_provenance": {
+    "reason": "The active-contact SuperDex reference mapping and response envelope are not closed."
+  },
   "reference_envelope": null,
   "units": "SI: m, kg, s, N, Pa; normal stiffness N/m^3",
   "dt_s": 0.001,

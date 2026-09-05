@@ -17,9 +17,9 @@
   "properties": {
     "schema_version": {"const": "normal_loading/v2"},
     "status": {"const": "DRAFT"},
-    "calibration_status": {"enum": ["UNFROZEN", "FROZEN"]},
-    "support_status": {"enum": ["UNFROZEN", "FROZEN"]},
-    "reference_status": {"enum": ["UNFROZEN", "FROZEN"]},
+    "calibration_status": {"enum": ["UNFROZEN", "CANDIDATE", "FROZEN"]},
+    "support_status": {"enum": ["UNFROZEN", "CANDIDATE", "FROZEN"]},
+    "reference_status": {"enum": ["UNFROZEN", "CANDIDATE", "BLOCKED", "FROZEN"]},
     "calibration_provenance": {"$ref": "#/$defs/provenance"},
     "support_provenance": {"$ref": "#/$defs/provenance"},
     "reference_provenance": {"$ref": "#/$defs/provenance"}
@@ -30,10 +30,10 @@
         {"type": "null"},
         {
           "type": "object",
-          "required": ["version", "sha256"],
           "properties": {
             "version": {"type": "string", "minLength": 1},
             "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+            "reason": {"type": "string", "minLength": 1},
             "candidate_private_config": {"type": ["object", "null"]}
           }
         }
