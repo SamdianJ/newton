@@ -367,9 +367,7 @@ def test_pipeline_ownership(test, device):
     for external in (solver.contacts, solver._trial_contacts, pipeline.contacts()):
         with test.assertRaisesRegex(ValueError, "must be None"):
             solver.step(fixture.state, fixture.state_next, fixture.control, external, 0.01)
-    with test.assertRaises(NotImplementedError):
-        solver.step(fixture.state, fixture.state_next, fixture.control, None, 0.01)
-    with test.assertRaises(NotImplementedError):
+    with test.assertRaisesRegex(ValueError, "No valid final"):
         solver.update_contacts(solver.contacts, fixture.state_next)
     np.testing.assert_array_equal(fixture.state_next.particle_q.numpy(), before)
     np.testing.assert_array_equal(solver.contacts.contact_generation.numpy(), generation)
