@@ -116,6 +116,7 @@ def _allocation_sample(device, function):
 
 def _memory(workspace):
     groups = {
+        "fixed_patterns": [array for pattern in workspace._fixed_patterns or () for array in pattern],
         "global_bsr": [
             workspace.k_global_scalar_bsr.offsets,
             workspace.k_global_scalar_bsr.columns,
@@ -305,6 +306,9 @@ def profile_case(device, *, active, dt, young_modulus, poisson_ratio, contact_st
                 solve_allocations.append(allocations)
                 results.append({**asdict(result), "status": result.status.name, "warm_start": result.warm_start.name})
             methods[kind] = {
+                "additional_inverse_capacity_bytes": diagonal.values.capacity + diagonal.status.capacity
+                if kind == "diagonal_negative_control"
+                else 0,
                 "results": results,
                 "pcg_iterations": _percentiles([r["iterations"] for r in results]),
                 "pcg_ms": _percentiles(solve_samples),
