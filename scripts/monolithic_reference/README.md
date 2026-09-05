@@ -127,6 +127,21 @@ UV_PROJECT_ENVIRONMENT=/path/to/native-venv uv run --no-sync python /path/to/new
 Run the second command from the pinned reference root. The probe independently
 checks a 90-degree rotation plus translation of native local nodes, shapeless
 versus geometry-carried mass, and the dynamic plane error. It modifies no source.
+The wrapper validates exact substep count, the 1-based step/time sequence,
+manifest-sized state/residual/force arrays, effective dt and requested device/build
+before publishing results. Comparisons include separate link translation and
+quaternion-sign-invariant rotation differences plus per-step status and aggregate
+convergence, soft-commit, rollback, nonfinite-status and unavailable-field counts.
+A BLOCKED mapping never suppresses these observations. Invalid nonfinite numeric
+records are rejected.
+
+Native soft inertia uses a **consistent mass matrix** (full density*Nf*Ng
+quadrature), whereas Newton uses lumped particle mass. This is an explicit
+`INTENTIONALLY_DIFFERENT` mapping, separate from matching total mass and geometric
+COM weights. The native lumpedMass cache is not evidence of lumped dynamics.
+Manifest node masses must match rest-volume/density weights even if their total
+is correct; native COM uses independently computed geometric weights.
+
 Adapter records contain native binary hash/path, precision, hardware, worker
 count and effective parameters. Native total timing excludes offline queries;
 Newton total timing surrounds a synchronized solver step. Neither includes a

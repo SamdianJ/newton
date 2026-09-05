@@ -329,7 +329,7 @@
       "superdex_binding": "scripts/monolithic_reference/adapter.py::_superdex",
       "units": "kg",
       "status": "MATCHED",
-      "rationale": "Rest-volume equal-node tet lumping; public get_mass checked against manifest soft/link masses. Native noncolliding tet geometry carries explicit rigid mass/COM/inertia; shapeless native links would ignore supplied mass.",
+      "rationale": "Total soft mass, rigid mass/COM/inertia and geometric soft COM weights are matched and validated. Native public get_mass checks totals; manifest node weights must equal rest-volume/density row-sum weights. This does not equate the native consistent inertia matrix with Newton lumped dynamics.",
       "blocks": []
     },
     {
@@ -396,6 +396,16 @@
       "units": "Pa",
       "status": "INTENTIONALLY_DIFFERENT",
       "rationale": "Newton GN positive semidefinite approximation differs from native spectral projection; record actual native strategy without tuning it.",
+      "blocks": []
+    },
+    {
+      "mapping_id": "material.mass_discretization",
+      "manifest_path": "physics.mass_lumping",
+      "newton_binding": "Newton monolithic dynamic particle lumped inertia",
+      "superdex_binding": "mochi_soft.cpp:258-264 full massMatrix; fem_inertia.h:225-238 density*Nf*Ng quadrature",
+      "units": "kg",
+      "status": "INTENTIONALLY_DIFFERENT",
+      "rationale": "Pinned native inertia uses a consistent mass matrix with off-diagonal entries; its lumpedMass cache does not replace that matrix. No public lumping selector was found. Equal total mass and COM weights do not imply equal inertial dynamics.",
       "blocks": []
     }
   ],

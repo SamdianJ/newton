@@ -35,9 +35,21 @@ def world_nodes(local, quaternion, translation):
     return local + 2 * np.cross(vector, np.cross(vector, local) + scalar * local) + translation
 
 
+def rest_lumped_masses(physics):
+    """Compute geometric COM weights; this does not change native consistent inertia."""
+    rest = np.asarray(physics["rest_positions_m"], dtype=np.float32).astype(np.float64)
+    tets = np.asarray(physics["tet_indices"])
+    volumes = np.linalg.det(rest[tets[:, 1:]] - rest[tets[:, :1]]) / 6
+    masses = np.zeros(len(rest))
+    np.add.at(masses, tets.ravel(), np.repeat(volumes * physics["density_kg_m3"] / 4, 4))
+    return masses
+
+
 def validate_adapter_scope(physics):
     """Reject inputs outside the measured no-contact subset before allocating a scene."""
     _validate_body_and_mesh_inputs(physics)
+    if not np.allclose(physics["node_masses_kg"], rest_lumped_masses(physics), rtol=1e-6, atol=0):
+        raise ValueError("Manifest node mass distribution differs from rest-volume/density weights")
     if physics.get("shapes") != [] or physics.get("contact") is not None or physics.get("drive") is not None:
         raise ValueError("Adapter supports only explicit shapes=[] and contact/drive=null; normal loading is UNMAPPED")
     if any(physics["fixed_nodes"]) or any(physics["surface_materials"]) or any(physics["edge_materials"]):
@@ -172,7 +184,15 @@ def _newton(manifest, args, output):
         "stored_tet_materials": model.tet_materials.numpy().tolist(),
         "node_masses_kg": model.particle_mass.numpy().tolist(),
         "gravity_m_s2": model.gravity.numpy().tolist(),
-        "solver": {name: getattr(solver, name) for name in ("iterations", "linear_tolerance") if hasattr(solver, name)},
+        "solver": {
+            name: getattr(solver, name)
+            for name in (
+                "newton_max_iterations",
+                "line_search_max_iterations",
+                "linear_max_iterations",
+                "linear_tolerance",
+            )
+        },
         "internal_config": repr(solver._config),
     }
     base = _base_record(manifest, args, parameters, wp.__version__)
@@ -315,6 +335,8 @@ def _superdex(manifest, args, output):
             "poisson_ratio": effective.neo_hookean.poisson_ratio,
             "psd_strategy": str(effective.neo_hookean.psd_strategy),
             "soft_mass_kg": soft.get_mass(),
+            "soft_inertia_discretization": "native consistent mass matrix",
+            "soft_com_geometric_weights_kg": rest_lumped_masses(physics).tolist(),
             "link_masses_kg": measured_mass,
             "link_com_m": measured_com,
             "link_inertia_kg_m2": measured_inertia,
@@ -362,7 +384,7 @@ def _superdex(manifest, args, output):
                     for actor in link_actors
                 ],
                 node_positions_m=nodes.tolist(),
-                soft_com_m=np.average(nodes, axis=0, weights=physics["node_masses_kg"]).tolist(),
+                soft_com_m=np.average(nodes, axis=0, weights=rest_lumped_masses(physics)).tolist(),
                 min_det_f=float(np.linalg.det(deformation).min()),
                 penetration_m=0.0,
                 normal_physical_force_n=np.asarray(soft.get_contact_force_world()).tolist(),

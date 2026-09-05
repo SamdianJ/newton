@@ -365,6 +365,8 @@ def validate_step_record(record: dict) -> None:
     collect_nulls(record, "")
     if nulls != set(record.get("unavailable_fields", {})):
         raise ValueError("unavailable_fields must explain exactly the unavailable null measurements")
+    for transform in record["link_xform"]:
+        _require_unit(transform[3:], "step_record.link_xform.rotation")
     residual = record["residual_contribution"]
     generalized = record["generalized_physical_force"]
     if residual is not None and (
@@ -429,12 +431,44 @@ def run_adapter(
                 record[key] != value for key, value in manifest.data["repositories"].items()
             ):
                 raise ValueError("Adapter records do not match the requested manifest/source identities")
+        _validate_run_request(measured, manifest, device=device, build_type=build_type)
         require_reference_worktree(identity.path, expected_sha=expected)
         (temporary / "stdout.log").write_text(result.stdout)
         (temporary / "stderr.log").write_text(result.stderr)
         (temporary / "manifest.json").write_bytes(canonical_manifest_bytes(manifest) + b"\n")
         temporary.rename(output_dir)
     return 0
+
+
+def _validate_run_request(records, manifest, *, device, build_type):
+    physics = manifest.data["physics"]
+    if len(records) != physics["substeps"]:
+        raise ValueError("Adapter record count differs from requested substeps")
+    nq = sum(joint["type"] != "FIXED" for joint in physics["joints"])
+    nx = sum(not fixed for fixed in physics["fixed_nodes"])
+    dimensions = {
+        "joint_q": nq,
+        "link_xform": len(physics["links"]),
+        "node_positions_m": len(physics["rest_positions_m"]),
+        "physical_world_force_or_wrench": len(physics["links"]),
+        "generalized_physical_force": nq + 3 * nx,
+    }
+    for step, record in enumerate(records, 1):
+        expected_time = step * physics["dt_s"]
+        if record["step"] != step or not math.isclose(
+            record["time_s"], expected_time, rel_tol=0, abs_tol=4 * math.ulp(expected_time)
+        ):
+            raise ValueError("Adapter step/time differs from requested timestep sequence")
+        if record["device"] != device or record["build_type"] != build_type:
+            raise ValueError("Adapter device/build differs from runtime request")
+        if json.loads(record["actual_parameters_json"]).get("dt_s") != physics["dt_s"]:
+            raise ValueError("Adapter effective dt differs from manifest")
+        for field, size in dimensions.items():
+            if record[field] is not None and len(record[field]) != size:
+                raise ValueError(f"Adapter {field} dimensions differ from manifest")
+        residual = record["residual_contribution"]
+        if residual is not None and (len(residual["q"]) != nq or len(residual["x"]) != nx):
+            raise ValueError("Adapter residual dimensions differ from manifest")
 
 
 def _read_step_records(path: Path, implementation: str) -> list[dict]:
@@ -474,6 +508,35 @@ def compare_runs(
             return [scalar for child in value for scalar in flat(child)]
         return [value]
 
+    quality_fields = (
+        "convergence_status",
+        "converged",
+        "committed_unconverged",
+        "rolled_back",
+        "nonlinear_iterations",
+        "linear_iterations",
+        "min_det_f",
+        "penetration_m",
+    )
+
+    def quality(records):
+        result = {
+            "record_count": len(records),
+            "status_counts": dict(Counter(record["convergence_status"] for record in records)),
+            "nonfinite_status_count": sum("NONFINITE" in record["convergence_status"].upper() for record in records),
+            "unavailable_fields": dict(
+                Counter(field for record in records for field in record.get("unavailable_fields", {}))
+            ),
+            "nonfinite_numeric_policy": "Nonfinite numeric values are rejected before comparison",
+        }
+        for field in ("converged", "committed_unconverged", "rolled_back"):
+            result[field] = {
+                "true": sum(record[field] is True for record in records),
+                "false": sum(record[field] is False for record in records),
+                "unavailable": sum(record[field] is None for record in records),
+            }
+        return result
+
     differences = []
     for a, b in zip(left, right, strict=True):
         for key in ("manifest_sha256", "newton_sha", "superdex_sha", "step", "time_s"):
@@ -495,12 +558,26 @@ def compare_runs(
             if len(av) != len(bv):
                 raise ValueError(f"Comparison {key} dimensions differ")
             row[f"{key}_max_absolute"] = max((abs(x - y) for x, y in zip(av, bv, strict=True)), default=0.0)
+        if len(a["link_xform"]) != len(b["link_xform"]):
+            raise ValueError("Comparison link_xform dimensions differ")
+        translations, rotations = [], []
+        for ta, tb in zip(a["link_xform"], b["link_xform"], strict=True):
+            translations.append(math.dist(ta[:3], tb[:3]))
+            qa, qb = ta[3:], tb[3:]
+            denominator = math.sqrt(sum(x * x for x in qa) * sum(x * x for x in qb))
+            cosine = abs(sum(x * y for x, y in zip(qa, qb, strict=True))) / denominator
+            rotations.append(2 * math.acos(min(1.0, cosine)))
+        row["link_translation_max_m"] = max(translations, default=0.0)
+        row["link_rotation_max_rad"] = max(rotations, default=0.0)
+        row["newton_quality"] = {field: a[field] for field in quality_fields}
+        row["superdex_quality"] = {field: b[field] for field in quality_fields}
         differences.append(row)
     report = {
         "status": "BLOCKED" if blocked else "OBSERVED",
         "manifest_sha256": left[0]["manifest_sha256"],
         "blocked_conclusions": blocked,
         "differences": differences,
+        "quality": {"newton": quality(left), "superdex": quality(right)},
         "mapping_status": {entry.mapping_id: entry.status for entry in mapping_report},
         "mappings": [asdict(entry) for entry in mapping_report],
         "limitations": "Observed differences are not numerical acceptance or performance-equality gates; interpret all mappings.",
