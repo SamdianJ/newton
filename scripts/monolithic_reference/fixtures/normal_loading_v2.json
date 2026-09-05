@@ -7,11 +7,11 @@
   "reference_status": "BLOCKED",
   "calibration_provenance": {
     "version": "monolithic_calibration_frozen/v1",
-    "sha256": "13ab5d5fa564c3a1f9e78560c0303df84efade33a17f76cd293c4107558c4173"
+    "sha256": "a0c314d5b17d48ae246819029ca3c5192b4016c3399bce0493c8f8a4dcc0805b"
   },
   "support_provenance": {
-    "version": "p1q3-resolved-local-v1/schema-v3",
-    "sha256": "23acd2775ceb818bda28fa8de0cda0f8695501b6a178c3175bcfcc1e71c5830e"
+    "version": "p1q3-resolved-local-v2/schema-v3",
+    "sha256": "98c396b05679cac651608ca9b2ed5ae7ce05cc2c500dcaf0fcfc6526cc37948f"
   },
   "reference_provenance": {
     "reason": "The active-contact SuperDex reference mapping and response envelope are not closed."
