@@ -6,6 +6,7 @@ from __future__ import annotations
 import enum
 import logging
 import math
+import time
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from types import MappingProxyType
@@ -18,10 +19,109 @@ from ..solver import SolverBase
 from .articulation import (
     MonolithicArticulationWorkspace,
     _validate_joint_coordinate_layout,
+    eval_articulation_actor_residual,
+    eval_articulation_passive_candidate,
+    project_articulation_body_wrenches,
     recover_articulation_candidate_rates,
+    scatter_articulation_actor_tangent,
 )
 from .collision import MonolithicCollisionPipeline
-from .tet import validate_tet_scope
+from .contact import (
+    MonolithicContactWorkspace,
+    _MonolithicReturnedStateRole,
+    assemble_current_contacts,
+    evaluate_final_contacts,
+    evaluate_trial_contacts,
+)
+from .linear import (
+    MonolithicLinearCapacities,
+    MonolithicLinearGeneration,
+    MonolithicLinearLayout,
+    MonolithicLinearStatus,
+    MonolithicLinearWorkspace,
+    MonolithicPcgConfig,
+    MonolithicPcgWarmStart,
+)
+from .tet import (
+    TetEvaluationStatus,
+    TetScatterBuffers,
+    assemble_tet_residual_tangent,
+    build_tet_triplet_pattern,
+    create_tet_assembly_workspace,
+    evaluate_tet_residual,
+    validate_tet_scope,
+)
+
+
+@dataclass(frozen=True, slots=True)
+class _SolverMonolithicInternalConfig:
+    """Initial tiny-fixture settings; full asset/trajectory calibration is pending.
+
+    See ``scripts/monolithic_reference/calibrate_components.py`` for the
+    float32 reduction and coordinate-ULP measurements behind these draft gates.
+    """
+
+    epsilon_d: float = 1.0e-6
+    residual_floor_global: float = 1.11e-6
+    residual_floor_q: float = 1.1e-6
+    residual_floor_x: float = 5.0e-8
+    merit_noise: float = 0.0
+    merit_absolute_global: float = 1.1e-6
+    merit_absolute_q: float = 2.8e-6
+    merit_absolute_x: float = 7.1e-8
+    merit_relative_global: float = 1.0e-4
+    merit_relative_q: float = 1.0e-4
+    merit_relative_x: float = 1.0e-4
+    step_tolerance_global: float = 2.6e-7
+    step_tolerance_q: float = 6.9e-7
+    step_tolerance_x: float = 1.8e-8
+    det_f_guard: float = 0.2
+    regularization_values: tuple[float, ...] = (0.0, 1.0e-4, 1.0e-3, 1.0e-2, 0.1, 1.0, 10.0)
+
+
+@dataclass(frozen=True, slots=True)
+class _TrialResult:
+    status: int
+    merit: float
+    merit_q: float
+    merit_x: float
+    min_det_f: float
+    maximum_penetration: float
+
+
+class _StepFailure(RuntimeError):
+    def __init__(self, status: SolverMonolithic.Status, reason: str):
+        self.status = status
+        super().__init__(reason)
+
+
+@wp.kernel
+def _scale_vector(values: wp.array[float], scale: wp.array[float], sign: float, out: wp.array[float]):
+    i = wp.tid()
+    out[i] = sign * scale[i] * values[i]
+
+
+@wp.kernel
+def _copy_particle_residual(values: wp.array[wp.vec3], offset: int, out: wp.array[float]):
+    i = wp.tid()
+    for axis in range(3):
+        out[offset + 3 * i + axis] = values[i][axis]
+
+
+@wp.kernel
+def _build_dynamic_diagonal(
+    mass: wp.array3d[float],
+    particle_mass: wp.array[float],
+    particle_ids: wp.array[int],
+    nq: int,
+    inv_dt_sq: float,
+    out: wp.array[float],
+):
+    i = wp.tid()
+    if i < nq:
+        out[i] = mass[0, i, i] * inv_dt_sq
+    else:
+        out[i] = particle_mass[particle_ids[(i - nq) // 3]] * inv_dt_sq
 
 
 @dataclass(frozen=True, slots=True)
@@ -391,12 +491,11 @@ class _Candidate:
 
 
 class SolverMonolithic(SolverBase):
-    """Experimental monolithic solver shell; simulation stepping is not implemented.
+    """Solve articulated rigid/tet motion with a common implicit position update.
 
-    Construction validates the supported model and allocates owned collision
-    buffers. :meth:`step` and :meth:`update_contacts` raise
-    :class:`NotImplementedError` until the nonlinear solve and final contact
-    force publication are implemented.
+    This experimental implementation supports normal-only P1Q3 contact and
+    static fixed particles. Numerical defaults currently use tiny-fixture
+    development calibration; broader asset and trajectory validation is pending.
 
     .. experimental::
         This class may change without the normal deprecation period.
@@ -424,8 +523,8 @@ class SolverMonolithic(SolverBase):
     class Stats:
         """Immutable diagnostics; unmeasured numerical fields contain NaN.
 
-        Contact publication is absent in the PR-0 transaction scaffold, so its
-        generation is -1 and its contact diagnostics remain unmeasured.
+        Linear residual ratios are measured by actual-operator post-checks;
+        they remain NaN if the step does not invoke a linear solve.
         """
 
         status: SolverMonolithic.Status
@@ -451,9 +550,13 @@ class SolverMonolithic(SolverBase):
         rho_x: float = math.nan
         """Normalized particle scaled residual [dimensionless]; NaN when unmeasured."""
         merit_initial: float = math.nan
+        """First current merit using its initial scale; not a convergence denominator."""
         merit_final: float = math.nan
+        """Last evaluated current merit; on rollback this can describe a discarded state."""
         merit_q_final: float = math.nan
+        """Joint block of the last evaluated current merit."""
         merit_x_final: float = math.nan
+        """Particle block of the last evaluated current merit."""
         accepted_alpha: float = math.nan
         lambda_value: float = math.nan
         min_p_ap: float = math.nan
@@ -464,15 +567,15 @@ class SolverMonolithic(SolverBase):
         soft_contact_pair_count: int = 0
         published_contact_generation: int = -1
         max_penetration: float = math.nan
-        """Maximum contact penetration [m]; unmeasured in PR-0."""
+        """Maximum contact penetration in the returned state [m]."""
         min_det_f: float = math.nan
-        """Minimum tet deformation determinant [dimensionless]; unmeasured in PR-0."""
+        """Minimum evaluated tet deformation determinant [dimensionless]."""
         contact_force_imbalance: float = math.nan
         contact_moment_imbalance: float = math.nan
         generalized_projection_error: float = math.nan
         contact_sign_error: float = math.nan
         timings: Mapping[str, float | None] = field(default_factory=lambda: MappingProxyType({}))
-        """Measured durations [ms], or None for unmeasured entries; empty in PR-0."""
+        """Measured durations [ms], or None for unmeasured entries."""
 
         def __post_init__(self):
             object.__setattr__(self, "timings", MappingProxyType(dict(self.timings)))
@@ -537,6 +640,57 @@ class SolverMonolithic(SolverBase):
         self.line_search_max_iterations = line_search_max_iterations
         self.linear_max_iterations = linear_max_iterations
         self.linear_tolerance = linear_tolerance
+        self._config = _SolverMonolithicInternalConfig()
+        layout = self._layout
+        nq, nx, size = layout.q_dof_count, layout.dynamic_particle_count, layout.scalar_dof_count
+        pattern = build_tet_triplet_pattern(
+            model.tet_indices.numpy(),
+            layout.particle_to_dynamic.numpy(),
+            x_dof_start=nq,
+        )
+        contact_capacity = collision_pipeline.soft_contact_max
+        self._linear = MonolithicLinearWorkspace(
+            MonolithicLinearLayout(nq, nx),
+            MonolithicLinearCapacities(
+                nq * nq + len(pattern.global_rows) + contact_capacity * (nq + 9) ** 2,
+                len(pattern.ax_rows),
+                contact_capacity,
+                linear_max_iterations,
+                linear_max_iterations + 2,
+            ),
+            layout.particle_to_dynamic,
+            device=model.device,
+        )
+        self._linear._set_fixed_triplet_pattern(
+            global_rows=np.concatenate((np.repeat(np.arange(nq), nq), pattern.global_rows)).astype(np.int32),
+            global_columns=np.concatenate((np.tile(np.arange(nq), nq), pattern.global_columns)).astype(np.int32),
+            internal_rows=pattern.ax_rows,
+            internal_columns=pattern.ax_columns,
+        )
+        self._tet_workspace = create_tet_assembly_workspace(pattern, tet_count=model.tet_count, device=model.device)
+        self._tet_triplet_count = len(pattern.global_rows)
+        self._contact = MonolithicContactWorkspace(
+            model,
+            collision_pipeline,
+            self._linear,
+            contact_stiffness=contact_stiffness,
+        )
+        self._final_evaluation_state = model.state()
+        self._particle_residual = wp.zeros(nx, dtype=wp.vec3, device=model.device)
+        self._dynamic_diagonal = wp.zeros(size, dtype=float, device=model.device)
+        self._residual_ref = wp.zeros(size, dtype=float, device=model.device)
+        self._metric_vector = wp.zeros(size, dtype=float, device=model.device)
+        self._metric_slices = (self._metric_vector, self._metric_vector[:nq], self._metric_vector[nq:])
+        self._norm_values = wp.zeros(3, dtype=float, device=model.device)
+        self._norm_outputs = tuple(self._norm_values[i : i + 1] for i in range(3))
+        self._rhs_hat = wp.zeros(size, dtype=float, device=model.device)
+        self._y = wp.zeros(size, dtype=float, device=model.device)
+        self._delta = wp.zeros(size, dtype=float, device=model.device)
+        self._final_residual = wp.zeros(size, dtype=float, device=model.device)
+        self._contact_status = wp.zeros(1, dtype=int, device=model.device)
+        self._default_control = model.control(clone_variables=False)
+        self._generation = None
+        self._assembly_sequence = 0
 
     @property
     def last_stats(self) -> SolverMonolithic.Stats:
@@ -546,22 +700,505 @@ class SolverMonolithic(SolverBase):
     def step(
         self, state_in: State, state_out: State, control: Control | None, contacts: Contacts | None, dt: float
     ) -> None:
-        """Advance by ``dt`` [s] once the monolithic physics implementation exists."""
+        """Advance by ``dt`` [s], or restore the input on a hard numerical failure.
+
+        Exhausting nonlinear iterations commits the last safe accepted state
+        with an unconverged status. If contact publication also fails on the
+        rollback state, restore the input, invalidate forces and raise RuntimeError.
+        """
         self._resolve_step_contacts(contacts)
-        raise NotImplementedError("Monolithic nonlinear stepping is not implemented")
+        _validate_dt(dt)
+        _validate_state(self.model, state_in)
+        _validate_state(self.model, state_out)
+        _validate_dirichlet(self.model, self._layout, state_in)
+        pipeline = self.collision_pipeline
+        pipeline.validate_contacts(self.contacts)
+        pipeline.validate_contacts(self._trial_contacts)
+        control = self._default_control if control is None else control
+        self._articulation.validate_candidate(
+            self.model,
+            state_in,
+            self._transaction.accepted.qdd,
+            control.joint_f,
+            state_in.body_f,
+        )
+        start = time.perf_counter()
+        self._transaction.begin(state_in, state_out, control, dt)
+        self._contact.invalidate_final_force()
+        self._assembly_sequence = 0
+        self._metrics = {
+            "nonlinear_iterations": 0,
+            "line_search_iterations": 0,
+            "linear_iterations": 0,
+            "regularization_retries": 0,
+            "matrix_assembly_count": 0,
+            "true_residual_recomputations": 0,
+            "residual_replacements": 0,
+            "preconditioner_kind": "actor_block",
+            "triplet_capacity": self._linear.capacities.global_scalar_triplet_count,
+        }
+        reason = None
+        try:
+            try:
+                status = self._iterate(dt)
+            except _StepFailure as error:
+                status, reason = error.status, str(error)
+            self._finish_step(state_out, status, reason, start)
+        except Exception:
+            # A programming/configuration exception must not leave a reusable
+            # solver in an open transaction or retain a partially published state.
+            state_out.assign(self._transaction._original)
+            self._contact.invalidate_final_force()
+            self._transaction._finished = True
+            raise
 
     def update_contacts(self, contacts: Contacts, state: State | None = None) -> None:
-        """Publish final physical contact forces once contact evaluation exists."""
-        raise NotImplementedError("Monolithic final contact publication is not implemented")
+        """Idempotently publish cached forces for the last returned state."""
+        if contacts is not self.contacts:
+            raise ValueError("update_contacts requires solver.contacts")
+        generation = self._contact.final_force_generation
+        if generation is None:
+            raise ValueError("No valid final contact publication")
+        state = generation.returned_state if state is None else state
+        self._contact._publish_final_forces(
+            state,
+            contacts,
+            step_generation=self._transaction.step_generation,
+            returned_state_role=generation.returned_state_role,
+        )
+
+    def _rms(self, values: wp.array[float], *, scaled: bool = True) -> tuple[float, float, float]:
+        if scaled:
+            wp.launch(
+                _scale_vector,
+                values.size,
+                [values, self._linear.scale, 1.0, self._metric_vector],
+                device=self.model.device,
+            )
+        else:
+            wp.copy(self._metric_vector, values)
+        self._norm_values.zero_()
+        for vector, output in zip(self._metric_slices, self._norm_outputs, strict=True):
+            if vector.size:
+                wp.utils.array_inner(vector, vector, out=output)
+        norms = self._norm_values.numpy()
+        if not np.isfinite(norms).all() or np.any(norms < 0):
+            raise _StepFailure(self.Status.NONFINITE, "Nonfinite scaled reduction")
+        return tuple(
+            math.sqrt(float(value) / max(vector.size, 1))
+            for value, vector in zip(norms, self._metric_slices, strict=True)
+        )
+
+    def _converged(self, merit: tuple[float, float, float], reference: tuple[float, float, float]) -> bool:
+        config = self._config
+        return all(
+            value <= getattr(config, f"merit_absolute_{block}") + getattr(config, f"merit_relative_{block}") * ref
+            for block, value, ref in zip(("global", "q", "x"), merit, reference, strict=True)
+        )
+
+    def _collide(self, state: State, contacts: Contacts) -> None:
+        try:
+            self.collision_pipeline.collide(state, contacts, dt=0.0)
+        except MonolithicCollisionPipeline.Error as error:
+            if error.status == self.collision_pipeline.Status.CONTACT_CAPACITY_OVERFLOW:
+                raise _StepFailure(self.Status.CONTACT_OVERFLOW, str(error)) from error
+            if error.status == self.collision_pipeline.Status.INVALID_SDF_GRADIENT:
+                raise _StepFailure(self.Status.NONFINITE, str(error)) from error
+            raise
+
+    def _actor_residual(self, candidate: _Candidate) -> None:
+        model, articulation, inputs = self.model, self._articulation, self._transaction.inputs
+        eval_articulation_passive_candidate(model, candidate.state, articulation)
+        nq = self._layout.q_dof_count
+        wp.launch(
+            project_articulation_body_wrenches,
+            nq,
+            [
+                0,
+                nq,
+                model.articulation_start,
+                model.articulation_end,
+                model.joint_child,
+                articulation.scratch.J,
+                inputs.body_f,
+                articulation.generalized_body_force,
+            ],
+            device=model.device,
+        )
+        wp.launch(
+            eval_articulation_actor_residual,
+            nq,
+            [
+                0,
+                0,
+                nq,
+                articulation.M,
+                candidate.qdd,
+                articulation.C,
+                articulation.g,
+                inputs.joint_f,
+                articulation.generalized_body_force,
+                candidate.residual,
+            ],
+            device=model.device,
+        )
+
+    def _tet_arguments(self, candidate: _Candidate, dt: float) -> dict:
+        return {
+            "candidate_particle_q": candidate.state.particle_q,
+            "particle_q_n": self._transaction._original.particle_q,
+            "particle_qd_n": self._transaction._original.particle_qd,
+            "frozen_particle_f": self._transaction.inputs.particle_f,
+            "dynamic_particle_ids": self._layout.dynamic_particle_ids,
+            "particle_to_dynamic": self._layout.particle_to_dynamic,
+            "residual_x": self._particle_residual,
+            "dt": dt,
+            "min_det_f_guard": self._config.det_f_guard,
+            "workspace": self._tet_workspace,
+        }
+
+    def _check_tet(self) -> float:
+        code = TetEvaluationStatus(int(self._tet_workspace.failure_flags.numpy()[0]))
+        if code == TetEvaluationStatus.DET_F_GUARD:
+            raise _StepFailure(self.Status.TET_INVERSION, "Tet determinant guard")
+        if code == TetEvaluationStatus.NONFINITE:
+            raise _StepFailure(self.Status.NONFINITE, "Nonfinite tet evaluation")
+        if code != TetEvaluationStatus.SUCCESS:
+            raise ValueError(f"Invalid tet evaluation contract: {code.name}")
+        return float(self._tet_workspace.min_det_f.numpy()[0])
+
+    def _check_contact(self) -> None:
+        code = int(self._contact_status.numpy()[0])
+        if code == int(MonolithicLinearStatus.CONTACT_FACTOR_OVERFLOW):
+            raise _StepFailure(self.Status.CONTACT_OVERFLOW, "Contact factor capacity")
+        if code == int(MonolithicLinearStatus.NONFINITE_CONTRIBUTION):
+            raise _StepFailure(self.Status.NONFINITE, "Nonfinite contact evaluation")
+        if code:
+            raise ValueError(f"Invalid contact evaluation contract: {code}")
+
+    def _evaluate_current(self, candidate: _Candidate, dt: float) -> _TrialResult:
+        self._actor_residual(candidate)
+        self._collide(candidate.state, self._trial_contacts)
+        self._assembly_sequence += 1
+        generation = MonolithicLinearGeneration(
+            self._transaction.step_generation,
+            self._metrics["nonlinear_iterations"],
+            int(self._trial_contacts.contact_generation.numpy()[0]),
+            self._assembly_sequence,
+        )
+        self._generation = generation
+        assembly = self._linear.begin_assembly(generation)
+        nq, model = self._layout.q_dof_count, self.model
+        triplets = assembly.global_scalar_triplets
+        wp.launch(
+            scatter_articulation_actor_tangent,
+            (nq, nq),
+            [
+                0,
+                nq,
+                0,
+                0,
+                1.0 / dt**2,
+                self._articulation.M,
+                assembly.aq_actor_dense,
+                triplets.rows,
+                triplets.columns,
+                triplets.values,
+            ],
+            device=model.device,
+        )
+        assemble_tet_residual_tangent(
+            model,
+            **self._tet_arguments(candidate, dt),
+            scatter=TetScatterBuffers(
+                assembly.ax_internal_triplets.values, triplets.values[nq * nq : nq * nq + self._tet_triplet_count]
+            ),
+        )
+        min_det = self._check_tet()
+        wp.launch(
+            _copy_particle_residual,
+            self._layout.dynamic_particle_count,
+            [self._particle_residual, nq, candidate.residual],
+            device=model.device,
+        )
+        assemble_current_contacts(
+            model,
+            candidate.state,
+            self._trial_contacts,
+            self.collision_pipeline,
+            self._articulation,
+            self._contact,
+            assembly,
+            candidate.residual,
+            generation=generation,
+        )
+        result = self._linear.finalize_assembly(generation=generation)
+        self._metrics["matrix_assembly_count"] += 1
+        self._metrics.update(
+            matrix_nnz=result.global_nnz,
+            triplet_count=result.global_triplet_count,
+            owner_generation=self._assembly_sequence,
+        )
+        self._require_linear(result.status)
+        wp.launch(
+            _build_dynamic_diagonal,
+            self._layout.scalar_dof_count,
+            [
+                self._articulation.M,
+                model.particle_mass,
+                self._layout.dynamic_particle_ids,
+                nq,
+                1.0 / dt**2,
+                self._dynamic_diagonal,
+            ],
+            device=model.device,
+        )
+        self._require_linear(
+            self._linear.build_scaling(self._dynamic_diagonal, epsilon_d=self._config.epsilon_d, generation=generation)
+        )
+        return _TrialResult(
+            0, *self._rms(candidate.residual), min_det, self._contact._diagnostics(0)["max_penetration"]
+        )
+
+    def _evaluate_trial(self, candidate: _Candidate, dt: float) -> _TrialResult:
+        self._actor_residual(candidate)
+        self._collide(candidate.state, self._trial_contacts)
+        evaluate_tet_residual(self.model, **self._tet_arguments(candidate, dt))
+        min_det = self._check_tet()
+        wp.launch(
+            _copy_particle_residual,
+            self._layout.dynamic_particle_count,
+            [self._particle_residual, self._layout.q_dof_count, candidate.residual],
+            device=self.model.device,
+        )
+        self._contact_status.zero_()
+        evaluate_trial_contacts(
+            self.model,
+            candidate.state,
+            self._trial_contacts,
+            self.collision_pipeline,
+            self._articulation,
+            self._contact,
+            candidate.residual,
+            self._contact_status,
+            owner_generation=self._generation,
+            trial_generation=candidate.generation,
+        )
+        self._check_contact()
+        return _TrialResult(
+            0, *self._rms(candidate.residual), min_det, self._contact._diagnostics(1)["max_penetration"]
+        )
+
+    def _require_linear(self, status: MonolithicLinearStatus) -> None:
+        if status == MonolithicLinearStatus.SUCCESS:
+            return
+        mapped = {
+            "NON_POSITIVE_PIVOT": self.Status.PRECONDITIONER_FACTORIZATION_FAILED,
+            "NON_POSITIVE_CURVATURE": self.Status.LINEAR_NON_POSITIVE_CURVATURE,
+            "NEAR_ZERO_CURVATURE": self.Status.LINEAR_NON_POSITIVE_CURVATURE,
+            "NON_POSITIVE_PRECONDITIONED_RESIDUAL": self.Status.LINEAR_PRECONDITIONER_NOT_SPD,
+            "STAGNATION": self.Status.LINEAR_STAGNATION,
+            "MAX_ITERATIONS": self.Status.LINEAR_MAX_ITERATIONS,
+            "GLOBAL_TRIPLET_OVERFLOW": self.Status.CONTACT_OVERFLOW,
+            "CONTACT_FACTOR_OVERFLOW": self.Status.CONTACT_OVERFLOW,
+        }
+        if status.name in ("STALE_GENERATION", "INVALID_ARGUMENT", "PRECONDITIONER_NOT_FACTORED"):
+            raise ValueError(f"Invalid linear workspace contract: {status.name}")
+        raise _StepFailure(mapped.get(status.name, self.Status.NONFINITE), status.name)
+
+    def _iterate(self, dt: float) -> SolverMonolithic.Status:
+        config, transaction = self._config, self._transaction
+        small_step = False
+        for iteration in range(self.newton_max_iterations + 1):
+            self._metrics["nonlinear_iterations"] = iteration
+            current = self._evaluate_current(transaction.accepted, dt)
+            if iteration == 0:
+                wp.copy(self._residual_ref, transaction.accepted.residual)
+                self._metrics["merit_initial"] = current.merit
+            merit = (current.merit, current.merit_q, current.merit_x)
+            reference = self._rms(self._residual_ref)
+            self._metrics.update(
+                merit_final=merit[0], merit_q_final=merit[1], merit_x_final=merit[2], min_det_f=current.min_det_f
+            )
+            if self._converged(merit, reference):
+                return self.Status.SUCCESS
+            if small_step:
+                raise _StepFailure(self.Status.NONLINEAR_STAGNATION, "Small scaled step with unresolved residual")
+            if iteration == self.newton_max_iterations:
+                return self.Status.NONLINEAR_MAX_ITERATIONS
+            wp.launch(
+                _scale_vector,
+                self._layout.scalar_dof_count,
+                [transaction.accepted.residual, self._linear.scale, -1.0, self._rhs_hat],
+                device=self.model.device,
+            )
+            pcg_config = MonolithicPcgConfig(
+                maximum_iterations=self.linear_max_iterations,
+                true_residual_interval=10,
+                linear_tolerance=self.linear_tolerance,
+                residual_floor_global=config.residual_floor_global,
+                residual_floor_q=config.residual_floor_q,
+                residual_floor_x=config.residual_floor_x,
+                curvature_absolute_tolerance=0.0,
+                curvature_relative_tolerance=1.0e-12,
+                preconditioner_positive_tolerance=0.0,
+                stagnation_window=10,
+                stagnation_minimum_reduction=1.0e-3,
+            )
+            accepted = False
+            last_reason = "No acceptable trial"
+            for retry, lambda_value in enumerate(config.regularization_values):
+                self._metrics["regularization_retries"] += int(retry > 0)
+                self._metrics["lambda_value"] = lambda_value
+                try:
+                    self._require_linear(self._linear.set_regularization(lambda_value, generation=self._generation))
+                    self._require_linear(
+                        self._linear.factor_actor_preconditioner(generation=self._generation, pivot_tolerance=0.0)
+                    )
+                    result = self._linear.solve_pcg(
+                        self._rhs_hat,
+                        self._y,
+                        generation=self._generation,
+                        warm_start=MonolithicPcgWarmStart.ZERO,
+                        config=pcg_config,
+                    )
+                    self._metrics["linear_iterations"] += result.iterations
+                    self._metrics["true_residual_recomputations"] += result.true_residual_checks
+                    self._metrics["residual_replacements"] += result.residual_replacements
+                    self._metrics.update(
+                        rho=result.rho,
+                        rho_q=result.rho_q,
+                        rho_x=result.rho_x,
+                        min_p_ap=result.min_p_ap,
+                        min_r_z=result.min_r_z,
+                    )
+                    self._require_linear(result.status)
+                    self._require_linear(self._linear.recover_delta(self._y, self._delta, generation=self._generation))
+                except _StepFailure as error:
+                    last_reason = str(error)
+                    continue
+                step_rms = self._rms(self._y, scaled=False)
+                for search in range(self.line_search_max_iterations):
+                    alpha = 0.5**search
+                    self._metrics["line_search_iterations"] += 1
+                    transaction.trial.form_trial(transaction.accepted, self._delta, alpha, dt)
+                    try:
+                        trial = self._evaluate_trial(transaction.trial, dt)
+                    except _StepFailure as error:
+                        last_reason = str(error)
+                        continue
+                    if trial.merit <= (1.0 - 1.0e-4 * alpha) * merit[0] + config.merit_noise:
+                        transaction.accept_trial()
+                        self._metrics["accepted_alpha"] = alpha
+                        small_step = all(
+                            alpha * value <= getattr(config, f"step_tolerance_{block}")
+                            for block, value in zip(("global", "q", "x"), step_rms, strict=True)
+                        )
+                        accepted = True
+                        break
+                    last_reason = "Actual trial merit failed the decrease condition"
+                if accepted:
+                    break
+            if not accepted:
+                raise _StepFailure(self.Status.REGULARIZATION_EXHAUSTED, last_reason)
+        raise AssertionError("Unreachable nonlinear loop exit")
+
+    def _publish_final(self, state: State, status: SolverMonolithic.Status) -> None:
+        roles = {
+            self.Status.SUCCESS: _MonolithicReturnedStateRole.STATE_OUT_CONVERGED,
+            self.Status.NONLINEAR_MAX_ITERATIONS: _MonolithicReturnedStateRole.STATE_OUT_SOFT_STOP,
+        }
+        role = roles.get(status, _MonolithicReturnedStateRole.STATE_IN_ROLLBACK)
+        # FK refresh must not overwrite the original body caches on rollback.
+        self._final_evaluation_state.assign(state)
+        eval_articulation_passive_candidate(self.model, self._final_evaluation_state, self._articulation)
+        self._collide(state, self.contacts)
+        self._final_residual.zero_()
+        self._contact_status.zero_()
+        evaluate_final_contacts(
+            self.model,
+            state,
+            self.contacts,
+            self.collision_pipeline,
+            self._articulation,
+            self._contact,
+            self._final_residual,
+            self._contact_status,
+            step_generation=self._transaction.step_generation,
+            returned_state_role=role,
+        )
+        self._check_contact()
+        if self.contacts.force is not None:
+            self._contact._publish_final_forces(
+                state, self.contacts, step_generation=self._transaction.step_generation, returned_state_role=role
+            )
+
+    def _finish_step(self, state_out: State, status: SolverMonolithic.Status, reason: str | None, start: float) -> None:
+        transaction = self._transaction
+        commit = status in (self.Status.SUCCESS, self.Status.NONLINEAR_MAX_ITERATIONS)
+        if commit:
+            transaction.accepted.commit(state_out)
+        else:
+            state_out.assign(transaction._original)
+        publication_error = None
+        try:
+            self._publish_final(state_out, status)
+        except _StepFailure as error:
+            status, reason, commit = error.status, str(error), False
+            state_out.assign(transaction._original)
+            try:
+                self._publish_final(state_out, status)
+            except _StepFailure as second_error:
+                publication_error = second_error
+                self._contact.invalidate_final_force()
+        diagnostics = self._contact._diagnostics(2) if publication_error is None else {}
+        transaction.last_stats = self.Stats(
+            status=status,
+            failure_reason=reason,
+            converged=status == self.Status.SUCCESS,
+            rolled_back=not commit,
+            step_generation=transaction.step_generation,
+            accepted_generation=transaction.accepted.generation,
+            soft_contact_pair_count=self.collision_pipeline.soft_contact_pair_count,
+            published_contact_generation=int(self.contacts.contact_generation.numpy()[0])
+            if publication_error is None
+            else -1,
+            active_sample_count=diagnostics.get("active_sample_count", 0),
+            max_penetration=diagnostics.get("max_penetration", math.nan),
+            contact_force_imbalance=diagnostics.get("force_imbalance", math.nan),
+            contact_moment_imbalance=diagnostics.get("moment_imbalance", math.nan),
+            generalized_projection_error=diagnostics.get("generalized_projection_error", math.nan),
+            contact_sign_error=diagnostics.get("contact_sign_error", math.nan),
+            timings={"step": 1000.0 * (time.perf_counter() - start)},
+            **self._metrics,
+        )
+        transaction._finished = True
+        if status != self.Status.SUCCESS:
+            stats = transaction.last_stats
+            logging.getLogger(__name__).warning(
+                "Monolithic status=%s failure_reason=%s converged=%s rolled_back=%s step_generation=%d nonlinear_iterations=%d linear_iterations=%d rho=%s",
+                status.value,
+                reason,
+                stats.converged,
+                stats.rolled_back,
+                stats.step_generation,
+                stats.nonlinear_iterations,
+                stats.linear_iterations,
+                stats.rho,
+            )
+        if publication_error is not None:
+            raise RuntimeError(
+                "Contact publication failed on the rollback state; forces are invalid"
+            ) from publication_error
 
 
 class _StepTransaction:
-    """Stage state-only transactions for integration with future physical evaluation.
+    """Stage candidate state and frozen inputs for physical evaluation.
 
     This helper does not collide or publish final forces. Its caller supplies
-    evaluated safety and terminal diagnostics. It cannot implement a solver step
-    until the final contact transaction and physics modules have landed.
-    Optional and custom state arrays are unsupported in this PR-0 scaffold.
+    evaluated safety and terminal diagnostics. The solver owns physical
+    evaluation and the final contact transaction.
+    Optional and custom state arrays are unsupported.
     Input/output schemas are validated before copying, including at terminal
     publication in case the caller changed the destination after ``begin``.
     """

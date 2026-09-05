@@ -1,19 +1,17 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 The Newton Developers
 # SPDX-License-Identifier: Apache-2.0
 
-"""Bounded assembly storage for the experimental monolithic solver.
-
-This module assembles supplied contributions only. Scaling, preconditioning and
-numerical solving belong to the subsequent solver phase.
-"""
+"""Bounded assembly, symmetric scaling and private PCG for monolithic stepping."""
 
 import enum
 from dataclasses import dataclass
+from functools import partial
 from typing import Any
 
 import numpy as np
 import warp as wp
 import warp.sparse as sparse
+from warp.optim.linear import LinearOperator
 
 
 class MonolithicLinearStatus(enum.IntEnum):
@@ -27,6 +25,60 @@ class MonolithicLinearStatus(enum.IntEnum):
     NONFINITE_CONTRIBUTION = 7
     INVALID_CONTACT_WEIGHT = 8
     BSR_BUILD_FAILURE = 9
+    INVALID_DIAGONAL = 10
+    PRECONDITIONER_NOT_FACTORED = 11
+    NON_POSITIVE_PIVOT = 12
+    NON_POSITIVE_CURVATURE = 13
+    NEAR_ZERO_CURVATURE = 14
+    NON_POSITIVE_PRECONDITIONED_RESIDUAL = 15
+    NONFINITE_ITERATION = 16
+    MAX_ITERATIONS = 17
+    STAGNATION = 18
+
+
+class MonolithicPcgWarmStart(enum.IntEnum):
+    ZERO = 0
+    SAME_GENERATION = 1
+
+
+@dataclass(frozen=True, slots=True)
+class MonolithicPcgConfig:
+    maximum_iterations: int
+    true_residual_interval: int
+    linear_tolerance: float
+    residual_floor_global: float
+    residual_floor_q: float
+    residual_floor_x: float
+    curvature_absolute_tolerance: float
+    curvature_relative_tolerance: float
+    preconditioner_positive_tolerance: float
+    stagnation_window: int
+    stagnation_minimum_reduction: float
+
+    def __post_init__(self):
+        if any(
+            not isinstance(value, int) or isinstance(value, bool) or value <= 0
+            for value in (self.maximum_iterations, self.true_residual_interval, self.stagnation_window)
+        ):
+            raise ValueError("PCG iteration counts and stagnation window must be positive integers")
+        positive = (self.linear_tolerance, self.residual_floor_global, self.residual_floor_q, self.residual_floor_x)
+        nonnegative = (
+            self.curvature_absolute_tolerance,
+            self.curvature_relative_tolerance,
+            self.preconditioner_positive_tolerance,
+            self.stagnation_minimum_reduction,
+        )
+        if (
+            any(
+                not np.isfinite(value)
+                or value < np.finfo(np.float32).smallest_subnormal
+                or value > np.finfo(np.float32).max
+                for value in positive
+            )
+            or any(not np.isfinite(value) or value < 0 or value > np.finfo(np.float32).max for value in nonnegative)
+            or self.stagnation_minimum_reduction >= 1
+        ):
+            raise ValueError("PCG tolerances must be finite with positive residual floors")
 
 
 @dataclass(frozen=True, slots=True)
@@ -75,6 +127,20 @@ class MonolithicLinearGeneration:
     nonlinear_iteration: int
     contact_generation: int
     assembly_sequence: int
+
+
+@dataclass(frozen=True, slots=True)
+class MonolithicLinearSolveResult:
+    status: MonolithicLinearStatus
+    generation: MonolithicLinearGeneration
+    iterations: int
+    true_residual_checks: int
+    residual_replacements: int
+    rho: float
+    rho_q: float
+    rho_x: float
+    min_p_ap: float
+    min_r_z: float
 
 
 @dataclass(frozen=True, slots=True)
@@ -331,6 +397,440 @@ def _validate_aq_finite(values: wp.array2d[float], status: wp.array[int]):
         wp.atomic_max(status, 0, 7)
 
 
+@wp.kernel
+def _extract_scalar_diagonal(
+    offsets: wp.array[int], columns: wp.array[int], values: wp.array[float], diagonal: wp.array[float]
+):
+    row = wp.tid()
+    value = float(0.0)
+    for index in range(offsets[row], offsets[row + 1]):
+        if columns[index] == row:
+            value = values[index]
+    diagonal[row] = value
+
+
+@wp.kernel
+def _build_monolithic_symmetric_scaling(
+    matrix_diagonal: wp.array[float],
+    dynamic_diagonal: wp.array[float],
+    epsilon_d: float,
+    diagonal: wp.array[float],
+    scale: wp.array[float],
+    floor_count: wp.array[int],
+    status: wp.array[int],
+):
+    i = wp.tid()
+    raw, dynamic = matrix_diagonal[i], dynamic_diagonal[i]
+    floor = epsilon_d * dynamic
+    if not wp.isfinite(raw) or not wp.isfinite(dynamic) or not wp.isfinite(floor) or raw <= 0.0 or dynamic <= 0.0:
+        wp.atomic_max(status, 0, 10)
+        return
+    d = wp.max(raw, floor)
+    s = 1.0 / wp.sqrt(d)
+    if not wp.isfinite(s):
+        wp.atomic_max(status, 0, 10)
+        return
+    diagonal[i] = d
+    scale[i] = s
+    if floor > raw:
+        wp.atomic_add(floor_count, 0, 1)
+
+
+@wp.kernel
+def _scale_vector(scale: wp.array[float], x: wp.array[float], result: wp.array[float]):
+    i = wp.tid()
+    result[i] = scale[i] * x[i]
+
+
+@wp.kernel
+def _scaled_matvec_finish(
+    scale: wp.array[float],
+    kx: wp.array[float],
+    x: wp.array[float],
+    y: wp.array[float],
+    result: wp.array[float],
+    regularization: float,
+    alpha: float,
+    beta: float,
+):
+    i = wp.tid()
+    value = alpha * (scale[i] * kx[i] + regularization * x[i])
+    if beta != 0.0:
+        value += beta * y[i]
+    result[i] = value
+
+
+def _monolithic_scaled_matvec(workspace, x, y, z, alpha, beta) -> None:
+    if not workspace._scaling_valid:
+        raise ValueError("Scaled operator requires current valid scaling")
+    wp.launch(_scale_vector, x.size, [workspace.scale, x, workspace._scaled_x], device=workspace.device)
+    sparse.bsr_mv(workspace.k_global_scalar_bsr, workspace._scaled_x, workspace._k_scaled)
+    wp.launch(
+        _scaled_matvec_finish,
+        x.size,
+        [workspace.scale, workspace._k_scaled, x, y, z, workspace._lambda, alpha, beta],
+        device=workspace.device,
+    )
+
+
+@wp.kernel
+def _assemble_monolithic_q_preconditioner(
+    aq: wp.array2d[float],
+    factors: _MonolithicContactFactors,
+    scale: wp.array[float],
+    regularization: float,
+    result: wp.array2d[float],
+):
+    i, j = wp.tid()
+    value = aq[i, j]
+    for c in range(factors.count[0]):
+        value += factors.weights[c] * factors.gq[c, i] * factors.gq[c, j]
+    value *= scale[i] * scale[j]
+    if i == j:
+        value += regularization
+    result[i, j] = value
+
+
+@wp.kernel
+def _assemble_monolithic_x_preconditioner(
+    offsets: wp.array[int],
+    columns: wp.array[int],
+    values: wp.array[wp.mat33],
+    factors: _MonolithicContactFactors,
+    q_count: int,
+    scale: wp.array[float],
+    regularization: float,
+    result: wp.array[wp.mat33],
+):
+    particle = wp.tid()
+    block = wp.mat33(0.0)
+    for index in range(offsets[particle], offsets[particle + 1]):
+        if columns[index] == particle:
+            block = values[index]
+    for c in range(factors.count[0]):
+        g = wp.vec3(0.0)
+        for slot in range(9):
+            column = factors.gx_columns[c, slot]
+            if column >= 3 * particle and column < 3 * particle + 3:
+                g[column - 3 * particle] += factors.gx_values[c, slot]
+        block += factors.weights[c] * wp.outer(g, g)
+    for i in range(3):
+        for j in range(3):
+            block[i, j] *= scale[q_count + 3 * particle + i] * scale[q_count + 3 * particle + j]
+        block[i, i] += regularization
+    result[particle] = block
+
+
+@wp.kernel
+def _factor_monolithic_q_cholesky(
+    matrix: wp.array2d[float],
+    factor: wp.array2d[float],
+    tolerance: float,
+    status: wp.array[int],
+):
+    for i in range(matrix.shape[0]):
+        for j in range(i + 1):
+            value = matrix[i, j]
+            for k in range(j):
+                value -= factor[i, k] * factor[j, k]
+            if not wp.isfinite(value):
+                wp.atomic_max(status, 0, 16)
+                return
+            if i == j:
+                if value <= tolerance:
+                    wp.atomic_max(status, 0, 12)
+                    return
+                factor[i, j] = wp.sqrt(value)
+            else:
+                factor[i, j] = value / factor[j, j]
+
+
+@wp.kernel
+def _factor_monolithic_x_cholesky(
+    matrix: wp.array[wp.mat33],
+    factor: wp.array[wp.mat33],
+    tolerance: float,
+    status: wp.array[int],
+):
+    particle = wp.tid()
+    a, lower = matrix[particle], wp.mat33(0.0)
+    for i in range(3):
+        for j in range(i + 1):
+            value = a[i, j]
+            for k in range(j):
+                value -= lower[i, k] * lower[j, k]
+            if not wp.isfinite(value):
+                wp.atomic_max(status, 0, 16)
+                return
+            if i == j:
+                if value <= tolerance:
+                    wp.atomic_max(status, 0, 12)
+                    return
+                lower[i, j] = wp.sqrt(value)
+            else:
+                lower[i, j] = value / lower[j, j]
+    factor[particle] = lower
+
+
+@wp.kernel
+def _apply_q_preconditioner(factor: wp.array2d[float], x: wp.array[float], temporary: wp.array[float]):
+    n = factor.shape[0]
+    for i in range(n):
+        value = x[i]
+        for j in range(i):
+            value -= factor[i, j] * temporary[j]
+        temporary[i] = value / factor[i, i]
+    for reverse_i in range(n):
+        i = n - 1 - reverse_i
+        value = temporary[i]
+        for j in range(i + 1, n):
+            value -= factor[j, i] * temporary[j]
+        temporary[i] = value / factor[i, i]
+
+
+@wp.kernel
+def _apply_x_preconditioner(
+    factor: wp.array[wp.mat33],
+    q_count: int,
+    x: wp.array[float],
+    temporary: wp.array[float],
+):
+    particle = wp.tid()
+    lower = factor[particle]
+    base = q_count + 3 * particle
+    result = wp.vec3(0.0)
+    for i in range(3):
+        value = x[base + i]
+        for j in range(i):
+            value -= lower[i, j] * result[j]
+        result[i] = value / lower[i, i]
+    for reverse_i in range(3):
+        i = 2 - reverse_i
+        value = result[i]
+        for j in range(i + 1, 3):
+            value -= lower[j, i] * result[j]
+        result[i] = value / lower[i, i]
+    for i in range(3):
+        temporary[base + i] = result[i]
+
+
+@wp.kernel
+def _combine_vectors(x: wp.array[float], y: wp.array[float], z: wp.array[float], alpha: float, beta: float):
+    i = wp.tid()
+    value = alpha * x[i]
+    if beta != 0.0:
+        value += beta * y[i]
+    z[i] = value
+
+
+def _monolithic_preconditioner_matvec(workspace, x, y, z, alpha, beta) -> None:
+    if not workspace._factor_valid:
+        raise ValueError("Preconditioner must be refactored for current scaling and lambda")
+    wp.launch(
+        _apply_q_preconditioner, 1, [workspace._q_cholesky, x, workspace._preconditioned], device=workspace.device
+    )
+    wp.launch(
+        _apply_x_preconditioner,
+        workspace.layout.dynamic_particle_count,
+        [workspace._x_cholesky, workspace.layout.q_dof_count, x, workspace._preconditioned],
+        device=workspace.device,
+    )
+    wp.launch(_combine_vectors, x.size, [workspace._preconditioned, y, z, alpha, beta], device=workspace.device)
+
+
+@wp.kernel
+def _pcg_products(a: wp.array[float], b: wp.array[float], products: wp.array[float], status: wp.array[int]):
+    i = wp.tid()
+    av, bv = a[i], b[i]
+    if not wp.isfinite(av) or not wp.isfinite(bv):
+        wp.atomic_max(status, 0, 16)
+    wp.atomic_add(products, 0, av * bv)
+    wp.atomic_add(products, 1, av * av)
+    wp.atomic_add(products, 2, bv * bv)
+
+
+@wp.kernel
+def _validate_monolithic_preconditioned_residual(
+    products: wp.array[float],
+    tolerance: float,
+    r_z: wp.array[float],
+    status: wp.array[int],
+):
+    value = products[0]
+    if not wp.isfinite(value) or not wp.isfinite(products[1]) or not wp.isfinite(products[2]):
+        status[0] = 16
+    elif value <= tolerance:
+        status[0] = 15
+    else:
+        r_z[0] = value
+
+
+@wp.kernel
+def _compute_monolithic_pcg_alpha(
+    products: wp.array[float],
+    r_z: wp.array[float],
+    absolute_tolerance: float,
+    relative_tolerance: float,
+    alpha: wp.array[float],
+    status: wp.array[int],
+):
+    curvature = products[0]
+    if not wp.isfinite(curvature) or not wp.isfinite(products[1]) or not wp.isfinite(products[2]):
+        status[0] = 16
+    elif curvature <= 0.0:
+        status[0] = 13
+    elif curvature <= absolute_tolerance + relative_tolerance * wp.sqrt(products[1]) * wp.sqrt(products[2]):
+        status[0] = 14
+    else:
+        value = r_z[0] / curvature
+        if not wp.isfinite(value):
+            status[0] = 16
+        else:
+            alpha[0] = value
+
+
+@wp.kernel
+def _update_monolithic_pcg_solution_residual(
+    y: wp.array[float],
+    r: wp.array[float],
+    p: wp.array[float],
+    ap: wp.array[float],
+    alpha: wp.array[float],
+    status: wp.array[int],
+):
+    i = wp.tid()
+    if status[0] != 0:
+        return
+    yi, ri = y[i] + alpha[0] * p[i], r[i] - alpha[0] * ap[i]
+    if not wp.isfinite(yi) or not wp.isfinite(ri):
+        wp.atomic_max(status, 0, 16)
+        return
+    y[i] = yi
+    r[i] = ri
+
+
+@wp.kernel
+def _compute_monolithic_pcg_beta(
+    r_z: wp.array[float],
+    old_r_z: wp.array[float],
+    beta: wp.array[float],
+    status: wp.array[int],
+):
+    if status[0] != 0:
+        return
+    if not wp.isfinite(old_r_z[0]) or old_r_z[0] <= 0.0 or not wp.isfinite(r_z[0]) or r_z[0] <= 0.0:
+        status[0] = 15
+        return
+    value = r_z[0] / old_r_z[0]
+    if not wp.isfinite(value):
+        status[0] = 16
+    else:
+        beta[0] = value
+
+
+@wp.kernel
+def _pcg_update_direction(z: wp.array[float], p: wp.array[float], beta: wp.array[float], status: wp.array[int]):
+    i = wp.tid()
+    if status[0] != 0:
+        return
+    value = z[i] + beta[0] * p[i]
+    if not wp.isfinite(value):
+        wp.atomic_max(status, 0, 16)
+    p[i] = value
+
+
+@wp.kernel
+def _true_residual_maxima(
+    ay: wp.array[float],
+    rhs: wp.array[float],
+    q_count: int,
+    residual: wp.array[float],
+    maxima: wp.array[float],
+    status: wp.array[int],
+):
+    i = wp.tid()
+    value = rhs[i] - ay[i]
+    residual[i] = value
+    if not wp.isfinite(value) or not wp.isfinite(rhs[i]):
+        wp.atomic_max(status, 0, 16)
+        return
+    block = int(1)
+    if i >= q_count:
+        block = 2
+    wp.atomic_max(maxima, 0, wp.abs(value))
+    wp.atomic_max(maxima, block, wp.abs(value))
+    wp.atomic_max(maxima, 3, wp.abs(rhs[i]))
+    wp.atomic_max(maxima, block + 3, wp.abs(rhs[i]))
+
+
+@wp.kernel
+def _true_residual_sums(
+    residual: wp.array[float],
+    rhs: wp.array[float],
+    q_count: int,
+    maxima: wp.array[float],
+    sums: wp.array[float],
+    status: wp.array[int],
+):
+    i = wp.tid()
+    if status[0] != 0:
+        return
+    block = int(1)
+    if i >= q_count:
+        block = 2
+    # Each slice has its own scale so a large x block cannot erase a tiny q block.
+    for local in range(2):
+        index = int(0)
+        if local == 1:
+            index = block
+        if maxima[index] > 0.0:
+            value = residual[i] / maxima[index]
+            wp.atomic_add(sums, index, value * value)
+        if maxima[index + 3] > 0.0:
+            value = rhs[i] / maxima[index + 3]
+            wp.atomic_add(sums, index + 3, value * value)
+
+
+@wp.kernel
+def _compute_true_residual_norms(
+    maxima: wp.array[float],
+    sums: wp.array[float],
+    norms: wp.array[float],
+    status: wp.array[int],
+):
+    i = wp.tid()
+    if status[0] != 0:
+        return
+    value = maxima[i] * wp.sqrt(sums[i])
+    if not wp.isfinite(value) or not wp.isfinite(sums[i]):
+        wp.atomic_max(status, 0, 16)
+        return
+    norms[i] = value
+
+
+@wp.kernel
+def _compute_monolithic_true_residual_ratios(
+    norms: wp.array[float],
+    floor_global: float,
+    floor_q: float,
+    floor_x: float,
+    ratios: wp.array[float],
+    status: wp.array[int],
+):
+    i = wp.tid()
+    if status[0] != 0:
+        return
+    floor = floor_global
+    if i == 1:
+        floor = floor_q
+    elif i == 2:
+        floor = floor_x
+    value = norms[i] / wp.max(norms[i + 3], floor)
+    ratios[i] = value
+    if not wp.isfinite(value):
+        wp.atomic_max(status, 0, 16)
+
+
 class MonolithicLinearWorkspace:
     """Own one current assembly with fixed producer slots and guarded appends.
 
@@ -406,6 +906,43 @@ class MonolithicLinearWorkspace:
         factors.active_token = self._active_token
         factors.token = 0
         self._factors = factors
+        n = layout.scalar_dof_count
+        for name in (
+            "dynamic_diagonal",
+            "diagonal",
+            "scale",
+            "_matrix_diagonal",
+            "_scaled_x",
+            "_k_scaled",
+            "_preconditioned",
+            "_r",
+            "_z",
+            "_p",
+            "_ap",
+            "_true_r",
+        ):
+            setattr(self, name, wp.zeros(n, dtype=float, device=device))
+        for name in ("_r_z", "_old_r_z", "_alpha", "_beta"):
+            setattr(self, name, wp.zeros(1, dtype=float, device=device))
+        self._products = wp.zeros(3, dtype=float, device=device)
+        self._true_sums = wp.zeros(6, dtype=float, device=device)
+        self._true_maxima = wp.zeros(6, dtype=float, device=device)
+        self._true_norms = wp.zeros(6, dtype=float, device=device)
+        self._ratios = wp.zeros(3, dtype=float, device=device)
+        self._status = wp.zeros(1, dtype=int, device=device)
+        self.floor_count = wp.zeros(1, dtype=int, device=device)
+        self._q_preconditioner = wp.zeros_like(self.aq_actor_dense)
+        self._q_cholesky = wp.zeros_like(self.aq_actor_dense)
+        self._x_preconditioner = wp.zeros(layout.dynamic_particle_count, dtype=wp.mat33, device=device)
+        self._x_cholesky = wp.zeros_like(self._x_preconditioner)
+        self._scaling_valid = False
+        self._factor_valid = False
+        self._lambda = 0.0
+        self._warm_start_key = None
+        self.operator = LinearOperator((n, n), wp.float32, self.device, partial(_monolithic_scaled_matvec, self))
+        self.preconditioner = LinearOperator(
+            (n, n), wp.float32, self.device, partial(_monolithic_preconditioner_matvec, self)
+        )
 
     def _set_fixed_triplet_pattern(
         self,
@@ -452,6 +989,9 @@ class MonolithicLinearWorkspace:
         self._generation = generation
         self._sealed = False
         self._valid = False
+        self._scaling_valid = False
+        self._factor_valid = False
+        self._warm_start_key = None
         self.aq_actor_dense.zero_()
         # Copy only struct descriptors: old views retain their captured token.
         for name, struct_type, fields in [
@@ -597,6 +1137,342 @@ class MonolithicLinearWorkspace:
             int(self.ax_internal_bsr3.offsets.numpy()[-1]) if self._valid else 0,
         )
 
+    def _current(self, generation) -> bool:
+        return generation == self._generation and self._sealed and self._valid
+
+    def _vector_valid(self, vector) -> bool:
+        return (
+            isinstance(vector, wp.array)
+            and vector.dtype == wp.float32
+            and vector.device == self.device
+            and vector.shape == (self.layout.scalar_dof_count,)
+            and vector.is_contiguous
+        )
+
+    def _read_status(self) -> MonolithicLinearStatus:
+        return MonolithicLinearStatus(int(self._status.numpy()[0]))
+
+    def build_scaling(
+        self, dynamic_diagonal: wp.array[float], *, epsilon_d: float, generation: MonolithicLinearGeneration
+    ) -> MonolithicLinearStatus:
+        """Freeze D and S for the current unregularized assembly."""
+        if not self._current(generation):
+            return MonolithicLinearStatus.STALE_GENERATION
+        self._scaling_valid = False
+        self._factor_valid = False
+        self._warm_start_key = None
+        if not self._vector_valid(dynamic_diagonal) or not np.isfinite(epsilon_d) or epsilon_d <= 0:
+            return MonolithicLinearStatus.INVALID_ARGUMENT
+        wp.copy(self.dynamic_diagonal, dynamic_diagonal)
+        self._status.zero_()
+        self.floor_count.zero_()
+        matrix = self.k_global_scalar_bsr
+        wp.launch(
+            _extract_scalar_diagonal,
+            matrix.nrow,
+            [matrix.offsets, matrix.columns, matrix.values, self._matrix_diagonal],
+            device=self.device,
+        )
+        wp.launch(
+            _build_monolithic_symmetric_scaling,
+            matrix.nrow,
+            [
+                self._matrix_diagonal,
+                self.dynamic_diagonal,
+                epsilon_d,
+                self.diagonal,
+                self.scale,
+                self.floor_count,
+                self._status,
+            ],
+            device=self.device,
+        )
+        status = self._read_status()
+        self._scaling_valid = status == MonolithicLinearStatus.SUCCESS
+        self._lambda = 0.0
+        return status
+
+    def set_regularization(
+        self, lambda_value: float, *, generation: MonolithicLinearGeneration
+    ) -> MonolithicLinearStatus:
+        if not self._current(generation) or not self._scaling_valid:
+            return MonolithicLinearStatus.STALE_GENERATION
+        if not np.isfinite(lambda_value) or lambda_value < 0 or lambda_value > np.finfo(np.float32).max:
+            return MonolithicLinearStatus.INVALID_ARGUMENT
+        if lambda_value != self._lambda:
+            self._factor_valid = False
+        self._lambda = float(lambda_value)
+        return MonolithicLinearStatus.SUCCESS
+
+    def factor_actor_preconditioner(
+        self, *, generation: MonolithicLinearGeneration, pivot_tolerance: float
+    ) -> MonolithicLinearStatus:
+        if not self._current(generation) or not self._scaling_valid:
+            return MonolithicLinearStatus.STALE_GENERATION
+        self._factor_valid = False
+        if not np.isfinite(pivot_tolerance) or pivot_tolerance < 0:
+            return MonolithicLinearStatus.INVALID_ARGUMENT
+        self._status.zero_()
+        wp.launch(
+            _assemble_monolithic_q_preconditioner,
+            self.aq_actor_dense.shape,
+            [self.aq_actor_dense, self._factors, self.scale, self._lambda, self._q_preconditioner],
+            device=self.device,
+        )
+        matrix = self.ax_internal_bsr3
+        wp.launch(
+            _assemble_monolithic_x_preconditioner,
+            matrix.nrow,
+            [
+                matrix.offsets,
+                matrix.columns,
+                matrix.values,
+                self._factors,
+                self.layout.q_dof_count,
+                self.scale,
+                self._lambda,
+                self._x_preconditioner,
+            ],
+            device=self.device,
+        )
+        wp.launch(
+            _factor_monolithic_q_cholesky,
+            1,
+            [self._q_preconditioner, self._q_cholesky, pivot_tolerance, self._status],
+            device=self.device,
+        )
+        wp.launch(
+            _factor_monolithic_x_cholesky,
+            matrix.nrow,
+            [self._x_preconditioner, self._x_cholesky, pivot_tolerance, self._status],
+            device=self.device,
+        )
+        status = self._read_status()
+        self._factor_valid = status == MonolithicLinearStatus.SUCCESS
+        return status
+
+    def _products_of(self, a, b):
+        self._products.zero_()
+        wp.launch(_pcg_products, a.size, [a, b, self._products, self._status], device=self.device)
+
+    def _true_residual(self, rhs, y, config):
+        self._status.zero_()
+        self.operator.matvec(y, self._ap, self._ap, 1.0, 0.0)
+        self._true_sums.zero_()
+        self._true_maxima.zero_()
+        self._true_norms.fill_(float("nan"))
+        self._ratios.fill_(float("nan"))
+        wp.launch(
+            _true_residual_maxima,
+            y.size,
+            [self._ap, rhs, self.layout.q_dof_count, self._true_r, self._true_maxima, self._status],
+            device=self.device,
+        )
+        wp.launch(
+            _true_residual_sums,
+            y.size,
+            [self._true_r, rhs, self.layout.q_dof_count, self._true_maxima, self._true_sums, self._status],
+            device=self.device,
+        )
+        wp.launch(
+            _compute_true_residual_norms,
+            6,
+            [self._true_maxima, self._true_sums, self._true_norms, self._status],
+            device=self.device,
+        )
+        wp.launch(
+            _compute_monolithic_true_residual_ratios,
+            3,
+            [
+                self._true_norms,
+                config.residual_floor_global,
+                config.residual_floor_q,
+                config.residual_floor_x,
+                self._ratios,
+                self._status,
+            ],
+            device=self.device,
+        )
+        return tuple(float(value) for value in self._ratios.numpy())
+
+    def solve_pcg(
+        self,
+        rhs_hat: wp.array[float],
+        y: wp.array[float],
+        *,
+        generation: MonolithicLinearGeneration,
+        warm_start: MonolithicPcgWarmStart,
+        config: MonolithicPcgConfig,
+    ) -> MonolithicLinearSolveResult:
+        """Solve Khat*y=rhs_hat using the current operator and actor preconditioner.
+
+        SAME_GENERATION reuses only the last successful solution array for this
+        unchanged K/D/S. Lambda may change, but requires refactorization first.
+        Every solve recomputes its initial true residual, including warm starts.
+        """
+        iterations, checks, replacements = 0, 0, 0
+        ratios = (float("nan"),) * 3
+        min_p_ap, min_r_z = float("nan"), float("nan")
+
+        def result(status):
+            return MonolithicLinearSolveResult(
+                status, generation, iterations, checks, replacements, *ratios, min_p_ap, min_r_z
+            )
+
+        if not self._current(generation) or not self._scaling_valid:
+            return result(MonolithicLinearStatus.STALE_GENERATION)
+        if not self._factor_valid:
+            return result(MonolithicLinearStatus.PRECONDITIONER_NOT_FACTORED)
+        if (
+            not isinstance(config, MonolithicPcgConfig)
+            or not self._vector_valid(rhs_hat)
+            or not self._vector_valid(y)
+            or (rhs_hat.size > 0 and rhs_hat.ptr < y.ptr + y.size * 4 and y.ptr < rhs_hat.ptr + rhs_hat.size * 4)
+            or warm_start not in (MonolithicPcgWarmStart.ZERO, MonolithicPcgWarmStart.SAME_GENERATION)
+            or config.maximum_iterations > self.capacities.pcg_max_iterations
+            or config.maximum_iterations + 2 > self.capacities.pcg_true_residual_check_count
+        ):
+            return result(MonolithicLinearStatus.INVALID_ARGUMENT)
+        if warm_start == MonolithicPcgWarmStart.SAME_GENERATION and self._warm_start_key != (generation, y.ptr):
+            return result(MonolithicLinearStatus.STALE_GENERATION)
+        self._warm_start_key = None
+        self._status.zero_()
+        if warm_start == MonolithicPcgWarmStart.ZERO:
+            y.zero_()
+        ratios = self._true_residual(rhs_hat, y, config)
+        checks += 1
+        status = self._read_status()
+        if status != MonolithicLinearStatus.SUCCESS:
+            return result(status)
+        if max(ratios) <= config.linear_tolerance:
+            self._warm_start_key = (generation, y.ptr)
+            return result(MonolithicLinearStatus.SUCCESS)
+        wp.copy(self._r, self._true_r)
+        self.preconditioner.matvec(self._r, self._z, self._z, 1.0, 0.0)
+        self._products_of(self._r, self._z)
+        wp.launch(
+            _validate_monolithic_preconditioned_residual,
+            1,
+            [self._products, config.preconditioner_positive_tolerance, self._r_z, self._status],
+            device=self.device,
+        )
+        min_r_z = float(self._products.numpy()[0])
+        status = self._read_status()
+        if status != MonolithicLinearStatus.SUCCESS:
+            return result(status)
+        wp.copy(self._p, self._z)
+        history = [max(ratios)]
+        # A check can occur on every iteration when a recursive residual is tiny.
+        # The configured check capacity therefore bounds that worst case.
+        for iteration in range(1, config.maximum_iterations + 1):
+            self.operator.matvec(self._p, self._ap, self._ap, 1.0, 0.0)
+            self._products_of(self._p, self._ap)
+            wp.launch(
+                _compute_monolithic_pcg_alpha,
+                1,
+                [
+                    self._products,
+                    self._r_z,
+                    config.curvature_absolute_tolerance,
+                    config.curvature_relative_tolerance,
+                    self._alpha,
+                    self._status,
+                ],
+                device=self.device,
+            )
+            curvature = float(self._products.numpy()[0])
+            min_p_ap = curvature if np.isnan(min_p_ap) else min(min_p_ap, curvature)
+            status = self._read_status()
+            if status != MonolithicLinearStatus.SUCCESS:
+                break
+            wp.launch(
+                _update_monolithic_pcg_solution_residual,
+                y.size,
+                [y, self._r, self._p, self._ap, self._alpha, self._status],
+                device=self.device,
+            )
+            iterations = iteration
+            self._products_of(self._r, self._r)
+            recursive_sq = float(self._products.numpy()[0])
+            status = self._read_status()
+            if status != MonolithicLinearStatus.SUCCESS:
+                break
+            denominator = max(float(self._true_norms.numpy()[3]), config.residual_floor_global)
+            check = (
+                iteration % config.true_residual_interval == 0
+                or iteration == config.maximum_iterations
+                or recursive_sq <= (config.linear_tolerance * denominator) ** 2
+            )
+            if check:
+                ratios = self._true_residual(rhs_hat, y, config)
+                checks += 1
+                status = self._read_status()
+                if status != MonolithicLinearStatus.SUCCESS:
+                    break
+                if max(ratios) <= config.linear_tolerance:
+                    self._warm_start_key = (generation, y.ptr)
+                    return result(MonolithicLinearStatus.SUCCESS)
+                history.append(max(ratios))
+                if (
+                    len(history) > config.stagnation_window
+                    and history[-1]
+                    >= (1.0 - config.stagnation_minimum_reduction) * history[-1 - config.stagnation_window]
+                ):
+                    status = MonolithicLinearStatus.STAGNATION
+                    break
+                wp.copy(self._r, self._true_r)
+                replacements += 1
+            if iteration == config.maximum_iterations:
+                status = MonolithicLinearStatus.MAX_ITERATIONS
+                break
+            wp.copy(self._old_r_z, self._r_z)
+            self.preconditioner.matvec(self._r, self._z, self._z, 1.0, 0.0)
+            self._products_of(self._r, self._z)
+            wp.launch(
+                _validate_monolithic_preconditioned_residual,
+                1,
+                [self._products, config.preconditioner_positive_tolerance, self._r_z, self._status],
+                device=self.device,
+            )
+            min_r_z = min(min_r_z, float(self._products.numpy()[0]))
+            status = self._read_status()
+            if status != MonolithicLinearStatus.SUCCESS:
+                break
+            if check:
+                # Residual replacement restarts conjugacy against the actual operator.
+                wp.copy(self._p, self._z)
+            else:
+                wp.launch(
+                    _compute_monolithic_pcg_beta,
+                    1,
+                    [self._r_z, self._old_r_z, self._beta, self._status],
+                    device=self.device,
+                )
+                wp.launch(
+                    _pcg_update_direction, y.size, [self._z, self._p, self._beta, self._status], device=self.device
+                )
+                status = self._read_status()
+                if status != MonolithicLinearStatus.SUCCESS:
+                    break
+        # Failure diagnostics also come from an extra actual-operator matvec.
+        ratios = self._true_residual(rhs_hat, y, config)
+        checks += 1
+        if self._read_status() == MonolithicLinearStatus.NONFINITE_ITERATION:
+            status = MonolithicLinearStatus.NONFINITE_ITERATION
+        return result(status)
+
+    def recover_delta(
+        self, y: wp.array[float], delta: wp.array[float], *, generation: MonolithicLinearGeneration
+    ) -> MonolithicLinearStatus:
+        if not self._current(generation) or not self._scaling_valid:
+            return MonolithicLinearStatus.STALE_GENERATION
+        if not self._vector_valid(y) or not self._vector_valid(delta):
+            return MonolithicLinearStatus.INVALID_ARGUMENT
+        wp.launch(_scale_vector, y.size, [self.scale, y, delta], device=self.device)
+        self._status.zero_()
+        self._products_of(delta, delta)
+        return self._read_status()
+
     def densify_for_test(self, *, generation: MonolithicLinearGeneration) -> MonolithicDenseLinearOracle:
         """Copy the finalized production BSR to a host dense debug oracle."""
         if generation != self._generation or not self._sealed or not self._valid:
@@ -607,4 +1483,10 @@ class MonolithicLinearWorkspace:
         for row in range(matrix.nrow):
             start, end = offsets[row], offsets[row + 1]
             dense[row, columns[start:end]] = values[start:end]
-        return MonolithicDenseLinearOracle(dense)
+        if not self._scaling_valid:
+            return MonolithicDenseLinearOracle(dense)
+        diagonal, scale = self.diagonal.numpy().astype(np.float64), self.scale.numpy().astype(np.float64)
+        regularized = dense + self._lambda * np.diag(diagonal)
+        # Match the production S*K*S + lambda*I operator, avoiding a second assembly.
+        scaled = scale[:, None] * dense * scale[None, :] + self._lambda * np.eye(matrix.nrow)
+        return MonolithicDenseLinearOracle(dense, self.dynamic_diagonal.numpy(), scale, regularized, scaled)
