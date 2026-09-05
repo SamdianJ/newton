@@ -17,6 +17,7 @@ class TestLazySolverImports(unittest.TestCase):
             "featherstone",
             "implicit_mpm",
             "kamino",
+            "monolithic",
             "mujoco",
             "semi_implicit",
             "style3d",
@@ -52,6 +53,36 @@ class TestLazySolverImports(unittest.TestCase):
             "from newton.solvers.experimental.coupled import SolverCoupled, SolverCoupledProxy; "
             "import newton.solvers.experimental.coupled as coupled; "
             "assert coupled.SolverCoupled is SolverCoupled; "
+            "print('ok')"
+        )
+        result = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=True)
+        self.assertEqual(result.stdout.strip(), "ok")
+
+    def test_experimental_monolithic_namespace_is_lazy(self):
+        """Defer importing the monolithic backend until its namespace is accessed."""
+        code = (
+            "import sys; import newton.solvers; "
+            "assert 'monolithic' in newton.solvers.experimental.__all__; "
+            "assert 'newton.solvers.experimental.monolithic' in sys.modules; "
+            "assert 'newton._src.solvers.monolithic' not in sys.modules; "
+            "assert 'SolverMonolithic' not in newton.solvers.__all__; "
+            "print('ok')"
+        )
+        result = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=True)
+        self.assertEqual(result.stdout.strip(), "ok")
+
+    def test_experimental_monolithic_import(self):
+        """Resolve the monolithic scaffold through its canonical experimental import."""
+        code = (
+            "from newton.solvers.experimental.monolithic import SolverMonolithic; "
+            "import newton.solvers.experimental.monolithic as monolithic; "
+            "from newton.solvers import SolverBase; "
+            "assert monolithic.SolverMonolithic is SolverMonolithic; "
+            "assert monolithic.__all__ == ['SolverMonolithic']; "
+            "assert issubclass(SolverMonolithic, SolverBase); "
+            "assert SolverMonolithic.supports_collision_pipeline; "
+            "assert 'SolverMonolithic' in dir(monolithic); "
+            "assert not hasattr(monolithic, 'SolverNonexistent'); "
             "print('ok')"
         )
         result = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=True)

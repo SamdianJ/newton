@@ -15,7 +15,9 @@ Experimental solver namespaces.
    :hidden:
 
    newton_solvers_experimental_coupled
+   newton_solvers_experimental_monolithic
 
 .. rubric:: Submodules
 
 - :doc:`newton.solvers.experimental.coupled <newton_solvers_experimental_coupled>`
+- :doc:`newton.solvers.experimental.monolithic <newton_solvers_experimental_monolithic>`

@@ -55,14 +55,31 @@ class _LazyCoupledModule(ModuleType):
         return dir(self._load())
 
 
+class _LazyMonolithicModule(ModuleType):
+    def _load(self) -> ModuleType:
+        module = importlib.import_module("._src.solvers.monolithic", __package__)
+        experimental.monolithic = module
+        sys.modules[self.__name__] = module
+        return module
+
+    def __getattr__(self, name: str):
+        module = self._load()
+        return getattr(module, name)
+
+    def __dir__(self) -> list[str]:
+        return dir(self._load())
+
+
 experimental = ModuleType(f"{__name__}.experimental")
 experimental.__doc__ = """Experimental solver namespaces.
 
 .. experimental::
 """
-experimental.__all__ = ["coupled"]
+experimental.__all__ = ["coupled", "monolithic"]
 experimental.__path__ = []
 experimental.coupled = _LazyCoupledModule(f"{__name__}.experimental.coupled")
+experimental.monolithic = _LazyMonolithicModule(f"{__name__}.experimental.monolithic")
 
 sys.modules[f"{__name__}.experimental"] = experimental
 sys.modules[f"{__name__}.experimental.coupled"] = experimental.coupled
+sys.modules[f"{__name__}.experimental.monolithic"] = experimental.monolithic
