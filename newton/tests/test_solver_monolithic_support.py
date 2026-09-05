@@ -160,38 +160,145 @@ def test_supported_shared_feature_motion(test, device):
             test.assertLessEqual(max(metric["relative_difference_from_finest"]), 0.1)
 
 
-def test_freeze_audit_rejects_incomplete_provenance(test, device):
-    """Require exactly one CPU/CUDA result and finite evidence before freezing."""
-    del device
-    root = Path(__file__).resolve().parents[2]
-    provenance = _source_provenance(root)
+def _synthetic_supported_manifest(fixture_id, level, surface_multiplier):
+    manifest = {
+        "support_fixture_id": fixture_id,
+        "level": level,
+        "surface_multiplier": surface_multiplier,
+        "length_m": 0.04,
+        "density_kg_m3": 1000.0,
+        "contact_stiffness_n_m3": 2.0e5,
+        "particle_radius_m": 0.0001,
+        "soft_contact_gap_m": 0.0002,
+        "shape_margin_m": 0.0,
+        "solver_parameters": {"newton_max_iterations": 20},
+        "shape_scale": [[0.0, 0.0, 0.0]],
+        "nominal_initial_penetration_m": None,
+    }
+    if fixture_id == "plane_uniform_face_z025mm_l012_v2":
+        manifest.update(case="plane", shape_kind="plane", shape_center_m=(0.0, 0.0, 0.00025))
+    elif fixture_id == "broad_box_full_face_l012_v1":
+        manifest.update(
+            case="broad_box",
+            shape_kind="box",
+            feature_width_m=0.08,
+            shape_center_m=(0.04 / 3, 0.04 / 3, -0.0004),
+        )
+    elif fixture_id == "sample_between_box_w10_l234_v1":
+        manifest.update(
+            case="resolved_sharp_box",
+            shape_kind="box",
+            feature_width_m=0.01,
+            shape_center_m=(0.04 / 3, 0.04 / 3, -0.0004),
+        )
+    else:
+        location = "edge" if fixture_id == "shared_edge_r30_l234_v1" else "vertex"
+        direction = np.asarray((0.0, -1.0, -1.0) if location == "edge" else (-1.0, -1.0, -1.0))
+        anchor = np.asarray((0.02, 0.0, 0.0) if location == "edge" else (0.0, 0.0, 0.0))
+        center = anchor + direction / np.linalg.norm(direction) * (0.03 + 0.0001 - 0.008)
+        manifest.update(
+            case=f"supported_{location}",
+            shape_kind="sphere",
+            feature_width_m=0.06,
+            shape_center_m=center.tolist(),
+            shape_scale=[[0.03, 0.03, 0.03]],
+            nominal_initial_penetration_m=0.008,
+        )
+    return manifest
+
+
+def _synthetic_freeze_evidence():
+    fixture_levels = {
+        "plane_uniform_face_z025mm_l012_v2": (0, 1, 2),
+        "broad_box_full_face_l012_v1": (0, 1, 2),
+        "sample_between_box_w10_l234_v1": (2, 3, 4),
+        "shared_edge_r30_l234_v1": (2, 3, 4),
+        "shared_vertex_r30_l234_v1": (2, 3, 4),
+    }
     support = {
         "id": "p1q3-resolved-local-v2",
         "status": "FROZEN",
-        "supported_fixture_ids": sorted(
-            {
-                "plane_uniform_face_z025mm_l012_v2",
-                "broad_box_full_face_l012_v1",
-                "shared_edge_r30_l234_v1",
-                "shared_vertex_r30_l234_v1",
-                "sample_between_box_w10_l234_v1",
-            }
-        ),
+        "supported_fixture_ids": sorted(fixture_levels),
     }
-    static = [
-        {
-            "support_envelope": "SUPPORTED",
-            "manifest": {"support_fixture_id": fixture_id},
-            "same_mesh_quadrature_gate": "PASS",
-            "sampling_classification": "DETECTED",
+    static = []
+    for fixture_id, levels in fixture_levels.items():
+        for level, multiplier in zip(levels, (1, 4, 16), strict=True):
+            threshold = 0.05 if fixture_id.startswith("plane_") else 0.1
+            static.append(
+                {
+                    "case": _synthetic_supported_manifest(fixture_id, level, multiplier)["case"],
+                    "level": level,
+                    "surface_multiplier": multiplier,
+                    "support_envelope": "SUPPORTED",
+                    "manifest": _synthetic_supported_manifest(fixture_id, level, multiplier),
+                    "normal_force_n": 1.0,
+                    "evaluation_status": 0,
+                    "same_mesh_quadrature_gate": "PASS",
+                    "same_mesh_quadrature_threshold": threshold,
+                    "same_mesh_oracle": {
+                        "integration_domain": "full_tet_boundary",
+                        "normal_force_n": 1.0,
+                        "relative_force_error": 0.0,
+                    },
+                    "sampling_classification": "DETECTED",
+                }
+            )
+    motion = []
+    comparisons = []
+    factors = (1.05, 1.02, 1.0)
+    for case, fixture_id in (
+        ("supported_edge", "shared_edge_r30_l234_v1"),
+        ("supported_vertex", "shared_vertex_r30_l234_v1"),
+    ):
+        metric_values = {
+            "rigid_displacement_m": [factor * 1.0e-4 for factor in factors],
+            "max_surface_penetration_m": [factor * 1.0e-3 for factor in factors],
+            "peak_surface_penetration_m": [factor * 1.0e-3 for factor in factors],
+            "soft_volume_mean_displacement_m": [factor * 2.0e-4 for factor in factors],
         }
-        for fixture_id in support["supported_fixture_ids"]
-    ]
-    comparisons = [
-        {"case": case, "role": "HARD_SUPPORTED_GATE", "gate": "PASS", "sampling_gate": "PASS"}
-        for case in ("supported_edge", "supported_vertex")
-    ]
-    evidence = [
+        for level, multiplier, factor in zip((2, 3, 4), (1, 4, 16), factors, strict=True):
+            trace_row = {
+                "converged": True,
+                "rolled_back": False,
+                "sampling_miss": False,
+                "rigid_displacement_m": factor * 1.0e-4,
+                "max_surface_penetration_m": factor * 1.0e-3,
+                "soft_volume_mean_displacement_m": [0.0, 0.0, factor * 2.0e-4],
+            }
+            motion.append(
+                {
+                    "case": case,
+                    "level": level,
+                    "manifest": _synthetic_supported_manifest(fixture_id, level, multiplier),
+                    "applied_joint_force_n": 0.1,
+                    "dt_s": 0.001,
+                    "steps": 20,
+                    "trace": [deepcopy(trace_row) for _ in range(20)],
+                    "all_steps_success": True,
+                }
+            )
+        metrics = {}
+        for name, values in metric_values.items():
+            relative = [abs(value - values[-1]) / abs(values[-1]) for value in values]
+            floor = float(np.spacing(np.float32(0.04))) if "displacement" in name else 0.0
+            metrics[name] = {
+                "values": values,
+                "relative_difference_from_finest": relative,
+                "absolute_difference_from_finest": [abs(value - values[-1]) for value in values],
+                "reference_floor_m": floor,
+                "normalization": "RESOLVED",
+            }
+        comparisons.append(
+            {
+                "case": case,
+                "role": "HARD_SUPPORTED_GATE",
+                "gate": "PASS",
+                "threshold": 0.1,
+                "metrics": metrics,
+                "sampling_gate": "PASS",
+            }
+        )
+    return [
         {
             "device": name,
             "c4_gate": "PASS",
@@ -201,10 +308,19 @@ def test_freeze_audit_rejects_incomplete_provenance(test, device):
             "dirichlet_mass_audit_gate": "PASS",
             "supported_local_motion_gate": "PASS",
             "static": deepcopy(static),
+            "motion": deepcopy(motion),
             "local_motion_comparisons": deepcopy(comparisons),
         }
         for name in ("cpu", "cuda:0")
     ]
+
+
+def test_freeze_audit_rejects_incomplete_provenance(test, device):
+    """Require exactly one CPU/CUDA result and finite evidence before freezing."""
+    del device
+    root = Path(__file__).resolve().parents[2]
+    provenance = _source_provenance(root)
+    evidence = _synthetic_freeze_evidence()
     frozen, reasons = _freeze_audit(
         requested_devices=["cpu", "cuda:0"],
         evidence=evidence,
@@ -250,6 +366,51 @@ def test_freeze_audit_rejects_incomplete_provenance(test, device):
             "invalid_supported_fixture_ids",
         ),
         (lambda rows: rows[0]["local_motion_comparisons"].pop(), "invalid_supported_motion_comparisons"),
+        (
+            lambda rows: rows[0]["static"].pop(
+                next(
+                    index
+                    for index, row in enumerate(rows[0]["static"])
+                    if row["manifest"]["support_fixture_id"] == "plane_uniform_face_z025mm_l012_v2"
+                    and row["level"] == 1
+                )
+            ),
+            "invalid_supported_fixture_evidence",
+        ),
+        (
+            lambda rows: next(
+                row
+                for row in rows[0]["static"]
+                if row["manifest"]["support_fixture_id"] == "plane_uniform_face_z025mm_l012_v2"
+            )["same_mesh_oracle"].pop("integration_domain"),
+            "invalid_supported_fixture_evidence",
+        ),
+        (
+            lambda rows: next(
+                row for row in rows[0]["static"] if row["manifest"]["support_fixture_id"] == "shared_edge_r30_l234_v1"
+            )["same_mesh_oracle"].update(relative_force_error=0.01),
+            "invalid_supported_fixture_evidence",
+        ),
+        (
+            lambda rows: rows[0]["motion"].pop(
+                next(
+                    index
+                    for index, row in enumerate(rows[0]["motion"])
+                    if row["case"] == "supported_edge" and row["level"] == 3
+                )
+            ),
+            "invalid_supported_motion_evidence",
+        ),
+        (
+            lambda rows: rows[0]["local_motion_comparisons"][0]["metrics"].clear(),
+            "invalid_supported_motion_metrics",
+        ),
+        (
+            lambda rows: rows[0]["local_motion_comparisons"][0]["metrics"]["rigid_displacement_m"].update(
+                relative_difference_from_finest=[0.0, 0.0, 0.0]
+            ),
+            "invalid_supported_motion_metrics",
+        ),
     ):
         invalid = deepcopy(evidence)
         mutation(invalid)

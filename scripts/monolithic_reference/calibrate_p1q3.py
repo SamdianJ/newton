@@ -48,6 +48,13 @@ _SUPPORTED_FIXTURE_IDS = {
     "shared_vertex_r30_l234_v1",
     "sample_between_box_w10_l234_v1",
 }
+_SUPPORTED_FIXTURE_LEVELS = {
+    "plane_uniform_face_z025mm_l012_v2": (0, 1, 2),
+    "broad_box_full_face_l012_v1": (0, 1, 2),
+    "sample_between_box_w10_l234_v1": (2, 3, 4),
+    "shared_edge_r30_l234_v1": (2, 3, 4),
+    "shared_vertex_r30_l234_v1": (2, 3, 4),
+}
 _C4_SOURCE_PATHS = (
     "scripts/monolithic_reference/calibrate_p1q3.py",
     "scripts/monolithic_reference/p1q3_oracle.py",
@@ -913,6 +920,11 @@ def _freeze_audit(
         if any(row.get(gate) != "PASS" for gate in required_subgates):
             reasons.append("incomplete_or_failed_device_subgates")
             break
+    expected_static_keys = {
+        (fixture_id, level, multiplier)
+        for fixture_id, levels in _SUPPORTED_FIXTURE_LEVELS.items()
+        for level, multiplier in zip(levels, (1, 4, 16), strict=True)
+    }
     for row in evidence:
         support = row.get("support_envelope", {})
         if (
@@ -922,26 +934,149 @@ def _freeze_audit(
         ):
             reasons.append("invalid_supported_fixture_ids")
             break
-        supported_static = {
-            static_row.get("manifest", {}).get("support_fixture_id")
-            for static_row in row.get("static", ())
-            if static_row.get("support_envelope") == "SUPPORTED"
-            and static_row.get("same_mesh_quadrature_gate") == "PASS"
-            and static_row.get("sampling_classification") == "DETECTED"
-        }
-        if supported_static != _SUPPORTED_FIXTURE_IDS:
+        supported_static = [
+            static_row for static_row in row.get("static", ()) if static_row.get("support_envelope") == "SUPPORTED"
+        ]
+        actual_static_keys = []
+        valid_static = len(supported_static) == len(expected_static_keys)
+        for static_row in supported_static:
+            try:
+                manifest = static_row["manifest"]
+                fixture_id = manifest["support_fixture_id"]
+                key = (fixture_id, static_row["level"], static_row["surface_multiplier"])
+                oracle = static_row["same_mesh_oracle"]
+                production_force = float(static_row["normal_force_n"])
+                oracle_force = float(oracle["normal_force_n"])
+                stored_error = float(oracle["relative_force_error"])
+                threshold = float(static_row["same_mesh_quadrature_threshold"])
+                recomputed_error = abs(production_force - oracle_force) / max(oracle_force, 1.0e-12)
+                expected_threshold = 0.05 if fixture_id == "plane_uniform_face_z025mm_l012_v2" else 0.1
+                valid_static = valid_static and (
+                    key in expected_static_keys
+                    and manifest["level"] == static_row["level"]
+                    and manifest["surface_multiplier"] == static_row["surface_multiplier"]
+                    and _is_exact_supported_fixture(manifest)
+                    and static_row["evaluation_status"] == 0
+                    and static_row["same_mesh_quadrature_gate"] == "PASS"
+                    and static_row["sampling_classification"] == "DETECTED"
+                    and np.isfinite((production_force, oracle_force, stored_error, threshold, recomputed_error)).all()
+                    and oracle_force > 0.0
+                    and threshold == expected_threshold
+                    and abs(stored_error - recomputed_error) <= 1.0e-12 + 1.0e-9 * abs(recomputed_error)
+                    and recomputed_error <= threshold
+                    and oracle["integration_domain"] == "full_tet_boundary"
+                )
+                actual_static_keys.append(key)
+            except (KeyError, TypeError, ValueError, IndexError):
+                valid_static = False
+        if not valid_static or set(actual_static_keys) != expected_static_keys:
             reasons.append("invalid_supported_fixture_evidence")
             break
+    expected_motion_keys = {
+        (case, level, multiplier)
+        for case in _SUPPORTED_LOCAL_CASES
+        for level, multiplier in zip((2, 3, 4), (1, 4, 16), strict=True)
+    }
     for row in evidence:
-        hard_motion = {
-            comparison.get("case")
+        supported_motion = [motion for motion in row.get("motion", ()) if motion.get("case") in _SUPPORTED_LOCAL_CASES]
+        actual_motion_keys = []
+        valid_motion = len(supported_motion) == len(expected_motion_keys)
+        for motion in supported_motion:
+            try:
+                manifest = motion["manifest"]
+                key = (motion["case"], motion["level"], manifest["surface_multiplier"])
+                trace = motion["trace"]
+                valid_motion = valid_motion and (
+                    key in expected_motion_keys
+                    and manifest["level"] == motion["level"]
+                    and _is_exact_supported_fixture(manifest)
+                    and motion["steps"] == 20
+                    and motion["dt_s"] == 0.001
+                    and motion["applied_joint_force_n"] == 0.1
+                    and motion["all_steps_success"] is True
+                    and len(trace) == 20
+                    and all(
+                        step["converged"] is True and step["rolled_back"] is False and step["sampling_miss"] is False
+                        for step in trace
+                    )
+                )
+                actual_motion_keys.append(key)
+            except (KeyError, TypeError, ValueError, IndexError):
+                valid_motion = False
+        if not valid_motion or set(actual_motion_keys) != expected_motion_keys:
+            reasons.append("invalid_supported_motion_evidence")
+            break
+        hard_motion = [
+            comparison
             for comparison in row.get("local_motion_comparisons", ())
             if comparison.get("role") == "HARD_SUPPORTED_GATE"
-            and comparison.get("gate") == "PASS"
-            and comparison.get("sampling_gate") == "PASS"
-        }
-        if hard_motion != set(_SUPPORTED_LOCAL_CASES):
+        ]
+        if (
+            len(hard_motion) != len(_SUPPORTED_LOCAL_CASES)
+            or {comparison.get("case") for comparison in hard_motion} != set(_SUPPORTED_LOCAL_CASES)
+            or any(
+                comparison.get("gate") != "PASS"
+                or comparison.get("sampling_gate") != "PASS"
+                or comparison.get("threshold") != 0.1
+                for comparison in hard_motion
+            )
+        ):
             reasons.append("invalid_supported_motion_comparisons")
+            break
+        valid_metrics = True
+        expected_metric_names = {
+            "rigid_displacement_m",
+            "max_surface_penetration_m",
+            "peak_surface_penetration_m",
+            "soft_volume_mean_displacement_m",
+        }
+        for comparison in hard_motion:
+            case_rows = sorted(
+                (motion for motion in supported_motion if motion["case"] == comparison["case"]),
+                key=lambda motion: motion["level"],
+            )
+            metrics = comparison.get("metrics", {})
+            if set(metrics) != expected_metric_names:
+                valid_metrics = False
+                continue
+            derived = {
+                "rigid_displacement_m": [motion["trace"][-1]["rigid_displacement_m"] for motion in case_rows],
+                "max_surface_penetration_m": [motion["trace"][-1]["max_surface_penetration_m"] for motion in case_rows],
+                "peak_surface_penetration_m": [
+                    max(step["max_surface_penetration_m"] for step in motion["trace"]) for motion in case_rows
+                ],
+                "soft_volume_mean_displacement_m": [
+                    float(np.linalg.norm(motion["trace"][-1]["soft_volume_mean_displacement_m"]))
+                    for motion in case_rows
+                ],
+            }
+            for name, values in derived.items():
+                metric = metrics[name]
+                floor = float(np.spacing(np.float32(_LENGTH))) if "displacement" in name else 0.0
+                relative = _relative_to_finest(values, floor)
+                absolute = [abs(value - values[-1]) for value in values]
+                try:
+                    stored_values = np.asarray(metric["values"], dtype=np.float64)
+                    stored_relative = np.asarray(metric["relative_difference_from_finest"], dtype=np.float64)
+                    stored_absolute = np.asarray(metric["absolute_difference_from_finest"], dtype=np.float64)
+                    valid_metrics = valid_metrics and (
+                        stored_values.shape == (3,)
+                        and stored_relative.shape == (3,)
+                        and stored_absolute.shape == (3,)
+                        and np.isfinite(stored_values).all()
+                        and np.isfinite(stored_relative).all()
+                        and np.isfinite(stored_absolute).all()
+                        and np.allclose(stored_values, values, rtol=1.0e-12, atol=1.0e-15)
+                        and np.allclose(stored_relative, relative, rtol=1.0e-12, atol=1.0e-15)
+                        and np.allclose(stored_absolute, absolute, rtol=1.0e-12, atol=1.0e-15)
+                        and metric["reference_floor_m"] == floor
+                        and metric["normalization"] == "RESOLVED"
+                        and max(relative) <= 0.1
+                    )
+                except (KeyError, TypeError, ValueError):
+                    valid_metrics = False
+        if not valid_metrics:
+            reasons.append("invalid_supported_motion_metrics")
             break
     if len(evidence) != 2 or not all(row["c4_gate"] == "PASS" for row in evidence):
         reasons.append("device_c4_gate_not_pass")
