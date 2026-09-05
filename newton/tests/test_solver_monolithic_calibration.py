@@ -7,6 +7,7 @@ import copy
 import hashlib
 import json
 import subprocess
+import tempfile
 import unittest
 from dataclasses import asdict, replace
 from pathlib import Path
@@ -27,6 +28,7 @@ from scripts.monolithic_reference.calibrate_components import (
     calibrate_case,
     calibration_cases,
     freeze_calibration_cases,
+    verify_calibration_release_index,
 )
 
 _ROOT = Path(__file__).parents[2]
@@ -337,7 +339,17 @@ class TestCalibrationInputs(unittest.TestCase):
         }
         c4_bytes = json.dumps(c4, sort_keys=True).encode()
         compact_bytes = json.dumps(
-            {"calibration_status": "FROZEN", "solver_internal_config": final_config}, sort_keys=True
+            {
+                "calibration_status": "FROZEN",
+                "solver_internal_config": final_config,
+                "evidence": {
+                    "component_raw_sha256": hashlib.sha256(
+                        (json.dumps(raw, indent=2, allow_nan=False) + "\n").encode()
+                    ).hexdigest(),
+                    "c4_support_sha256": hashlib.sha256(c4_bytes).hexdigest(),
+                },
+            },
+            sort_keys=True,
         ).encode()
         candidate_runs = [loading_run(device, config=final_config) for device in ("cpu", "cuda:0")]
         for run in candidate_runs:
@@ -360,6 +372,9 @@ class TestCalibrationInputs(unittest.TestCase):
                 c4_bytes,
                 compact_bytes,
             )
+        forged = type(verified)(copy.deepcopy(verified.audit_artifact), verified.capability)
+        with self.assertRaisesRegex(CalibrationFreezeError, "unconsumed builder result"):
+            aggregate_calibration_evidence([raw], freeze=True, verified_trajectory=forged)
         result = aggregate_calibration_evidence([raw], freeze=True, verified_trajectory=verified)
         self.assertEqual(
             verified.audit_artifact["upstream"]["compact_calibration"]["artifact_sha256"],
@@ -384,10 +399,12 @@ class TestCalibrationInputs(unittest.TestCase):
         tampered = copy.deepcopy(raw)
         for fd_record in tampered["evidence"][0]["finite_difference"]["tet"]["records"]:
             fd_record["energy_gradient"]["relative_error"] = 1.0
-        rejected = aggregate_calibration_evidence([tampered], verified_trajectory=verified)
+        rejected = aggregate_calibration_evidence([tampered])
         self.assertTrue(rejected["failed_records"])
         with self.assertRaises(CalibrationFreezeError):
-            aggregate_calibration_evidence([tampered], freeze=True, verified_trajectory=verified)
+            aggregate_calibration_evidence([tampered], freeze=True)
+        with self.assertRaisesRegex(CalibrationFreezeError, "unconsumed builder result"):
+            aggregate_calibration_evidence([raw], freeze=True, verified_trajectory=verified)
 
         audit_only = copy.deepcopy(verified.audit_artifact)
         audit_only["upstream"]["normal_loading"]["cpu"]["candidate_artifact_sha256"] = "0" * 64
@@ -416,6 +433,22 @@ class TestCalibrationInputs(unittest.TestCase):
                         c4_bytes,
                         compact_bytes,
                     )
+
+        compact_with_downstream = json.loads(compact_bytes)
+        compact_with_downstream["evidence"]["trajectory_sha256"] = "0" * 64
+        with patch(
+            "scripts.monolithic_reference.calibrate_components._current_producer_identity",
+            return_value=producer,
+        ):
+            with self.assertRaisesRegex(CalibrationFreezeError, "must contain only"):
+                build_trajectory_evidence(
+                    raw,
+                    probe_runs,
+                    candidate_runs,
+                    [loading_run(device, config=None) for device in ("cpu", "cuda:0")],
+                    c4_bytes,
+                    json.dumps(compact_with_downstream).encode(),
+                )
 
         wrong_source = copy.deepcopy(raw)
         wrong_source["source_sha256"]["newton/_src/solvers/monolithic/contact.py"] = "d" * 64
@@ -505,6 +538,156 @@ class TestCalibrationInputs(unittest.TestCase):
             normal["support_provenance"]["sha256"],
             frozen["evidence"]["c4_support_sha256"],
         )
+    def test_release_index_rehashes_complete_dag_and_rejects_tampering(self):
+        """A release index binds bytes and canonical normal-run directories without downstream compact edges."""
+
+        def write_json(path, value):
+            path.write_text(json.dumps(value, indent=2, allow_nan=False) + "\n")
+
+        def file_entry(root, name):
+            path = root / name
+            return {"path": name, "sha256": hashlib.sha256(path.read_bytes()).hexdigest()}
+
+        def write_run(root, name, metadata):
+            path = root / name
+            path.mkdir()
+            write_json(path / "metadata.json", metadata)
+            write_json(path / "summary.json", {"status": "PASS"})
+            (path / "steps.jsonl").write_text('{"finite_state": true}\n')
+            digest = _hash_json(
+                {
+                    filename: hashlib.sha256((path / filename).read_bytes()).hexdigest()
+                    for filename in ("metadata.json", "summary.json", "steps.jsonl")
+                }
+            )
+            return {"path": name, "sha256": digest}
+
+        config = json.loads(
+            (_ROOT / "scripts/monolithic_reference/fixtures/calibration_candidate_v2.json").read_text()
+        )["portable_solver_internal_config"]
+        integration_sha = "1" * 40
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            write_json(root / "component.json", {"artifact_kind": "raw_measurement"})
+            c4 = {
+                "status": "FROZEN",
+                "evidence": [
+                    {
+                        "device": device,
+                        "c4_gate": "PASS",
+                        "supported_local_motion_gate": "PASS",
+                        "support_envelope": {"status": "FROZEN"},
+                    }
+                    for device in ("cpu", "cuda:0")
+                ],
+            }
+            write_json(root / "c4.json", c4)
+            compact = {
+                "schema_version": "monolithic_calibration_frozen/v1",
+                "calibration_status": "FROZEN",
+                "v01_status": "DRAFT",
+                "runtime_authority": True,
+                "solver_internal_config": config,
+                "acceptance": {"force_detection_floor_n": 1e-5},
+                "evidence": {
+                    "component_raw_sha256": hashlib.sha256((root / "component.json").read_bytes()).hexdigest(),
+                    "c4_support_sha256": hashlib.sha256((root / "c4.json").read_bytes()).hexdigest(),
+                },
+            }
+            write_json(root / "compact.json", compact)
+            compact_sha = hashlib.sha256((root / "compact.json").read_bytes()).hexdigest()
+            c4_sha = hashlib.sha256((root / "c4.json").read_bytes()).hexdigest()
+            normal = {}
+            upstream_normal = {}
+            for device in ("cpu", "cuda"):
+                normal[device] = {}
+                for role in ("probe", "candidate", "legacy_default_baseline"):
+                    metadata = {"newton_sha": integration_sha}
+                    if role == "candidate":
+                        metadata.update(
+                            calibration_status="FROZEN",
+                            calibration_sha256=compact_sha,
+                            support_status="FROZEN",
+                            support_sha256=c4_sha,
+                            solver_internal_config=config,
+                        )
+                    entry = write_run(root, f"{device}-{role}", metadata)
+                    normal[device][role] = entry
+                upstream_normal[device] = {
+                    "probe_artifact_sha256": normal[device]["probe"]["sha256"],
+                    "candidate_artifact_sha256": normal[device]["candidate"]["sha256"],
+                    "candidate_git_sha": integration_sha,
+                    "legacy_default_baseline_artifact_sha256": normal[device]["legacy_default_baseline"]["sha256"],
+                }
+            trajectory = {
+                "artifact_kind": "trajectory_evidence",
+                "calibration_schema_version": 2,
+                "profile": "freeze",
+                "validated_solver_internal_config": config,
+                "upstream": {
+                    "compact_calibration": {"artifact_sha256": compact_sha},
+                    "c4": {"artifact_sha256": c4_sha},
+                    "normal_loading": upstream_normal,
+                },
+                "evidence": [
+                    {"device": device, "role": role, "status": "PASS"}
+                    for device in ("cpu", "cuda")
+                    for role in ("normal_loading_1000", "c4_supported_motion")
+                ],
+            }
+            terminal = {
+                "artifact_kind": "calibration_freeze",
+                "calibration_schema_version": 2,
+                "calibration_status": "FROZEN",
+                "v01_status": "DRAFT",
+                "portable_solver_internal_config": config,
+                "missing_case_keys": [],
+                "missing_trajectory_keys": [],
+                "failed_records": [],
+                "artifact_failures": [],
+            }
+            write_json(root / "trajectory.json", trajectory)
+            write_json(root / "terminal.json", terminal)
+            index = {
+                "schema_version": "monolithic_calibration_release/v1",
+                "status": "FROZEN",
+                "v01_status": "DRAFT",
+                "integration_git_sha": integration_sha,
+                "artifacts": {
+                    "component_raw": file_entry(root, "component.json"),
+                    "compact": file_entry(root, "compact.json"),
+                    "c4": file_entry(root, "c4.json"),
+                    "trajectory": file_entry(root, "trajectory.json"),
+                    "terminal": file_entry(root, "terminal.json"),
+                    "normal_loading": normal,
+                },
+            }
+            write_json(root / "release.json", index)
+            result = verify_calibration_release_index(root / "release.json")
+            self.assertEqual(result["status"], "VERIFIED")
+            self.assertEqual(set(compact["evidence"]), {"component_raw_sha256", "c4_support_sha256"})
+
+            (root / "terminal.json").write_text((root / "terminal.json").read_text() + "\n")
+            with self.assertRaisesRegex(CalibrationFreezeError, "terminal byte hash"):
+                verify_calibration_release_index(root / "release.json")
+            write_json(root / "terminal.json", terminal)
+
+            trajectory["upstream"]["normal_loading"]["cpu"]["candidate_artifact_sha256"] = "0" * 64
+            write_json(root / "trajectory.json", trajectory)
+            index["artifacts"]["trajectory"] = file_entry(root, "trajectory.json")
+            write_json(root / "release.json", index)
+            with self.assertRaisesRegex(CalibrationFreezeError, "candidate hash"):
+                verify_calibration_release_index(root / "release.json")
+
+            trajectory["upstream"]["normal_loading"]["cpu"]["candidate_artifact_sha256"] = normal["cpu"]["candidate"][
+                "sha256"
+            ]
+            trajectory["evidence"].pop()
+            write_json(root / "trajectory.json", trajectory)
+            index["artifacts"]["trajectory"] = file_entry(root, "trajectory.json")
+            write_json(root / "release.json", index)
+            with self.assertRaisesRegex(CalibrationFreezeError, "roles"):
+                verify_calibration_release_index(root / "release.json")
 
 
 def test_measured_active_and_inactive(test, device):

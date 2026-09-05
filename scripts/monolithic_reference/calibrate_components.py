@@ -311,6 +311,7 @@ def main():
     parser.add_argument("--trajectory-c4", type=Path, help="Frozen C4 support artifact")
     parser.add_argument("--trajectory-calibration-raw", type=Path, help="Complete raw calibration artifact")
     parser.add_argument("--trajectory-calibration-compact", type=Path, help="Versioned compact calibration artifact")
+    parser.add_argument("--verify-release-index", type=Path, help="Verify a frozen calibration release DAG")
     parser.add_argument(
         "--freeze", action="store_true", help="Require complete passing evidence and freeze calibration"
     )
@@ -318,6 +319,28 @@ def main():
     args = parser.parse_args()
     if not math.isfinite(args.dt) or args.dt <= 0 or args.repeats < 2:
         parser.error("dt must be positive and finite; repeats must be at least two")
+    if args.verify_release_index is not None:
+        if (
+            args.matrix
+            or args.aggregate
+            or args.freeze
+            or any(
+                value is not None
+                for value in (
+                    args.trajectory_candidate,
+                    args.trajectory_probe,
+                    args.trajectory_baseline,
+                    args.trajectory_c4,
+                    args.trajectory_calibration_raw,
+                    args.trajectory_calibration_compact,
+                )
+            )
+        ):
+            parser.error("--verify-release-index cannot be combined with measurement or freeze options")
+        payload = verify_calibration_release_index(args.verify_release_index)
+        args.output.parent.mkdir(parents=True, exist_ok=True)
+        args.output.write_text(json.dumps(payload, indent=2, allow_nan=False) + "\n")
+        return
     trajectory_arguments = (
         args.trajectory_candidate,
         args.trajectory_probe,
@@ -552,7 +575,7 @@ class CalibrationFreezeError(ValueError):
     """Raised when an artifact violates the fail-closed freeze contract."""
 
 
-_VERIFICATION_NONCE = object()
+_VERIFIED_TRAJECTORY_REGISTRY = {}
 
 
 @dataclass(frozen=True, slots=True)
@@ -560,11 +583,7 @@ class _VerifiedTrajectoryEvidence:
     """In-process authority returned only after re-reading every upstream artifact."""
 
     audit_artifact: dict
-    seal: tuple[int, str]
-
-
-def _verified_trajectory_seal(artifact):
-    return id(_VERIFICATION_NONCE), _hash_json(artifact)
+    capability: object
 
 
 def _device_class(name):
@@ -1019,11 +1038,16 @@ def aggregate_calibration_evidence(artifacts, *, freeze=False, verified_trajecto
     This validates evidence completeness and identity.  It deliberately leaves
     ``v01_status`` as DRAFT because reference/E2E acceptance is a separate gate.
     """
-    if verified_trajectory is not None and (
-        type(verified_trajectory) is not _VerifiedTrajectoryEvidence
-        or verified_trajectory.seal != _verified_trajectory_seal(verified_trajectory.audit_artifact)
-    ):
-        raise CalibrationFreezeError("verified_trajectory must be an intact in-process verified result")
+    if verified_trajectory is not None:
+        registered = _VERIFIED_TRAJECTORY_REGISTRY.pop(id(verified_trajectory), None)
+        if (
+            type(verified_trajectory) is not _VerifiedTrajectoryEvidence
+            or registered is None
+            or registered[0] is not verified_trajectory
+            or registered[1] is not verified_trajectory.capability
+            or registered[2] != _hash_json(verified_trajectory.audit_artifact)
+        ):
+            raise CalibrationFreezeError("verified_trajectory must be an intact, unconsumed builder result")
     authoritative_trajectory = None if verified_trajectory is None else verified_trajectory.audit_artifact
     if freeze and any(artifact.get("artifact_kind") == "trajectory_evidence" for artifact in artifacts):
         raise CalibrationFreezeError("Serialized trajectory JSON is audit-only and cannot authorize freeze")
@@ -1246,6 +1270,175 @@ def _load_normal_run(path):
         "artifact_sha256": _hash_json(
             {name: hashlib.sha256(item.read_bytes()).hexdigest() for name, item in required.items()}
         ),
+    }
+
+
+_COMPACT_EVIDENCE_KEYS = {"component_raw_sha256", "c4_support_sha256"}
+
+
+def _validate_compact_evidence(compact, component_raw_sha256, c4_sha256):
+    evidence = compact.get("evidence")
+    if not isinstance(evidence, dict) or set(evidence) != _COMPACT_EVIDENCE_KEYS:
+        raise CalibrationFreezeError("Compact evidence must contain only component_raw_sha256 and c4_support_sha256")
+    if evidence["component_raw_sha256"] != component_raw_sha256:
+        raise CalibrationFreezeError("Compact component raw hash differs from release bytes")
+    if evidence["c4_support_sha256"] != c4_sha256:
+        raise CalibrationFreezeError("Compact C4 support hash differs from release bytes")
+
+
+def _release_file(index_path, entry, label):
+    if not isinstance(entry, dict) or set(entry) != {"path", "sha256"}:
+        raise CalibrationFreezeError(f"Release {label} entry must contain exactly path and sha256")
+    path = Path(entry["path"])
+    path = path if path.is_absolute() else index_path.parent / path
+    if not path.is_file():
+        raise CalibrationFreezeError(f"Release {label} file is missing: {path}")
+    data = path.read_bytes()
+    if hashlib.sha256(data).hexdigest() != entry["sha256"]:
+        raise CalibrationFreezeError(f"Release {label} byte hash differs")
+    try:
+        return json.loads(data)
+    except (TypeError, ValueError, json.JSONDecodeError) as error:
+        raise CalibrationFreezeError(f"Release {label} is not valid JSON") from error
+
+
+def _release_normal_run(index_path, entry, label):
+    if not isinstance(entry, dict) or set(entry) != {"path", "sha256"}:
+        raise CalibrationFreezeError(f"Release {label} entry must contain exactly path and sha256")
+    path = Path(entry["path"])
+    path = path if path.is_absolute() else index_path.parent / path
+    run = _load_normal_run(path)
+    if run["artifact_sha256"] != entry["sha256"]:
+        raise CalibrationFreezeError(f"Release {label} canonical artifact hash differs")
+    return run
+
+
+def _release_device(value):
+    return "cuda" if value == "cuda:0" else value
+
+
+def verify_calibration_release_index(index_path):
+    """Rehash and validate a frozen calibration release DAG."""
+    index_path = Path(index_path)
+    try:
+        index = json.loads(index_path.read_bytes())
+    except (OSError, TypeError, ValueError, json.JSONDecodeError) as error:
+        raise CalibrationFreezeError(f"Calibration release index is unreadable: {index_path}") from error
+    integration_sha = index.get("integration_git_sha")
+    if (
+        index.get("schema_version") != "monolithic_calibration_release/v1"
+        or index.get("status") != "FROZEN"
+        or index.get("v01_status") != "DRAFT"
+        or not isinstance(integration_sha, str)
+        or len(integration_sha) != 40
+        or any(character not in "0123456789abcdef" for character in integration_sha)
+    ):
+        raise CalibrationFreezeError("Release index status, V0.1 state, or integration SHA is invalid")
+    artifacts = index.get("artifacts")
+    expected_artifacts = {"component_raw", "compact", "c4", "trajectory", "terminal", "normal_loading"}
+    if not isinstance(artifacts, dict) or set(artifacts) != expected_artifacts:
+        raise CalibrationFreezeError("Release index artifact set is incomplete")
+    loaded = {}
+    for name in ("component_raw", "compact", "c4", "trajectory", "terminal"):
+        loaded[name] = _release_file(index_path, artifacts[name], name)
+    compact, c4, trajectory, terminal = (loaded[name] for name in ("compact", "c4", "trajectory", "terminal"))
+    _validate_compact_evidence(
+        compact,
+        artifacts["component_raw"]["sha256"],
+        artifacts["c4"]["sha256"],
+    )
+    config = compact.get("solver_internal_config")
+    acceptance = compact.get("acceptance")
+    if (
+        compact.get("calibration_status") != "FROZEN"
+        or compact.get("v01_status") != "DRAFT"
+        or compact.get("runtime_authority") is not True
+        or _config_failure(config, acceptance)
+    ):
+        raise CalibrationFreezeError("Compact calibration status or config is invalid")
+    c4_rows = c4.get("evidence", [])
+    c4_devices = {_release_device(row.get("device")): row for row in c4_rows}
+    if (
+        c4.get("status") != "FROZEN"
+        or set(c4_devices) != {"cpu", "cuda"}
+        or len(c4_rows) != 2
+        or any(
+            row.get("c4_gate") != "PASS"
+            or row.get("supported_local_motion_gate") != "PASS"
+            or row.get("support_envelope", {}).get("status") != "FROZEN"
+            for row in c4_rows
+        )
+    ):
+        raise CalibrationFreezeError("C4 release evidence is not an exact CPU/CUDA freeze")
+    normal_entries = artifacts["normal_loading"]
+    if not isinstance(normal_entries, dict) or set(normal_entries) != {"cpu", "cuda"}:
+        raise CalibrationFreezeError("Release normal-loading devices must be exactly CPU and CUDA")
+    normal = {}
+    for device, entries in normal_entries.items():
+        if not isinstance(entries, dict) or set(entries) != {"probe", "candidate", "legacy_default_baseline"}:
+            raise CalibrationFreezeError(f"Release normal-loading roles are incomplete on {device}")
+        normal[device] = {
+            role: _release_normal_run(index_path, entry, f"normal-loading {device}/{role}")
+            for role, entry in entries.items()
+        }
+        metadata = normal[device]["candidate"]["metadata"]
+        if (
+            metadata.get("newton_sha") != integration_sha
+            or metadata.get("calibration_status") != "FROZEN"
+            or metadata.get("calibration_sha256") != artifacts["compact"]["sha256"]
+            or metadata.get("support_status") != "FROZEN"
+            or metadata.get("support_sha256") != artifacts["c4"]["sha256"]
+            or metadata.get("solver_internal_config") != config
+        ):
+            raise CalibrationFreezeError(f"Release candidate provenance or config differs on {device}")
+    upstream = trajectory.get("upstream", {})
+    upstream_normal = upstream.get("normal_loading", {})
+    if (
+        trajectory.get("artifact_kind") != "trajectory_evidence"
+        or trajectory.get("profile") != "freeze"
+        or trajectory.get("validated_solver_internal_config") != config
+        or upstream.get("compact_calibration", {}).get("artifact_sha256") != artifacts["compact"]["sha256"]
+        or upstream.get("c4", {}).get("artifact_sha256") != artifacts["c4"]["sha256"]
+        or set(upstream_normal) != {"cpu", "cuda"}
+    ):
+        raise CalibrationFreezeError("Trajectory upstream does not bind the compact/C4 release")
+    for device in ("cpu", "cuda"):
+        values = upstream_normal[device]
+        if (
+            values.get("candidate_git_sha") != integration_sha
+            or values.get("probe_artifact_sha256") != normal_entries[device]["probe"]["sha256"]
+            or values.get("candidate_artifact_sha256") != normal_entries[device]["candidate"]["sha256"]
+            or values.get("legacy_default_baseline_artifact_sha256")
+            != normal_entries[device]["legacy_default_baseline"]["sha256"]
+        ):
+            raise CalibrationFreezeError(f"Trajectory normal-loading candidate hash differs on {device}")
+    roles = [(row.get("device"), row.get("role"), row.get("status")) for row in trajectory.get("evidence", [])]
+    expected_roles = [
+        (device, role, "PASS") for device in ("cpu", "cuda") for role in ("normal_loading_1000", "c4_supported_motion")
+    ]
+    if sorted(roles) != sorted(expected_roles):
+        raise CalibrationFreezeError("Trajectory CPU/CUDA roles are incomplete or duplicated")
+    if (
+        terminal.get("artifact_kind") != "calibration_freeze"
+        or terminal.get("calibration_status") != "FROZEN"
+        or terminal.get("v01_status") != "DRAFT"
+        or terminal.get("portable_solver_internal_config") != config
+        or any(
+            terminal.get(name)
+            for name in ("missing_case_keys", "missing_trajectory_keys", "failed_records", "artifact_failures")
+        )
+    ):
+        raise CalibrationFreezeError("Terminal calibration freeze status or config is invalid")
+    return {
+        "schema_version": "monolithic_calibration_release_verification/v1",
+        "status": "VERIFIED",
+        "release_index_sha256": hashlib.sha256(index_path.read_bytes()).hexdigest(),
+        "integration_git_sha": integration_sha,
+        "calibration_status": "FROZEN",
+        "v01_status": "DRAFT",
+        "artifact_sha256": {
+            name: artifacts[name]["sha256"] for name in ("component_raw", "compact", "c4", "trajectory", "terminal")
+        },
     }
 
 
@@ -1491,6 +1684,11 @@ def build_trajectory_evidence(
         raise CalibrationFreezeError("Compact calibration artifact is not valid JSON bytes") from error
     calibration_compact_sha256 = hashlib.sha256(calibration_compact_bytes).hexdigest()
     component = aggregate_calibration_evidence([calibration_raw])
+    _validate_compact_evidence(
+        calibration_compact,
+        hashlib.sha256((json.dumps(calibration_raw, indent=2, allow_nan=False) + "\n").encode()).hexdigest(),
+        c4_sha256,
+    )
     if component["missing_case_keys"] or component["failed_records"] or component["artifact_failures"]:
         raise CalibrationFreezeError("Calibration component artifact is not complete")
     source_files = calibration_raw["source_sha256"]
@@ -1624,7 +1822,13 @@ def build_trajectory_evidence(
         },
         "evidence": output,
     }
-    return _VerifiedTrajectoryEvidence(artifact, _verified_trajectory_seal(artifact))
+    verified = _VerifiedTrajectoryEvidence(artifact, object())
+    _VERIFIED_TRAJECTORY_REGISTRY[id(verified)] = (
+        verified,
+        verified.capability,
+        _hash_json(artifact),
+    )
+    return verified
 
 
 def _hash_json(value):
