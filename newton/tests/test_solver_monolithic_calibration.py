@@ -527,6 +527,10 @@ class TestCalibrationInputs(unittest.TestCase):
         runtime = json.loads(json.dumps(asdict(_SolverMonolithicInternalConfig())))
         self.assertEqual(runtime, frozen["solver_internal_config"])
         self.assertEqual(frozen["acceptance"]["force_detection_floor_n"], 1.2695789400826758e-05)
+        self.assertEqual(
+            set(frozen["evidence"]),
+            {"component_raw_sha256", "c4_support_sha256"},
+        )
         for digest in frozen["evidence"].values():
             self.assertEqual(len(digest), 64)
         normal = json.loads((path.parent / "normal_loading_v2.json").read_text())
@@ -538,6 +542,7 @@ class TestCalibrationInputs(unittest.TestCase):
             normal["support_provenance"]["sha256"],
             frozen["evidence"]["c4_support_sha256"],
         )
+
     def test_release_index_rehashes_complete_dag_and_rejects_tampering(self):
         """A release index binds bytes and canonical normal-run directories without downstream compact edges."""
 

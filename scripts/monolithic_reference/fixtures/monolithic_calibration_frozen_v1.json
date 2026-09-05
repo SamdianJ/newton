@@ -5,9 +5,7 @@
   "runtime_authority": true,
   "evidence": {
     "component_raw_sha256": "6901db5c7bec36e6060757b822357f5a66326c0e30077767a1aee218a3049c15",
-    "trajectory_sha256": "07d18701fb48063486cf00f6136333dbdac27941ad561109e82b0a7f2995ec88",
-    "c4_support_sha256": "98c396b05679cac651608ca9b2ed5ae7ce05cc2c500dcaf0fcfc6526cc37948f",
-    "calibration_freeze_sha256": "9b045167461cbf3d270ca2e7ed692703809f506fbfc843c1bd7adca97e311815"
+    "c4_support_sha256": "53000e3c374475902244a76c24c0f3d82561836ac9fb34c9045c92b34894dfe2"
   },
   "scope": {
     "component_cases": 52,
