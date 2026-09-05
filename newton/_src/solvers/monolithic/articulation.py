@@ -12,6 +12,25 @@ from ...sim import JointType, Model, State, eval_fk, eval_jacobian, eval_mass_ma
 from ...sim.inverse_dynamics import _compute_coriolis_force, _compute_gravity_force, _InverseDynamicsScratchBuffer
 
 
+def _validate_joint_coordinate_layout(model: Model) -> np.ndarray:
+    """Validate the complete supported joint prefix layout and return the DOF-to-coordinate map."""
+    types = model.joint_type.numpy()
+    if not np.isin(types, [JointType.FIXED, JointType.REVOLUTE, JointType.PRISMATIC]).all():
+        raise ValueError("Monolithic supports only FIXED, REVOLUTE and PRISMATIC joints")
+    moving = types != JointType.FIXED
+    expected = np.concatenate((np.zeros(1, dtype=np.int32), np.cumsum(moving, dtype=np.int32)))
+    if expected[-1] != model.joint_coord_count or expected[-1] != model.joint_dof_count:
+        raise ValueError("Invalid revolute/prismatic joint coordinate counts")
+    for name in ("joint_q_start", "joint_qd_start"):
+        starts = getattr(model, name)
+        if starts.dtype != wp.int32 or not np.array_equal(starts.numpy(), expected):
+            raise ValueError(f"Invalid joint coordinate prefix layout: {name}")
+    dimensions = np.stack((types == JointType.PRISMATIC, types == JointType.REVOLUTE), axis=1)
+    if not np.array_equal(model.joint_dof_dim.numpy(), dimensions):
+        raise ValueError("Invalid joint_dof_dim for FIXED/REVOLUTE/PRISMATIC joints")
+    return expected[:-1][moving]
+
+
 class MonolithicArticulationWorkspace:
     """Reuse passive dynamics scratch on one model and one execution stream.
 
@@ -150,9 +169,7 @@ class MonolithicArticulationWorkspace:
             or np.any(np.linalg.eigvalsh(inertia.astype(np.float64)) < 0.0)
         ):
             raise ValueError("Articulation body inertia must be finite, symmetric and positive semidefinite")
-        types = model.joint_type.numpy()
-        if not np.isin(types, [JointType.FIXED, JointType.REVOLUTE, JointType.PRISMATIC]).all():
-            raise ValueError("Monolithic supports only FIXED, REVOLUTE and PRISMATIC joints")
+        coord = _validate_joint_coordinate_layout(model)
         starts, ends = model.articulation_start.numpy(), model.articulation_end.numpy()
         if starts.tolist() != [0, model.joint_count] or ends.tolist() != [model.joint_count]:
             raise ValueError("Monolithic requires a tree without unowned joints or loop closures")
@@ -168,15 +185,6 @@ class MonolithicArticulationWorkspace:
             body_to_link[child] = link
         if roots != 1 or len(seen) != model.body_count:
             raise ValueError("Monolithic requires one world-anchored tree owning every body")
-        moving = types != JointType.FIXED
-        coord = model.joint_q_start.numpy()[:-1][moving]
-        dofs = model.joint_qd_start.numpy()[:-1][moving]
-        if (
-            len(coord) != model.joint_dof_count
-            or len(coord) != model.joint_coord_count
-            or not np.array_equal(dofs, np.arange(model.joint_dof_count))
-        ):
-            raise ValueError("Invalid revolute/prismatic joint coordinate layout")
         if not model.joint_enabled.numpy().all():
             raise ValueError("Monolithic requires enabled joints")
         if stream is not None and stream.device != model.device:
