@@ -341,6 +341,48 @@ def test_interior_radius_and_nonmanifold(test, device):
         MonolithicCollisionPipeline(model)
 
 
+def test_sdf_query_resources(test, device):
+    """Reject missing fine-grid resources while retaining valid coarse-only queries."""
+    model, state = _scene(device, shape="sphere")
+    descriptor, coarse, fine = create_texture_sdf_from_primitive(
+        newton.GeoType.SPHERE,
+        (0.03, 0.0, 0.0),
+        max_resolution=32,
+        device=device,
+    )
+    test.assertGreater(descriptor.num_subgrids, 0)
+    model.shape_type.assign([int(newton.GeoType.MESH)])
+    model._shape_sdf_index.assign([0])
+    model.shape_scale.assign([(1.0, 1.0, 1.0)])
+    model._texture_sdf_coarse_textures = [coarse]
+    null_texture = TextureSDFData().subgrid_texture
+    indirection = descriptor.subgrid_start_slots
+    for missing in ("fine_handle", "fine_owner", "fine_owner_mismatch", "empty_indirection"):
+        with test.subTest(missing=missing):
+            descriptor.subgrid_texture = null_texture if missing == "fine_handle" else fine
+            descriptor.subgrid_start_slots = (
+                wp.zeros((0, 0, 0), dtype=wp.uint32, device=device) if missing == "empty_indirection" else indirection
+            )
+            model._texture_sdf_subgrid_textures = [
+                None if missing == "fine_owner" else coarse if missing == "fine_owner_mismatch" else fine
+            ]
+            model._texture_sdf_data = wp.array([descriptor], dtype=TextureSDFData, device=device)
+            with test.assertRaisesRegex(ValueError, "INVALID_SDF_DESCRIPTOR"):
+                MonolithicCollisionPipeline(model)
+    # A coarse-only descriptor never dereferences the absent fine texture.
+    descriptor.num_subgrids = 0
+    descriptor.subgrid_texture = null_texture
+    descriptor.subgrid_start_slots = wp.full(indirection.shape, wp.uint32(0xFFFFFFFF), dtype=wp.uint32, device=device)
+    model._texture_sdf_subgrid_textures = [None]
+    model._texture_sdf_data = wp.array([descriptor], dtype=TextureSDFData, device=device)
+    pipeline = MonolithicCollisionPipeline(model, soft_contact_gap=0.1)
+    contacts = pipeline.contacts()
+    pipeline.collide(state, contacts)
+    test.assertEqual(int(contacts.soft_contact_count.numpy()[0]), 12)
+    test.assertEqual(int(contacts.contact_generation.numpy()[0]), 1)
+    np.testing.assert_allclose(np.linalg.norm(contacts.soft_contact_normal.numpy(), axis=1), 1.0, atol=2e-6)
+
+
 class TestMonolithicCollision(unittest.TestCase):
     """Exercise fixed quadrature collision on the available devices."""
 
@@ -358,6 +400,13 @@ for _test in [
     test_interior_radius_and_nonmanifold,
 ]:
     add_function_test(TestMonolithicCollision, _test.__name__, _test, devices=get_test_devices())
+
+add_function_test(
+    TestMonolithicCollision,
+    "test_sdf_query_resources",
+    test_sdf_query_resources,
+    devices=[device for device in get_test_devices() if device.is_cuda],
+)
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
