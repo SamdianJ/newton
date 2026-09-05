@@ -91,6 +91,7 @@ class TestCalibrationInputs(unittest.TestCase):
             "calibration_schema_version": 2,
             "profile": "freeze",
             "git_dirty": False,
+            "repeats": 100,
             "source_set_sha256": "b" * 64,
             "devices": ["cpu", "cuda"],
             "evidence": [record],
@@ -169,6 +170,7 @@ class TestCalibrationInputs(unittest.TestCase):
             "calibration_schema_version": 2,
             "profile": "freeze",
             "git_dirty": False,
+            "repeats": 100,
             "source_set_sha256": "b" * 64,
             "evidence": records,
         }

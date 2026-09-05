@@ -647,7 +647,7 @@ def aggregate_calibration_evidence(artifacts, *, freeze=False):
     """
     expected_cases = {_case_key(case): case for case in freeze_calibration_cases()}
     expected_keys = {(device, key) for device in ("cpu", "cuda") for key in expected_cases}
-    sources, records, seen, trajectory = set(), [], set(), set()
+    sources, records, seen, trajectory, artifact_failures = set(), [], set(), set(), []
     for artifact in artifacts:
         kind = artifact.get("artifact_kind")
         if kind not in ("raw_measurement", "trajectory_evidence") or artifact.get("calibration_schema_version") != 2:
@@ -658,6 +658,13 @@ def aggregate_calibration_evidence(artifacts, *, freeze=False):
         if len(source) != 64:
             raise CalibrationFreezeError("Missing source-set identity")
         sources.add(source)
+        if kind == "raw_measurement" and artifact.get("repeats", 0) < 100:
+            artifact_failures.append(
+                {
+                    "batch_index": artifact.get("batch_index"),
+                    "reason": f"repeats {artifact.get('repeats', 0)} is below freeze minimum 100",
+                }
+            )
         if kind == "trajectory_evidence":
             for row in artifact.get("evidence", []):
                 device = _device_class(row.get("device", artifact.get("device", "")))
@@ -718,7 +725,14 @@ def aggregate_calibration_evidence(artifacts, *, freeze=False):
     )
     per_device = _aggregate_parameters(records, coordinate["max_supported_abs_coordinate_m"])
     portable, portable_acceptance = _portable_config(per_device)
-    ready = not missing and not missing_trajectory and not failures and len(sources) == 1 and coordinate_ready
+    ready = (
+        not missing
+        and not missing_trajectory
+        and not failures
+        and not artifact_failures
+        and len(sources) == 1
+        and coordinate_ready
+    )
     if freeze and not ready:
         raise CalibrationFreezeError("Calibration evidence is incomplete or contains failed gates")
     return {
@@ -734,6 +748,7 @@ def aggregate_calibration_evidence(artifacts, *, freeze=False):
         "missing_case_keys": missing,
         "missing_trajectory_keys": missing_trajectory,
         "failed_records": failures,
+        "artifact_failures": artifact_failures,
         "candidate_private_config": per_device,
         "portable_solver_internal_config": portable,
         "portable_acceptance": portable_acceptance,

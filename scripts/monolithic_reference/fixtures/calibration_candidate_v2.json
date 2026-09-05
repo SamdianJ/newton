@@ -160,7 +160,7 @@
     "force_detection_floor_n": 4e-06
   },
   "open_gates": [
-    "complete freeze-profile raw matrix from one clean source set",
+    "complete freeze-profile raw matrix with at least 100 repeats from one clean source set",
     "all supported records pass finite-difference, reduction and linear gates",
     "trajectory evidence passes on CPU and CUDA",
     "10 m outside controls are present and excluded from support"
