@@ -551,6 +551,28 @@ class SolverMonolithic(SolverBase):
         triplet_capacity: int = 0
         owner_generation: int = -1
         preconditioner_kind: str = "none"
+        factor_setup_count: int = 0
+        """Total actual factor attempts across all current assemblies in this step."""
+        factor_failure_count: int = 0
+        """Total failed factor attempts across all current assemblies in this step."""
+        q_block_count: int = 0
+        """Number of articulation Cholesky blocks in the selected preconditioner."""
+        particle_block_count: int = 0
+        """Number of dynamic-particle 3x3 blocks in the selected preconditioner."""
+        warm_start: str | None = None
+        """Most recent solve's initial-guess mode; None when no solve started."""
+        initial_guess_norm: float = math.nan
+        """Measured scaled L2 initial-guess norm for the most recent solve."""
+        recursive_true_residual_gap: float = math.nan
+        """Most recent solve's maximum global scaled L2 recursive-minus-true gap."""
+        recursive_true_residual_gap_q: float = math.nan
+        """Most recent solve's maximum joint scaled L2 recursive-minus-true gap."""
+        recursive_true_residual_gap_x: float = math.nan
+        """Most recent solve's maximum particle scaled L2 recursive-minus-true gap."""
+        stagnation_window: int | None = None
+        """Most recent solve's configured window in true-residual checks."""
+        linear_scale_generation: int = -1
+        """Assembly sequence of the most recent solve, which can precede the current scale."""
         rho: float = math.nan
         """Normalized global scaled residual [dimensionless]; NaN when unmeasured."""
         rho_q: float = math.nan
@@ -780,6 +802,10 @@ class SolverMonolithic(SolverBase):
             "true_residual_recomputations": 0,
             "residual_replacements": 0,
             "preconditioner_kind": "actor_block",
+            "factor_setup_count": 0,
+            "factor_failure_count": 0,
+            "q_block_count": int(self._layout.q_dof_count > 0),
+            "particle_block_count": self._layout.dynamic_particle_count,
             "triplet_capacity": self._linear.capacities.global_scalar_triplet_count,
             "merit_noise": self._config.merit_noise,
             "residual_floor_global": self._config.residual_floor_global,
@@ -1127,9 +1153,13 @@ class SolverMonolithic(SolverBase):
                 self._metrics["lambda_value"] = lambda_value
                 try:
                     self._require_linear(self._linear.set_regularization(lambda_value, generation=self._generation))
-                    self._require_linear(
-                        self._linear.factor_actor_preconditioner(generation=self._generation, pivot_tolerance=0.0)
+                    setups, failures = self._linear.factor_setup_count, self._linear.factor_failure_count
+                    factor_status = self._linear.factor_actor_preconditioner(
+                        generation=self._generation, pivot_tolerance=0.0
                     )
+                    self._metrics["factor_setup_count"] += self._linear.factor_setup_count - setups
+                    self._metrics["factor_failure_count"] += self._linear.factor_failure_count - failures
+                    self._require_linear(factor_status)
                     result = self._linear.solve_pcg(
                         self._rhs_hat,
                         self._y,
@@ -1146,6 +1176,13 @@ class SolverMonolithic(SolverBase):
                         rho_x=result.rho_x,
                         min_p_ap=result.min_p_ap,
                         min_r_z=result.min_r_z,
+                        warm_start=result.warm_start.name.lower() if result.warm_start is not None else None,
+                        initial_guess_norm=result.initial_guess_norm,
+                        recursive_true_residual_gap=result.recursive_true_residual_gap[0],
+                        recursive_true_residual_gap_q=result.recursive_true_residual_gap[1],
+                        recursive_true_residual_gap_x=result.recursive_true_residual_gap[2],
+                        stagnation_window=result.stagnation_window,
+                        linear_scale_generation=result.generation.assembly_sequence,
                     )
                     self._require_linear(result.status)
                     self._require_linear(self._linear.recover_delta(self._y, self._delta, generation=self._generation))

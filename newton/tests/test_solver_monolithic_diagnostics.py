@@ -4,6 +4,7 @@
 """Verify measured nonlinear diagnostics against independently evaluated norms."""
 
 import unittest
+from unittest.mock import patch
 
 import numpy as np
 
@@ -69,11 +70,66 @@ def test_unmeasured_and_effective_settings(test, device):
     test.assertEqual(stats.residual_floor_x, solver._config.residual_floor_x)
 
 
+def test_linear_diagnostics_survive_final_assembly(test, device):
+    """Accumulate actual factor attempts across assemblies and reset solve diagnostics on the next step."""
+    fixture, solver = _free_scene(device, gravity=(0.0, 0.0, -9.81))
+    factor, solve = solver._linear.factor_actor_preconditioner, solver._linear.solve_pcg
+    counts, results = [], []
+
+    def measure_factor(*args, **kwargs):
+        before = (solver._linear.factor_setup_count, solver._linear.factor_failure_count)
+        result = factor(*args, **kwargs)
+        counts.append((solver._linear.factor_setup_count - before[0], solver._linear.factor_failure_count - before[1]))
+        return result
+
+    def measure_solve(*args, **kwargs):
+        result = solve(*args, **kwargs)
+        results.append(result)
+        return result
+
+    with (
+        patch.object(solver._linear, "factor_actor_preconditioner", side_effect=measure_factor),
+        patch.object(solver._linear, "solve_pcg", side_effect=measure_solve),
+    ):
+        solver.step(fixture.state, fixture.state_next, fixture.control, None, 0.001)
+    stats = solver.last_stats
+    test.assertGreater(len(results), 0)
+    test.assertEqual(stats.factor_setup_count, sum(value[0] for value in counts))
+    test.assertEqual(stats.factor_failure_count, sum(value[1] for value in counts))
+    test.assertEqual(solver._linear.factor_setup_count, 0)
+    test.assertEqual(stats.warm_start, "zero")
+    test.assertEqual(stats.initial_guess_norm, results[-1].initial_guess_norm)
+    test.assertEqual(stats.stagnation_window, results[-1].stagnation_window)
+    test.assertEqual(stats.linear_scale_generation, results[-1].generation.assembly_sequence)
+    test.assertLess(stats.linear_scale_generation, stats.scale_generation)
+    np.testing.assert_allclose(
+        [stats.recursive_true_residual_gap, stats.recursive_true_residual_gap_q, stats.recursive_true_residual_gap_x],
+        results[-1].recursive_true_residual_gap,
+        equal_nan=True,
+    )
+    test.assertEqual(stats.q_block_count, 1)
+    test.assertEqual(stats.particle_block_count, 4)
+    fixture.model.gravity.zero_()
+    solver.step(fixture.state, fixture.state_next, fixture.control, None, 0.001)
+    stats = solver.last_stats
+    test.assertEqual(stats.factor_setup_count, 0)
+    test.assertEqual(stats.factor_failure_count, 0)
+    test.assertIsNone(stats.warm_start)
+    test.assertIsNone(stats.stagnation_window)
+    test.assertTrue(np.isnan(stats.initial_guess_norm))
+    test.assertTrue(np.isnan(stats.recursive_true_residual_gap))
+    test.assertEqual(stats.linear_scale_generation, -1)
+
+
 class TestMonolithicDiagnostics(unittest.TestCase):
     """Exercise nonlinear diagnostics on CPU and CUDA."""
 
 
-for _test in (test_current_scale_diagnostics, test_unmeasured_and_effective_settings):
+for _test in (
+    test_current_scale_diagnostics,
+    test_unmeasured_and_effective_settings,
+    test_linear_diagnostics_survive_final_assembly,
+):
     add_function_test(TestMonolithicDiagnostics, _test.__name__, _test, devices=get_test_devices())
 
 

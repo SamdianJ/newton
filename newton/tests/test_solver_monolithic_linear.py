@@ -30,6 +30,7 @@ from newton._src.solvers.monolithic.linear import (
 )
 from newton.tests.monolithic_test_utils import build_tiny_cpu_fixture
 from newton.tests.unittest_utils import add_function_test, get_test_devices
+from scripts.monolithic_reference.profile_linear import _DiagonalInverse, profile_case
 
 
 @wp.kernel
@@ -941,12 +942,115 @@ def test_pcg_partial_overlap(test, device):
     np.testing.assert_array_equal(storage.numpy(), 1.0)
 
 
+def test_pcg_diagnostics(test, device):
+    """Report measured warm starts and recursive-to-true gaps without filling missing values."""
+    workspace, generation = _ready_system(device)
+    rhs, y = wp.ones(11, dtype=float, device=device), wp.zeros(11, dtype=float, device=device)
+    config = _pcg_config(true_residual_interval=2)
+    result = workspace.solve_pcg(rhs, y, generation=generation, warm_start=MonolithicPcgWarmStart.ZERO, config=config)
+    test.assertEqual(result.warm_start, MonolithicPcgWarmStart.ZERO)
+    test.assertEqual(result.initial_guess_norm, 0.0)
+    test.assertEqual(result.stagnation_window, 20)
+    test.assertTrue(np.isfinite(result.recursive_true_residual_gap).all())
+    initial_norm = np.linalg.norm(y.numpy().astype(np.float64))
+    result = workspace.solve_pcg(
+        rhs, y, generation=generation, warm_start=MonolithicPcgWarmStart.SAME_GENERATION, config=config
+    )
+    test.assertEqual(result.warm_start, MonolithicPcgWarmStart.SAME_GENERATION)
+    test.assertAlmostEqual(result.initial_guess_norm, initial_norm, places=5)
+    test.assertEqual(result.iterations, 0)
+    test.assertTrue(np.isnan(result.recursive_true_residual_gap).all())
+    invalid = workspace.solve_pcg(
+        rhs, rhs, generation=generation, warm_start=MonolithicPcgWarmStart.ZERO, config=config
+    )
+    test.assertIsNone(invalid.warm_start)
+    test.assertTrue(np.isnan(invalid.initial_guess_norm))
+    test.assertIsNone(invalid.stagnation_window)
+    # Inject a measurable recursive-residual drift and independently retain each actual gap.
+    products_of, true_residual = workspace._products_of, workspace._true_residual
+    injected, observed = [], []
+
+    def drift(a, b):
+        if a is workspace._r and b is workspace._r and not injected:
+            a.zero_()
+            injected.append(True)
+        products_of(a, b)
+
+    def capture(rhs_arg, y_arg, config_arg):
+        result = true_residual(rhs_arg, y_arg, config_arg)
+        if injected:
+            gap = (workspace._r.numpy() - workspace._true_r.numpy()).astype(np.float64)
+            observed.append([np.linalg.norm(block) for block in (gap, gap[:2], gap[2:])])
+        return result
+
+    with (
+        patch.object(workspace, "_products_of", side_effect=drift),
+        patch.object(workspace, "_true_residual", side_effect=capture),
+    ):
+        result = workspace.solve_pcg(
+            rhs, y, generation=generation, warm_start=MonolithicPcgWarmStart.ZERO, config=config
+        )
+    test.assertEqual(result.status, MonolithicLinearStatus.SUCCESS)
+    np.testing.assert_allclose(result.recursive_true_residual_gap, np.max(observed, axis=0), rtol=2e-6, atol=1e-10)
+    test.assertGreater(result.recursive_true_residual_gap[0], 0)
+
+
+def test_factor_diagnostics(test, device):
+    """Count actual factor attempts and failures within each assembly generation."""
+    workspace, generation = _ready_system(device)
+    test.assertEqual(workspace.factor_setup_count, 1)
+    test.assertEqual(workspace.factor_failure_count, 0)
+    test.assertEqual(workspace.factor_last_status, MonolithicLinearStatus.SUCCESS)
+    workspace.aq_actor_dense.fill_(-100.0)
+    workspace.factor_actor_preconditioner(generation=generation, pivot_tolerance=0.0)
+    test.assertEqual(workspace.factor_setup_count, 2)
+    test.assertEqual(workspace.factor_failure_count, 1)
+    test.assertEqual(workspace.factor_last_status, MonolithicLinearStatus.NON_POSITIVE_PIVOT)
+    workspace.factor_actor_preconditioner(generation=generation, pivot_tolerance=-1.0)
+    test.assertEqual(workspace.factor_setup_count, 2)
+    next_generation = MonolithicLinearGeneration(1, 1, 2, 2)
+    workspace.begin_assembly(next_generation)
+    test.assertEqual(workspace.factor_setup_count, 0)
+    test.assertEqual(workspace.factor_failure_count, 0)
+    test.assertIsNone(workspace.factor_last_status)
+
+
+def test_offline_diagonal_profile(test, device):
+    """Apply the offline inverse of the production diagonal and profile actual contact contributions."""
+
+    workspace, generation = _ready_system(device, heterogeneous=True)
+    workspace.set_regularization(0.03, generation=generation)
+    inverse = _DiagonalInverse(workspace)
+    inverse.setup()
+    vector = np.linspace(-1, 2, 11).astype(np.float32)
+    x, out = wp.array(vector, device=device), wp.zeros(11, dtype=float, device=device)
+    inverse.operator.matvec(x, out, out, 1.0, 0.0)
+    expected = vector / workspace.densify_for_test(generation=generation).scaled_matrix.diagonal()
+    np.testing.assert_allclose(out.numpy(), expected, rtol=2e-6, atol=1e-7)
+    report = profile_case(
+        device, active=True, dt=0.001, young_modulus=1e4, poisson_ratio=0.3, contact_stiffness=2e5, repeats=2
+    )
+    test.assertGreater(report["active_samples"], 0)
+    test.assertFalse(report["dense_oracle_used"])
+    test.assertIsNone(report["total_step_ms"])
+    test.assertIsNone(report["memory"]["peak_device_bytes"])
+    for method in report["methods"].values():
+        test.assertEqual(method["success_count"], 2)
+        test.assertEqual([sample["count"] for sample in method["solve_allocator_samples"]], [0, 0])
+        test.assertTrue(
+            all(max(result["rho"], result["rho_q"], result["rho_x"]) <= 1e-4 for result in method["results"])
+        )
+
+
 class TestMonolithicLinear(unittest.TestCase):
     """Exercise assembly independently on each available device."""
 
 
 for device in get_test_devices():
     for test_function in [
+        test_offline_diagonal_profile,
+        test_pcg_diagnostics,
+        test_factor_diagnostics,
         test_pcg_extreme_true_residuals,
         test_pcg_partial_overlap,
         test_pcg_recursive_drift,
