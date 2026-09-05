@@ -259,7 +259,7 @@ class TestCalibrationInputs(unittest.TestCase):
                     "worktree_dirty": False,
                     "input_sha256": "c" * 64,
                     "newton_sha": source["git_sha"],
-                    "solver_internal_config": config if config is not None else {"strict": True},
+                    "solver_internal_config": config if config is not None else {"legacy_default": True},
                     "requested_solver_internal_config": config,
                     "actual_parameters": {
                         "acceptance": {
@@ -335,19 +335,40 @@ class TestCalibrationInputs(unittest.TestCase):
                 for device in ("cpu", "cuda:0")
             ],
         }
+        c4_bytes = json.dumps(c4, sort_keys=True).encode()
+        compact_bytes = json.dumps(
+            {"calibration_status": "FROZEN", "solver_internal_config": final_config}, sort_keys=True
+        ).encode()
+        candidate_runs = [loading_run(device, config=final_config) for device in ("cpu", "cuda:0")]
+        for run in candidate_runs:
+            run["metadata"].update(
+                calibration_status="FROZEN",
+                calibration_sha256=hashlib.sha256(compact_bytes).hexdigest(),
+                support_status="FROZEN",
+                support_sha256=hashlib.sha256(c4_bytes).hexdigest(),
+            )
         producer = _committed_source_identity(["scripts/monolithic_reference/calibrate_components.py"])
         with patch(
             "scripts.monolithic_reference.calibrate_components._current_producer_identity",
             return_value=producer,
         ):
-            trajectories = build_trajectory_evidence(
+            verified = build_trajectory_evidence(
                 raw,
                 probe_runs,
-                [loading_run(device, config=final_config) for device in ("cpu", "cuda:0")],
+                candidate_runs,
                 [loading_run(device, config=None) for device in ("cpu", "cuda:0")],
-                json.dumps(c4, sort_keys=True).encode(),
+                c4_bytes,
+                compact_bytes,
             )
-        result = aggregate_calibration_evidence([raw, trajectories], freeze=True)
+        result = aggregate_calibration_evidence([raw], freeze=True, verified_trajectory=verified)
+        self.assertEqual(
+            verified.audit_artifact["upstream"]["compact_calibration"]["artifact_sha256"],
+            candidate_runs[0]["metadata"]["calibration_sha256"],
+        )
+        self.assertEqual(
+            verified.audit_artifact["upstream"]["c4"]["artifact_sha256"],
+            candidate_runs[0]["metadata"]["support_sha256"],
+        )
         self.assertEqual(result["calibration_status"], "FROZEN")
         self.assertEqual(result["v01_status"], "DRAFT")
         coordinate = result["exact_fixture_translation_offset_evidence"]
@@ -363,10 +384,38 @@ class TestCalibrationInputs(unittest.TestCase):
         tampered = copy.deepcopy(raw)
         for fd_record in tampered["evidence"][0]["finite_difference"]["tet"]["records"]:
             fd_record["energy_gradient"]["relative_error"] = 1.0
-        rejected = aggregate_calibration_evidence([tampered, trajectories])
+        rejected = aggregate_calibration_evidence([tampered], verified_trajectory=verified)
         self.assertTrue(rejected["failed_records"])
         with self.assertRaises(CalibrationFreezeError):
-            aggregate_calibration_evidence([tampered, trajectories], freeze=True)
+            aggregate_calibration_evidence([tampered], freeze=True, verified_trajectory=verified)
+
+        audit_only = copy.deepcopy(verified.audit_artifact)
+        audit_only["upstream"]["normal_loading"]["cpu"]["candidate_artifact_sha256"] = "0" * 64
+        normal_row = next(
+            row for row in audit_only["evidence"] if row["device"] == "cpu" and row["role"] == "normal_loading_1000"
+        )
+        normal_row["candidate_artifact_sha256"] = "0" * 64
+        audit_result = aggregate_calibration_evidence([raw, audit_only])
+        self.assertEqual(audit_result["calibration_status"], "INCOMPLETE")
+        with self.assertRaisesRegex(CalibrationFreezeError, "audit-only"):
+            aggregate_calibration_evidence([raw, audit_only], freeze=True)
+
+        for field in ("calibration_sha256", "support_sha256"):
+            wrong_provenance = copy.deepcopy(candidate_runs)
+            wrong_provenance[0]["metadata"][field] = "0" * 64
+            with patch(
+                "scripts.monolithic_reference.calibrate_components._current_producer_identity",
+                return_value=producer,
+            ):
+                with self.assertRaisesRegex(CalibrationFreezeError, "provenance hash differs"):
+                    build_trajectory_evidence(
+                        raw,
+                        probe_runs,
+                        wrong_provenance,
+                        [loading_run(device, config=None) for device in ("cpu", "cuda:0")],
+                        c4_bytes,
+                        compact_bytes,
+                    )
 
         wrong_source = copy.deepcopy(raw)
         wrong_source["source_sha256"]["newton/_src/solvers/monolithic/contact.py"] = "d" * 64
@@ -380,7 +429,7 @@ class TestCalibrationInputs(unittest.TestCase):
         self.assertTrue(rejected["failed_records"])
         self.assertTrue(rejected["artifact_failures"])
 
-        no_pcg = [loading_run(device, config=final_config) for device in ("cpu", "cuda:0")]
+        no_pcg = copy.deepcopy(candidate_runs)
         for run in no_pcg:
             for record in run["records"]:
                 record["linear_iterations"] = 0
@@ -395,7 +444,8 @@ class TestCalibrationInputs(unittest.TestCase):
                     probe_runs,
                     no_pcg,
                     [loading_run(device, config=None) for device in ("cpu", "cuda:0")],
-                    json.dumps(c4, sort_keys=True).encode(),
+                    c4_bytes,
+                    compact_bytes,
                 )
 
     def test_versioned_candidate_is_not_runtime_authority(self):

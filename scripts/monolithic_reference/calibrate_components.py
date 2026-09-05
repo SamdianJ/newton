@@ -300,9 +300,17 @@ def main():
     parser.add_argument("--aggregate", type=Path, nargs="+", help="Aggregate version-2 raw freeze batches")
     parser.add_argument("--trajectory-candidate", type=Path, nargs="+", help="Candidate normal-loading run directories")
     parser.add_argument("--trajectory-probe", type=Path, nargs="+", help="Unadjusted calibration candidate runs")
-    parser.add_argument("--trajectory-strict", type=Path, nargs="+", help="Strict-baseline normal-loading directories")
+    parser.add_argument(
+        "--trajectory-legacy-default-baseline",
+        "--trajectory-strict",
+        dest="trajectory_baseline",
+        type=Path,
+        nargs="+",
+        help="Legacy-default normal-loading baseline directories",
+    )
     parser.add_argument("--trajectory-c4", type=Path, help="Frozen C4 support artifact")
     parser.add_argument("--trajectory-calibration-raw", type=Path, help="Complete raw calibration artifact")
+    parser.add_argument("--trajectory-calibration-compact", type=Path, help="Versioned compact calibration artifact")
     parser.add_argument(
         "--freeze", action="store_true", help="Require complete passing evidence and freeze calibration"
     )
@@ -313,22 +321,30 @@ def main():
     trajectory_arguments = (
         args.trajectory_candidate,
         args.trajectory_probe,
-        args.trajectory_strict,
+        args.trajectory_baseline,
         args.trajectory_c4,
         args.trajectory_calibration_raw,
+        args.trajectory_calibration_compact,
     )
     if any(value is not None for value in trajectory_arguments):
         if args.matrix or args.aggregate or not all(value is not None for value in trajectory_arguments):
             parser.error(
-                "trajectory evidence production requires candidate, strict, C4 and calibration raw inputs only"
+                "trajectory evidence requires probe, candidate, legacy-default baseline, C4 and calibration raw inputs"
             )
         c4_bytes = args.trajectory_c4.read_bytes()
-        payload = build_trajectory_evidence(
-            json.loads(args.trajectory_calibration_raw.read_text()),
+        calibration_raw = json.loads(args.trajectory_calibration_raw.read_text())
+        verified = build_trajectory_evidence(
+            calibration_raw,
             [_load_normal_run(path) for path in args.trajectory_probe],
             [_load_normal_run(path) for path in args.trajectory_candidate],
-            [_load_normal_run(path) for path in args.trajectory_strict],
+            [_load_normal_run(path) for path in args.trajectory_baseline],
             c4_bytes,
+            args.trajectory_calibration_compact.read_bytes(),
+        )
+        payload = (
+            aggregate_calibration_evidence([calibration_raw], freeze=True, verified_trajectory=verified)
+            if args.freeze
+            else verified.audit_artifact
         )
         args.output.parent.mkdir(parents=True, exist_ok=True)
         args.output.write_text(json.dumps(payload, indent=2, allow_nan=False) + "\n")
@@ -343,7 +359,7 @@ def main():
         args.output.write_text(json.dumps(payload, indent=2, allow_nan=False) + "\n")
         return
     if args.freeze:
-        parser.error("--freeze requires --aggregate")
+        parser.error("--freeze requires --aggregate or the complete trajectory input set")
     if args.matrix:
         if args.batch_count <= 0 or not 0 <= args.batch_index < args.batch_count:
             parser.error("batch-count must be positive and batch-index must select an existing batch")
@@ -534,6 +550,21 @@ def freeze_calibration_cases():
 
 class CalibrationFreezeError(ValueError):
     """Raised when an artifact violates the fail-closed freeze contract."""
+
+
+_VERIFICATION_NONCE = object()
+
+
+@dataclass(frozen=True, slots=True)
+class _VerifiedTrajectoryEvidence:
+    """In-process authority returned only after re-reading every upstream artifact."""
+
+    audit_artifact: dict
+    seal: tuple[int, str]
+
+
+def _verified_trajectory_seal(artifact):
+    return id(_VERIFICATION_NONCE), _hash_json(artifact)
 
 
 def _device_class(name):
@@ -982,12 +1013,21 @@ def _production_source_failure(reference_sources, git_sha, candidate_sources=Non
     return None
 
 
-def aggregate_calibration_evidence(artifacts, *, freeze=False):
+def aggregate_calibration_evidence(artifacts, *, freeze=False, verified_trajectory=None):
     """Aggregate raw batches and optionally freeze the calibration sub-state.
 
     This validates evidence completeness and identity.  It deliberately leaves
     ``v01_status`` as DRAFT because reference/E2E acceptance is a separate gate.
     """
+    if verified_trajectory is not None and (
+        type(verified_trajectory) is not _VerifiedTrajectoryEvidence
+        or verified_trajectory.seal != _verified_trajectory_seal(verified_trajectory.audit_artifact)
+    ):
+        raise CalibrationFreezeError("verified_trajectory must be an intact in-process verified result")
+    authoritative_trajectory = None if verified_trajectory is None else verified_trajectory.audit_artifact
+    if freeze and any(artifact.get("artifact_kind") == "trajectory_evidence" for artifact in artifacts):
+        raise CalibrationFreezeError("Serialized trajectory JSON is audit-only and cannot authorize freeze")
+    artifacts = [*artifacts] + ([] if authoritative_trajectory is None else [authoritative_trajectory])
     expected_cases = {_case_key(case): case for case in freeze_calibration_cases()}
     expected_keys = {(device, key) for device in ("cpu", "cuda") for key in expected_cases}
     measurement_sources, trajectory_sources = set(), set()
@@ -1007,6 +1047,11 @@ def aggregate_calibration_evidence(artifacts, *, freeze=False):
             measurement_sources.add(source)
             measurement_git_shas.add(artifact["git_sha"])
         else:
+            if artifact is not authoritative_trajectory:
+                artifact_failures.append(
+                    {"batch_index": None, "reason": "serialized trajectory evidence is audit-only"}
+                )
+                continue
             trajectory_sources.add(source)
             if set(artifact["source_sha256"]) != {"scripts/monolithic_reference/calibrate_components.py"}:
                 raise CalibrationFreezeError("Trajectory evidence has an unexpected producer source set")
@@ -1016,13 +1061,21 @@ def aggregate_calibration_evidence(artifacts, *, freeze=False):
             trajectory_measurement_sources.add(measurement_source)
             trajectory_measurement_git_shas.add(artifact.get("measurement_git_sha", ""))
             upstream = artifact.get("upstream", {})
+            compact_upstream = upstream.get("compact_calibration", {})
             normal_upstream = upstream.get("normal_loading", {})
             c4_upstream = upstream.get("c4", {})
-            if set(normal_upstream) != {"cpu", "cuda"} or set(c4_upstream) != {
-                "git_sha",
-                "source_set_sha256",
-                "artifact_sha256",
-            }:
+            if (
+                set(upstream) != {"compact_calibration", "normal_loading", "c4"}
+                or set(compact_upstream) != {"artifact_sha256"}
+                or len(compact_upstream.get("artifact_sha256", "")) != 64
+                or set(normal_upstream) != {"cpu", "cuda"}
+                or set(c4_upstream)
+                != {
+                    "git_sha",
+                    "source_set_sha256",
+                    "artifact_sha256",
+                }
+            ):
                 raise CalibrationFreezeError("Trajectory upstream provenance is incomplete")
             validated_config = artifact.get("validated_solver_internal_config")
             derivation = artifact.get("trajectory_config_derivation", {})
@@ -1065,15 +1118,15 @@ def aggregate_calibration_evidence(artifacts, *, freeze=False):
                     or set(row["representative_states"]) != {"free", "onset", "loading", "peak", "settled"}
                     or any(not isinstance(index, int) or index < 0 for index in row["representative_states"].values())
                     or len(row.get("candidate_artifact_sha256", "")) != 64
-                    or len(row.get("strict_artifact_sha256", "")) != 64
-                    or not _finite_array(list(row.get("candidate_vs_strict_relative_errors", {}).values()))
-                    or max(row["candidate_vs_strict_relative_errors"].values(), default=math.inf) > 0.05
-                    or row.get("candidate_vs_strict_baseline") != "PASS"
+                    or len(row.get("legacy_default_baseline_artifact_sha256", "")) != 64
+                    or not _finite_array(list(row.get("candidate_vs_legacy_default_relative_errors", {}).values()))
+                    or max(row["candidate_vs_legacy_default_relative_errors"].values(), default=math.inf) > 0.05
+                    or row.get("candidate_vs_legacy_default_baseline") != "PASS"
                     or row.get("false_convergence_count") != 0
                     or row.get("candidate_artifact_sha256")
                     != normal_upstream.get(device, {}).get("candidate_artifact_sha256")
-                    or row.get("strict_artifact_sha256")
-                    != normal_upstream.get(device, {}).get("strict_artifact_sha256")
+                    or row.get("legacy_default_baseline_artifact_sha256")
+                    != normal_upstream.get(device, {}).get("legacy_default_baseline_artifact_sha256")
                     or row.get("probe_artifact_sha256") != normal_upstream.get(device, {}).get("probe_artifact_sha256")
                     or row.get("probe_failed_final_merit_q_max")
                     != normal_upstream.get(device, {}).get("probe_failed_final_merit_q_max")
@@ -1250,24 +1303,44 @@ def _normal_loading_failure(run):
     return None
 
 
-def _normal_loading_role(candidate, strict, portable_config, reference_sources, probe):
-    cm, sm = candidate["metadata"], strict["metadata"]
+def _normal_fixture_physics_sha(metadata):
+    fixture = dict(metadata.get("actual_parameters", {}))
+    fixture.pop("acceptance", None)
+    for name in (
+        "calibration_status",
+        "support_status",
+        "reference_status",
+        "calibration_provenance",
+        "support_provenance",
+        "reference_provenance",
+    ):
+        fixture.pop(name, None)
+    return _hash_json(fixture)
+
+
+def _normal_loading_role(candidate, baseline, portable_config, reference_sources, probe):
+    cm, bm = candidate["metadata"], baseline["metadata"]
     device = _device_class(cm.get("device"))
-    if _device_class(sm.get("device")) != device:
-        raise CalibrationFreezeError("Candidate/strict normal-loading devices differ")
-    if any(metadata.get("worktree_dirty") is not False for metadata in (cm, sm)):
+    if _device_class(bm.get("device")) != device:
+        raise CalibrationFreezeError("Candidate/baseline normal-loading devices differ")
+    if any(metadata.get("worktree_dirty") is not False for metadata in (cm, bm)):
         raise CalibrationFreezeError(f"Normal-loading evidence is dirty on {device}")
-    if cm.get("input_sha256") != sm.get("input_sha256") or len(cm.get("input_sha256", "")) != 64:
-        raise CalibrationFreezeError(f"Candidate/strict normal-loading fixtures differ on {device}")
+    if _normal_fixture_physics_sha(cm) != _normal_fixture_physics_sha(bm):
+        raise CalibrationFreezeError(f"Candidate/baseline normal-loading physics fixtures differ on {device}")
     if (
-        cm.get("requested_solver_internal_config") != portable_config
+        cm.get("requested_solver_internal_config") not in (None, portable_config)
         or cm.get("solver_internal_config") != portable_config
     ):
-        raise CalibrationFreezeError(f"Candidate config was not explicitly applied on {device}")
-    if sm.get("requested_solver_internal_config") is not None:
-        raise CalibrationFreezeError(f"Strict baseline unexpectedly applied a candidate config on {device}")
-    for run in (candidate, strict):
-        source_error = _production_source_failure(reference_sources, run["metadata"].get("newton_sha", ""))
+        raise CalibrationFreezeError(f"Candidate did not use the validated config on {device}")
+    if bm.get("requested_solver_internal_config") is not None:
+        raise CalibrationFreezeError(f"Legacy default baseline unexpectedly applied a candidate config on {device}")
+    for run, ignored_paths in (
+        (candidate, {"newton/_src/solvers/monolithic/solver_monolithic.py"}),
+        (baseline, ()),
+    ):
+        source_error = _production_source_failure(
+            reference_sources, run["metadata"].get("newton_sha", ""), ignored_paths=ignored_paths
+        )
         if source_error:
             raise CalibrationFreezeError(f"{source_error} on {device}")
         numerical_error = _normal_loading_failure(run)
@@ -1276,13 +1349,13 @@ def _normal_loading_role(candidate, strict, portable_config, reference_sources, 
     metrics = ("peak_force_n", "settled_force_n", "secant_stiffness_n_m", "curve_work_j")
     parity = {}
     for name in metrics:
-        actual, reference = candidate["summary"].get(name), strict["summary"].get(name)
+        actual, reference = candidate["summary"].get(name), baseline["summary"].get(name)
         if not _finite_array([actual, reference], shape=(2,)):
             raise CalibrationFreezeError(f"Normal-loading parity metric {name} is missing on {device}")
         error = abs(actual - reference) / max(abs(actual), abs(reference), 1e-12)
         parity[name] = error
     if max(parity.values()) > 0.05:
-        raise CalibrationFreezeError(f"Candidate/strict normal-loading parity exceeds 5% on {device}")
+        raise CalibrationFreezeError(f"Candidate/legacy-default parity exceeds 5% on {device}")
     records = candidate["records"]
     onset = candidate["summary"]["contact_onset_step"]
     if onset is None:
@@ -1303,14 +1376,14 @@ def _normal_loading_role(candidate, strict, portable_config, reference_sources, 
         "status": "PASS",
         "fixture_sha256": cm["input_sha256"],
         "candidate_artifact_sha256": candidate["artifact_sha256"],
-        "strict_artifact_sha256": strict["artifact_sha256"],
+        "legacy_default_baseline_artifact_sha256": baseline["artifact_sha256"],
         "probe_artifact_sha256": probe["artifact_sha256"],
         "probe_failed_final_merit_q_max": probe["failed_final_merit_q_max"],
         "finite_state": True,
         "convergence_gate": "PASS",
         "representative_states": indices,
-        "candidate_vs_strict_baseline": "PASS",
-        "candidate_vs_strict_relative_errors": parity,
+        "candidate_vs_legacy_default_baseline": "PASS",
+        "candidate_vs_legacy_default_relative_errors": parity,
         "false_convergence_count": 0,
     }
 
@@ -1398,13 +1471,25 @@ def _current_producer_identity():
     }
 
 
-def build_trajectory_evidence(calibration_raw, probe_runs, candidate_runs, strict_runs, c4_artifact_bytes):
+def build_trajectory_evidence(
+    calibration_raw,
+    probe_runs,
+    candidate_runs,
+    baseline_runs,
+    c4_artifact_bytes,
+    calibration_compact_bytes,
+):
     """Derive trajectory roles from actual normal-loading and C4 artifacts."""
     try:
         c4_artifact = json.loads(c4_artifact_bytes)
     except (TypeError, ValueError, json.JSONDecodeError) as error:
         raise CalibrationFreezeError("C4 artifact is not valid JSON bytes") from error
     c4_sha256 = hashlib.sha256(c4_artifact_bytes).hexdigest()
+    try:
+        calibration_compact = json.loads(calibration_compact_bytes)
+    except (TypeError, ValueError, json.JSONDecodeError) as error:
+        raise CalibrationFreezeError("Compact calibration artifact is not valid JSON bytes") from error
+    calibration_compact_sha256 = hashlib.sha256(calibration_compact_bytes).hexdigest()
     component = aggregate_calibration_evidence([calibration_raw])
     if component["missing_case_keys"] or component["failed_records"] or component["artifact_failures"]:
         raise CalibrationFreezeError("Calibration component artifact is not complete")
@@ -1437,13 +1522,13 @@ def build_trajectory_evidence(calibration_raw, probe_runs, candidate_runs, stric
         probe_runs, component["component_portable_solver_internal_config"], source_files
     )
     candidates = {_device_class(run["metadata"].get("device")): run for run in candidate_runs}
-    strict = {_device_class(run["metadata"].get("device")): run for run in strict_runs}
+    baseline = {_device_class(run["metadata"].get("device")): run for run in baseline_runs}
     if (
         len(candidate_runs) != 2
-        or len(strict_runs) != 2
+        or len(baseline_runs) != 2
         or len(c4_artifact.get("evidence", [])) != 2
         or set(candidates) != {"cpu", "cuda"}
-        or set(strict) != {"cpu", "cuda"}
+        or set(baseline) != {"cpu", "cuda"}
         or set(c4_rows) != {"cpu", "cuda"}
     ):
         raise CalibrationFreezeError("Trajectory producer requires exactly one CPU and CUDA artifact per role")
@@ -1452,6 +1537,20 @@ def build_trajectory_evidence(calibration_raw, probe_runs, candidate_runs, stric
         raise CalibrationFreezeError("CPU/CUDA trajectory candidates used different solver configs")
     if candidate_configs[0] != candidate_config:
         raise CalibrationFreezeError("Final candidate does not equal the config derived from failed probes")
+    if (
+        calibration_compact.get("calibration_status") != "FROZEN"
+        or calibration_compact.get("solver_internal_config") != candidate_config
+    ):
+        raise CalibrationFreezeError("Compact calibration artifact does not contain the validated config")
+    for device in ("cpu", "cuda"):
+        metadata = candidates[device]["metadata"]
+        if (
+            metadata.get("calibration_status") != "FROZEN"
+            or metadata.get("calibration_sha256") != calibration_compact_sha256
+            or metadata.get("support_status") != "FROZEN"
+            or metadata.get("support_sha256") != c4_sha256
+        ):
+            raise CalibrationFreezeError(f"Candidate fixture provenance hash differs on {device}")
     config_error = _trajectory_config_failure(
         candidate_config,
         component["component_portable_solver_internal_config"],
@@ -1463,7 +1562,7 @@ def build_trajectory_evidence(calibration_raw, probe_runs, candidate_runs, stric
     for device in ("cpu", "cuda"):
         output.append(
             _normal_loading_role(
-                candidates[device], strict[device], candidate_config, source_files, probe_provenance[device]
+                candidates[device], baseline[device], candidate_config, source_files, probe_provenance[device]
             )
         )
         c4 = c4_rows[device]
@@ -1488,7 +1587,7 @@ def build_trajectory_evidence(calibration_raw, probe_runs, candidate_runs, stric
             }
         )
     producer = _current_producer_identity()
-    return {
+    artifact = {
         "artifact_kind": "trajectory_evidence",
         "calibration_schema_version": 2,
         "profile": "freeze",
@@ -1504,6 +1603,7 @@ def build_trajectory_evidence(calibration_raw, probe_runs, candidate_runs, stric
             "result": candidate_config["merit_absolute_q"],
         },
         "upstream": {
+            "compact_calibration": {"artifact_sha256": calibration_compact_sha256},
             "normal_loading": {
                 device: {
                     "probe_git_sha": probe_provenance[device]["git_sha"],
@@ -1511,8 +1611,8 @@ def build_trajectory_evidence(calibration_raw, probe_runs, candidate_runs, stric
                     "probe_failed_final_merit_q_max": probe_provenance[device]["failed_final_merit_q_max"],
                     "candidate_git_sha": candidates[device]["metadata"]["newton_sha"],
                     "candidate_artifact_sha256": candidates[device]["artifact_sha256"],
-                    "strict_git_sha": strict[device]["metadata"]["newton_sha"],
-                    "strict_artifact_sha256": strict[device]["artifact_sha256"],
+                    "legacy_default_baseline_git_sha": baseline[device]["metadata"]["newton_sha"],
+                    "legacy_default_baseline_artifact_sha256": baseline[device]["artifact_sha256"],
                 }
                 for device in ("cpu", "cuda")
             },
@@ -1524,6 +1624,7 @@ def build_trajectory_evidence(calibration_raw, probe_runs, candidate_runs, stric
         },
         "evidence": output,
     }
+    return _VerifiedTrajectoryEvidence(artifact, _verified_trajectory_seal(artifact))
 
 
 def _hash_json(value):

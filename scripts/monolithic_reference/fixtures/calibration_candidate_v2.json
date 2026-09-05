@@ -7,8 +7,8 @@
   "source_evidence": {
     "artifact": "agents/tet/artifacts/c23/components_freeze_raw_r100.json",
     "sha256": "6901db5c7bec36e6060757b822357f5a66326c0e30077767a1aee218a3049c15",
-    "strict_aggregate_artifact": "agents/tet/artifacts/c23/calibration_candidate_r100_strict.json",
-    "strict_aggregate_sha256": "a96284864408fee6b4e94f3b15e5a882b0030b1f989ed905a969a1c0d2fc33df",
+    "validated_aggregate_artifact": "agents/tet/artifacts/c23/calibration_candidate_r100_strict.json",
+    "validated_aggregate_sha256": "a96284864408fee6b4e94f3b15e5a882b0030b1f989ed905a969a1c0d2fc33df",
     "measurement_git_sha": "efa12a2f6e621a01e33ccd501b82d718b8d70860",
     "measurement_source_set_sha256": "417221c7a6bf921cc1f85dd3bc997015d636bc111d8f9cc201b045b53dedb32a",
     "normal_loading_probe_artifacts": [
@@ -31,7 +31,7 @@
         "sha256": "281e2cbbabb0b76e76db9d518636351016342b7adbee45ee16100f0955bf356c"
       }
     ],
-    "normal_loading_strict_artifacts": [
+    "normal_loading_legacy_default_baseline_artifacts": [
       {
         "path": "agents/integration/artifacts/freeze-v1/strict-cpu",
         "sha256": "909da579eefbf6c6fbd9a2e4d398efb3fddcffc4afe56236d40bcaf204f440bc"
@@ -215,6 +215,6 @@
     "all core records pass finite-difference, reduction and dense true-residual cancellation gates; runtime PCG is not measured here",
     "exact fixture CPU/CUDA common translation-offset prefix is 2 m; first failure is CPU mixed contact FD at 5 m",
     "10 m controls are measured but excluded from support policy",
-    "normal-loading failed probes isolate q merit; adjusted CPU/CUDA candidate and old strict baseline pass 1000 steps with runtime PCG"
+    "normal-loading failed probes isolate q merit; adjusted CPU/CUDA candidate and legacy-default baseline pass 1000 steps with runtime PCG"
   ]
 }
