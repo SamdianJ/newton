@@ -49,7 +49,7 @@ class ContactIntegral:
     consistent_nodal_forces: np.ndarray
     energy: float
     active_area: float
-    maximum_penetration: float
+    adaptive_sample_maximum_penetration: float
     force_magnitude_absolute_error: float
     force_resultant_absolute_error: np.ndarray
     moment_resultant_absolute_error: np.ndarray
@@ -244,7 +244,7 @@ def integrate_contact_over_mesh(
         moment_resultant=stiffness * total[5:8],
         consistent_nodal_forces=stiffness * nodal_forces,
         active_area=float(total[17]),
-        maximum_penetration=maximum_penetration,
+        adaptive_sample_maximum_penetration=maximum_penetration,
         force_magnitude_absolute_error=float(stiffness * error[0]),
         force_resultant_absolute_error=stiffness * error[1:4],
         energy_absolute_error=float(stiffness * error[4]),

@@ -41,7 +41,13 @@ _CASES = (
     *_WIDE_CASES,
 )
 _SUPPORT_ENVELOPE_ID = "p1q3-resolved-local-v1"
-_SUPPORT_CLASSES = {"affine_full_face", "resolved_curved_shared_feature", "resolved_inter_sample_feature"}
+_SUPPORTED_FIXTURE_IDS = {
+    "plane_uniform_face_l012_v1",
+    "broad_box_full_face_l012_v1",
+    "shared_edge_r30_l234_v1",
+    "shared_vertex_r30_l234_v1",
+    "sample_between_box_w10_l234_v1",
+}
 
 
 def refined_tetrahedron(level: int, *, length: float = _LENGTH) -> tuple[np.ndarray, np.ndarray]:
@@ -106,6 +112,7 @@ def _build_scene(device, level, case):
     if case == "plane":
         center, feature_width = (0.0, 0.0, 0.001), None
         shape_kind, support_class = "plane", "affine_full_face"
+        support_fixture_id = "plane_uniform_face_l012_v1"
         builder.add_shape_plane(
             body=body, width=0.0, length=0.0, xform=wp.transform(center, wp.quat_identity()), cfg=cfg
         )
@@ -115,11 +122,13 @@ def _build_scene(device, level, case):
             sphere_radius = int(radius_mm) / 1000.0
             penetration = 0.008
             support_class = "curved_local_patch"
+            support_fixture_id = None
         else:
             _, location = case.split("_")
             sphere_radius = 0.03
             penetration = 0.008
             support_class = "resolved_curved_shared_feature"
+            support_fixture_id = f"shared_{location}_r30_l234_v1"
         direction = np.array([0.0, -1.0, -1.0]) if location == "edge" else np.array([-1.0, -1.0, -1.0])
         anchor = np.array([length / 2, 0, 0]) if location == "edge" else np.zeros(3)
         center = tuple(anchor + direction / np.linalg.norm(direction) * (sphere_radius + _RADIUS - penetration))
@@ -135,6 +144,7 @@ def _build_scene(device, level, case):
         center = (length / 2, -0.004, -0.004) if case == "shared_edge" else (-0.004, -0.004, -0.004)
         feature_width = 0.016
         shape_kind, support_class = "sphere", "curved_local_patch"
+        support_fixture_id = None
         builder.add_shape_sphere(
             body=body, radius=feature_width / 2, xform=wp.transform(center, wp.quat_identity()), cfg=cfg
         )
@@ -148,6 +158,13 @@ def _build_scene(device, level, case):
             else "resolved_inter_sample_feature"
             if case == "resolved_sharp_box"
             else "affine_full_face"
+        )
+        support_fixture_id = (
+            None
+            if case == "sharp_box"
+            else "sample_between_box_w10_l234_v1"
+            if case == "resolved_sharp_box"
+            else "broad_box_full_face_l012_v1"
         )
         builder.add_shape_box(
             body=body,
@@ -220,6 +237,7 @@ def _build_scene(device, level, case):
         "nominal_initial_penetration_m": penetration if case.startswith(("wide_", "supported_")) else None,
         "support_envelope_id": _SUPPORT_ENVELOPE_ID,
         "declared_support_class": support_class,
+        "support_fixture_id": support_fixture_id,
         "fixed_mask": fixed.tolist(),
         "fixed_rule": f"reference x+y+z={length} m",
         "soft_contact_gap_m": 0.0002,
@@ -253,7 +271,7 @@ def _build_scene(device, level, case):
         name: getattr(solver, name)
         for name in ("newton_max_iterations", "line_search_max_iterations", "linear_max_iterations", "linear_tolerance")
     }
-    manifest["draft_internal_solver_parameters"] = asdict(solver._config)
+    manifest["solver_internal_config"] = asdict(solver._config)
     faces = model.tri_indices.numpy()
     manifest["maximum_boundary_edge_m"] = float(
         max(np.linalg.norm(points[face[i]] - points[face[j]]) for face in faces for i, j in ((0, 1), (1, 2), (2, 0)))
@@ -307,6 +325,60 @@ def _geometric_penetration(model, state, manifest):
     return max(0.0, float(radius - distance))
 
 
+def _is_exact_supported_fixture(manifest: dict) -> bool:
+    """Match only the measured fixtures; this is not an interpolated envelope."""
+    fixture_id = manifest["support_fixture_id"]
+    if fixture_id not in _SUPPORTED_FIXTURE_IDS:
+        return False
+    common = (
+        manifest["length_m"] == _LENGTH
+        and manifest["density_kg_m3"] == 1000.0
+        and manifest["contact_stiffness_n_m3"] == _STIFFNESS
+        and abs(manifest["particle_radius_m"] - _RADIUS) <= 1.0e-10
+        and manifest["soft_contact_gap_m"] == 0.0002
+        and manifest["shape_margin_m"] == 0.0
+        and manifest["solver_parameters"]["newton_max_iterations"] == 20
+    )
+    if not common:
+        return False
+    if fixture_id == "plane_uniform_face_l012_v1":
+        return (
+            manifest["case"] == "plane"
+            and manifest["level"] in (0, 1, 2)
+            and manifest["shape_kind"] == "plane"
+            and tuple(manifest["shape_center_m"]) == (0.0, 0.0, 0.001)
+        )
+    if fixture_id == "broad_box_full_face_l012_v1":
+        return (
+            manifest["case"] == "broad_box"
+            and manifest["level"] in (0, 1, 2)
+            and manifest["shape_kind"] == "box"
+            and manifest["feature_width_m"] == 0.08
+            and tuple(manifest["shape_center_m"]) == (_LENGTH / 3, _LENGTH / 3, -0.0004)
+        )
+    if fixture_id == "sample_between_box_w10_l234_v1":
+        return (
+            manifest["case"] == "resolved_sharp_box"
+            and manifest["level"] in (2, 3, 4)
+            and manifest["shape_kind"] == "box"
+            and manifest["feature_width_m"] == 0.01
+            and tuple(manifest["shape_center_m"]) == (_LENGTH / 3, _LENGTH / 3, -0.0004)
+        )
+    location = "edge" if fixture_id == "shared_edge_r30_l234_v1" else "vertex"
+    direction = np.asarray((0.0, -1.0, -1.0) if location == "edge" else (-1.0, -1.0, -1.0))
+    anchor = np.asarray((_LENGTH / 2, 0.0, 0.0) if location == "edge" else (0.0, 0.0, 0.0))
+    expected_center = anchor + direction / np.linalg.norm(direction) * (0.03 + _RADIUS - 0.008)
+    return (
+        manifest["case"] == f"supported_{location}"
+        and manifest["level"] in (2, 3, 4)
+        and manifest["shape_kind"] == "sphere"
+        and manifest["feature_width_m"] == 0.06
+        and abs(manifest["shape_scale"][0][0] - 0.03) <= 1.0e-8
+        and manifest["nominal_initial_penetration_m"] == 0.008
+        and np.allclose(manifest["shape_center_m"], expected_center, rtol=0.0, atol=1.0e-12)
+    )
+
+
 def _measure(model, state, solver, manifest):
     contacts = solver.contacts
     count = int(contacts.soft_contact_count.numpy()[0])
@@ -351,20 +423,7 @@ def _measure(model, state, solver, manifest):
     relative_force_error = abs(float(np.linalg.norm(forces[:count, :3], axis=1).sum()) - oracle_force) / max(
         oracle_force, 1.0e-12
     )
-    supported = manifest["declared_support_class"] in _SUPPORT_CLASSES
-    if manifest["declared_support_class"] == "resolved_curved_shared_feature":
-        supported = (
-            manifest["level"] >= manifest["support_base_level"]
-            and manifest["maximum_boundary_edge_to_shape_radius"] <= 0.4715
-            and abs(manifest["nominal_initial_penetration_m"] - 0.008) <= 1.0e-12
-        )
-    elif manifest["declared_support_class"] == "resolved_inter_sample_feature":
-        supported = (
-            manifest["level"] >= manifest["support_base_level"]
-            and manifest["case"] == "resolved_sharp_box"
-            and abs(manifest["feature_width_m"] - 0.01) <= 1.0e-12
-            and np.allclose(manifest["shape_center_m"][:2], (_LENGTH / 3, _LENGTH / 3), rtol=0.0, atol=1.0e-12)
-        )
+    supported = _is_exact_supported_fixture(manifest)
     missed = oracle_force > 1.0e-12 and diagnostics["active_sample_count"] == 0
     status = int(solver._contact_status.numpy()[0])
     return {
@@ -401,7 +460,7 @@ def _measure(model, state, solver, manifest):
         if "box" not in manifest["case"]
         else "known triangle-interior witness lower bound",
         "support_envelope": "SUPPORTED" if supported else "UNSUPPORTED",
-        "support_reason": manifest["declared_support_class"],
+        "support_reason": manifest["support_fixture_id"] if supported else manifest["declared_support_class"],
         "same_mesh_oracle": {
             "method": "independent float64 adaptive degree-5 triangle quadrature",
             "integration_domain": oracle_domain,
@@ -411,7 +470,7 @@ def _measure(model, state, solver, manifest):
             "consistent_nodal_physical_forces_n": oracle.consistent_nodal_forces.tolist(),
             "contact_energy_j": oracle.energy,
             "active_area_m2": oracle.active_area,
-            "maximum_penetration_m": oracle.maximum_penetration,
+            "adaptive_sample_maximum_penetration_m": oracle.adaptive_sample_maximum_penetration,
             "force_magnitude_absolute_error_n": oracle.force_magnitude_absolute_error,
             "force_resultant_absolute_error_n": oracle.force_resultant_absolute_error.tolist(),
             "moment_resultant_absolute_error_nm": oracle.moment_resultant_absolute_error.tolist(),
@@ -567,8 +626,17 @@ def measure_motion_comparison(device, *, case: str, steps: int, dt: float):
     """Measure one predeclared 1x/4x/16x family and apply the unchanged 10% gate."""
     rows = [measure_motion(device, level=level, case=case, steps=steps, dt=dt) for level in _case_levels(case)]
     metrics = {}
-    for name in ("rigid_displacement_m", "max_surface_penetration_m", "soft_volume_mean_displacement_m"):
-        values = [row["trace"][-1][name] for row in rows]
+    for name in (
+        "rigid_displacement_m",
+        "max_surface_penetration_m",
+        "peak_surface_penetration_m",
+        "soft_volume_mean_displacement_m",
+    ):
+        values = (
+            [max(step["max_surface_penetration_m"] for step in row["trace"]) for row in rows]
+            if name == "peak_surface_penetration_m"
+            else [row["trace"][-1][name] for row in rows]
+        )
         if name == "soft_volume_mean_displacement_m":
             values = [float(np.linalg.norm(value)) for value in values]
         floor = float(np.spacing(np.float32(_LENGTH))) if "displacement" in name else 0.0
@@ -715,14 +783,29 @@ def calibrate(device, *, steps: int, dt: float):
         "support_envelope": {
             "id": _SUPPORT_ENVELOPE_ID,
             "status": "FROZEN" if c4_gate == "PASS" else "CANDIDATE",
-            "supported_contact_patch_classes": sorted(_SUPPORT_CLASSES),
-            "maximum_boundary_edge_to_sphere_radius": 0.4715,
+            "semantics": "exact measured fixtures only; no interval or phase interpolation",
+            "supported_fixture_ids": sorted(_SUPPORTED_FIXTURE_IDS),
+            "fixture_descriptions": {
+                "plane_uniform_face_l012_v1": "exact uniform z=0 plane face at levels 0/1/2",
+                "broad_box_full_face_l012_v1": "exact 80 mm full-face box at center (L/3,L/3,-0.4 mm)",
+                "shared_edge_r30_l234_v1": "exact 30 mm sphere edge placement at levels 2/3/4",
+                "shared_vertex_r30_l234_v1": "exact 30 mm sphere vertex placement at levels 2/3/4",
+                "sample_between_box_w10_l234_v1": "exact-phase 10 mm local box at levels 2/3/4",
+            },
             "supported_local_fixture": {
                 "tet_length_m": _LENGTH,
                 "sphere_radius_m": 0.03,
                 "initial_penetration_m": 0.008,
+                "edge_center_m": [0.02, -0.01562705971286289, -0.01562705971286289],
+                "vertex_center_m": [-0.012759033682218924, -0.012759033682218924, -0.012759033682218924],
                 "levels": [2, 3, 4],
                 "surface_multipliers": [1, 4, 16],
+                "observed_h_over_r_by_level": [
+                    0.4714045207910317,
+                    0.23570226039551584,
+                    0.11785113019775792,
+                ],
+                "observed_h_over_r_is_not_an_interval_bound": True,
                 "steps": 20,
                 "dt_s": 0.001,
                 "joint_force_n": 0.1,
@@ -733,7 +816,11 @@ def calibrate(device, *, steps: int, dt: float):
                 "center_xy_m": [_LENGTH / 3, _LENGTH / 3],
                 "levels": [2, 3, 4],
                 "surface_multipliers": [1, 4, 16],
-                "minimum_feature_width_to_maximum_boundary_edge": 0.7071,
+                "observed_feature_width_over_h_by_level": [
+                    0.7071067811865475,
+                    1.414213562373095,
+                    2.82842712474619,
+                ],
                 "phase_scope": "this exact center phase only; no arbitrary-phase guarantee",
             },
             "shape_capability_is_not_physical_support": True,
@@ -786,6 +873,48 @@ def _source_provenance(root: Path) -> dict:
     return {"source_sha256": sources, "source_set_sha256": source_set}
 
 
+def _device_kind(device) -> str:
+    resolved = wp.get_device(device)
+    if resolved.is_cpu:
+        return "cpu"
+    if resolved.is_cuda:
+        return "cuda"
+    return "unsupported"
+
+
+def _freeze_audit(
+    *,
+    requested_devices,
+    evidence,
+    dynamic_steps: int,
+    dt: float,
+    git_dirty: bool,
+    nonfinite_fields,
+) -> tuple[bool, list[str]]:
+    """Return the top-level freeze decision and stable rejection reasons."""
+    reasons = []
+    requested_kinds = [_device_kind(device) for device in requested_devices]
+    evidence_kinds = [_device_kind(row["device"]) for row in evidence]
+    if sorted(requested_kinds) != ["cpu", "cuda"]:
+        reasons.append("requires_exactly_one_cpu_and_one_cuda_request")
+    if sorted(evidence_kinds) != ["cpu", "cuda"] or len(evidence) != 2:
+        reasons.append("requires_exactly_one_cpu_and_one_cuda_evidence")
+    if dynamic_steps != 20 or dt != 0.001:
+        reasons.append("requires_frozen_20_step_dt_1e-3_trial")
+    if git_dirty:
+        reasons.append("requires_clean_git_tree")
+    if nonfinite_fields:
+        reasons.append("nonfinite_evidence")
+    if len(evidence) != 2 or not all(row["c4_gate"] == "PASS" for row in evidence):
+        reasons.append("device_c4_gate_not_pass")
+    return not reasons, reasons
+
+
+def _validate_new_output(path: Path) -> None:
+    if path.exists():
+        raise FileExistsError(f"refusing to overwrite existing C4 artifact: {path}")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path, required=True)
@@ -795,21 +924,21 @@ def main():
     args = parser.parse_args()
     if args.dynamic_steps < 0 or not np.isfinite(args.dt) or args.dt <= 0:
         parser.error("dynamic-steps must be nonnegative and dt finite/positive")
+    try:
+        _validate_new_output(args.output)
+    except FileExistsError as error:
+        parser.error(str(error))
+    if sorted(_device_kind(device) for device in args.devices) != ["cpu", "cuda"]:
+        parser.error("--devices must contain exactly one CPU and one CUDA device")
     root = Path(__file__).resolve().parents[2]
     source_provenance = _source_provenance(root)
     evidence = [calibrate(device, steps=args.dynamic_steps, dt=args.dt) for device in args.devices]
     if _source_provenance(root) != source_provenance:
         raise RuntimeError("C4 source files changed while evidence was being generated")
     git_dirty = bool(subprocess.check_output(["git", "status", "--porcelain"], cwd=root, text=True))
-    frozen = (
-        not git_dirty
-        and args.dynamic_steps == 20
-        and args.dt == 0.001
-        and all(row["c4_gate"] == "PASS" for row in evidence)
-    )
     payload = {
-        "status": "FROZEN" if frozen else "CANDIDATE",
-        "schema_version": 2,
+        "status": "CANDIDATE",
+        "schema_version": 3,
         "git_sha": subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=root, text=True).strip(),
         "git_dirty": git_dirty,
         "script_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
@@ -832,6 +961,20 @@ def main():
     nonfinite = []
     payload = _finite_json(payload, nonfinite=nonfinite)
     payload["nonfinite_fields_stored_as_null"] = nonfinite
+    frozen, freeze_reasons = _freeze_audit(
+        requested_devices=args.devices,
+        evidence=payload["evidence"],
+        dynamic_steps=args.dynamic_steps,
+        dt=args.dt,
+        git_dirty=git_dirty,
+        nonfinite_fields=nonfinite,
+    )
+    payload["status"] = "FROZEN" if frozen else "CANDIDATE"
+    payload["freeze_audit"] = {
+        "gate": "PASS" if frozen else "FAIL",
+        "required_device_kinds": ["cpu", "cuda"],
+        "rejection_reasons": freeze_reasons,
+    }
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(payload, indent=2, allow_nan=False) + "\n")
 

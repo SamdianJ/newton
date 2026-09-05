@@ -4,11 +4,16 @@
 """Check the P1Q3 calibration harness against measurable sampling contracts."""
 
 import unittest
+from pathlib import Path
+from tempfile import TemporaryDirectory
 
 import numpy as np
 
 from newton.tests.unittest_utils import add_function_test, get_test_devices
 from scripts.monolithic_reference.calibrate_p1q3 import (
+    _freeze_audit,
+    _is_exact_supported_fixture,
+    _validate_new_output,
     calibrate,
     measure_motion,
     measure_motion_comparison,
@@ -59,10 +64,14 @@ def test_sharp_feature_envelope(test, device):
     test.assertEqual([row["surface_multiplier"] for row in resolved], [1, 4, 16])
     for row in resolved:
         test.assertEqual(row["support_envelope"], "SUPPORTED")
+        test.assertEqual(row["manifest"]["support_fixture_id"], "sample_between_box_w10_l234_v1")
+        test.assertTrue(_is_exact_supported_fixture(row["manifest"]))
         test.assertEqual(row["sampling_classification"], "DETECTED")
         test.assertGreater(row["same_mesh_oracle"]["active_area_m2"], 0.0)
         test.assertGreater(row["active_sample_count"], 0)
         test.assertEqual(row["same_mesh_quadrature_gate"], "PASS")
+    changed_width = {**resolved[0]["manifest"], "feature_width_m": 0.0101}
+    test.assertFalse(_is_exact_supported_fixture(changed_width))
 
 
 def test_independent_plane_oracle(test, device):
@@ -132,8 +141,11 @@ def test_supported_shared_feature_motion(test, device):
         test.assertEqual([row["boundary_face_count"] for row in static], [64, 256, 1024])
         for row in static:
             test.assertEqual(row["support_envelope"], "SUPPORTED")
+            test.assertEqual(
+                row["manifest"]["support_fixture_id"], f"shared_{case.removeprefix('supported_')}_r30_l234_v1"
+            )
+            test.assertTrue(_is_exact_supported_fixture(row["manifest"]))
             test.assertEqual(row["sampling_classification"], "DETECTED")
-            test.assertLessEqual(row["manifest"]["maximum_boundary_edge_to_shape_radius"], 0.4715)
             test.assertLessEqual(row["same_mesh_oracle"]["relative_force_error"], 0.1)
         rows, comparison = measure_motion_comparison(device, case=case, steps=20, dt=0.001)
         test.assertEqual(comparison["gate"], "PASS")
@@ -141,6 +153,48 @@ def test_supported_shared_feature_motion(test, device):
         for metric in comparison["metrics"].values():
             test.assertEqual(metric["normalization"], "RESOLVED")
             test.assertLessEqual(max(metric["relative_difference_from_finest"]), 0.1)
+
+
+def test_freeze_audit_rejects_incomplete_provenance(test, device):
+    """Require exactly one CPU/CUDA result and finite evidence before freezing."""
+    del device
+    evidence = [{"device": "cpu", "c4_gate": "PASS"}, {"device": "cuda:0", "c4_gate": "PASS"}]
+    frozen, reasons = _freeze_audit(
+        requested_devices=["cpu", "cuda:0"],
+        evidence=evidence,
+        dynamic_steps=20,
+        dt=0.001,
+        git_dirty=False,
+        nonfinite_fields=[],
+    )
+    test.assertTrue(frozen)
+    test.assertEqual(reasons, [])
+    for requested, rows, nonfinite, reason in (
+        (["cpu"], evidence[:1], [], "requires_exactly_one_cpu_and_one_cuda_request"),
+        (["cpu", "cpu"], [evidence[0], evidence[0]], [], "requires_exactly_one_cpu_and_one_cuda_request"),
+        (["cpu", "cuda:0"], evidence, ["/evidence/0/value"], "nonfinite_evidence"),
+    ):
+        frozen, reasons = _freeze_audit(
+            requested_devices=requested,
+            evidence=rows,
+            dynamic_steps=20,
+            dt=0.001,
+            git_dirty=False,
+            nonfinite_fields=nonfinite,
+        )
+        test.assertFalse(frozen)
+        test.assertIn(reason, reasons)
+
+
+def test_artifact_output_is_immutable(test, device):
+    """Fail before calibration when the requested artifact already exists."""
+    del device
+    with TemporaryDirectory() as directory:
+        output = Path(directory) / "existing.json"
+        output.touch()
+        with test.assertRaises(FileExistsError):
+            _validate_new_output(output)
+        _validate_new_output(Path(directory) / "new.json")
 
 
 def test_broad_curvature_control(test, device):
@@ -168,6 +222,8 @@ for function in (
     test_independent_oracle_resolves_sample_between_box,
     test_c4_gate_is_scoped_and_machine_readable,
     test_supported_shared_feature_motion,
+    test_freeze_audit_rejects_incomplete_provenance,
+    test_artifact_output_is_immutable,
     test_broad_curvature_control,
 ):
     add_function_test(TestMonolithicSupport, function.__name__, function, devices=get_test_devices())
