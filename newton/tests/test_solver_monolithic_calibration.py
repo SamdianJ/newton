@@ -484,11 +484,9 @@ class TestCalibrationInputs(unittest.TestCase):
 
     def test_frozen_calibration_is_the_runtime_authority(self):
         """Keep production defaults identical to the reviewed compact freeze manifest."""
-        path = (
-            Path(__file__).parents[2]
-            / "scripts/monolithic_reference/fixtures/monolithic_calibration_frozen_v1.json"
-        )
-        frozen = json.loads(path.read_text())
+        path = Path(__file__).parents[2] / "scripts/monolithic_reference/fixtures/monolithic_calibration_frozen_v1.json"
+        frozen_bytes = path.read_bytes()
+        frozen = json.loads(frozen_bytes)
         self.assertEqual(frozen["schema_version"], "monolithic_calibration_frozen/v1")
         self.assertEqual(frozen["calibration_status"], "FROZEN")
         self.assertEqual(frozen["v01_status"], "DRAFT")
@@ -498,6 +496,15 @@ class TestCalibrationInputs(unittest.TestCase):
         self.assertEqual(frozen["acceptance"]["force_detection_floor_n"], 1.2695789400826758e-05)
         for digest in frozen["evidence"].values():
             self.assertEqual(len(digest), 64)
+        normal = json.loads((path.parent / "normal_loading_v2.json").read_text())
+        self.assertEqual(
+            normal["calibration_provenance"]["sha256"],
+            hashlib.sha256(frozen_bytes).hexdigest(),
+        )
+        self.assertEqual(
+            normal["support_provenance"]["sha256"],
+            frozen["evidence"]["c4_support_sha256"],
+        )
 
 
 def test_measured_active_and_inactive(test, device):

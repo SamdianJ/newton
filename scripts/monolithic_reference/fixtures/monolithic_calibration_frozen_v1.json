@@ -6,7 +6,7 @@
   "evidence": {
     "component_raw_sha256": "6901db5c7bec36e6060757b822357f5a66326c0e30077767a1aee218a3049c15",
     "trajectory_sha256": "07d18701fb48063486cf00f6136333dbdac27941ad561109e82b0a7f2995ec88",
-    "c4_support_sha256": "26e1b45bfb870eb8bed2a9257ce1295ea31c26e874982da02e0331b35ec51cee",
+    "c4_support_sha256": "23acd2775ceb818bda28fa8de0cda0f8695501b6a178c3175bcfcc1e71c5830e",
     "calibration_freeze_sha256": "9b045167461cbf3d270ca2e7ed692703809f506fbfc843c1bd7adca97e311815"
   },
   "scope": {
