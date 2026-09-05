@@ -1,11 +1,11 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 The Newton Developers
 # SPDX-License-Identifier: Apache-2.0
 
-"""Run and measure a DRAFT normal-loading trajectory; never certify P0/V0.1 exit.
+"""Run and measure the versioned normal-loading trajectory.
 
 Use ``uv run -m scripts.monolithic_reference.normal_loading --device cpu
---output /path/to/evidence``. Raw records use a separate draft measurement
-format, not the frozen cross-implementation step-record schema.
+--output /path/to/evidence``. Calibration, contact-support, and reference
+evidence are independent axes; numerical success alone never certifies exit.
 """
 
 import argparse
@@ -25,14 +25,60 @@ from newton.solvers.experimental.monolithic import MonolithicCollisionPipeline, 
 
 import newton
 
-DEFAULT_FIXTURE = Path(__file__).with_name("fixtures") / "normal_loading_draft_v1.json"
+FIXTURE_DIRECTORY = Path(__file__).with_name("fixtures")
+LEGACY_FIXTURE = FIXTURE_DIRECTORY / "normal_loading_draft_v1.json"
+DEFAULT_FIXTURE = FIXTURE_DIRECTORY / "normal_loading_v2.json"
+_STATUS_AXES = ("calibration", "support", "reference")
 
 
 def load_fixture(path=DEFAULT_FIXTURE):
-    """Read the explicitly unfrozen normal-loading input."""
+    """Read a supported version of the normal-loading input."""
     fixture = json.loads(Path(path).read_text())
     _validate_fixture(fixture)
     return fixture
+
+
+def _axis_status(fixture, axis):
+    if fixture["schema_version"] == "normal_loading_draft/v1":
+        if axis == "calibration":
+            return fixture["calibration_status"]
+        if axis == "reference" and fixture["reference_envelope"] is not None:
+            return "FROZEN"
+        return "UNFROZEN"
+    return fixture[f"{axis}_status"]
+
+
+def _axis_provenance(fixture, axis):
+    return fixture.get(f"{axis}_provenance")
+
+
+def _valid_sha256(value):
+    return isinstance(value, str) and len(value) == 64 and all(character in "0123456789abcdef" for character in value)
+
+
+def _validate_status_axes(fixture):
+    for axis in _STATUS_AXES:
+        status = _axis_status(fixture, axis)
+        if status not in ("UNFROZEN", "FROZEN"):
+            raise ValueError(f"Invalid {axis}_status")
+        provenance = _axis_provenance(fixture, axis)
+        if provenance is not None and not isinstance(provenance, dict):
+            raise ValueError(f"Invalid {axis}_provenance")
+        if status == "FROZEN":
+            if (
+                provenance is None
+                or not isinstance(provenance.get("version"), str)
+                or not provenance["version"]
+                or not _valid_sha256(provenance.get("sha256"))
+            ):
+                raise ValueError(f"Frozen {axis} evidence requires a nonempty version and SHA-256")
+    calibration = _axis_provenance(fixture, "calibration")
+    if calibration is not None and calibration.get("candidate_private_config") is not None:
+        candidate = calibration["candidate_private_config"]
+        if not isinstance(candidate, dict) or any(not isinstance(value, dict) for value in candidate.values()):
+            raise ValueError("candidate_private_config must map device classes to config dictionaries")
+    if _axis_status(fixture, "reference") == "FROZEN" and fixture["reference_envelope"] is None:
+        raise ValueError("Frozen reference evidence requires reference_envelope")
 
 
 def _validate_fixture(fixture):
@@ -40,13 +86,14 @@ def _validate_fixture(fixture):
     rigid, soft, contact, drive, limits = (
         fixture[name] for name in ("rigid", "soft", "contact", "drive", "acceptance")
     )
-    if (
-        fixture["status"] != "DRAFT"
-        or fixture["schema_version"] != "normal_loading_draft/v1"
-        or fixture["calibration_status"] != "UNFROZEN"
-        or fixture["reference_envelope"] is not None
-    ):
-        raise ValueError("This runner only supports unfrozen normal_loading_draft/v1 input")
+    schema_version = fixture["schema_version"]
+    if fixture["status"] != "DRAFT" or schema_version not in ("normal_loading_draft/v1", "normal_loading/v2"):
+        raise ValueError("This runner only supports DRAFT normal_loading_draft/v1 or normal_loading/v2 input")
+    if schema_version == "normal_loading_draft/v1":
+        if fixture["calibration_status"] != "UNFROZEN" or fixture["reference_envelope"] is not None:
+            raise ValueError("Legacy normal_loading_draft/v1 must remain unfrozen")
+    else:
+        _validate_status_axes(fixture)
     if rigid["shape_type"] != "infinite_plane" or rigid["joint_type"] != "PRISMATIC" or contact["quadrature"] != "P1Q3":
         raise ValueError("Only PRISMATIC infinite_plane with P1Q3 is supported")
     if rigid["approach_axis_world"] != [0.0, 0.0, 1.0]:
@@ -309,7 +356,7 @@ def _measure(model, state, solver, fixture, step, time_s, command, frozen_force)
 
 
 def assess_run(records, fixture, *, execution_error=None):
-    """Apply the declared provisional gates and expose missing freeze/reference evidence."""
+    """Apply numerical gates separately from three independent evidence axes."""
     limits = fixture["acceptance"]
     onset, streak, maximum_streak, failures = None, 0, 0, 0
     for i, record in enumerate(records):
@@ -356,7 +403,7 @@ def assess_run(records, fixture, *, execution_error=None):
             )
         )
 
-    gates = {
+    numerical_gates = {
         "execution_completed": execution_error is None,
         "minimum_steps": count >= limits["minimum_substeps"],
         "finite_state": all(r["finite_state"] for r in records),
@@ -376,9 +423,14 @@ def assess_run(records, fixture, *, execution_error=None):
         "converged_nonlinear_gates": all(ratios_ok(r) for r in records if r["converged"]),
         "converged_linear_gates": all(linear_ok(r) for r in records if r["converged"]),
         "contact_balance_and_sign": all(contact_ok(r) for r in records if not r["rolled_back"]),
-        "frozen_calibration": fixture["calibration_status"] == "FROZEN",
-        "reference_envelope": fixture["reference_envelope"] is not None,
     }
+    evidence_gates = {
+        "frozen_calibration": _axis_status(fixture, "calibration") == "FROZEN",
+        "frozen_support": _axis_status(fixture, "support") == "FROZEN",
+        "frozen_reference": _axis_status(fixture, "reference") == "FROZEN",
+    }
+    gates = {**numerical_gates, **evidence_gates}
+    e2e_numerical_pass = all(numerical_gates.values())
     loading = records[onset:] if onset is not None else []
     force = np.asarray([r["normal_compressive_force_n"] for r in loading])
     closure = np.asarray([r["actual_closure_m"] for r in loading])
@@ -389,10 +441,9 @@ def assess_run(records, fixture, *, execution_error=None):
         secant = float((force[interval[1]] - force[interval[0]]) / (closure[interval[1]] - closure[interval[0]]))
     return {
         "gates": gates,
-        "draft_numerical_pass": all(
-            value for key, value in gates.items() if key not in ("frozen_calibration", "reference_envelope")
-        ),
-        "v01_exit": False,
+        "e2e_numerical_pass": e2e_numerical_pass,
+        "draft_numerical_pass": e2e_numerical_pass,
+        "v01_exit": _v01_exit({"e2e_numerical_pass": e2e_numerical_pass, **evidence_gates}),
         "substeps": count,
         "converged_ratio": converged_ratio,
         "soft_stop_rate": sum(r["committed_unconverged"] for r in records) / max(count, 1),
@@ -405,6 +456,12 @@ def assess_run(records, fixture, *, execution_error=None):
         "secant_stiffness_n_m": secant,
         "curve_work_j": float(np.trapezoid(force, closure)) if force.size > 1 else None,
     }
+
+
+def _v01_exit(gates):
+    """Require numerical acceptance plus every independently frozen evidence axis."""
+    required = ("e2e_numerical_pass", "frozen_calibration", "frozen_support", "frozen_reference")
+    return all(gates.get(name) is True for name in required)
 
 
 def run_loading(fixture, *, device="cpu", substeps=None):
@@ -433,7 +490,19 @@ def run_loading(fixture, *, device="cpu", substeps=None):
     root = Path(__file__).resolve().parents[2]
     metadata = {
         "status": "DRAFT",
-        "record_schema": "normal_loading_measurements_draft/v1",
+        "record_schema": "normal_loading_measurements/v2",
+        "calibration_status": _axis_status(fixture, "calibration"),
+        "support_status": _axis_status(fixture, "support"),
+        "reference_status": _axis_status(fixture, "reference"),
+        "calibration_version": (_axis_provenance(fixture, "calibration") or {}).get("version"),
+        "calibration_sha256": (_axis_provenance(fixture, "calibration") or {}).get("sha256"),
+        "support_version": (_axis_provenance(fixture, "support") or {}).get("version"),
+        "support_sha256": (_axis_provenance(fixture, "support") or {}).get("sha256"),
+        "reference_version": (_axis_provenance(fixture, "reference") or {}).get("version"),
+        "reference_sha256": (_axis_provenance(fixture, "reference") or {}).get("sha256"),
+        "candidate_solver_internal_config": (_axis_provenance(fixture, "calibration") or {}).get(
+            "candidate_private_config"
+        ),
         "input_sha256": hashlib.sha256(serialized).hexdigest(),
         "actual_parameters": fixture,
         "execution_error": execution_error,
@@ -455,7 +524,7 @@ def run_loading(fixture, *, device="cpu", substeps=None):
         "warp_version": wp.__version__,
         "solver_internal_config": {field.name: getattr(solver._config, field.name) for field in fields(solver._config)},
         "normal_force_side": "physical force on rigid finger; compressive scalar is minus its projection on approach axis",
-        "scope": "Draft C5/C6/C7 precheck; no frozen comparison manifest or reference envelope",
+        "scope": "C5/C6/C7 measurement; status axes are reported independently",
     }
     return {
         "metadata": metadata,

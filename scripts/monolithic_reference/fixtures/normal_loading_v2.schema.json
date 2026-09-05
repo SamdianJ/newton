@@ -1,0 +1,43 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "normal_loading_v2.schema.json",
+  "title": "Monolithic normal-loading fixture v2 status contract",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "status",
+    "calibration_status",
+    "support_status",
+    "reference_status",
+    "calibration_provenance",
+    "support_provenance",
+    "reference_provenance",
+    "reference_envelope"
+  ],
+  "properties": {
+    "schema_version": {"const": "normal_loading/v2"},
+    "status": {"const": "DRAFT"},
+    "calibration_status": {"enum": ["UNFROZEN", "FROZEN"]},
+    "support_status": {"enum": ["UNFROZEN", "FROZEN"]},
+    "reference_status": {"enum": ["UNFROZEN", "FROZEN"]},
+    "calibration_provenance": {"$ref": "#/$defs/provenance"},
+    "support_provenance": {"$ref": "#/$defs/provenance"},
+    "reference_provenance": {"$ref": "#/$defs/provenance"}
+  },
+  "$defs": {
+    "provenance": {
+      "oneOf": [
+        {"type": "null"},
+        {
+          "type": "object",
+          "required": ["version", "sha256"],
+          "properties": {
+            "version": {"type": "string", "minLength": 1},
+            "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+            "candidate_private_config": {"type": ["object", "null"]}
+          }
+        }
+      ]
+    }
+  }
+}
