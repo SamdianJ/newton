@@ -573,7 +573,22 @@ class TestCalibrationInputs(unittest.TestCase):
         integration_sha = "1" * 40
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            write_json(root / "component.json", {"artifact_kind": "raw_measurement"})
+            source = _committed_source_identity(["newton/_src/solvers/monolithic/contact.py"])
+            component_raw = {
+                "artifact_kind": "raw_measurement",
+                "calibration_schema_version": 2,
+                "profile": "freeze",
+                "git_dirty": False,
+                "repeats": 100,
+                **source,
+                "evidence": [
+                    _synthetic_raw_record(case, device)
+                    for device in ("cpu", "cuda:0")
+                    for case in freeze_calibration_cases()
+                ],
+            }
+            component = aggregate_calibration_evidence([component_raw])
+            write_json(root / "component.json", component_raw)
             c4 = {
                 "status": "FROZEN",
                 "evidence": [
@@ -594,7 +609,7 @@ class TestCalibrationInputs(unittest.TestCase):
                 "v01_status": "DRAFT",
                 "runtime_authority": True,
                 "solver_internal_config": config,
-                "acceptance": {"force_detection_floor_n": 1e-5},
+                "acceptance": component["portable_acceptance"],
                 "evidence": {
                     "component_raw_sha256": hashlib.sha256((root / "component.json").read_bytes()).hexdigest(),
                     "c4_support_sha256": hashlib.sha256((root / "c4.json").read_bytes()).hexdigest(),
@@ -629,6 +644,7 @@ class TestCalibrationInputs(unittest.TestCase):
                 "artifact_kind": "trajectory_evidence",
                 "calibration_schema_version": 2,
                 "profile": "freeze",
+                "source_set_sha256": "2" * 64,
                 "validated_solver_internal_config": config,
                 "upstream": {
                     "compact_calibration": {"artifact_sha256": compact_sha},
@@ -646,7 +662,15 @@ class TestCalibrationInputs(unittest.TestCase):
                 "calibration_schema_version": 2,
                 "calibration_status": "FROZEN",
                 "v01_status": "DRAFT",
+                "measurement_source": {
+                    "git_sha": component_raw["git_sha"],
+                    "source_set_sha256": component_raw["source_set_sha256"],
+                },
+                "trajectory_source_set_sha256": [trajectory["source_set_sha256"]],
+                "candidate_private_config": component["candidate_private_config"],
+                "component_portable_solver_internal_config": component["component_portable_solver_internal_config"],
                 "portable_solver_internal_config": config,
+                "portable_acceptance": component["portable_acceptance"],
                 "missing_case_keys": [],
                 "missing_trajectory_keys": [],
                 "failed_records": [],
@@ -677,6 +701,16 @@ class TestCalibrationInputs(unittest.TestCase):
             with self.assertRaisesRegex(CalibrationFreezeError, "terminal byte hash"):
                 verify_calibration_release_index(root / "release.json")
             write_json(root / "terminal.json", terminal)
+
+            swapped_terminal = copy.deepcopy(terminal)
+            swapped_terminal["trajectory_source_set_sha256"] = ["3" * 64]
+            write_json(root / "terminal.json", swapped_terminal)
+            index["artifacts"]["terminal"] = file_entry(root, "terminal.json")
+            write_json(root / "release.json", index)
+            with self.assertRaisesRegex(CalibrationFreezeError, "does not bind"):
+                verify_calibration_release_index(root / "release.json")
+            write_json(root / "terminal.json", terminal)
+            index["artifacts"]["terminal"] = file_entry(root, "terminal.json")
 
             trajectory["upstream"]["normal_loading"]["cpu"]["candidate_artifact_sha256"] = "0" * 64
             write_json(root / "trajectory.json", trajectory)

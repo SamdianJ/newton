@@ -1342,6 +1342,9 @@ def verify_calibration_release_index(index_path):
     for name in ("component_raw", "compact", "c4", "trajectory", "terminal"):
         loaded[name] = _release_file(index_path, artifacts[name], name)
     compact, c4, trajectory, terminal = (loaded[name] for name in ("compact", "c4", "trajectory", "terminal"))
+    component = aggregate_calibration_evidence([loaded["component_raw"]])
+    if component["missing_case_keys"] or component["failed_records"] or component["artifact_failures"]:
+        raise CalibrationFreezeError("Release component raw evidence is incomplete")
     _validate_compact_evidence(
         compact,
         artifacts["component_raw"]["sha256"],
@@ -1421,17 +1424,31 @@ def verify_calibration_release_index(index_path):
     ]
     if sorted(roles) != sorted(expected_roles):
         raise CalibrationFreezeError("Trajectory CPU/CUDA roles are incomplete or duplicated")
+    trajectory_source = trajectory.get("source_set_sha256")
+    expected_measurement_source = {
+        "git_sha": loaded["component_raw"].get("git_sha"),
+        "source_set_sha256": loaded["component_raw"].get("source_set_sha256"),
+    }
     if (
         terminal.get("artifact_kind") != "calibration_freeze"
         or terminal.get("calibration_status") != "FROZEN"
         or terminal.get("v01_status") != "DRAFT"
+        or terminal.get("measurement_source") != expected_measurement_source
+        or not isinstance(trajectory_source, str)
+        or len(trajectory_source) != 64
+        or terminal.get("trajectory_source_set_sha256") != [trajectory_source]
+        or terminal.get("candidate_private_config") != component["candidate_private_config"]
+        or terminal.get("component_portable_solver_internal_config")
+        != component["component_portable_solver_internal_config"]
         or terminal.get("portable_solver_internal_config") != config
+        or terminal.get("portable_acceptance") != compact.get("acceptance")
+        or terminal.get("portable_acceptance") != component["portable_acceptance"]
         or any(
             terminal.get(name)
             for name in ("missing_case_keys", "missing_trajectory_keys", "failed_records", "artifact_failures")
         )
     ):
-        raise CalibrationFreezeError("Terminal calibration freeze status or config is invalid")
+        raise CalibrationFreezeError("Terminal calibration freeze does not bind the trajectory/raw/config release")
     return {
         "schema_version": "monolithic_calibration_release_verification/v1",
         "status": "VERIFIED",
