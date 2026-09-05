@@ -9,11 +9,28 @@ from dataclasses import replace
 import numpy as np
 
 from newton.tests.unittest_utils import add_function_test, get_test_devices
-from scripts.monolithic_reference.calibrate_components import CalibrationCase, calibrate_case, calibration_cases
+from scripts.monolithic_reference.calibrate_components import (
+    CalibrationCase,
+    _fd_status,
+    calibrate_case,
+    calibration_cases,
+)
 
 
 class TestCalibrationInputs(unittest.TestCase):
     """Check the declared matrix without running a benchmark in ordinary tests."""
+
+    def test_fd_requires_adjacent_steps(self):
+        """A single favorable step cannot establish a reproducible FD plateau."""
+        records = [
+            {"step": h, "derivative": {"relative_error": error}}
+            for h, error in ((0.1, 0.02), (0.01, 0.001), (0.001, 0.02))
+        ]
+        self.assertEqual(_fd_status(records, ("derivative",), "cpu")["status"], "OUTSIDE_MEASURED_GATE")
+        records[-1]["derivative"]["relative_error"] = 0.002
+        self.assertEqual(_fd_status(records, ("derivative",), "cpu")["status"], "PASS")
+        records[-1]["fixed_active_set"] = False
+        self.assertEqual(_fd_status(records, ("derivative",), "cpu")["status"], "OUTSIDE_MEASURED_GATE")
 
     def test_matrix_and_validation(self):
         """Record deterministic discrete coverage and reject invalid parameters."""
@@ -44,6 +61,8 @@ def test_measured_active_and_inactive(test, device):
         test.assertEqual(result["force_noise"]["active_sample_count"] > 0, active)
         test.assertEqual(np.linalg.norm(result["force_noise"]["physical_world_force_or_wrench"]) > 0, active)
         test.assertGreaterEqual(result["force_noise"]["recommended_force_detection_floor"], 0)
+        for block in ("q", "x"):
+            test.assertLess(result["force_noise"][f"scaled_projection_error_{block}"]["relative_error"], 1e-4)
         test.assertEqual(len(result["reduction_noise"]["merit_samples"]), 3)
         test.assertEqual(len(result["linear_cancellation"]), 9)
         test.assertTrue(np.isfinite(result["diagonal"]).all())
@@ -51,6 +70,7 @@ def test_measured_active_and_inactive(test, device):
         for name in ("tet", "fk") + (("contact",) if active else ()):
             test.assertGreaterEqual(len(result["finite_difference"][name]["records"]), 5)
         test.assertEqual(result["finite_difference"]["tet"]["status"], "PASS")
+        test.assertEqual(np.asarray(result["finite_difference"]["tet"]["physical_world_force_or_wrench"]).shape, (4, 3))
         test.assertEqual(result["finite_difference"]["fk"]["status"], "PASS")
         if active:
             test.assertEqual(result["finite_difference"]["contact"]["status"], "PASS")

@@ -13,6 +13,7 @@ Without that flag, the original tiny no-contact CLI and evidence remain availabl
 
 import argparse
 import hashlib
+import itertools
 import json
 import math
 import platform
@@ -38,6 +39,7 @@ from newton._src.solvers.monolithic.solver_monolithic import SolverMonolithic, _
 from newton._src.solvers.monolithic.tet import (
     TetScatterBuffers,
     _compute_cofactor_derivative,
+    _evaluate_elastic_residual,
     _evaluate_stable_neo_hookean,
     assemble_tet_residual_tangent,
     build_tet_triplet_pattern,
@@ -560,9 +562,20 @@ def _fd_status(records, names, device):
     gate = 5e-3 if wp.get_device(device).is_cpu else 1e-2
     smooth = [row for row in records if row.get("fixed_active_set", True)]
     minima = {name: min((row[name]["relative_error"] for row in smooth), default=1.0) for name in names}
+    plateaus = {
+        name: [
+            [a["step"], b["step"]]
+            for a, b in itertools.pairwise(records)
+            if a.get("fixed_active_set", True)
+            and b.get("fixed_active_set", True)
+            and max(a[name]["relative_error"], b[name]["relative_error"]) <= gate
+        ]
+        for name in names
+    }
     return {
-        "status": "PASS" if max(minima.values()) <= gate else "OUTSIDE_MEASURED_GATE",
+        "status": "PASS" if all(plateaus.values()) else "OUTSIDE_MEASURED_GATE",
         "gate": gate,
+        "adjacent_passing_step_pairs": plateaus,
         "best_relative_errors": minima,
         "records": records,
     }
@@ -619,6 +632,96 @@ def _material_sweep(device, case):
 def _point(probe, local):
     pose = probe.candidate.state.body_q.numpy()[1]
     return np.asarray(wp.transform_point(wp.transform(*pose), wp.vec3(local)), dtype=np.float64)
+
+
+def _tet_nodal_sweep(probe):
+    """Differentiate the production elastic energy/force at actual world coordinates."""
+    model, case, device = probe.model, probe.case, probe.model.device
+    positions = probe.candidate.state.particle_q.numpy().copy()
+    x = wp.empty(4, dtype=wp.vec3, device=device)
+    residual = wp.empty(4, dtype=wp.vec3, device=device)
+    energy = wp.empty(1, dtype=float, device=device)
+    minimum = wp.empty(1, dtype=float, device=device)
+    flags = wp.empty(1, dtype=int, device=device)
+    mapping = wp.array(np.arange(4, dtype=np.int32), dtype=int, device=device)
+
+    def evaluate(values):
+        x.assign(values)
+        residual.zero_()
+        minimum.fill_(1e30)
+        flags.zero_()
+        wp.launch(
+            _evaluate_elastic_residual,
+            1,
+            [
+                1e-6,
+                x,
+                model.tet_indices,
+                model.tet_poses,
+                model.tet_materials,
+                mapping,
+                residual,
+                energy,
+                minimum,
+                flags,
+            ],
+            device=device,
+        )
+        if flags.numpy()[0]:
+            raise AssertionError("Elastic FD probe left the valid determinant domain")
+        return float(energy.numpy()[0]), residual.numpy().astype(np.float64)
+
+    _, analytic = evaluate(positions)
+    rest_inverse = model.tet_poses.numpy()[0].astype(np.float64)
+    f = (positions[1:] - positions[0]).astype(np.float64).T @ rest_inverse
+    arrays = [
+        wp.array([f], dtype=wp.mat33, device=device),
+        wp.empty(1, dtype=float, device=device),
+        wp.empty(1, dtype=wp.mat33, device=device),
+        wp.empty(1, dtype=mat99, device=device),
+        wp.empty(1, dtype=mat99, device=device),
+    ]
+    mu, lam, _ = model.tet_materials.numpy()[0]
+    wp.launch(_matrix_constitutive, 1, [arrays[0], mu, lam, *arrays[1:]], device=device)
+    raw = (
+        arrays[3].numpy()[0].astype(np.float64)
+        + ((float(mu) + float(lam)) * (np.linalg.det(f) - 1) - float(mu)) * arrays[4].numpy()[0]
+    )
+    gradients = np.vstack((-rest_inverse.sum(axis=0), rest_inverse))
+    volume = 1 / (6 * np.linalg.det(rest_inverse))
+    direction = np.random.default_rng(case.seed).normal(size=(4, 3))
+    direction /= np.linalg.norm(direction)
+    df = (direction[1:] - direction[0]).T @ rest_inverse
+    stress_derivative = (raw @ df.flatten(order="F")).reshape((3, 3), order="F")
+    derivative = volume * (stress_derivative @ gradients.T).T
+    records = []
+    for step in (0.1, 0.03, 0.01, 0.003, 0.001, 0.0003, 0.0001):
+        h = step * 0.01 * case.coordinate_scale
+        ep, rp = evaluate((positions + h * direction).astype(np.float32))
+        em, rm = evaluate((positions - h * direction).astype(np.float32))
+        records.append(
+            {
+                "step": step,
+                "step_metres": h,
+                "energy_gradient": _error(np.sum(analytic * direction), (ep - em) / (2 * h)),
+                "physical_force_raw_derivative": _error(-derivative, -(rp - rm) / (2 * h)),
+            }
+        )
+    result = _fd_status(records, ("energy_gradient", "physical_force_raw_derivative"), device)
+    result.update(
+        variable_scale_metres=0.01 * case.coordinate_scale,
+        seed=case.seed,
+        direction=direction.tolist(),
+        condition_indicator=float(np.linalg.cond(raw)),
+        residual_contribution=analytic.tolist(),
+        physical_world_force_or_wrench=(-analytic).tolist(),
+        generalized_physical_force=(-analytic).tolist(),
+        projection="Identity: all four nodal world translations are dynamic",
+        sign_error_q=0.0,
+        sign_error_x=0.0,
+        constitutive_probe=_material_sweep(device, case),
+    )
+    return result
 
 
 def _fk_sweep(probe):
@@ -759,6 +862,32 @@ def _contact_sweep(probe):
     return result
 
 
+def _project_world_forces(probe):
+    """Independently project measured world forces with point J and barycentrics."""
+    solver, device = probe.solver, probe.model.device
+    data = _frozen_contact_data(probe)
+    force = solver._contact.final_force_linear.numpy().astype(np.float64)
+    result = np.zeros(14)
+    columns = wp.empty(2, dtype=wp.vec3, device=device)
+    for record, (ids, bary, local) in enumerate(zip(data["ids"], data["bary"], data["local"], strict=True)):
+        wp.launch(
+            _fk_columns,
+            2,
+            [
+                solver._articulation.scratch.J,
+                probe.candidate.state.body_q,
+                probe.model.body_com,
+                wp.vec3(_point(probe, local)),
+                columns,
+            ],
+            device=device,
+        )
+        result[:2] += columns.numpy().astype(np.float64) @ force[record]
+        for particle, weight in zip(ids, bary, strict=True):
+            result[2 + 3 * particle : 5 + 3 * particle] -= float(weight) * force[record]
+    return result
+
+
 def calibrate_case(device, *, case, repeats):
     """Measure production reductions, force resolution, cancellation and exact FD."""
     if repeats < 2:
@@ -837,12 +966,13 @@ def calibrate_case(device, *, case, repeats):
                 }
             )
     probe.evaluate(base)
-    fd = {"tet": _material_sweep(device, case), "fk": _fk_sweep(probe), "contact": _contact_sweep(probe)}
+    fd = {"tet": _tet_nodal_sweep(probe), "fk": _fk_sweep(probe), "contact": _contact_sweep(probe)}
     probe.evaluate(base)
     contact = solver._contact
     physical = solver._contact.final_force_linear.numpy().astype(np.float64)
     contact_residual = contact._residual[2].numpy().astype(np.float64)
     generalized = contact._projection[2].numpy().astype(np.float64)
+    projected_world = _project_world_forces(probe)
     force_spread = float(np.linalg.norm(np.ptp(forces[:, :3], axis=0)))
     force_reduction_error = float(np.linalg.norm(baseline_force[:3] - reference_force[:3]))
     force_ulp = max(row["force_resultant_change"] for row in quantization)
@@ -877,6 +1007,8 @@ def calibrate_case(device, *, case, repeats):
             "physical_rigid_sample_forces": physical.tolist(),
             "generalized_physical_force": generalized.tolist(),
             "residual_contribution": contact_residual.tolist(),
+            "scaled_projection_error_q": _error(scale[:2] * projected_world[:2], scale[:2] * generalized[:2]),
+            "scaled_projection_error_x": _error(scale[2:] * projected_world[2:], scale[2:] * generalized[2:]),
             "scaled_sign_error_q": _error(scale[:2] * contact_residual[:2], -scale[:2] * generalized[:2]),
             "scaled_sign_error_x": _error(scale[2:] * contact_residual[2:], -scale[2:] * generalized[2:]),
             "resultant_samples": forces.tolist(),
