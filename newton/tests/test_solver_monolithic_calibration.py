@@ -14,6 +14,7 @@ from newton.tests.unittest_utils import add_function_test, get_test_devices
 from scripts.monolithic_reference.calibrate_components import (
     CalibrationCase,
     CalibrationFreezeError,
+    _coordinate_envelope,
     _fd_status,
     aggregate_calibration_evidence,
     calibrate_case,
@@ -104,6 +105,33 @@ class TestCalibrationInputs(unittest.TestCase):
         with self.assertRaises(CalibrationFreezeError):
             aggregate_calibration_evidence([raw])
 
+    def test_coordinate_envelope_stops_at_first_common_failure(self):
+        """Later passing points cannot recover a failed CPU/CUDA common prefix."""
+        records = []
+        for device in ("cpu", "cuda"):
+            for case in freeze_calibration_cases():
+                if case.coordinate_role != "coordinate_sweep":
+                    continue
+                passed = case.world_offset != 0.5
+                records.append(
+                    {
+                        "device_class": device,
+                        "case": case,
+                        "raw": {
+                            "coordinate_support_status": "PASS" if passed else "OUTSIDE_MEASURED_GATE",
+                            "gates": {
+                                "finite_difference": "PASS" if passed else "FAIL",
+                                "reduction": "PASS",
+                                "linear": "PASS",
+                            },
+                        },
+                    }
+                )
+        result = _coordinate_envelope(records)
+        self.assertEqual(result["max_supported_abs_coordinate_m"], 0.25)
+        self.assertEqual(result["first_failed_magnitude_m"], 0.5)
+        self.assertEqual(result["passing_points_after_first_failure_not_used"], [1.0, 2.0, 5.0])
+
     def test_complete_passing_evidence_freezes_only_calibration_substate(self):
         """A complete manifest freezes calibration but never V0.1 acceptance."""
         records = []
@@ -121,7 +149,7 @@ class TestCalibrationInputs(unittest.TestCase):
                             "active_sample_count": case.requested_contact_cardinality,
                         },
                         "gates": {
-                            "finite_difference": "OUTSIDE_MEASURED_GATE" if outside else "PASS",
+                            "finite_difference": "FAIL" if outside else "PASS",
                             "reduction": "PASS",
                             "linear": "PASS",
                             "trajectory": "PASS",
@@ -144,11 +172,38 @@ class TestCalibrationInputs(unittest.TestCase):
             "source_set_sha256": "b" * 64,
             "evidence": records,
         }
-        result = aggregate_calibration_evidence([raw], freeze=True)
+        trajectories = {
+            "artifact_kind": "trajectory_evidence",
+            "calibration_schema_version": 2,
+            "profile": "freeze",
+            "git_dirty": False,
+            "source_set_sha256": "b" * 64,
+            "evidence": [
+                {
+                    "device": device,
+                    "role": role,
+                    "status": "PASS",
+                    "fixture_sha256": "c" * 64,
+                    "finite_state": True,
+                    "convergence_gate": "PASS",
+                    "representative_states": ["free", "onset", "loading", "peak", "settled"],
+                    "candidate_vs_strict_baseline": "PASS",
+                    "false_convergence_count": 0,
+                    "support_artifact_sha256": "d" * 64,
+                }
+                for device in ("cpu", "cuda:0")
+                for role in ("normal_loading_1000", "c4_supported_motion")
+            ],
+        }
+        result = aggregate_calibration_evidence([raw, trajectories], freeze=True)
         self.assertEqual(result["calibration_status"], "FROZEN")
         self.assertEqual(result["v01_status"], "DRAFT")
         self.assertEqual(result["coordinate_envelope"]["max_supported_abs_coordinate_m"], 5.0)
-        self.assertEqual(result["candidate_private_config"]["cpu"]["residual_floor_global"], 3.0)
+        self.assertEqual(
+            result["candidate_private_config"]["cpu"]["solver_internal_config"]["residual_floor_global"], 3.0
+        )
+        self.assertEqual(result["portable_solver_internal_config"]["residual_floor_global"], 3.0)
+        self.assertEqual(result["portable_acceptance"]["force_detection_floor_n"], 4e-6)
 
     def test_versioned_candidate_is_not_runtime_authority(self):
         """The checked-in proposal is machine-readable but explicitly unfrozen."""
@@ -159,6 +214,27 @@ class TestCalibrationInputs(unittest.TestCase):
         self.assertEqual(candidate["v01_status"], "DRAFT")
         self.assertTrue(candidate["runtime_use"].startswith("PROHIBITED"))
         self.assertEqual(set(candidate["candidate_private_config"]), {"cpu", "cuda"})
+        fields = {
+            "epsilon_d",
+            "residual_floor_global",
+            "residual_floor_q",
+            "residual_floor_x",
+            "merit_noise",
+            "merit_absolute_global",
+            "merit_absolute_q",
+            "merit_absolute_x",
+            "merit_relative_global",
+            "merit_relative_q",
+            "merit_relative_x",
+            "step_tolerance_global",
+            "step_tolerance_q",
+            "step_tolerance_x",
+            "det_f_guard",
+            "regularization_values",
+        }
+        self.assertEqual(set(candidate["portable_solver_internal_config"]), fields)
+        self.assertNotIn("force_detection_floor_n", candidate["portable_solver_internal_config"])
+        self.assertEqual(candidate["portable_acceptance"]["force_detection_floor_n"], 4e-6)
 
 
 def test_measured_active_and_inactive(test, device):

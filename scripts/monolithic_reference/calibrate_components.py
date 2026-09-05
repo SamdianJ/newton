@@ -504,28 +504,35 @@ def _record_failure(record, case):
     if observed.get("active_sample_count") != case.requested_contact_cardinality:
         return "observed contact cardinality differs from declaration"
     gates = record.get("gates", {})
-    if case.coordinate_role == "outside_control":
-        if record.get("coordinate_support_status") != "OUTSIDE_MEASURED_GATE":
-            return "10 m control was not rejected"
-        return None
-    if case.coordinate_role == "coordinate_sweep":
+    if case.coordinate_role in ("coordinate_sweep", "outside_control"):
         required = ("finite_difference", "reduction", "linear")
         if any(gates.get(name) not in ("PASS", "FAIL") for name in required):
             return "coordinate sweep is missing a measured gate result"
+        if record.get("coordinate_support_status") not in ("PASS", "OUTSIDE_MEASURED_GATE"):
+            return "coordinate sweep is missing its measured support result"
         return None
-    required = ("finite_difference", "reduction", "linear", "trajectory")
+    required = ("finite_difference", "reduction", "linear")
     if any(gates.get(name) != "PASS" for name in required):
         return "one or more required raw gates failed"
     return None
 
 
-def _aggregate_parameters(records):
+def _aggregate_parameters(records, max_coordinate):
     result = {}
     for device in ("cpu", "cuda"):
         supported = [
             record
             for record in records
-            if record["device_class"] == device and record["case"].coordinate_role == "supported"
+            if record["device_class"] == device
+            and (
+                record["case"].coordinate_role == "supported"
+                or (
+                    record["case"].coordinate_role == "coordinate_sweep"
+                    and max_coordinate is not None
+                    and record["case"].world_offset <= max_coordinate
+                    and record["raw"].get("coordinate_support_status") == "PASS"
+                )
+            )
         ]
         if not supported:
             continue
@@ -541,7 +548,7 @@ def _aggregate_parameters(records):
             record["raw"].get("force_noise", {}).get("recommended_force_detection_floor") for record in supported
         ]
         residual, merit, step = (maxima(name) for name in ("residual_floors", "merit_absolute", "small_scaled_step"))
-        result[device] = {
+        solver_internal_config = {
             "epsilon_d": 1e-6,
             "residual_floor_global": None if residual is None else residual[0],
             "residual_floor_q": None if residual is None else residual[1],
@@ -556,9 +563,16 @@ def _aggregate_parameters(records):
             "step_tolerance_global": None if step is None else step[0],
             "step_tolerance_q": None if step is None else step[1],
             "step_tolerance_x": None if step is None else step[2],
-            "force_detection_floor_n": (
-                max(force_floors) if force_floors and all(value is not None for value in force_floors) else None
-            ),
+            "det_f_guard": 0.2,
+            "regularization_values": [0.0, 1e-4, 1e-3, 1e-2, 0.1, 1.0, 10.0],
+        }
+        result[device] = {
+            "solver_internal_config": solver_internal_config,
+            "acceptance": {
+                "force_detection_floor_n": (
+                    max(force_floors) if force_floors and all(value is not None for value in force_floors) else None
+                )
+            },
         }
     return result
 
@@ -598,6 +612,25 @@ def _coordinate_envelope(records):
     }
 
 
+def _portable_config(per_device):
+    if set(per_device) != {"cpu", "cuda"}:
+        return None, None
+    configs = [per_device[device]["solver_internal_config"] for device in ("cpu", "cuda")]
+    fixed = ("epsilon_d", "det_f_guard", "regularization_values")
+    if any(config[name] != configs[0][name] for config in configs[1:] for name in fixed):
+        raise CalibrationFreezeError("Device candidates disagree on fixed solver policy")
+    portable = {}
+    for name in configs[0]:
+        values = [config[name] for config in configs]
+        if name in fixed:
+            portable[name] = values[0]
+        else:
+            portable[name] = None if any(value is None for value in values) else max(values)
+    force = [per_device[device]["acceptance"]["force_detection_floor_n"] for device in ("cpu", "cuda")]
+    acceptance = {"force_detection_floor_n": None if any(value is None for value in force) else max(force)}
+    return portable, acceptance
+
+
 def aggregate_calibration_evidence(artifacts, *, freeze=False):
     """Aggregate raw batches and optionally freeze the calibration sub-state.
 
@@ -606,16 +639,43 @@ def aggregate_calibration_evidence(artifacts, *, freeze=False):
     """
     expected_cases = {_case_key(case): case for case in freeze_calibration_cases()}
     expected_keys = {(device, key) for device in ("cpu", "cuda") for key in expected_cases}
-    sources, records, seen = set(), [], set()
+    sources, records, seen, trajectory = set(), [], set(), set()
     for artifact in artifacts:
-        if artifact.get("artifact_kind") != "raw_measurement" or artifact.get("calibration_schema_version") != 2:
-            raise CalibrationFreezeError("Only version-2 raw measurement artifacts may be aggregated")
+        kind = artifact.get("artifact_kind")
+        if kind not in ("raw_measurement", "trajectory_evidence") or artifact.get("calibration_schema_version") != 2:
+            raise CalibrationFreezeError("Only version-2 raw or trajectory evidence artifacts may be aggregated")
         if artifact.get("profile") != "freeze" or artifact.get("git_dirty") is not False:
             raise CalibrationFreezeError("Freeze evidence must use the freeze profile from a clean tree")
         source = artifact.get("source_set_sha256", "")
         if len(source) != 64:
             raise CalibrationFreezeError("Missing source-set identity")
         sources.add(source)
+        if kind == "trajectory_evidence":
+            for row in artifact.get("evidence", []):
+                device = _device_class(row.get("device", artifact.get("device", "")))
+                role = row.get("role")
+                if role not in ("normal_loading_1000", "c4_supported_motion"):
+                    raise CalibrationFreezeError(f"Unexpected trajectory role: {(device, role)}")
+                key = (device, role)
+                if key in trajectory:
+                    raise CalibrationFreezeError(f"Duplicate trajectory role: {key}")
+                if (
+                    row.get("status") != "PASS"
+                    or len(row.get("fixture_sha256", "")) != 64
+                    or row.get("finite_state") is not True
+                    or row.get("convergence_gate") != "PASS"
+                ):
+                    raise CalibrationFreezeError(f"Trajectory gate failed: {key}")
+                if role == "normal_loading_1000" and (
+                    set(row.get("representative_states", ())) != {"free", "onset", "loading", "peak", "settled"}
+                    or row.get("candidate_vs_strict_baseline") != "PASS"
+                    or row.get("false_convergence_count") != 0
+                ):
+                    raise CalibrationFreezeError(f"Normal-loading evidence is incomplete: {key}")
+                if role == "c4_supported_motion" and len(row.get("support_artifact_sha256", "")) != 64:
+                    raise CalibrationFreezeError(f"C4 support identity is missing: {key}")
+                trajectory.add(key)
+            continue
         for raw in artifact.get("evidence", []):
             try:
                 case = CalibrationCase(**raw["parameters"])
@@ -639,12 +699,18 @@ def aggregate_calibration_evidence(artifacts, *, freeze=False):
         if reason:
             failures.append({"device": record["device_class"], "case_id": record["case"].case_id, "reason": reason})
     missing = sorted(f"{device}:{case}" for device, case in expected_keys - seen)
+    expected_trajectory = {
+        (device, role) for device in ("cpu", "cuda") for role in ("normal_loading_1000", "c4_supported_motion")
+    }
+    missing_trajectory = sorted(f"{device}:{case}" for device, case in expected_trajectory - trajectory)
     coordinate = _coordinate_envelope(records)
     coordinate_ready = (
         coordinate["max_supported_abs_coordinate_m"] is not None
         and coordinate["max_supported_abs_coordinate_m"] >= coordinate["minimum_freeze_envelope_m"]
     )
-    ready = not missing and not failures and len(sources) == 1 and coordinate_ready
+    per_device = _aggregate_parameters(records, coordinate["max_supported_abs_coordinate_m"])
+    portable, portable_acceptance = _portable_config(per_device)
+    ready = not missing and not missing_trajectory and not failures and len(sources) == 1 and coordinate_ready
     if freeze and not ready:
         raise CalibrationFreezeError("Calibration evidence is incomplete or contains failed gates")
     return {
@@ -658,8 +724,11 @@ def aggregate_calibration_evidence(artifacts, *, freeze=False):
         "expected_case_count": len(expected_keys),
         "observed_case_count": len(seen),
         "missing_case_keys": missing,
+        "missing_trajectory_keys": missing_trajectory,
         "failed_records": failures,
-        "candidate_private_config": _aggregate_parameters(records),
+        "candidate_private_config": per_device,
+        "portable_solver_internal_config": portable,
+        "portable_acceptance": portable_acceptance,
     }
 
 
@@ -992,7 +1061,7 @@ def _tet_nodal_sweep(probe):
         flags.zero_()
         wp.launch(
             _evaluate_elastic_residual,
-            1,
+            tet_count,
             [
                 1e-6,
                 x,
@@ -1265,7 +1334,7 @@ def calibrate_case(device, *, case, repeats, profile="quick"):
         _, force, _ = probe.evaluate(base)
         wp.launch(
             _scale_calibration_vector,
-            14,
+            size,
             [frozen_scale, probe.candidate.residual, solver._metric_vector],
             device=device,
         )
@@ -1349,7 +1418,11 @@ def calibrate_case(device, *, case, repeats, profile="quick"):
         if case.requested_contact_cardinality < 0 or observed_contacts == case.requested_contact_cardinality
         else "FAIL"
     )
-    coordinate_support_status = "OUTSIDE_MEASURED_GATE" if case.coordinate_role == "outside_control" else "PASS"
+    reduction_gate = "PASS" if np.isfinite(samples).all() else "FAIL"
+    linear_gate = "PASS" if all(np.isfinite(row["true_norm_max"]).all() for row in cancellation) else "FAIL"
+    coordinate_support_status = (
+        "PASS" if fd_gate == cardinality_gate == reduction_gate == linear_gate == "PASS" else "OUTSIDE_MEASURED_GATE"
+    )
     return {
         "status": "RAW_MEASUREMENT" if profile == "freeze" else "DRAFT",
         "device": str(device),
@@ -1398,8 +1471,8 @@ def calibrate_case(device, *, case, repeats, profile="quick"):
         "gates": {
             "finite_difference": fd_gate,
             "contact_cardinality": cardinality_gate,
-            "reduction": "PASS" if np.isfinite(samples).all() else "FAIL",
-            "linear": "PASS" if all(np.isfinite(row["true_norm_max"]).all() for row in cancellation) else "FAIL",
+            "reduction": reduction_gate,
+            "linear": linear_gate,
             "trajectory": "NOT_MEASURED",
         },
         "coordinate_support_status": coordinate_support_status,

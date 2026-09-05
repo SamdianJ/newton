@@ -68,39 +68,96 @@
   },
   "candidate_private_config": {
     "cpu": {
-      "epsilon_d": 1e-06,
-      "residual_floor_global": 0.00062,
-      "residual_floor_q": 0.00013,
-      "residual_floor_x": 0.0006,
-      "merit_noise": 0.0,
-      "merit_absolute_global": 1.5e-06,
-      "merit_absolute_q": 7.2e-07,
-      "merit_absolute_x": 1.6e-06,
-      "merit_relative_global": 0.0001,
-      "merit_relative_q": 0.0001,
-      "merit_relative_x": 0.0001,
-      "step_tolerance_global": 2.6e-07,
-      "step_tolerance_q": 1.8e-07,
-      "step_tolerance_x": 2.8e-07,
-      "force_detection_floor_n": 4e-06
+      "solver_internal_config": {
+        "epsilon_d": 1e-06,
+        "residual_floor_global": 0.00062,
+        "residual_floor_q": 0.00013,
+        "residual_floor_x": 0.0006,
+        "merit_noise": 0.0,
+        "merit_absolute_global": 1.5e-06,
+        "merit_absolute_q": 7.2e-07,
+        "merit_absolute_x": 1.6e-06,
+        "merit_relative_global": 0.0001,
+        "merit_relative_q": 0.0001,
+        "merit_relative_x": 0.0001,
+        "step_tolerance_global": 2.6e-07,
+        "step_tolerance_q": 1.8e-07,
+        "step_tolerance_x": 2.8e-07,
+        "det_f_guard": 0.2,
+        "regularization_values": [
+          0.0,
+          0.0001,
+          0.001,
+          0.01,
+          0.1,
+          1.0,
+          10.0
+        ]
+      },
+      "acceptance": {
+        "force_detection_floor_n": 4e-06
+      }
     },
     "cuda": {
-      "epsilon_d": 1e-06,
-      "residual_floor_global": 0.00068,
-      "residual_floor_q": 0.00015,
-      "residual_floor_x": 0.00066,
-      "merit_noise": 0.0,
-      "merit_absolute_global": 1.5e-06,
-      "merit_absolute_q": 7.2e-07,
-      "merit_absolute_x": 1.6e-06,
-      "merit_relative_global": 0.0001,
-      "merit_relative_q": 0.0001,
-      "merit_relative_x": 0.0001,
-      "step_tolerance_global": 2.6e-07,
-      "step_tolerance_q": 1.8e-07,
-      "step_tolerance_x": 2.8e-07,
-      "force_detection_floor_n": 2e-06
+      "solver_internal_config": {
+        "epsilon_d": 1e-06,
+        "residual_floor_global": 0.00068,
+        "residual_floor_q": 0.00015,
+        "residual_floor_x": 0.00066,
+        "merit_noise": 0.0,
+        "merit_absolute_global": 1.5e-06,
+        "merit_absolute_q": 7.2e-07,
+        "merit_absolute_x": 1.6e-06,
+        "merit_relative_global": 0.0001,
+        "merit_relative_q": 0.0001,
+        "merit_relative_x": 0.0001,
+        "step_tolerance_global": 2.6e-07,
+        "step_tolerance_q": 1.8e-07,
+        "step_tolerance_x": 2.8e-07,
+        "det_f_guard": 0.2,
+        "regularization_values": [
+          0.0,
+          0.0001,
+          0.001,
+          0.01,
+          0.1,
+          1.0,
+          10.0
+        ]
+      },
+      "acceptance": {
+        "force_detection_floor_n": 2e-06
+      }
     }
+  },
+  "portable_solver_internal_config": {
+    "epsilon_d": 1e-06,
+    "residual_floor_global": 0.00068,
+    "residual_floor_q": 0.00015,
+    "residual_floor_x": 0.00066,
+    "merit_noise": 0.0,
+    "merit_absolute_global": 1.5e-06,
+    "merit_absolute_q": 7.2e-07,
+    "merit_absolute_x": 1.6e-06,
+    "merit_relative_global": 0.0001,
+    "merit_relative_q": 0.0001,
+    "merit_relative_x": 0.0001,
+    "step_tolerance_global": 2.6e-07,
+    "step_tolerance_q": 1.8e-07,
+    "step_tolerance_x": 2.8e-07,
+    "det_f_guard": 0.2,
+    "regularization_values": [
+      0.0,
+      0.0001,
+      0.001,
+      0.01,
+      0.1,
+      1.0,
+      10.0
+    ]
+  },
+  "portable_acceptance": {
+    "force_detection_floor_n": 4e-06
   },
   "open_gates": [
     "complete freeze-profile raw matrix from one clean source set",
