@@ -354,6 +354,7 @@ PN = "PN"
 pnd = "pnd"
 
 [tool.typos.default.extend-identifiers]
+monolithic_tiny_rev_pris_one_tet_v1 = "monolithic_tiny_rev_pris_one_tet_v1"
 PNGs = "PNGs"
 Haa = "Haa"
 iy = "iy"
