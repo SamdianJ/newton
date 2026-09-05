@@ -262,6 +262,41 @@ def test_full_element_raw_derivative(test, device):
     test.assertGreater(np.linalg.norm(production - inertia - raw) / np.linalg.norm(raw), 0.1)
 
 
+def test_guard_runtime_precision(test, device):
+    """Reject a positive host guard that becomes zero in the runtime precision."""
+    fixture, _, scatter, args = _setup(device)
+    positions = args["candidate_particle_q"].numpy().copy()
+    positions[3] = positions[0]
+    args["candidate_particle_q"].assign(positions)
+    for evaluate in (evaluate_tet_residual, assemble_tet_residual_tangent):
+        with test.subTest(evaluate=evaluate.__name__), test.assertRaisesRegex(ValueError, "min_det_f_guard"):
+            extra = {"scatter": scatter} if evaluate is assemble_tet_residual_tangent else {}
+            evaluate(fixture.model, **dict(args, min_det_f_guard=1.0e-100), **extra)
+
+
+def test_rest_volume_runtime_precision(test, device):
+    """Refuse finite rest data whose runtime determinant overflows to infinity."""
+    fixture, _, scatter, args = _setup(device)
+    model = fixture.model
+    model.tet_poses.assign(np.array([np.eye(3) * 1.0e13], dtype=np.float32))
+    model.tet_materials.assign(np.array([[1.0e30, 1.0e30, 0]], dtype=np.float32))
+    rest_positions = np.array([[0, 0, 0], [1.0e-13, 0, 0], [0, 1.0e-13, 0], [0, 0, 1.0e-13]], dtype=np.float32)
+    model.particle_q.assign(rest_positions)
+    args["particle_q_n"].assign(rest_positions)
+    positions = rest_positions.copy()
+    positions[1, 0] *= 1.2
+    args["candidate_particle_q"].assign(positions)
+    with test.subTest(stage="construction"), test.assertRaisesRegex(ValueError, "rest volume"):
+        validate_tet_scope(
+            model, dynamic_particle_ids=np.arange(4, dtype=np.int32), particle_to_dynamic=np.arange(4, dtype=np.int32)
+        )
+    for evaluate in (evaluate_tet_residual, assemble_tet_residual_tangent):
+        extra = {"scatter": scatter} if evaluate is assemble_tet_residual_tangent else {}
+        evaluate(model, **args, **extra)
+        with test.subTest(stage=evaluate.__name__):
+            test.assertEqual(args["workspace"].failure_flags.numpy()[0], TetEvaluationStatus.NONFINITE)
+
+
 def test_shared_nodes_dense_oracle(test, device):
     """Accumulate two tetrahedra at shared nodes and solve the same dense matrix."""
     builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0))
@@ -348,6 +383,8 @@ for device in get_test_devices():
         test_assembly_sign_psd_and_owner_parity,
         test_fixed_and_failures,
         test_full_element_raw_derivative,
+        test_guard_runtime_precision,
+        test_rest_volume_runtime_precision,
         test_shared_nodes_dense_oracle,
         test_scope_and_pattern_validation,
     ):

@@ -105,11 +105,13 @@ def validate_tet_scope(model: Model, *, dynamic_particle_ids: np.ndarray, partic
     poses, materials = model.tet_poses.numpy(), model.tet_materials.numpy()
     if poses.shape != (model.tet_count, 3, 3) or not np.all(np.isfinite(poses)):
         raise ValueError("tet rest poses must be finite inverse rest matrices")
-    determinants = np.linalg.det(poses.astype(np.float64))
-    with np.errstate(divide="ignore", over="ignore", invalid="ignore"):
-        volumes = (1.0 / (6.0 * determinants)).astype(np.float32)
-    if np.any(determinants <= 0) or not np.all(np.isfinite(volumes)) or np.any(volumes <= 0):
-        raise ValueError("tet rest volume must be finite and positive")
+    # Validate the actual device expression: a float64 determinant can hide
+    # float32 intermediate overflow and incorrectly admit a zero runtime volume.
+    device_volumes = wp.empty(model.tet_count, dtype=float, device=model.device)
+    wp.launch(_evaluate_rest_volumes, model.tet_count, [model.tet_poses, device_volumes], device=model.device)
+    volumes = device_volumes.numpy()
+    if not np.all(np.isfinite(volumes)) or np.any(volumes <= 0):
+        raise ValueError("tet rest volume must be finite and positive in runtime float32 arithmetic")
     if materials.shape != (model.tet_count, 3) or not np.all(np.isfinite(materials)):
         raise ValueError("tet materials must contain finite mu, lambda, damping")
     lambda_nh = materials[:, 0].astype(np.float64) + materials[:, 1]
@@ -166,6 +168,17 @@ def create_tet_assembly_workspace(
         wp.zeros(1, dtype=float, device=device),
         wp.zeros(1, dtype=int, device=device),
     )
+
+
+@wp.func
+def _compute_rest_volume(inverse_rest: wp.mat33) -> float:
+    return 1.0 / (6.0 * wp.determinant(inverse_rest))
+
+
+@wp.kernel
+def _evaluate_rest_volumes(poses: wp.array[wp.mat33], volumes: wp.array[float]):
+    tet = wp.tid()
+    volumes[tet] = _compute_rest_volume(poses[tet])
 
 
 @wp.func
@@ -327,8 +340,12 @@ def _elastic_state(
         if determinant < min_det_f_guard:
             wp.atomic_max(failure_flags, 0, 1)
             valid = False
+    rest_volume = _compute_rest_volume(tet_poses[tet])
+    if not wp.isfinite(rest_volume) or rest_volume <= 0.0:
+        wp.atomic_max(failure_flags, 0, 2)
+        valid = False
     energy, stress, projected = _evaluate_stable_neo_hookean(
-        f, 1.0 / (6.0 * wp.determinant(tet_poses[tet])), tet_materials[tet, 0], tet_materials[tet, 1]
+        f, rest_volume, tet_materials[tet, 0], tet_materials[tet, 1]
     )
     if not wp.isfinite(energy):
         wp.atomic_max(failure_flags, 0, 2)
@@ -449,10 +466,11 @@ def _prepare_evaluation(model, args):
     with np.errstate(divide="ignore", over="ignore", invalid="ignore", under="ignore"):
         dt32 = np.float32(dt)
         inv_dt_sq = np.float32((1.0 / np.float64(dt)) ** 2)
+        guard32 = np.float32(guard)
     if not np.isfinite(dt32) or dt32 <= 0 or not np.isfinite(inv_dt_sq) or inv_dt_sq <= 0:
         raise ValueError("dt must be finite, positive and representable in float32 inertia")
-    if not np.isfinite(guard) or guard <= 0 or guard > np.finfo(np.float32).max:
-        raise ValueError("min_det_f_guard must be finite and positive")
+    if not np.isfinite(guard32) or guard32 <= 0:
+        raise ValueError("min_det_f_guard must be finite and positive in runtime float32 arithmetic")
     specifications = (
         ("candidate_particle_q", wp.vec3, (model.particle_count,)),
         ("particle_q_n", wp.vec3, (model.particle_count,)),
