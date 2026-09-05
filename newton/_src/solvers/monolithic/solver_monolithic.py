@@ -55,26 +55,26 @@ from .tet import (
 
 @dataclass(frozen=True, slots=True)
 class _SolverMonolithicInternalConfig:
-    """Initial tiny-fixture settings; full asset/trajectory calibration is pending.
+    """Portable CPU/CUDA settings from the versioned P0 component and trajectory calibration.
 
     See ``scripts/monolithic_reference/calibrate_components.py`` for the
-    float32 reduction and coordinate-ULP measurements behind these draft gates.
+    component, float32 reduction, coordinate-ULP, and trajectory gates.
     """
 
     epsilon_d: float = 1.0e-6
-    residual_floor_global: float = 1.11e-6
-    residual_floor_q: float = 1.1e-6
-    residual_floor_x: float = 5.0e-8
-    merit_noise: float = 0.0
-    merit_absolute_global: float = 1.1e-6
-    merit_absolute_q: float = 2.8e-6
-    merit_absolute_x: float = 7.1e-8
+    residual_floor_global: float = 1.7210128930635914e-4
+    residual_floor_q: float = 2.1090331703277343e-5
+    residual_floor_x: float = 1.7099733184977595e-4
+    merit_noise: float = 7.92642972091695e-9
+    merit_absolute_global: float = 6.763034882944481e-6
+    merit_absolute_q: float = 2.5e-7
+    merit_absolute_x: float = 7.3049125684417234e-6
     merit_relative_global: float = 1.0e-4
     merit_relative_q: float = 1.0e-4
     merit_relative_x: float = 1.0e-4
-    step_tolerance_global: float = 2.6e-7
-    step_tolerance_q: float = 6.9e-7
-    step_tolerance_x: float = 1.8e-8
+    step_tolerance_global: float = 1.6873759893848113e-6
+    step_tolerance_q: float = 9.100770221088748e-10
+    step_tolerance_x: float = 1.8225743746537296e-6
     det_f_guard: float = 0.2
     regularization_values: tuple[float, ...] = (0.0, 1.0e-4, 1.0e-3, 1.0e-2, 0.1, 1.0, 10.0)
 
