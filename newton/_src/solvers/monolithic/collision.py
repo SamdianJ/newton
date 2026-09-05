@@ -102,6 +102,7 @@ def _validate_and_collect_shapes(model: Model, target_bodies: np.ndarray) -> np.
     indices = model._shape_sdf_index.numpy()
     descriptors = model._texture_sdf_data.numpy()
     coarse = model._texture_sdf_coarse_textures
+    fine = model._texture_sdf_subgrid_textures
     margins = model.shape_margin.numpy()
     transforms = model.shape_transform.numpy()
     analytic = {GeoType.SPHERE, GeoType.BOX, GeoType.CAPSULE, GeoType.CYLINDER, GeoType.CONE}
@@ -135,9 +136,22 @@ def _validate_and_collect_shapes(model: Model, target_bodies: np.ndarray) -> np.
                 or not np.isfinite(descriptor["sdf_box_upper"]).all()
                 or np.any(descriptor["sdf_box_upper"] <= descriptor["sdf_box_lower"])
                 or descriptor["subgrid_start_slots"]["data"] == 0
+                or descriptor["subgrid_start_slots"]["ndim"] != 3
+                or np.any(descriptor["subgrid_start_slots"]["shape"][:3] <= 0)
+                or descriptor["num_subgrids"] < 0
                 or int.from_bytes(descriptor["coarse_texture"].tobytes()[:8], "little") == 0
             ):
                 raise error(status.INVALID_SDF_DESCRIPTOR, f"shape_{shape}_empty_or_invalid")
+            if descriptor["num_subgrids"] > 0:
+                fine_handle = int.from_bytes(descriptor["subgrid_texture"].tobytes()[:8], "little")
+                if (
+                    fine_handle == 0
+                    or fine is None
+                    or index >= len(fine)
+                    or fine[index] is None
+                    or fine[index].id != fine_handle
+                ):
+                    raise error(status.INVALID_SDF_DESCRIPTOR, f"shape_{shape}_missing_fine_texture")
             if not descriptor["scale_baked"]:
                 reason = ""
                 if not np.isfinite(scale).all():
