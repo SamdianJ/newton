@@ -295,6 +295,31 @@ def test_rest_volume_runtime_precision(test, device):
         evaluate(model, **args, **extra)
         with test.subTest(stage=evaluate.__name__):
             test.assertEqual(args["workspace"].failure_flags.numpy()[0], TetEvaluationStatus.NONFINITE)
+    # Float32 determinant rounding can flip the orientation of a near-singular
+    # matrix; accepting a positive runtime volume alone loses the rest-data gate.
+    for inverse_rest in np.array(
+        [
+            [
+                [0.9303522109985352, 1.0570017099380493, 0.2456357479095459],
+                [-0.4884321093559265, -0.5002595782279968, -1.5494998693466187],
+                [0.4419201910495758, 0.5567421913146973, -1.3038640022277832],
+            ],
+            [
+                [1.257820725440979, 1.1558890342712402, 0.9321374893188477],
+                [-0.48559752106666565, -0.2361743450164795, 1.8318073749542236],
+                [0.7722234129905701, 0.9197148680686951, 2.7639448642730713],
+            ],
+        ],
+        dtype=np.float32,
+    ):
+        test.assertLess(np.linalg.det(inverse_rest.astype(np.float64)), 0.0)
+        model.tet_poses.assign(inverse_rest[None])
+        with test.subTest(stage="rest_orientation"), test.assertRaisesRegex(ValueError, "rest volume"):
+            validate_tet_scope(
+                model,
+                dynamic_particle_ids=np.arange(4, dtype=np.int32),
+                particle_to_dynamic=np.arange(4, dtype=np.int32),
+            )
 
 
 def test_shared_nodes_dense_oracle(test, device):
