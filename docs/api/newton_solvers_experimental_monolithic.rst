@@ -4,18 +4,20 @@
 newton.solvers.experimental.monolithic
 ======================================
 
-Experimental monolithic solver development scaffold.
+Experimental monolithic solver components and fixed P1Q3 collision.
 
 .. experimental::
 
-This scaffold provides internal layout, state-transaction, and sparse-assembly
-contracts. Physical stepping is not implemented; constructing the solver raises
-``NotImplementedError``. The collision pipeline will be added separately.
+The collision pipeline can detect tet-face contacts independently. The solver
+validates its model and allocates owned buffers at construction; physical
+stepping and final contact force publication remain unimplemented.
 
 .. py:module:: newton.solvers.experimental.monolithic
 .. currentmodule:: newton.solvers.experimental.monolithic
 
 .. rubric:: Classes
+
+.. autoclass:: MonolithicCollisionPipeline
 
 .. autoclass:: SolverMonolithic
 
