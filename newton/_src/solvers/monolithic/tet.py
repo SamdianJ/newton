@@ -105,6 +105,8 @@ def validate_tet_scope(model: Model, *, dynamic_particle_ids: np.ndarray, partic
     poses, materials = model.tet_poses.numpy(), model.tet_materials.numpy()
     if poses.shape != (model.tet_count, 3, 3) or not np.all(np.isfinite(poses)):
         raise ValueError("tet rest poses must be finite inverse rest matrices")
+    if np.any(np.linalg.det(poses.astype(np.float64)) <= 0):
+        raise ValueError("tet rest volume must be positive before runtime rounding")
     # Validate the actual device expression: a float64 determinant can hide
     # float32 intermediate overflow and incorrectly admit a zero runtime volume.
     device_volumes = wp.empty(model.tet_count, dtype=float, device=model.device)
