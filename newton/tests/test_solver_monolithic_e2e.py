@@ -14,7 +14,9 @@ import numpy as np
 
 from newton.tests.unittest_utils import add_function_test, get_test_devices
 from scripts.monolithic_reference.normal_loading import (
+    LEGACY_FIXTURE,
     SolverMonolithic,
+    _v01_exit,
     assess_run,
     command_at,
     load_fixture,
@@ -23,10 +25,15 @@ from scripts.monolithic_reference.normal_loading import (
 
 
 class TestNormalLoadingContract(unittest.TestCase):
-    def test_drive_and_draft_contract(self):
-        """Keep the scene draft and sample continuous free/loading/settle commands."""
+    def test_drive_and_versioned_status_contract(self):
+        """Keep independent evidence axes and sample the declared command."""
         fixture = load_fixture()
         self.assertEqual(fixture["status"], "DRAFT")
+        self.assertEqual(fixture["schema_version"], "normal_loading/v2")
+        self.assertEqual(fixture["calibration_status"], "UNFROZEN")
+        self.assertEqual(fixture["support_status"], "UNFROZEN")
+        self.assertEqual(fixture["reference_status"], "BLOCKED")
+        self.assertIn("active-contact", fixture["reference_provenance"]["reason"])
         self.assertEqual(fixture["contact"]["stiffness_n_m3"], 1.0e7)
         self.assertEqual(fixture["acceptance"]["delta_soft_min_m"], 0.005)
         for time_s, expected, phase in ((0.0, 0.0, "free_space"), (0.2, 0.003, "loading"), (0.7, 0.012, "settle")):
@@ -34,6 +41,63 @@ class TestNormalLoadingContract(unittest.TestCase):
             self.assertAlmostEqual(q, expected)
             self.assertAlmostEqual(qd, 0.0)
             self.assertEqual(actual_phase, phase)
+
+    def test_legacy_draft_remains_loadable(self):
+        fixture = load_fixture(LEGACY_FIXTURE)
+        self.assertEqual(fixture["schema_version"], "normal_loading_draft/v1")
+        self.assertEqual(fixture["calibration_status"], "UNFROZEN")
+
+    def test_frozen_axis_requires_versioned_hash_but_is_not_globally_blocked(self):
+        fixture = load_fixture()
+        fixture["calibration_status"] = "FROZEN"
+        fixture["calibration_provenance"] = {
+            "version": "monolithic_calibration/v1",
+            "sha256": "a" * 64,
+            "candidate_private_config": {"cpu": {"residual_floor_global": 1.0e-6}},
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "fixture.json"
+            path.write_text(json.dumps(fixture))
+            loaded = load_fixture(path)
+            self.assertEqual(loaded["calibration_status"], "FROZEN")
+            for invalid in (None, {"version": "v1", "sha256": None}, {"version": "v1", "sha256": "bad"}):
+                changed = copy.deepcopy(fixture)
+                changed["calibration_provenance"] = invalid
+                path.write_text(json.dumps(changed))
+                with self.assertRaises(ValueError):
+                    load_fixture(path)
+
+    def test_candidate_and_blocked_statuses_do_not_count_as_frozen(self):
+        fixture = load_fixture()
+        fixture["calibration_status"] = "CANDIDATE"
+        fixture["support_status"] = "CANDIDATE"
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "fixture.json"
+            path.write_text(json.dumps(fixture))
+            load_fixture(path)
+            summary = assess_run([], fixture)
+            self.assertFalse(summary["gates"]["frozen_calibration"])
+            self.assertFalse(summary["gates"]["frozen_support"])
+            self.assertFalse(summary["gates"]["frozen_reference"])
+            changed = copy.deepcopy(fixture)
+            changed["reference_provenance"] = None
+            path.write_text(json.dumps(changed))
+            with self.assertRaises(ValueError):
+                load_fixture(path)
+
+    def test_v01_exit_requires_numerics_and_all_three_frozen_axes(self):
+        gates = {
+            "e2e_numerical_pass": True,
+            "frozen_calibration": True,
+            "frozen_support": True,
+            "frozen_reference": True,
+        }
+        self.assertTrue(_v01_exit(gates))
+        for name in gates:
+            with self.subTest(name=name):
+                changed = dict(gates)
+                changed[name] = False
+                self.assertFalse(_v01_exit(changed))
 
     def test_soft_metric_excludes_rigid_motion(self):
         """Measure apex-to-surface shortening independently of a rigid transform."""
@@ -83,11 +147,36 @@ class TestNormalLoadingContract(unittest.TestCase):
 def test_short_normal_loading(test, device):
     """Measure a short real trajectory and reject incomplete or failed evidence without changing thresholds."""
     fixture = load_fixture()
+    fixture["calibration_status"] = "FROZEN"
+    fixture["calibration_provenance"] = {
+        "version": "monolithic_calibration/test-v1",
+        "sha256": "b" * 64,
+        "candidate_private_config": {"cpu": {"residual_floor_global": 1.0e-6}},
+    }
     result = run_loading(fixture, device=device, substeps=12)
     test.assertEqual(len(result["records"]), 12)
     test.assertFalse(result["summary"]["gates"]["minimum_steps"])
     test.assertFalse(result["summary"]["v01_exit"])
     test.assertEqual(result["metadata"]["status"], "DRAFT")
+    test.assertEqual(result["metadata"]["calibration_status"], "FROZEN")
+    test.assertEqual(result["metadata"]["support_status"], "UNFROZEN")
+    test.assertEqual(result["metadata"]["reference_status"], "BLOCKED")
+    test.assertEqual(result["metadata"]["calibration_version"], "monolithic_calibration/test-v1")
+    test.assertEqual(result["metadata"]["calibration_sha256"], "b" * 64)
+    test.assertEqual(result["metadata"]["candidate_solver_internal_config"], {"cpu": {"residual_floor_global": 1.0e-6}})
+    test.assertIsNone(result["metadata"]["requested_solver_internal_config"])
+    default_config = result["metadata"]["solver_internal_config"]
+    test.assertNotEqual(default_config["residual_floor_global"], 1.0e-6)
+
+    candidate = dict(default_config)
+    candidate["merit_noise"] = 1.0e-12
+    applied = run_loading(fixture, device=device, substeps=1, candidate_internal_config=candidate)
+    test.assertEqual(applied["metadata"]["requested_solver_internal_config"], candidate)
+    test.assertEqual(applied["metadata"]["solver_internal_config"], candidate)
+    invalid = dict(candidate)
+    invalid["unknown_field"] = 1.0
+    with test.assertRaises(ValueError):
+        run_loading(fixture, device=device, substeps=0, candidate_internal_config=invalid)
     for i, record in enumerate(result["records"]):
         test.assertEqual(record["step"], i)
         test.assertEqual(record["phase"], "free_space")
