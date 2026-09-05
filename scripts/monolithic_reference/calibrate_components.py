@@ -1358,10 +1358,13 @@ def verify_calibration_release_index(index_path):
         raise CalibrationFreezeError("Compact calibration status or config is invalid")
     c4_rows = c4.get("evidence", [])
     c4_devices = {_release_device(row.get("device")): row for row in c4_rows}
+    c4_configs = _collect_nested_values(c4, "solver_internal_config")
     if (
         c4.get("status") != "FROZEN"
         or set(c4_devices) != {"cpu", "cuda"}
         or len(c4_rows) != 2
+        or not c4_configs
+        or any(c4_config != config for c4_config in c4_configs)
         or any(
             row.get("c4_gate") != "PASS"
             or row.get("supported_local_motion_gate") != "PASS"

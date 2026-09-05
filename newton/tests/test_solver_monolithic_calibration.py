@@ -577,6 +577,7 @@ class TestCalibrationInputs(unittest.TestCase):
                         "c4_gate": "PASS",
                         "supported_local_motion_gate": "PASS",
                         "support_envelope": {"status": "FROZEN"},
+                        "manifest": {"solver_internal_config": config},
                     }
                     for device in ("cpu", "cuda:0")
                 ],
