@@ -53,6 +53,26 @@ from newton._src.solvers.monolithic.tet import (
 from newton.tests.monolithic_test_utils import build_tiny_cpu_fixture
 from scripts.monolithic_reference.calibrate_p1q3 import refined_tetrahedron
 
+_INTERNAL_CONFIG_FIELDS = {
+    "epsilon_d",
+    "residual_floor_global",
+    "residual_floor_q",
+    "residual_floor_x",
+    "merit_noise",
+    "merit_absolute_global",
+    "merit_absolute_q",
+    "merit_absolute_x",
+    "merit_relative_global",
+    "merit_relative_q",
+    "merit_relative_x",
+    "step_tolerance_global",
+    "step_tolerance_q",
+    "step_tolerance_x",
+    "det_f_guard",
+    "regularization_values",
+}
+_PRODUCTION_SOURCE_PREFIX = "newton/_src/solvers/monolithic/"
+
 
 @wp.kernel
 def _constitutive(
@@ -278,6 +298,11 @@ def main():
     parser.add_argument("--batch-index", type=int, default=0)
     parser.add_argument("--batch-count", type=int, default=1)
     parser.add_argument("--aggregate", type=Path, nargs="+", help="Aggregate version-2 raw freeze batches")
+    parser.add_argument("--trajectory-candidate", type=Path, nargs="+", help="Candidate normal-loading run directories")
+    parser.add_argument("--trajectory-probe", type=Path, nargs="+", help="Unadjusted calibration candidate runs")
+    parser.add_argument("--trajectory-strict", type=Path, nargs="+", help="Strict-baseline normal-loading directories")
+    parser.add_argument("--trajectory-c4", type=Path, help="Frozen C4 support artifact")
+    parser.add_argument("--trajectory-calibration-raw", type=Path, help="Complete raw calibration artifact")
     parser.add_argument(
         "--freeze", action="store_true", help="Require complete passing evidence and freeze calibration"
     )
@@ -285,6 +310,29 @@ def main():
     args = parser.parse_args()
     if not math.isfinite(args.dt) or args.dt <= 0 or args.repeats < 2:
         parser.error("dt must be positive and finite; repeats must be at least two")
+    trajectory_arguments = (
+        args.trajectory_candidate,
+        args.trajectory_probe,
+        args.trajectory_strict,
+        args.trajectory_c4,
+        args.trajectory_calibration_raw,
+    )
+    if any(value is not None for value in trajectory_arguments):
+        if args.matrix or args.aggregate or not all(value is not None for value in trajectory_arguments):
+            parser.error(
+                "trajectory evidence production requires candidate, strict, C4 and calibration raw inputs only"
+            )
+        c4_bytes = args.trajectory_c4.read_bytes()
+        payload = build_trajectory_evidence(
+            json.loads(args.trajectory_calibration_raw.read_text()),
+            [_load_normal_run(path) for path in args.trajectory_probe],
+            [_load_normal_run(path) for path in args.trajectory_candidate],
+            [_load_normal_run(path) for path in args.trajectory_strict],
+            c4_bytes,
+        )
+        args.output.parent.mkdir(parents=True, exist_ok=True)
+        args.output.write_text(json.dumps(payload, indent=2, allow_nan=False) + "\n")
+        return
     if args.aggregate:
         if args.matrix:
             parser.error("--aggregate and --matrix are mutually exclusive")
@@ -501,17 +549,156 @@ def _case_key(case):
     return case.case_id
 
 
-def _record_failure(record, case):
+def _finite_array(value, *, shape=None):
+    try:
+        array = np.asarray(value, dtype=np.float64)
+    except (TypeError, ValueError):
+        return False
+    return (shape is None or array.shape == shape) and bool(np.isfinite(array).all())
+
+
+def _same_numbers(actual, expected):
+    return (
+        _finite_array(actual)
+        and np.asarray(actual).shape == np.asarray(expected).shape
+        and bool(np.allclose(actual, expected, rtol=1e-12, atol=1e-15))
+    )
+
+
+def _record_failure(record, case, device, repeats):
     if record.get("status") != "RAW_MEASUREMENT":
         return "record is not raw measurement"
     if len(record.get("fixture_sha256", "")) != 64:
         return "missing fixture identity"
+    stored = record.get("stored_fixture")
+    if not isinstance(stored, dict) or record["fixture_sha256"] != _hash_json(
+        {"parameters": asdict(case), "stored": stored}
+    ):
+        return "fixture identity does not match stored parameters"
+    if (
+        not _finite_array(stored.get("tet_indices"), shape=(case.tet_count, 4))
+        or not _finite_array(stored.get("particle_q"))
+        or np.asarray(stored["particle_q"]).ndim != 2
+        or np.asarray(stored["particle_q"]).shape[1] != 3
+        or not _finite_array(stored.get("initial_particle_q"), shape=np.asarray(stored["particle_q"]).shape)
+        or not _finite_array(stored.get("joint_X_p"))
+        or np.asarray(stored["joint_X_p"]).ndim != 2
+        or np.asarray(stored["joint_X_p"]).shape[1] != 7
+        or not _finite_array(stored.get("deformation_seed_input"))
+        or np.asarray(stored["deformation_seed_input"]).shape[-1] != 3
+    ):
+        return "stored fixture geometry is incomplete or nonfinite"
     observed = record.get("observed", {})
     if observed.get("tet_count") != case.tet_count:
         return "observed tet count differs from declaration"
     if observed.get("active_sample_count") != case.requested_contact_cardinality:
         return "observed contact cardinality differs from declaration"
+    finite_difference = record.get("finite_difference", {})
+    definitions = {
+        "tet": ("energy_gradient", "physical_force_raw_derivative"),
+        "fk": ("q_radians", "q_metres"),
+        "contact": ("gap_q", "gap_x", "energy_q", "energy_x"),
+    }
+    measured_fd = {}
+    for name, metrics in definitions.items():
+        block = finite_difference.get(name, {})
+        if name == "contact" and case.requested_contact_cardinality == 0:
+            if block.get("status") != "NOT_APPLICABLE" or block.get("records") != []:
+                return "inactive contact FD is not a valid NOT_APPLICABLE record"
+            measured_fd[name] = "NOT_APPLICABLE"
+            continue
+        records = block.get("records")
+        if not isinstance(records, list) or len(records) < 5:
+            return f"{name} FD records are incomplete"
+        recomputed = _fd_status(records, metrics, device)["status"]
+        if recomputed != block.get("status"):
+            return f"{name} FD status does not match raw records"
+        measured_fd[name] = recomputed
+    fd_gate = "PASS" if all(value in ("PASS", "NOT_APPLICABLE") for value in measured_fd.values()) else "FAIL"
+    reduction = record.get("reduction_noise", {})
+    samples = np.asarray(reduction.get("merit_samples", ()), dtype=np.float64)
+    reduction_gate = "PASS" if samples.shape == (repeats, 3) and np.isfinite(samples).all() else "FAIL"
+    cancellation = record.get("linear_cancellation", ())
+    expected_linear = {(value, block) for value in (0.0, 0.001, 1.0) for block in ("none", "q", "x")}
+    observed_linear = {(row.get("lambda"), row.get("zero_rhs_block")) for row in cancellation}
+    linear_gate = (
+        "PASS"
+        if len(cancellation) == 9
+        and observed_linear == expected_linear
+        and all(
+            _finite_array(row.get("true_norm_max"), shape=(3,))
+            and _finite_array(row.get("true_norm_peak_to_peak"), shape=(3,))
+            for row in cancellation
+        )
+        else "FAIL"
+    )
+    quantization = record.get("coordinate_quantization", ())
+    if not quantization or not all(
+        _finite_array(row.get("scaled_step_rms"), shape=(3,))
+        and _finite_array(row.get("scaled_residual_change_rms"), shape=(3,))
+        and _finite_array([row.get("force_resultant_change")], shape=(1,))
+        for row in quantization
+    ):
+        return "coordinate quantization records are incomplete or nonfinite"
+    draft = record.get("draft_parameters", {})
+    if not all(
+        _finite_array(draft.get(name), shape=(3,))
+        for name in ("residual_floors", "merit_absolute", "small_scaled_step")
+    ) or not _finite_array([draft.get("merit_noise"), draft.get("linear_tolerance_target")], shape=(2,)):
+        return "candidate parameter inputs are missing or nonfinite"
+    force_floor = record.get("force_noise", {}).get("recommended_force_detection_floor")
+    if not _finite_array([force_floor], shape=(1,)) or force_floor < 0:
+        return "force detection floor is missing or invalid"
+    q_floor = 2e4 * max(row["true_norm_max"][1] for row in cancellation if row["zero_rhs_block"] == "q")
+    x_floor = 2e4 * max(row["true_norm_max"][2] for row in cancellation if row["zero_rhs_block"] == "x")
+    residual = [math.hypot(q_floor, x_floor), q_floor, x_floor]
+    merit = 2 * np.max([row["scaled_residual_change_rms"] for row in quantization], axis=0)
+    step = 0.5 * np.max([row["scaled_step_rms"] for row in quantization], axis=0)
+    merit_noise = 2 * np.ptp(samples[:, 0])
+    force = record.get("force_noise", {})
+    resultants = np.asarray(force.get("resultant_samples", ()), dtype=np.float64)
+    rigid_forces = np.asarray(force.get("physical_rigid_sample_forces", ()), dtype=np.float64)
+    baseline = np.asarray(force.get("physical_world_force_or_wrench", ()), dtype=np.float64)
+    if (
+        resultants.shape != (repeats, 6)
+        or rigid_forces.ndim != 2
+        or rigid_forces.shape[1] != 3
+        or baseline.shape != (6,)
+        or not np.isfinite(resultants).all()
+        or not np.isfinite(rigid_forces).all()
+        or not np.isfinite(baseline).all()
+    ):
+        return "force floor raw arrays are incomplete or nonfinite"
+    force_spread = np.linalg.norm(np.ptp(resultants[:, :3], axis=0))
+    force_reduction = np.linalg.norm(baseline[:3] - np.sum(rigid_forces, axis=0))
+    force_ulp = max(row["force_resultant_change"] for row in quantization)
+    expected_force_floor = 2 * max(force_spread, force_reduction, force_ulp)
+    if (
+        not _same_numbers(draft["residual_floors"], residual)
+        or not _same_numbers(draft["merit_absolute"], merit)
+        or not _same_numbers(draft["small_scaled_step"], step)
+        or not _same_numbers(draft["merit_noise"], merit_noise)
+        or not _same_numbers(draft["linear_tolerance_target"], 1e-4)
+        or not _same_numbers(force_floor, expected_force_floor)
+    ):
+        return "candidate parameters do not match recomputed raw measurements"
     gates = record.get("gates", {})
+    derived = {
+        "finite_difference": fd_gate,
+        "contact_cardinality": (
+            "PASS" if observed.get("active_sample_count") == case.requested_contact_cardinality else "FAIL"
+        ),
+        "reduction": reduction_gate,
+        "linear": linear_gate,
+    }
+    if any(gates.get(name) != value for name, value in derived.items()):
+        return "stored component gate differs from recomputed raw evidence"
+    coordinate_status = "PASS" if all(value == "PASS" for value in derived.values()) else "OUTSIDE_MEASURED_GATE"
+    if (
+        case.coordinate_role in ("coordinate_sweep", "outside_control")
+        and record.get("coordinate_support_status") != coordinate_status
+    ):
+        return "coordinate support status differs from recomputed evidence"
     if case.coordinate_role in ("coordinate_sweep", "outside_control"):
         required = ("finite_difference", "reduction", "linear")
         if any(gates.get(name) not in ("PASS", "FAIL") for name in required):
@@ -519,8 +706,7 @@ def _record_failure(record, case):
         if record.get("coordinate_support_status") not in ("PASS", "OUTSIDE_MEASURED_GATE"):
             return "coordinate sweep is missing its measured support result"
         return None
-    required = ("finite_difference", "reduction", "linear")
-    if any(gates.get(name) != "PASS" for name in required):
+    if any(derived[name] != "PASS" for name in ("finite_difference", "reduction", "linear")):
         return "one or more required raw gates failed"
     return None
 
@@ -609,14 +795,36 @@ def _coordinate_envelope(records):
             first_failed = magnitude
         elif passed:
             passed_after_failure.append(magnitude)
+    passing_rows = [
+        record
+        for record in records
+        if record["case"].coordinate_role == "coordinate_sweep"
+        and passing_prefix
+        and record["case"].world_offset <= passing_prefix[-1]
+        and record["raw"].get("coordinate_support_status") == "PASS"
+    ]
+    coordinate_values = []
+    for record in passing_rows:
+        stored = record["raw"].get("stored_fixture", {})
+        coordinate_values.extend(np.asarray(stored.get("particle_q", ()), dtype=np.float64).reshape(-1).tolist())
+        coordinate_values.extend(
+            np.asarray(stored.get("initial_particle_q", ()), dtype=np.float64).reshape(-1).tolist()
+        )
+        for name in ("joint_X_p", "joint_X_c", "shape_transform"):
+            transforms = np.asarray(stored.get(name, ()), dtype=np.float64)
+            if transforms.ndim == 2 and transforms.shape[1] >= 3:
+                coordinate_values.extend(transforms[:, :3].reshape(-1).tolist())
+    maximum_world_coordinate = max((abs(value) for value in coordinate_values), default=None)
     return {
         "measured_magnitudes_m": list(_COORDINATE_SWEEP_MAGNITUDES),
         "required_patterns": ["positive_axis", "negative_axis", "mixed"],
-        "max_supported_abs_coordinate_m": max(passing_prefix, default=None),
-        "first_failed_magnitude_m": first_failed,
+        "maximum_passing_translation_offset_m": max(passing_prefix, default=None),
+        "maximum_observed_absolute_world_coordinate_m": maximum_world_coordinate,
+        "first_failing_translation_offset_m": first_failed,
         "passing_points_after_first_failure_not_used": passed_after_failure,
-        "minimum_freeze_envelope_m": 0.1,
-        "method": "CPU/CUDA common contiguous passing prefix; no recovery after first failed magnitude",
+        "minimum_required_translation_offset_m": 0.1,
+        "scope": "exact stored one-tet calibration fixture translations only; not a general world-coordinate range",
+        "method": "CPU/CUDA common contiguous measured translation-offset prefix; no recovery after first failure",
     }
 
 
@@ -639,6 +847,141 @@ def _portable_config(per_device):
     return portable, acceptance
 
 
+def _config_failure(config, acceptance):
+    if config is None or acceptance is None:
+        return "CPU/CUDA portable config is incomplete"
+    if set(config) != _INTERNAL_CONFIG_FIELDS:
+        return "portable config does not contain exactly the solver internal fields"
+    if set(acceptance) != {"force_detection_floor_n"}:
+        return "portable acceptance has missing or unknown fields"
+    fixed = {
+        "epsilon_d": 1e-6,
+        "det_f_guard": 0.2,
+        "regularization_values": [0.0, 1e-4, 1e-3, 1e-2, 0.1, 1.0, 10.0],
+        "merit_relative_global": 1e-4,
+        "merit_relative_q": 1e-4,
+        "merit_relative_x": 1e-4,
+    }
+    if any(config[name] != value for name, value in fixed.items()):
+        return "portable config changes a fixed solver policy"
+    upper_bounds = {
+        "residual_floor_global": 1e-2,
+        "residual_floor_q": 1e-2,
+        "residual_floor_x": 1e-2,
+        "merit_noise": 1e-3,
+        "merit_absolute_global": 1e-2,
+        "merit_absolute_q": 1e-2,
+        "merit_absolute_x": 1e-2,
+        "step_tolerance_global": 1e-2,
+        "step_tolerance_q": 1e-2,
+        "step_tolerance_x": 1e-2,
+    }
+    nonnegative = {"merit_noise"}
+    for name, value in config.items():
+        if name == "regularization_values":
+            if (
+                not _finite_array(value)
+                or len(value) < 2
+                or value[0] != 0.0
+                or any(right <= left for left, right in itertools.pairwise(value))
+            ):
+                return "regularization sequence is invalid"
+        elif not _finite_array([value], shape=(1,)) or (value < 0 if name in nonnegative else value <= 0):
+            return f"portable config field {name} is invalid"
+        elif name in upper_bounds and value > upper_bounds[name]:
+            return f"portable config field {name} exceeds its review bound"
+    force_floor = acceptance.get("force_detection_floor_n")
+    if not _finite_array([force_floor], shape=(1,)) or not 0 < force_floor <= 1e-2:
+        return "portable force detection floor is invalid"
+    return None
+
+
+def _trajectory_config_failure(config, component, acceptance):
+    reason = _config_failure(config, acceptance)
+    if reason:
+        return reason
+    calibrated = _INTERNAL_CONFIG_FIELDS - {
+        "epsilon_d",
+        "det_f_guard",
+        "regularization_values",
+        "merit_relative_global",
+        "merit_relative_q",
+        "merit_relative_x",
+    }
+    if any(config[name] < component[name] for name in calibrated):
+        return "trajectory candidate is less conservative than component calibration"
+    return None
+
+
+def _git_blob_sha256(git_sha, path):
+    try:
+        blob = subprocess.check_output(["git", "show", f"{git_sha}:{path}"], stderr=subprocess.DEVNULL)
+    except subprocess.CalledProcessError:
+        return None
+    return hashlib.sha256(blob).hexdigest()
+
+
+def _source_set_matches(source_files, source_set):
+    line_digest = hashlib.sha256(
+        "".join(f"{path}:{source_files[path]}\n" for path in sorted(source_files)).encode()
+    ).hexdigest()
+    return source_set in (_hash_json(source_files), line_digest)
+
+
+def _source_identity_failure(artifact, *, require_production=False):
+    git_sha = artifact.get("git_sha", "")
+    source_set = artifact.get("source_set_sha256", "")
+    source_files = artifact.get("source_sha256")
+    hexdigits = set("0123456789abcdef")
+    if (
+        len(git_sha) != 40
+        or any(character not in hexdigits for character in git_sha.lower())
+        or len(source_set) != 64
+        or any(character not in hexdigits for character in source_set.lower())
+        or not isinstance(source_files, dict)
+        or not source_files
+        or any(
+            not isinstance(path, str)
+            or Path(path).is_absolute()
+            or ".." in Path(path).parts
+            or not isinstance(value, str)
+            or len(value) != 64
+            or any(character not in hexdigits for character in value.lower())
+            for path, value in source_files.items()
+        )
+        or not _source_set_matches(source_files, source_set)
+    ):
+        return "source-set identity is malformed or does not match its file hash map"
+    production = [path for path in source_files if path.startswith(_PRODUCTION_SOURCE_PREFIX)]
+    if require_production and not production:
+        return "measurement source set does not include monolithic production code"
+    for path, expected in source_files.items():
+        if _git_blob_sha256(git_sha, path) != expected:
+            return f"source hash does not match git revision: {path}"
+    return None
+
+
+def _production_source_failure(reference_sources, git_sha, candidate_sources=None, *, ignored_paths=()):
+    expected = {
+        path: digest
+        for path, digest in reference_sources.items()
+        if path.startswith(_PRODUCTION_SOURCE_PREFIX) and path not in ignored_paths
+    }
+    if not expected:
+        return "calibration artifact has no production source identity"
+    if candidate_sources is None:
+        actual = {path: _git_blob_sha256(git_sha, path) for path in expected}
+    else:
+        overlap = expected.keys() & candidate_sources.keys()
+        if not overlap:
+            return "upstream artifact has no overlapping monolithic production source"
+        actual = {path: candidate_sources[path] for path in overlap}
+        expected = {path: expected[path] for path in overlap}
+    if actual != expected:
+        return "monolithic production sources differ from calibration measurement"
+    return None
+
+
 def aggregate_calibration_evidence(artifacts, *, freeze=False):
     """Aggregate raw batches and optionally freeze the calibration sub-state.
 
@@ -647,17 +990,53 @@ def aggregate_calibration_evidence(artifacts, *, freeze=False):
     """
     expected_cases = {_case_key(case): case for case in freeze_calibration_cases()}
     expected_keys = {(device, key) for device in ("cpu", "cuda") for key in expected_cases}
-    sources, records, seen, trajectory, artifact_failures = set(), [], set(), set(), []
+    measurement_sources, trajectory_sources = set(), set()
+    trajectory_measurement_sources, measurement_git_shas, trajectory_measurement_git_shas = set(), set(), set()
+    records, seen, trajectory, artifact_failures, trajectory_configs = [], set(), set(), [], []
     for artifact in artifacts:
         kind = artifact.get("artifact_kind")
         if kind not in ("raw_measurement", "trajectory_evidence") or artifact.get("calibration_schema_version") != 2:
             raise CalibrationFreezeError("Only version-2 raw or trajectory evidence artifacts may be aggregated")
         if artifact.get("profile") != "freeze" or artifact.get("git_dirty") is not False:
             raise CalibrationFreezeError("Freeze evidence must use the freeze profile from a clean tree")
-        source = artifact.get("source_set_sha256", "")
-        if len(source) != 64:
-            raise CalibrationFreezeError("Missing source-set identity")
-        sources.add(source)
+        source_error = _source_identity_failure(artifact, require_production=kind == "raw_measurement")
+        if source_error:
+            raise CalibrationFreezeError(source_error)
+        source = artifact["source_set_sha256"]
+        if kind == "raw_measurement":
+            measurement_sources.add(source)
+            measurement_git_shas.add(artifact["git_sha"])
+        else:
+            trajectory_sources.add(source)
+            if set(artifact["source_sha256"]) != {"scripts/monolithic_reference/calibrate_components.py"}:
+                raise CalibrationFreezeError("Trajectory evidence has an unexpected producer source set")
+            measurement_source = artifact.get("measurement_source_set_sha256", "")
+            if len(measurement_source) != 64:
+                raise CalibrationFreezeError("Trajectory evidence is missing its measurement source dependency")
+            trajectory_measurement_sources.add(measurement_source)
+            trajectory_measurement_git_shas.add(artifact.get("measurement_git_sha", ""))
+            upstream = artifact.get("upstream", {})
+            normal_upstream = upstream.get("normal_loading", {})
+            c4_upstream = upstream.get("c4", {})
+            if set(normal_upstream) != {"cpu", "cuda"} or set(c4_upstream) != {
+                "git_sha",
+                "source_set_sha256",
+                "artifact_sha256",
+            }:
+                raise CalibrationFreezeError("Trajectory upstream provenance is incomplete")
+            validated_config = artifact.get("validated_solver_internal_config")
+            derivation = artifact.get("trajectory_config_derivation", {})
+            if (
+                derivation.get("adjusted_field") != "merit_absolute_q"
+                or derivation.get("safety_factor") != 1.5
+                or derivation.get("round_up_quantum") != 0.5e-7
+                or not _finite_array([derivation.get("probe_maximum"), derivation.get("result")], shape=(2,))
+                or derivation["result"] != math.ceil(1.5 * derivation["probe_maximum"] / 0.5e-7) * 0.5e-7
+                or not isinstance(validated_config, dict)
+                or validated_config.get("merit_absolute_q") != derivation["result"]
+            ):
+                raise CalibrationFreezeError("Trajectory config derivation is invalid")
+            trajectory_configs.append(validated_config)
         if kind == "raw_measurement" and artifact.get("repeats", 0) < 100:
             artifact_failures.append(
                 {
@@ -682,13 +1061,29 @@ def aggregate_calibration_evidence(artifacts, *, freeze=False):
                 ):
                     raise CalibrationFreezeError(f"Trajectory gate failed: {key}")
                 if role == "normal_loading_1000" and (
-                    set(row.get("representative_states", ())) != {"free", "onset", "loading", "peak", "settled"}
+                    not isinstance(row.get("representative_states"), dict)
+                    or set(row["representative_states"]) != {"free", "onset", "loading", "peak", "settled"}
+                    or any(not isinstance(index, int) or index < 0 for index in row["representative_states"].values())
+                    or len(row.get("candidate_artifact_sha256", "")) != 64
+                    or len(row.get("strict_artifact_sha256", "")) != 64
+                    or not _finite_array(list(row.get("candidate_vs_strict_relative_errors", {}).values()))
+                    or max(row["candidate_vs_strict_relative_errors"].values(), default=math.inf) > 0.05
                     or row.get("candidate_vs_strict_baseline") != "PASS"
                     or row.get("false_convergence_count") != 0
+                    or row.get("candidate_artifact_sha256")
+                    != normal_upstream.get(device, {}).get("candidate_artifact_sha256")
+                    or row.get("strict_artifact_sha256")
+                    != normal_upstream.get(device, {}).get("strict_artifact_sha256")
+                    or row.get("probe_artifact_sha256") != normal_upstream.get(device, {}).get("probe_artifact_sha256")
+                    or row.get("probe_failed_final_merit_q_max")
+                    != normal_upstream.get(device, {}).get("probe_failed_final_merit_q_max")
                 ):
                     raise CalibrationFreezeError(f"Normal-loading evidence is incomplete: {key}")
-                if role == "c4_supported_motion" and len(row.get("support_artifact_sha256", "")) != 64:
-                    raise CalibrationFreezeError(f"C4 support identity is missing: {key}")
+                if role == "c4_supported_motion" and (
+                    len(row.get("support_artifact_sha256", "")) != 64
+                    or row.get("support_artifact_sha256") != c4_upstream.get("artifact_sha256")
+                ):
+                    raise CalibrationFreezeError(f"C4 support identity is missing or inconsistent: {key}")
                 trajectory.add(key)
             continue
         for raw in artifact.get("evidence", []):
@@ -705,12 +1100,25 @@ def aggregate_calibration_evidence(artifacts, *, freeze=False):
             if key in seen:
                 raise CalibrationFreezeError(f"Duplicate freeze case: {key}")
             seen.add(key)
-            records.append({"device_class": device, "case": case, "raw": raw})
-    if len(sources) > 1:
+            records.append(
+                {
+                    "device_class": device,
+                    "case": case,
+                    "raw": raw,
+                    "repeats": artifact.get("repeats", 0),
+                }
+            )
+    if len(measurement_sources) > 1:
         raise CalibrationFreezeError("Raw batches were measured from different source sets")
+    if len(measurement_git_shas) > 1:
+        raise CalibrationFreezeError("Raw batches were measured from different git revisions")
+    if trajectory_measurement_sources and trajectory_measurement_sources != measurement_sources:
+        raise CalibrationFreezeError("Trajectory evidence references a different calibration measurement source")
+    if trajectory_measurement_git_shas and trajectory_measurement_git_shas != measurement_git_shas:
+        raise CalibrationFreezeError("Trajectory evidence references a different calibration measurement revision")
     failures = []
     for record in records:
-        reason = _record_failure(record["raw"], record["case"])
+        reason = _record_failure(record["raw"], record["case"], record["device_class"], record["repeats"])
         if reason:
             failures.append({"device": record["device_class"], "case_id": record["case"].case_id, "reason": reason})
     missing = sorted(f"{device}:{case}" for device, case in expected_keys - seen)
@@ -720,17 +1128,28 @@ def aggregate_calibration_evidence(artifacts, *, freeze=False):
     missing_trajectory = sorted(f"{device}:{case}" for device, case in expected_trajectory - trajectory)
     coordinate = _coordinate_envelope(records)
     coordinate_ready = (
-        coordinate["max_supported_abs_coordinate_m"] is not None
-        and coordinate["max_supported_abs_coordinate_m"] >= coordinate["minimum_freeze_envelope_m"]
+        coordinate["maximum_passing_translation_offset_m"] is not None
+        and coordinate["maximum_passing_translation_offset_m"] >= coordinate["minimum_required_translation_offset_m"]
     )
-    per_device = _aggregate_parameters(records, coordinate["max_supported_abs_coordinate_m"])
-    portable, portable_acceptance = _portable_config(per_device)
+    per_device = _aggregate_parameters(records, coordinate["maximum_passing_translation_offset_m"])
+    component_portable, portable_acceptance = _portable_config(per_device)
+    portable = component_portable
+    config_error = _config_failure(component_portable, portable_acceptance)
+    if trajectory_configs:
+        if any(config != trajectory_configs[0] for config in trajectory_configs[1:]):
+            config_error = "trajectory artifacts disagree on the validated solver config"
+        else:
+            config_error = _trajectory_config_failure(trajectory_configs[0], component_portable, portable_acceptance)
+            if config_error is None:
+                portable = trajectory_configs[0]
+    if config_error:
+        artifact_failures.append({"batch_index": None, "reason": config_error})
     ready = (
         not missing
         and not missing_trajectory
         and not failures
         and not artifact_failures
-        and len(sources) == 1
+        and len(measurement_sources) == 1
         and coordinate_ready
     )
     if freeze and not ready:
@@ -740,8 +1159,12 @@ def aggregate_calibration_evidence(artifacts, *, freeze=False):
         "calibration_schema_version": 2,
         "calibration_status": "FROZEN" if freeze else "CANDIDATE" if ready else "INCOMPLETE",
         "v01_status": "DRAFT",
-        "source_set_sha256": next(iter(sources), None),
-        "coordinate_envelope": coordinate,
+        "measurement_source": {
+            "git_sha": next(iter(measurement_git_shas), None),
+            "source_set_sha256": next(iter(measurement_sources), None),
+        },
+        "trajectory_source_set_sha256": sorted(trajectory_sources),
+        "exact_fixture_translation_offset_evidence": coordinate,
         "outside_coordinate_controls_m": [_OUTSIDE_WORLD_OFFSET],
         "expected_case_count": len(expected_keys),
         "observed_case_count": len(seen),
@@ -750,8 +1173,356 @@ def aggregate_calibration_evidence(artifacts, *, freeze=False):
         "failed_records": failures,
         "artifact_failures": artifact_failures,
         "candidate_private_config": per_device,
+        "component_portable_solver_internal_config": component_portable,
         "portable_solver_internal_config": portable,
         "portable_acceptance": portable_acceptance,
+        "component_linear_gate_kind": "dense_true_residual_cancellation_not_runtime_pcg",
+    }
+
+
+def _load_normal_run(path):
+    path = Path(path)
+    required = {name: path / name for name in ("metadata.json", "summary.json", "steps.jsonl")}
+    if any(not item.is_file() for item in required.values()):
+        raise CalibrationFreezeError(f"Normal-loading run is incomplete: {path}")
+    records = [json.loads(line) for line in required["steps.jsonl"].read_text().splitlines()]
+    return {
+        "metadata": json.loads(required["metadata.json"].read_text()),
+        "summary": json.loads(required["summary.json"].read_text()),
+        "records": records,
+        "artifact_sha256": _hash_json(
+            {name: hashlib.sha256(item.read_bytes()).hexdigest() for name, item in required.items()}
+        ),
+    }
+
+
+def _normal_loading_failure(run):
+    metadata, summary, records = run["metadata"], run["summary"], run["records"]
+    limits = metadata.get("actual_parameters", {}).get("acceptance", {})
+    minimum_steps = limits.get("minimum_substeps", 1000)
+    if (
+        not isinstance(records, list)
+        or len(records) < minimum_steps
+        or summary.get("substeps") != len(records)
+        or not all(record.get("finite_state") is True for record in records)
+    ):
+        return "normal-loading records are incomplete or nonfinite"
+    numerical_gates = {
+        name: value for name, value in summary.get("gates", {}).items() if not name.startswith("frozen_")
+    }
+    if (
+        not numerical_gates
+        or numerical_gates.get("converged_linear_gates") is not True
+        or any(value is not True for value in numerical_gates.values())
+    ):
+        return "normal-loading numerical gates did not all pass"
+    converged_ratio = sum(record.get("converged") is True for record in records) / len(records)
+    if not math.isclose(
+        converged_ratio, summary.get("converged_ratio", math.nan), rel_tol=0.0, abs_tol=1e-12
+    ) or converged_ratio < limits.get("minimum_converged_ratio", 0.99):
+        return "normal-loading convergence ratio does not match raw records"
+    streak = maximum_streak = linear_solve_count = 0
+    for record in records:
+        streak = 0 if record.get("converged") is True else streak + 1
+        maximum_streak = max(maximum_streak, streak)
+        if record.get("converged") is True:
+            ratios = record.get("nonlinear_convergence_ratios")
+            if not _finite_array(ratios, shape=(3,)) or max(ratios) > 1.0:
+                return "normal-loading contains false nonlinear convergence"
+            if record.get("linear_iterations", 0) > 0:
+                linear_solve_count += 1
+                tolerance = limits.get("linear_tolerance")
+                values = [record.get("stats", {}).get(name) for name in ("rho", "rho_q", "rho_x")]
+                if (
+                    not _finite_array(values, shape=(3,))
+                    or not _finite_array([tolerance], shape=(1,))
+                    or max(values) > tolerance
+                ):
+                    return "normal-loading contains false linear convergence"
+    if linear_solve_count == 0:
+        return "normal-loading did not exercise runtime PCG"
+    if maximum_streak != summary.get("maximum_consecutive_non_success") or maximum_streak > limits.get(
+        "maximum_consecutive_non_success", 2
+    ):
+        return "normal-loading non-success streak does not match raw records"
+    if summary.get("e2e_numerical_pass") is not True:
+        return "normal-loading summary is not a numerical PASS"
+    return None
+
+
+def _normal_loading_role(candidate, strict, portable_config, reference_sources, probe):
+    cm, sm = candidate["metadata"], strict["metadata"]
+    device = _device_class(cm.get("device"))
+    if _device_class(sm.get("device")) != device:
+        raise CalibrationFreezeError("Candidate/strict normal-loading devices differ")
+    if any(metadata.get("worktree_dirty") is not False for metadata in (cm, sm)):
+        raise CalibrationFreezeError(f"Normal-loading evidence is dirty on {device}")
+    if cm.get("input_sha256") != sm.get("input_sha256") or len(cm.get("input_sha256", "")) != 64:
+        raise CalibrationFreezeError(f"Candidate/strict normal-loading fixtures differ on {device}")
+    if (
+        cm.get("requested_solver_internal_config") != portable_config
+        or cm.get("solver_internal_config") != portable_config
+    ):
+        raise CalibrationFreezeError(f"Candidate config was not explicitly applied on {device}")
+    if sm.get("requested_solver_internal_config") is not None:
+        raise CalibrationFreezeError(f"Strict baseline unexpectedly applied a candidate config on {device}")
+    for run in (candidate, strict):
+        source_error = _production_source_failure(reference_sources, run["metadata"].get("newton_sha", ""))
+        if source_error:
+            raise CalibrationFreezeError(f"{source_error} on {device}")
+        numerical_error = _normal_loading_failure(run)
+        if numerical_error:
+            raise CalibrationFreezeError(f"{numerical_error} on {device}")
+    metrics = ("peak_force_n", "settled_force_n", "secant_stiffness_n_m", "curve_work_j")
+    parity = {}
+    for name in metrics:
+        actual, reference = candidate["summary"].get(name), strict["summary"].get(name)
+        if not _finite_array([actual, reference], shape=(2,)):
+            raise CalibrationFreezeError(f"Normal-loading parity metric {name} is missing on {device}")
+        error = abs(actual - reference) / max(abs(actual), abs(reference), 1e-12)
+        parity[name] = error
+    if max(parity.values()) > 0.05:
+        raise CalibrationFreezeError(f"Candidate/strict normal-loading parity exceeds 5% on {device}")
+    records = candidate["records"]
+    onset = candidate["summary"]["contact_onset_step"]
+    if onset is None:
+        raise CalibrationFreezeError(f"Representative normal-loading onset is unavailable on {device}")
+    peak = int(np.argmax([record["normal_compressive_force_n"] for record in records]))
+    indices = {
+        "free": 0,
+        "onset": onset,
+        "loading": (onset + peak) // 2,
+        "peak": peak,
+        "settled": len(records) - 1,
+    }
+    if any(not 0 <= index < len(records) for index in indices.values()):
+        raise CalibrationFreezeError(f"Representative normal-loading states are unavailable on {device}")
+    return {
+        "device": device,
+        "role": "normal_loading_1000",
+        "status": "PASS",
+        "fixture_sha256": cm["input_sha256"],
+        "candidate_artifact_sha256": candidate["artifact_sha256"],
+        "strict_artifact_sha256": strict["artifact_sha256"],
+        "probe_artifact_sha256": probe["artifact_sha256"],
+        "probe_failed_final_merit_q_max": probe["failed_final_merit_q_max"],
+        "finite_state": True,
+        "convergence_gate": "PASS",
+        "representative_states": indices,
+        "candidate_vs_strict_baseline": "PASS",
+        "candidate_vs_strict_relative_errors": parity,
+        "false_convergence_count": 0,
+    }
+
+
+def _derive_trajectory_config(probes, component_config, reference_sources):
+    by_device = {_device_class(run["metadata"].get("device")): run for run in probes}
+    if len(probes) != 2 or set(by_device) != {"cpu", "cuda"}:
+        raise CalibrationFreezeError("Trajectory config probe requires exactly one CPU and CUDA run")
+    maxima, provenance = [], {}
+    for device, run in by_device.items():
+        metadata, summary, records = run["metadata"], run["summary"], run["records"]
+        if (
+            metadata.get("worktree_dirty") is not False
+            or metadata.get("requested_solver_internal_config") != component_config
+            or metadata.get("solver_internal_config") != component_config
+            or _production_source_failure(reference_sources, metadata.get("newton_sha", ""))
+        ):
+            raise CalibrationFreezeError(f"Unadjusted trajectory probe provenance differs on {device}")
+        failed = {
+            name
+            for name, passed in summary.get("gates", {}).items()
+            if not name.startswith("frozen_") and passed is not True
+        }
+        bad = [record for record in records if record.get("converged") is not True]
+        if (
+            summary.get("e2e_numerical_pass") is not False
+            or summary.get("substeps") != 1000
+            or failed != {"converged_ratio", "consecutive_non_success"}
+            or not bad
+            or not all(record.get("finite_state") is True for record in records)
+            or any(record.get("rolled_back") is True for record in records)
+            or not all(record.get("committed_unconverged") is True for record in bad)
+        ):
+            raise CalibrationFreezeError(f"Unadjusted probe did not isolate a convergence-only failure on {device}")
+        merits = []
+        for record in bad:
+            ratios = record.get("nonlinear_convergence_ratios")
+            merit_q = record.get("stats", {}).get("merit_q_final")
+            if (
+                not _finite_array(ratios, shape=(3,))
+                or not (ratios[0] <= 1.0 < ratios[1] and ratios[2] <= 1.0)
+                or not _finite_array([merit_q], shape=(1,))
+                or merit_q <= 0
+            ):
+                raise CalibrationFreezeError(f"Unadjusted probe failure is not isolated to q merit on {device}")
+            merits.append(merit_q)
+        maximum = max(merits)
+        maxima.append(maximum)
+        provenance[device] = {
+            "artifact_sha256": run["artifact_sha256"],
+            "git_sha": metadata["newton_sha"],
+            "failed_final_merit_q_max": maximum,
+        }
+    observed = max(maxima)
+    adjusted = dict(component_config)
+    quantum = 0.5e-7
+    adjusted["merit_absolute_q"] = math.ceil(1.5 * observed / quantum) * quantum
+    return adjusted, provenance
+
+
+def _collect_nested_values(value, key):
+    result = []
+    if isinstance(value, dict):
+        if key in value:
+            result.append(value[key])
+        for item in value.values():
+            result.extend(_collect_nested_values(item, key))
+    elif isinstance(value, list):
+        for item in value:
+            result.extend(_collect_nested_values(item, key))
+    return result
+
+
+def _current_producer_identity():
+    root = Path(__file__).resolve().parents[2]
+    paths = [Path(__file__).resolve()]
+    sources = {str(path.relative_to(root)): hashlib.sha256(path.read_bytes()).hexdigest() for path in paths}
+    return {
+        "git_sha": subprocess.check_output(["git", "-C", str(root), "rev-parse", "HEAD"], text=True).strip(),
+        "git_dirty": bool(
+            subprocess.check_output(["git", "-C", str(root), "status", "--porcelain"], text=True).strip()
+        ),
+        "source_sha256": sources,
+        "source_set_sha256": _hash_json(sources),
+    }
+
+
+def build_trajectory_evidence(calibration_raw, probe_runs, candidate_runs, strict_runs, c4_artifact_bytes):
+    """Derive trajectory roles from actual normal-loading and C4 artifacts."""
+    try:
+        c4_artifact = json.loads(c4_artifact_bytes)
+    except (TypeError, ValueError, json.JSONDecodeError) as error:
+        raise CalibrationFreezeError("C4 artifact is not valid JSON bytes") from error
+    c4_sha256 = hashlib.sha256(c4_artifact_bytes).hexdigest()
+    component = aggregate_calibration_evidence([calibration_raw])
+    if component["missing_case_keys"] or component["failed_records"] or component["artifact_failures"]:
+        raise CalibrationFreezeError("Calibration component artifact is not complete")
+    source_files = calibration_raw["source_sha256"]
+    source_set = calibration_raw["source_set_sha256"]
+    measurement_git_sha = calibration_raw.get("git_sha")
+    c4_sources = c4_artifact.get("source_sha256")
+    if (
+        c4_artifact.get("status") != "FROZEN"
+        or c4_artifact.get("git_dirty") is not False
+        or len(c4_sha256) != 64
+        or not isinstance(c4_sources, dict)
+        or not c4_sources
+        or not _source_set_matches(c4_sources, c4_artifact.get("source_set_sha256"))
+    ):
+        raise CalibrationFreezeError("C4 artifact is not frozen on the calibration source revision")
+    source_error = _source_identity_failure(c4_artifact)
+    if source_error:
+        raise CalibrationFreezeError(f"C4 {source_error}")
+    production_error = _production_source_failure(
+        source_files,
+        c4_artifact["git_sha"],
+        c4_sources,
+        ignored_paths={"newton/_src/solvers/monolithic/solver_monolithic.py"},
+    )
+    if production_error:
+        raise CalibrationFreezeError(production_error)
+    c4_rows = {_device_class(row.get("device")): row for row in c4_artifact.get("evidence", [])}
+    candidate_config, probe_provenance = _derive_trajectory_config(
+        probe_runs, component["component_portable_solver_internal_config"], source_files
+    )
+    candidates = {_device_class(run["metadata"].get("device")): run for run in candidate_runs}
+    strict = {_device_class(run["metadata"].get("device")): run for run in strict_runs}
+    if (
+        len(candidate_runs) != 2
+        or len(strict_runs) != 2
+        or len(c4_artifact.get("evidence", [])) != 2
+        or set(candidates) != {"cpu", "cuda"}
+        or set(strict) != {"cpu", "cuda"}
+        or set(c4_rows) != {"cpu", "cuda"}
+    ):
+        raise CalibrationFreezeError("Trajectory producer requires exactly one CPU and CUDA artifact per role")
+    candidate_configs = [candidates[device]["metadata"].get("solver_internal_config") for device in ("cpu", "cuda")]
+    if candidate_configs[0] != candidate_configs[1]:
+        raise CalibrationFreezeError("CPU/CUDA trajectory candidates used different solver configs")
+    if candidate_configs[0] != candidate_config:
+        raise CalibrationFreezeError("Final candidate does not equal the config derived from failed probes")
+    config_error = _trajectory_config_failure(
+        candidate_config,
+        component["component_portable_solver_internal_config"],
+        component["portable_acceptance"],
+    )
+    if config_error:
+        raise CalibrationFreezeError(config_error)
+    output = []
+    for device in ("cpu", "cuda"):
+        output.append(
+            _normal_loading_role(
+                candidates[device], strict[device], candidate_config, source_files, probe_provenance[device]
+            )
+        )
+        c4 = c4_rows[device]
+        c4_configs = _collect_nested_values(c4, "solver_internal_config")
+        if (
+            c4.get("c4_gate") != "PASS"
+            or c4.get("supported_local_motion_gate") != "PASS"
+            or c4.get("support_envelope", {}).get("status") != "FROZEN"
+            or not c4_configs
+            or any(config != candidate_config for config in c4_configs)
+        ):
+            raise CalibrationFreezeError(f"C4 supported motion gate failed on {device}")
+        output.append(
+            {
+                "device": device,
+                "role": "c4_supported_motion",
+                "status": "PASS",
+                "fixture_sha256": c4.get("support_envelope", {}).get("sha256") or c4_sha256,
+                "support_artifact_sha256": c4_sha256,
+                "finite_state": True,
+                "convergence_gate": "PASS",
+            }
+        )
+    producer = _current_producer_identity()
+    return {
+        "artifact_kind": "trajectory_evidence",
+        "calibration_schema_version": 2,
+        "profile": "freeze",
+        **producer,
+        "measurement_git_sha": measurement_git_sha,
+        "measurement_source_set_sha256": source_set,
+        "validated_solver_internal_config": candidate_config,
+        "trajectory_config_derivation": {
+            "adjusted_field": "merit_absolute_q",
+            "probe_maximum": max(row["failed_final_merit_q_max"] for row in probe_provenance.values()),
+            "safety_factor": 1.5,
+            "round_up_quantum": 0.5e-7,
+            "result": candidate_config["merit_absolute_q"],
+        },
+        "upstream": {
+            "normal_loading": {
+                device: {
+                    "probe_git_sha": probe_provenance[device]["git_sha"],
+                    "probe_artifact_sha256": probe_provenance[device]["artifact_sha256"],
+                    "probe_failed_final_merit_q_max": probe_provenance[device]["failed_final_merit_q_max"],
+                    "candidate_git_sha": candidates[device]["metadata"]["newton_sha"],
+                    "candidate_artifact_sha256": candidates[device]["artifact_sha256"],
+                    "strict_git_sha": strict[device]["metadata"]["newton_sha"],
+                    "strict_artifact_sha256": strict[device]["artifact_sha256"],
+                }
+                for device in ("cpu", "cuda")
+            },
+            "c4": {
+                "git_sha": c4_artifact["git_sha"],
+                "source_set_sha256": c4_artifact["source_set_sha256"],
+                "artifact_sha256": c4_sha256,
+            },
+        },
+        "evidence": output,
     }
 
 

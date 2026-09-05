@@ -3,10 +3,14 @@
 
 """Verify that offline calibration records measured terms and bounded scope."""
 
+import copy
+import hashlib
 import json
+import subprocess
 import unittest
 from dataclasses import asdict, replace
 from pathlib import Path
+from unittest.mock import patch
 
 import numpy as np
 
@@ -16,11 +20,113 @@ from scripts.monolithic_reference.calibrate_components import (
     CalibrationFreezeError,
     _coordinate_envelope,
     _fd_status,
+    _hash_json,
     aggregate_calibration_evidence,
+    build_trajectory_evidence,
     calibrate_case,
     calibration_cases,
     freeze_calibration_cases,
 )
+
+_ROOT = Path(__file__).parents[2]
+
+
+def _committed_source_identity(paths):
+    git_sha = subprocess.check_output(["git", "-C", str(_ROOT), "rev-parse", "HEAD"], text=True).strip()
+    sources = {
+        path: hashlib.sha256(
+            subprocess.check_output(["git", "-C", str(_ROOT), "show", f"{git_sha}:{path}"])
+        ).hexdigest()
+        for path in paths
+    }
+    return {
+        "git_sha": git_sha,
+        "git_dirty": False,
+        "source_sha256": sources,
+        "source_set_sha256": _hash_json(sources),
+    }
+
+
+def _synthetic_raw_record(case, device):
+    """Build structurally valid raw arrays; integrity/gate tests mutate these."""
+
+    def fd(metrics):
+        records = [{"step": step, **{name: {"relative_error": 0.0} for name in metrics}} for step in range(5)]
+        return {"status": "PASS", "records": records}
+
+    stored = {
+        "case_id": case.case_id,
+        "tet_indices": [[0, 1, 2, 3] for _ in range(case.tet_count)],
+        "particle_q": [[case.world_offset, 0.0, 0.0], [0.04, 0.0, 0.0], [0.0, 0.04, 0.0], [0.0, 0.0, 0.04]],
+        "initial_particle_q": [
+            [case.world_offset, 0.0, 0.0],
+            [0.04, 0.0, 0.0],
+            [0.0, 0.04, 0.0],
+            [0.0, 0.0, 0.04],
+        ],
+        "joint_X_p": [[case.world_offset, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0]],
+        "joint_X_c": [[0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0]],
+        "shape_transform": [[0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0]],
+        "deformation_seed_input": [0.0, 0.0, 0.0],
+    }
+    quantization = [
+        {
+            "scaled_step_rms": [6e-4, 2e-4, 4e-4],
+            "scaled_residual_change_rms": [1.5e-4, 5e-9, 1e-4],
+            "force_resultant_change": 2e-6,
+        }
+    ]
+    record = {
+        "status": "RAW_MEASUREMENT",
+        "device": device,
+        "parameters": asdict(case),
+        "stored_fixture": stored,
+        "fixture_sha256": _hash_json({"parameters": asdict(case), "stored": stored}),
+        "observed": {"tet_count": case.tet_count, "active_sample_count": case.requested_contact_cardinality},
+        "finite_difference": {
+            "tet": fd(("energy_gradient", "physical_force_raw_derivative")),
+            "fk": fd(("q_radians", "q_metres")),
+            "contact": (
+                fd(("gap_q", "gap_x", "energy_q", "energy_x"))
+                if case.requested_contact_cardinality
+                else {"status": "NOT_APPLICABLE", "records": []}
+            ),
+        },
+        "reduction_noise": {"merit_samples": [[0.0, 0.0, 0.0] for _ in range(100)]},
+        "linear_cancellation": [
+            {
+                "lambda": regularization,
+                "zero_rhs_block": block,
+                "true_norm_max": [0.0, 1e-8, 1e-8],
+                "true_norm_peak_to_peak": [0.0, 0.0, 0.0],
+            }
+            for regularization in (0.0, 0.001, 1.0)
+            for block in ("none", "q", "x")
+        ],
+        "coordinate_quantization": quantization,
+        "force_noise": {
+            "recommended_force_detection_floor": 4e-6,
+            "resultant_samples": [[0.0] * 6 for _ in range(100)],
+            "physical_rigid_sample_forces": [[0.0, 0.0, 0.0]],
+            "physical_world_force_or_wrench": [0.0] * 6,
+        },
+        "draft_parameters": {
+            "residual_floors": [2.8284271247461903e-4, 2e-4, 2e-4],
+            "merit_absolute": [3e-4, 1e-8, 2e-4],
+            "small_scaled_step": [3e-4, 1e-4, 2e-4],
+            "merit_noise": 0.0,
+            "linear_tolerance_target": 1e-4,
+        },
+    }
+    record["gates"] = {
+        "finite_difference": "PASS",
+        "contact_cardinality": "PASS",
+        "reduction": "PASS",
+        "linear": "PASS",
+        "trajectory": "NOT_MEASURED",
+    }
+    record["coordinate_support_status"] = "PASS"
+    return record
 
 
 class TestCalibrationInputs(unittest.TestCase):
@@ -78,21 +184,15 @@ class TestCalibrationInputs(unittest.TestCase):
     def test_freeze_aggregator_fails_closed(self):
         """Labels alone cannot freeze an incomplete or failed evidence set."""
         case = freeze_calibration_cases()[0]
-        record = {
-            "status": "RAW_MEASUREMENT",
-            "device": "cpu",
-            "parameters": asdict(case),
-            "fixture_sha256": "a" * 64,
-            "observed": {"tet_count": case.tet_count, "active_sample_count": case.requested_contact_cardinality},
-            "gates": {"finite_difference": "PASS", "reduction": "PASS", "linear": "PASS", "trajectory": "PASS"},
-        }
+        record = _synthetic_raw_record(case, "cpu")
+        source = _committed_source_identity(["newton/_src/solvers/monolithic/contact.py"])
         raw = {
             "artifact_kind": "raw_measurement",
             "calibration_schema_version": 2,
             "profile": "freeze",
             "git_dirty": False,
             "repeats": 100,
-            "source_set_sha256": "b" * 64,
+            **source,
             "devices": ["cpu", "cuda"],
             "evidence": [record],
         }
@@ -129,8 +229,8 @@ class TestCalibrationInputs(unittest.TestCase):
                     }
                 )
         result = _coordinate_envelope(records)
-        self.assertEqual(result["max_supported_abs_coordinate_m"], 0.25)
-        self.assertEqual(result["first_failed_magnitude_m"], 0.5)
+        self.assertEqual(result["maximum_passing_translation_offset_m"], 0.25)
+        self.assertEqual(result["first_failing_translation_offset_m"], 0.5)
         self.assertEqual(result["passing_points_after_first_failure_not_used"], [1.0, 2.0, 5.0])
 
     def test_complete_passing_evidence_freezes_only_calibration_substate(self):
@@ -138,74 +238,164 @@ class TestCalibrationInputs(unittest.TestCase):
         records = []
         for device in ("cpu", "cuda:0"):
             for case in freeze_calibration_cases():
-                outside = case.coordinate_role == "outside_control"
-                records.append(
-                    {
-                        "status": "RAW_MEASUREMENT",
-                        "device": device,
-                        "parameters": asdict(case),
-                        "fixture_sha256": "a" * 64,
-                        "observed": {
-                            "tet_count": case.tet_count,
-                            "active_sample_count": case.requested_contact_cardinality,
-                        },
-                        "gates": {
-                            "finite_difference": "FAIL" if outside else "PASS",
-                            "reduction": "PASS",
-                            "linear": "PASS",
-                            "trajectory": "PASS",
-                        },
-                        "coordinate_support_status": "OUTSIDE_MEASURED_GATE" if outside else "PASS",
-                        "draft_parameters": {
-                            "residual_floors": [3.0, 1.0, 2.0],
-                            "merit_absolute": [0.3, 0.1, 0.2],
-                            "small_scaled_step": [0.03, 0.01, 0.02],
-                            "merit_noise": 0.0,
-                        },
-                        "force_noise": {"recommended_force_detection_floor": 4e-6},
-                    }
-                )
+                records.append(_synthetic_raw_record(case, device))
+        source = _committed_source_identity(["newton/_src/solvers/monolithic/contact.py"])
         raw = {
             "artifact_kind": "raw_measurement",
             "calibration_schema_version": 2,
             "profile": "freeze",
             "git_dirty": False,
             "repeats": 100,
-            "source_set_sha256": "b" * 64,
+            **source,
             "evidence": records,
         }
-        trajectories = {
-            "artifact_kind": "trajectory_evidence",
-            "calibration_schema_version": 2,
-            "profile": "freeze",
-            "git_dirty": False,
-            "source_set_sha256": "b" * 64,
+        portable = aggregate_calibration_evidence([raw])["portable_solver_internal_config"]
+
+        def loading_run(device, *, config):
+            return {
+                "metadata": {
+                    "device": device,
+                    "worktree_dirty": False,
+                    "input_sha256": "c" * 64,
+                    "newton_sha": source["git_sha"],
+                    "solver_internal_config": config if config is not None else {"strict": True},
+                    "requested_solver_internal_config": config,
+                    "actual_parameters": {
+                        "acceptance": {
+                            "minimum_substeps": 1000,
+                            "minimum_converged_ratio": 0.99,
+                            "maximum_consecutive_non_success": 2,
+                            "linear_tolerance": 1e-4,
+                        }
+                    },
+                },
+                "summary": {
+                    "gates": {
+                        "finite_state": True,
+                        "converged_ratio": True,
+                        "converged_linear_gates": True,
+                    },
+                    "e2e_numerical_pass": True,
+                    "substeps": 1000,
+                    "converged_ratio": 1.0,
+                    "maximum_consecutive_non_success": 0,
+                    "contact_onset_step": 200,
+                    "peak_force_n": 1.0,
+                    "settled_force_n": 0.9,
+                    "secant_stiffness_n_m": 100.0,
+                    "curve_work_j": 0.01,
+                },
+                "records": [
+                    {
+                        "finite_state": True,
+                        "converged": True,
+                        "nonlinear_convergence_ratios": [0.5, 0.5, 0.5],
+                        "linear_iterations": 2,
+                        "stats": {"rho": 5e-5, "rho_q": 5e-5, "rho_x": 5e-5},
+                        "normal_compressive_force_n": index / 1000,
+                    }
+                    for index in range(1000)
+                ],
+                "artifact_sha256": ("e" if config is not None else "f") * 64,
+            }
+
+        probe_runs = [loading_run(device, config=portable) for device in ("cpu", "cuda:0")]
+        for run in probe_runs:
+            run["artifact_sha256"] = "b" * 64
+            run["summary"].update(
+                e2e_numerical_pass=False,
+                converged_ratio=0.0,
+                maximum_consecutive_non_success=1000,
+            )
+            run["summary"]["gates"].update(converged_ratio=False, consecutive_non_success=False)
+            for record in run["records"]:
+                record.update(
+                    converged=False,
+                    committed_unconverged=True,
+                    rolled_back=False,
+                    nonlinear_convergence_ratios=[0.5, 2.0, 0.5],
+                )
+                record["stats"]["merit_q_final"] = 1.62e-7
+        final_config = dict(portable)
+        final_config["merit_absolute_q"] = 2.5e-7
+
+        c4_source = _committed_source_identity(["newton/_src/solvers/monolithic/contact.py"])
+        c4 = {
+            "status": "FROZEN",
+            **c4_source,
             "evidence": [
                 {
                     "device": device,
-                    "role": role,
-                    "status": "PASS",
-                    "fixture_sha256": "c" * 64,
-                    "finite_state": True,
-                    "convergence_gate": "PASS",
-                    "representative_states": ["free", "onset", "loading", "peak", "settled"],
-                    "candidate_vs_strict_baseline": "PASS",
-                    "false_convergence_count": 0,
-                    "support_artifact_sha256": "d" * 64,
+                    "c4_gate": "PASS",
+                    "supported_local_motion_gate": "PASS",
+                    "support_envelope": {"status": "FROZEN", "sha256": "d" * 64},
+                    "static": [{"solver_internal_config": final_config}],
                 }
                 for device in ("cpu", "cuda:0")
-                for role in ("normal_loading_1000", "c4_supported_motion")
             ],
         }
+        producer = _committed_source_identity(["scripts/monolithic_reference/calibrate_components.py"])
+        with patch(
+            "scripts.monolithic_reference.calibrate_components._current_producer_identity",
+            return_value=producer,
+        ):
+            trajectories = build_trajectory_evidence(
+                raw,
+                probe_runs,
+                [loading_run(device, config=final_config) for device in ("cpu", "cuda:0")],
+                [loading_run(device, config=None) for device in ("cpu", "cuda:0")],
+                json.dumps(c4, sort_keys=True).encode(),
+            )
         result = aggregate_calibration_evidence([raw, trajectories], freeze=True)
         self.assertEqual(result["calibration_status"], "FROZEN")
         self.assertEqual(result["v01_status"], "DRAFT")
-        self.assertEqual(result["coordinate_envelope"]["max_supported_abs_coordinate_m"], 5.0)
+        coordinate = result["exact_fixture_translation_offset_evidence"]
+        self.assertEqual(coordinate["maximum_passing_translation_offset_m"], 5.0)
+        self.assertIn("not a general world-coordinate range", coordinate["scope"])
         self.assertEqual(
-            result["candidate_private_config"]["cpu"]["solver_internal_config"]["residual_floor_global"], 3.0
+            result["candidate_private_config"]["cpu"]["solver_internal_config"]["residual_floor_global"],
+            2.8284271247461903e-4,
         )
-        self.assertEqual(result["portable_solver_internal_config"]["residual_floor_global"], 3.0)
+        self.assertEqual(result["portable_solver_internal_config"]["residual_floor_global"], 2.8284271247461903e-4)
         self.assertEqual(result["portable_acceptance"]["force_detection_floor_n"], 4e-6)
+
+        tampered = copy.deepcopy(raw)
+        for fd_record in tampered["evidence"][0]["finite_difference"]["tet"]["records"]:
+            fd_record["energy_gradient"]["relative_error"] = 1.0
+        rejected = aggregate_calibration_evidence([tampered, trajectories])
+        self.assertTrue(rejected["failed_records"])
+        with self.assertRaises(CalibrationFreezeError):
+            aggregate_calibration_evidence([tampered, trajectories], freeze=True)
+
+        wrong_source = copy.deepcopy(raw)
+        wrong_source["source_sha256"]["newton/_src/solvers/monolithic/contact.py"] = "d" * 64
+        wrong_source["source_set_sha256"] = _hash_json(wrong_source["source_sha256"])
+        with self.assertRaises(CalibrationFreezeError):
+            aggregate_calibration_evidence([wrong_source])
+
+        missing_parameter = copy.deepcopy(raw)
+        del missing_parameter["evidence"][0]["draft_parameters"]["residual_floors"]
+        rejected = aggregate_calibration_evidence([missing_parameter])
+        self.assertTrue(rejected["failed_records"])
+        self.assertTrue(rejected["artifact_failures"])
+
+        no_pcg = [loading_run(device, config=final_config) for device in ("cpu", "cuda:0")]
+        for run in no_pcg:
+            for record in run["records"]:
+                record["linear_iterations"] = 0
+                record["stats"] = {}
+        with patch(
+            "scripts.monolithic_reference.calibrate_components._current_producer_identity",
+            return_value=producer,
+        ):
+            with self.assertRaisesRegex(CalibrationFreezeError, "did not exercise runtime PCG"):
+                build_trajectory_evidence(
+                    raw,
+                    probe_runs,
+                    no_pcg,
+                    [loading_run(device, config=None) for device in ("cpu", "cuda:0")],
+                    json.dumps(c4, sort_keys=True).encode(),
+                )
 
     def test_versioned_candidate_is_not_runtime_authority(self):
         """The checked-in proposal is machine-readable but explicitly unfrozen."""
@@ -215,6 +405,9 @@ class TestCalibrationInputs(unittest.TestCase):
         self.assertEqual(candidate["calibration_status"], "INCOMPLETE")
         self.assertEqual(candidate["v01_status"], "DRAFT")
         self.assertTrue(candidate["runtime_use"].startswith("PROHIBITED"))
+        coordinate = candidate["exact_fixture_translation_offset_evidence"]
+        self.assertEqual(coordinate["maximum_passing_translation_offset_m"], 2.0)
+        self.assertIn("not a general world-coordinate range", coordinate["scope"])
         self.assertEqual(set(candidate["candidate_private_config"]), {"cpu", "cuda"})
         fields = {
             "epsilon_d",
