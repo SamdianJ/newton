@@ -796,8 +796,8 @@ def calibrate(device, *, steps: int, dt: float):
                 "tet_length_m": _LENGTH,
                 "sphere_radius_m": 0.03,
                 "initial_penetration_m": 0.008,
-                "edge_center_m": [0.02, -0.01562705971286289, -0.01562705971286289],
-                "vertex_center_m": [-0.012759033682218924, -0.012759033682218924, -0.012759033682218924],
+                "edge_center_m": [0.02, -0.0156270598642227, -0.0156270598642227],
+                "vertex_center_m": [-0.012759440949090732, -0.012759440949090732, -0.012759440949090732],
                 "levels": [2, 3, 4],
                 "surface_multipliers": [1, 4, 16],
                 "observed_h_over_r_by_level": [
