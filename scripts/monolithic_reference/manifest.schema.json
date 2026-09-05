@@ -1,0 +1,406 @@
+{
+  "type": "object",
+  "required": ["schema_version", "fixture_id", "status", "repositories", "units", "physics", "mappings", "benchmark"],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {"enum": [1], "type": "integer"},
+    "fixture_id": {"type": "string", "minLength": 1},
+    "status": {"enum": ["DRAFT", "FROZEN"]},
+    "repositories": {
+      "type": "object",
+      "required": ["newton_sha", "superdex_sha"],
+      "additionalProperties": false,
+      "properties": {
+        "newton_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+        "superdex_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"}
+      }
+    },
+    "units": {
+      "type": "object",
+      "required": [
+        "length",
+        "mass",
+        "time",
+        "angle",
+        "force",
+        "torque",
+        "material",
+        "normal_stiffness",
+        "residual_q",
+        "residual_x"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "length": {"enum": ["m"]},
+        "mass": {"enum": ["kg"]},
+        "time": {"enum": ["s"]},
+        "angle": {"enum": ["rad"]},
+        "force": {"enum": ["N"]},
+        "torque": {"enum": ["N*m"]},
+        "material": {"enum": ["Pa"]},
+        "normal_stiffness": {"enum": ["N/m^3"]},
+        "residual_q": {"enum": ["N*m or N"]},
+        "residual_x": {"enum": ["N"]}
+      }
+    },
+    "physics": {
+      "type": "object",
+      "required": [
+        "frame",
+        "gravity_m_s2",
+        "rest_positions_m",
+        "tet_indices",
+        "boundary_faces",
+        "fixed_nodes",
+        "asset_sha256",
+        "particle_radius_m",
+        "density_kg_m3",
+        "node_masses_kg",
+        "tet_materials_pa_pa_pas",
+        "surface_materials",
+        "edge_materials",
+        "dt_s",
+        "substeps",
+        "initial",
+        "links",
+        "joints",
+        "shapes",
+        "contact",
+        "drive",
+        "integrator",
+        "material_law",
+        "mass_lumping"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "frame": {"enum": ["right-handed Z-up"]},
+        "gravity_m_s2": {"type": "array", "items": {"type": "number"}, "minItems": 3, "maxItems": 3},
+        "rest_positions_m": {
+          "type": "array",
+          "items": {"type": "array", "items": {"type": "number"}, "minItems": 3, "maxItems": 3},
+          "minItems": 1
+        },
+        "tet_indices": {
+          "type": "array",
+          "items": {"type": "array", "items": {"type": "integer", "minimum": 0}, "minItems": 4, "maxItems": 4},
+          "minItems": 1
+        },
+        "boundary_faces": {
+          "type": "array",
+          "items": {"type": "array", "items": {"type": "integer", "minimum": 0}, "minItems": 3, "maxItems": 3},
+          "minItems": 1
+        },
+        "fixed_nodes": {"type": "array", "items": {"type": "boolean"}, "minItems": 1},
+        "asset_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "particle_radius_m": {"type": "number", "minimum": 0},
+        "density_kg_m3": {"type": "number", "exclusiveMinimum": 0},
+        "node_masses_kg": {"type": "array", "items": {"type": "number", "minimum": 0}, "minItems": 1},
+        "tet_materials_pa_pa_pas": {
+          "type": "array",
+          "items": {"type": "array", "items": {"type": "number", "minimum": 0}, "minItems": 3, "maxItems": 3},
+          "minItems": 1
+        },
+        "surface_materials": {"type": "array", "items": {"type": "number", "minimum": 0}, "minItems": 5, "maxItems": 5},
+        "edge_materials": {"type": "array", "items": {"type": "number", "minimum": 0}, "minItems": 2, "maxItems": 2},
+        "dt_s": {"type": "number", "exclusiveMinimum": 0},
+        "substeps": {"type": "integer", "minimum": 1},
+        "initial": {
+          "type": "object",
+          "required": ["q", "qd", "x_m", "v_m_s"],
+          "additionalProperties": false,
+          "properties": {
+            "q": {"type": "array", "items": {"type": "number"}, "minItems": 1},
+            "qd": {"type": "array", "items": {"type": "number"}, "minItems": 1},
+            "x_m": {
+              "type": "array",
+              "items": {"type": "array", "items": {"type": "number"}, "minItems": 3, "maxItems": 3},
+              "minItems": 1
+            },
+            "v_m_s": {
+              "type": "array",
+              "items": {"type": "array", "items": {"type": "number"}, "minItems": 3, "maxItems": 3},
+              "minItems": 1
+            }
+          }
+        },
+        "links": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["mass_kg", "com_m", "inertia_kg_m2", "xform"],
+            "additionalProperties": false,
+            "properties": {
+              "mass_kg": {"type": "number", "exclusiveMinimum": 0},
+              "com_m": {"type": "array", "items": {"type": "number"}, "minItems": 3, "maxItems": 3},
+              "inertia_kg_m2": {
+                "type": "array",
+                "items": {"type": "array", "items": {"type": "number"}, "minItems": 3, "maxItems": 3},
+                "minItems": 3,
+                "maxItems": 3
+              },
+              "xform": {"type": "array", "items": {"type": "number"}, "minItems": 7, "maxItems": 7}
+            }
+          },
+          "minItems": 1
+        },
+        "joints": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["type", "parent", "child", "axis", "parent_xform", "child_xform"],
+            "additionalProperties": false,
+            "properties": {
+              "type": {"enum": ["FIXED", "REVOLUTE", "PRISMATIC"]},
+              "parent": {"type": "integer", "minimum": -1},
+              "child": {"type": "integer", "minimum": 0},
+              "axis": {"type": "array", "items": {"type": "number"}, "minItems": 3, "maxItems": 3},
+              "parent_xform": {"type": "array", "items": {"type": "number"}, "minItems": 7, "maxItems": 7},
+              "child_xform": {"type": "array", "items": {"type": "number"}, "minItems": 7, "maxItems": 7}
+            }
+          },
+          "minItems": 1
+        },
+        "shapes": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["type", "link", "xform", "sdf", "dimensions_m"],
+            "additionalProperties": false,
+            "properties": {
+              "type": {"type": "string", "minLength": 1},
+              "link": {"type": "integer", "minimum": 0},
+              "xform": {"type": "array", "items": {"type": "number"}, "minItems": 7, "maxItems": 7},
+              "sdf": {
+                "type": "object",
+                "required": ["resolution", "scale_baked", "asset_sha256", "runtime_scale", "provenance"],
+                "additionalProperties": false,
+                "properties": {
+                  "resolution": {"type": "array", "items": {"type": "number"}, "minItems": 3, "maxItems": 3},
+                  "scale_baked": {"type": "boolean"},
+                  "asset_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+                  "runtime_scale": {"type": "array", "items": {"type": "number"}, "minItems": 3, "maxItems": 3},
+                  "provenance": {"type": "string", "minLength": 1}
+                }
+              },
+              "dimensions_m": {"type": "array", "items": {"type": "number", "minimum": 0}, "minItems": 3, "maxItems": 3}
+            }
+          },
+          "minItems": 1
+        },
+        "contact": {
+          "type": "object",
+          "required": [
+            "soft_contact_gap_m",
+            "shape_margin_m",
+            "penetration_acceptance_limit_m",
+            "quadrature",
+            "barycentric",
+            "weight_rule",
+            "normal_law",
+            "normal_stiffness_n_m3",
+            "friction_coefficient"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "soft_contact_gap_m": {"type": "number", "minimum": 0},
+            "shape_margin_m": {"type": "number", "minimum": 0},
+            "penetration_acceptance_limit_m": {"type": "number", "minimum": 0},
+            "quadrature": {"enum": ["P1Q3"]},
+            "barycentric": {
+              "type": "array",
+              "items": {"type": "array", "items": {"type": "number"}, "minItems": 3, "maxItems": 3},
+              "minItems": 3,
+              "maxItems": 3
+            },
+            "weight_rule": {"enum": ["reference_area/3"]},
+            "normal_law": {"type": "string", "minLength": 1},
+            "normal_stiffness_n_m3": {"type": "number", "exclusiveMinimum": 0},
+            "friction_coefficient": {"type": "number", "minimum": 0}
+          }
+        },
+        "drive": {
+          "type": "object",
+          "required": ["trajectory", "stiffness", "damping"],
+          "additionalProperties": false,
+          "properties": {
+            "trajectory": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "required": ["time_s", "target_q", "target_qd"],
+                "additionalProperties": false,
+                "properties": {
+                  "time_s": {"type": "number", "minimum": 0},
+                  "target_q": {"type": "array", "items": {"type": "number"}, "minItems": 1},
+                  "target_qd": {"type": "array", "items": {"type": "number"}, "minItems": 1}
+                }
+              },
+              "minItems": 1
+            },
+            "stiffness": {"type": "array", "items": {"type": "number", "minimum": 0}, "minItems": 1},
+            "damping": {"type": "array", "items": {"type": "number", "minimum": 0}, "minItems": 1}
+          }
+        },
+        "integrator": {"enum": ["backward_euler"]},
+        "material_law": {"enum": ["stable_neo_hookean"]},
+        "mass_lumping": {"enum": ["rest_volume_equal_nodes"]}
+      }
+    },
+    "mappings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "mapping_id",
+          "manifest_path",
+          "newton_binding",
+          "superdex_binding",
+          "units",
+          "status",
+          "rationale",
+          "blocks"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "mapping_id": {"type": "string", "minLength": 1},
+          "manifest_path": {"type": "string", "minLength": 1},
+          "newton_binding": {"type": "string", "minLength": 1},
+          "superdex_binding": {"type": "string", "minLength": 1},
+          "units": {"type": "string", "minLength": 1},
+          "status": {"enum": ["MATCHED", "INTENTIONALLY_DIFFERENT", "UNMAPPED"]},
+          "rationale": {"type": "string", "minLength": 1},
+          "blocks": {"type": "array", "items": {"type": "string", "minLength": 1}}
+        }
+      },
+      "minItems": 1
+    },
+    "benchmark": {
+      "type": "object",
+      "required": [
+        "stages",
+        "contact_onset",
+        "approach_axis_world",
+        "rigid_reference_point_local_m",
+        "soft_probe",
+        "rigid_motion_removal",
+        "delta_soft_min_m",
+        "force_noise_floor_n",
+        "actual_closure_interval_m",
+        "reference_envelope",
+        "support_envelope",
+        "calibration",
+        "evidence_sha256"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "stages": {
+          "type": "object",
+          "required": ["free_space_end_step", "contact_loading_end_step", "settle_end_step"],
+          "additionalProperties": false,
+          "properties": {
+            "free_space_end_step": {"type": "integer", "minimum": 0},
+            "contact_loading_end_step": {"type": "integer", "minimum": 0},
+            "settle_end_step": {"type": "integer", "minimum": 0}
+          }
+        },
+        "contact_onset": {
+          "type": "object",
+          "required": ["force_floor_n", "consecutive_substeps"],
+          "additionalProperties": false,
+          "properties": {
+            "force_floor_n": {"type": "number", "minimum": 0},
+            "consecutive_substeps": {"type": "integer", "minimum": 1}
+          }
+        },
+        "approach_axis_world": {"type": "array", "items": {"type": "number"}, "minItems": 3, "maxItems": 3},
+        "rigid_reference_point_local_m": {"type": "array", "items": {"type": "number"}, "minItems": 3, "maxItems": 3},
+        "soft_probe": {"type": "array", "items": {"type": "integer", "minimum": 0}, "minItems": 1},
+        "rigid_motion_removal": {"enum": ["none", "anchored_best_fit"]},
+        "delta_soft_min_m": {"type": "number", "exclusiveMinimum": 0},
+        "force_noise_floor_n": {"type": "number", "minimum": 0},
+        "actual_closure_interval_m": {"type": "array", "items": {"type": "number"}, "minItems": 2, "maxItems": 2},
+        "reference_envelope": {
+          "type": "object",
+          "required": ["onset_m", "secant_stiffness_n_m", "peak_force_n", "settled_force_n", "curve_work_j"],
+          "additionalProperties": false,
+          "properties": {
+            "onset_m": {"type": "array", "items": {"type": "number"}, "minItems": 2, "maxItems": 2},
+            "secant_stiffness_n_m": {"type": "array", "items": {"type": "number"}, "minItems": 2, "maxItems": 2},
+            "peak_force_n": {"type": "array", "items": {"type": "number"}, "minItems": 2, "maxItems": 2},
+            "settled_force_n": {"type": "array", "items": {"type": "number"}, "minItems": 2, "maxItems": 2},
+            "curve_work_j": {"type": "array", "items": {"type": "number"}, "minItems": 2, "maxItems": 2}
+          }
+        },
+        "support_envelope": {
+          "type": "object",
+          "required": ["min_rigid_feature_m", "soft_mesh_resolution_m", "sdf_resolution_m", "evidence_sha256"],
+          "additionalProperties": false,
+          "properties": {
+            "min_rigid_feature_m": {"type": "number", "exclusiveMinimum": 0},
+            "soft_mesh_resolution_m": {"type": "number", "exclusiveMinimum": 0},
+            "sdf_resolution_m": {"type": "number", "exclusiveMinimum": 0},
+            "evidence_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+          }
+        },
+        "calibration": {
+          "type": "object",
+          "required": ["cpu", "cuda"],
+          "additionalProperties": false,
+          "properties": {
+            "cpu": {
+              "type": "object",
+              "required": [
+                "global_r_min",
+                "q_r_min",
+                "x_r_min",
+                "merit_noise",
+                "nonlinear_tolerance",
+                "pcg_true_residual_tolerance",
+                "scaled_step_tolerance",
+                "evidence_sha256"
+              ],
+              "additionalProperties": false,
+              "properties": {
+                "global_r_min": {"type": "number", "minimum": 0},
+                "q_r_min": {"type": "number", "minimum": 0},
+                "x_r_min": {"type": "number", "minimum": 0},
+                "merit_noise": {"type": "number", "minimum": 0},
+                "nonlinear_tolerance": {"type": "number", "exclusiveMinimum": 0},
+                "pcg_true_residual_tolerance": {"type": "number", "exclusiveMinimum": 0},
+                "scaled_step_tolerance": {"type": "number", "exclusiveMinimum": 0},
+                "evidence_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+              }
+            },
+            "cuda": {
+              "type": "object",
+              "required": [
+                "global_r_min",
+                "q_r_min",
+                "x_r_min",
+                "merit_noise",
+                "nonlinear_tolerance",
+                "pcg_true_residual_tolerance",
+                "scaled_step_tolerance",
+                "evidence_sha256"
+              ],
+              "additionalProperties": false,
+              "properties": {
+                "global_r_min": {"type": "number", "minimum": 0},
+                "q_r_min": {"type": "number", "minimum": 0},
+                "x_r_min": {"type": "number", "minimum": 0},
+                "merit_noise": {"type": "number", "minimum": 0},
+                "nonlinear_tolerance": {"type": "number", "exclusiveMinimum": 0},
+                "pcg_true_residual_tolerance": {"type": "number", "exclusiveMinimum": 0},
+                "scaled_step_tolerance": {"type": "number", "exclusiveMinimum": 0},
+                "evidence_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+              }
+            }
+          }
+        },
+        "evidence_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+      }
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "Frozen V0.1 reference contract. Draft validation permits missing required fields and null pending values, except required manifest identity and units."
+}

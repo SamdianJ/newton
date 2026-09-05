@@ -1,0 +1,165 @@
+{
+  "schema_version": 1,
+  "fixture_id": "monolithic_tiny_rev_pris_one_tet_v1",
+  "status": "DRAFT",
+  "repositories": {
+    "newton_sha": "d37f4d3d341ccce1e06a1dff21e9a054759b4855",
+    "superdex_sha": "54ae749a042709e897cad12da66822c71bcd1b97"
+  },
+  "units": {
+    "length": "m",
+    "mass": "kg",
+    "time": "s",
+    "angle": "rad",
+    "force": "N",
+    "torque": "N*m",
+    "material": "Pa",
+    "normal_stiffness": "N/m^3",
+    "residual_q": "N*m or N",
+    "residual_x": "N"
+  },
+  "physics": {
+    "frame": "right-handed Z-up",
+    "gravity_m_s2": [0.0, 0.0, -9.81],
+    "rest_positions_m": [[0.0, 0.0, 0.0], [0.04, 0.0, 0.0], [0.0, 0.03, 0.0], [0.0, 0.0, 0.02]],
+    "tet_indices": [[0, 1, 2, 3]],
+    "boundary_faces": [[1, 2, 3], [0, 3, 2], [0, 1, 3], [0, 2, 1]],
+    "fixed_nodes": [false, false, false, false],
+    "asset_sha256": null,
+    "particle_radius_m": 0.001,
+    "density_kg_m3": 1000.0,
+    "node_masses_kg": [0.001, 0.001, 0.001, 0.001],
+    "tet_materials_pa_pa_pas": [[3846.15380859375, 5769.23095703125, 0.0]],
+    "surface_materials": [0.0, 0.0, 0.0, 0.0, 0.0],
+    "edge_materials": [0.0, 0.0],
+    "dt_s": null,
+    "substeps": null,
+    "initial": {
+      "q": [0.2, 0.01],
+      "qd": [0.1, -0.02],
+      "x_m": [[0.0, 0.0, 0.0], [0.04, 0.0, 0.0], [0.0, 0.03, 0.0], [0.0, 0.0, 0.02]],
+      "v_m_s": [[0.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 0.0]]
+    },
+    "links": [
+      {
+        "mass_kg": 1.0,
+        "com_m": [0.05, 0.0, 0.0],
+        "inertia_kg_m2": [[0.002, 0.0, 0.0], [0.0, 0.003, 0.0], [0.0, 0.0, 0.004]],
+        "xform": [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0]
+      },
+      {
+        "mass_kg": 0.5,
+        "com_m": [0.02, 0.0, 0.0],
+        "inertia_kg_m2": [[0.001, 0.0, 0.0], [0.0, 0.0015, 0.0], [0.0, 0.0, 0.002]],
+        "xform": [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0]
+      }
+    ],
+    "joints": [
+      {
+        "type": "REVOLUTE",
+        "parent": -1,
+        "child": 0,
+        "axis": [0.0, 0.0, 1.0],
+        "parent_xform": [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0],
+        "child_xform": [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0]
+      },
+      {
+        "type": "PRISMATIC",
+        "parent": 0,
+        "child": 1,
+        "axis": [1.0, 0.0, 0.0],
+        "parent_xform": [0.1, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0],
+        "child_xform": [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0]
+      }
+    ],
+    "shapes": null,
+    "contact": null,
+    "drive": null,
+    "integrator": "backward_euler",
+    "material_law": "stable_neo_hookean",
+    "mass_lumping": "rest_volume_equal_nodes"
+  },
+  "mappings": [
+    {
+      "mapping_id": "frame.world",
+      "manifest_path": "physics",
+      "newton_binding": "Pending adapter implementation",
+      "superdex_binding": "Pending source audit",
+      "units": "m, right-handed Z-up",
+      "status": "UNMAPPED",
+      "rationale": "No cross-implementation evidence exists in PR-0.",
+      "blocks": ["cross-implementation-physics"]
+    },
+    {
+      "mapping_id": "mesh.boundary",
+      "manifest_path": "physics",
+      "newton_binding": "Pending adapter implementation",
+      "superdex_binding": "Pending source audit",
+      "units": "m",
+      "status": "UNMAPPED",
+      "rationale": "No cross-implementation evidence exists in PR-0.",
+      "blocks": ["cross-implementation-physics"]
+    },
+    {
+      "mapping_id": "material.mass",
+      "manifest_path": "physics",
+      "newton_binding": "Pending adapter implementation",
+      "superdex_binding": "Pending source audit",
+      "units": "kg",
+      "status": "UNMAPPED",
+      "rationale": "No cross-implementation evidence exists in PR-0.",
+      "blocks": ["cross-implementation-physics"]
+    },
+    {
+      "mapping_id": "material.neo_hookean",
+      "manifest_path": "physics",
+      "newton_binding": "Pending adapter implementation",
+      "superdex_binding": "Pending source audit",
+      "units": "Pa",
+      "status": "UNMAPPED",
+      "rationale": "No cross-implementation evidence exists in PR-0.",
+      "blocks": ["cross-implementation-physics"]
+    },
+    {
+      "mapping_id": "contact.gap",
+      "manifest_path": "physics",
+      "newton_binding": "Pending adapter implementation",
+      "superdex_binding": "Pending source audit",
+      "units": "m",
+      "status": "UNMAPPED",
+      "rationale": "No cross-implementation evidence exists in PR-0.",
+      "blocks": ["cross-implementation-physics"]
+    },
+    {
+      "mapping_id": "contact.gradient_norm",
+      "manifest_path": "physics",
+      "newton_binding": "Pending adapter implementation",
+      "superdex_binding": "Pending source audit",
+      "units": "1",
+      "status": "UNMAPPED",
+      "rationale": "No cross-implementation evidence exists in PR-0.",
+      "blocks": ["cross-implementation-physics"]
+    },
+    {
+      "mapping_id": "control.command",
+      "manifest_path": "physics",
+      "newton_binding": "Pending adapter implementation",
+      "superdex_binding": "Pending source audit",
+      "units": "rad or m",
+      "status": "UNMAPPED",
+      "rationale": "No cross-implementation evidence exists in PR-0.",
+      "blocks": ["cross-implementation-physics"]
+    },
+    {
+      "mapping_id": "contact.normal_law",
+      "manifest_path": "physics.contact.normal_law",
+      "newton_binding": "V0.1 quadratic hinge",
+      "superdex_binding": "PolyReLU",
+      "units": "N/m^3",
+      "status": "INTENTIONALLY_DIFFERENT",
+      "rationale": "Different normal laws require a mapped response envelope; trajectory equality is not a gate.",
+      "blocks": []
+    }
+  ],
+  "benchmark": null
+}
