@@ -141,6 +141,13 @@ class MonolithicLinearSolveResult:
     rho_x: float
     min_p_ap: float
     min_r_z: float
+    warm_start: MonolithicPcgWarmStart | None = None
+    initial_guess_norm: float = float("nan")
+    """Measured L2 norm of the initial scaled unknown y; NaN before a solve starts."""
+    recursive_true_residual_gap: tuple[float, float, float] = (float("nan"),) * 3
+    """Maximum scaled L2 recursive-minus-true gap in global/q/x slices before replacement."""
+    stagnation_window: int | None = None
+    """Configured stagnation window in true-residual checks; None before a solve starts."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -928,6 +935,15 @@ class MonolithicLinearWorkspace:
         self._true_sums = wp.zeros(6, dtype=float, device=device)
         self._true_maxima = wp.zeros(6, dtype=float, device=device)
         self._true_norms = wp.zeros(6, dtype=float, device=device)
+        self._diagnostic_vector = wp.zeros(n, dtype=float, device=device)
+        self._diagnostic_zero = wp.zeros(n, dtype=float, device=device)
+        self._diagnostic_maxima = wp.zeros(6, dtype=float, device=device)
+        self._diagnostic_sums = wp.zeros(6, dtype=float, device=device)
+        self._diagnostic_norms = wp.zeros(6, dtype=float, device=device)
+        self._diagnostic_status = wp.zeros(1, dtype=int, device=device)
+        self.factor_setup_count = 0
+        self.factor_failure_count = 0
+        self.factor_last_status = None
         self._ratios = wp.zeros(3, dtype=float, device=device)
         self._status = wp.zeros(1, dtype=int, device=device)
         self.floor_count = wp.zeros(1, dtype=int, device=device)
@@ -989,6 +1005,9 @@ class MonolithicLinearWorkspace:
         self._generation = generation
         self._sealed = False
         self._valid = False
+        self.factor_setup_count = 0
+        self.factor_failure_count = 0
+        self.factor_last_status = None
         self._scaling_valid = False
         self._factor_valid = False
         self._warm_start_key = None
@@ -1212,6 +1231,7 @@ class MonolithicLinearWorkspace:
         self._factor_valid = False
         if not np.isfinite(pivot_tolerance) or pivot_tolerance < 0:
             return MonolithicLinearStatus.INVALID_ARGUMENT
+        self.factor_setup_count += 1
         self._status.zero_()
         wp.launch(
             _assemble_monolithic_q_preconditioner,
@@ -1249,7 +1269,51 @@ class MonolithicLinearWorkspace:
         )
         status = self._read_status()
         self._factor_valid = status == MonolithicLinearStatus.SUCCESS
+        self.factor_last_status = status
+        self.factor_failure_count += int(not self._factor_valid)
         return status
+
+    def _diagnostic_block_norms(self, vector) -> tuple[float, float, float]:
+        """Measure scaled vector norms without altering iterative solver status or scratch."""
+        if vector is not self._diagnostic_vector:
+            wp.copy(self._diagnostic_vector, vector)
+        self._diagnostic_status.zero_()
+        self._diagnostic_maxima.zero_()
+        self._diagnostic_sums.zero_()
+        self._diagnostic_norms.fill_(float("nan"))
+        wp.launch(
+            _true_residual_maxima,
+            vector.size,
+            [
+                self._diagnostic_zero,
+                self._diagnostic_vector,
+                self.layout.q_dof_count,
+                self._diagnostic_vector,
+                self._diagnostic_maxima,
+                self._diagnostic_status,
+            ],
+            device=self.device,
+        )
+        wp.launch(
+            _true_residual_sums,
+            vector.size,
+            [
+                self._diagnostic_vector,
+                self._diagnostic_vector,
+                self.layout.q_dof_count,
+                self._diagnostic_maxima,
+                self._diagnostic_sums,
+                self._diagnostic_status,
+            ],
+            device=self.device,
+        )
+        wp.launch(
+            _compute_true_residual_norms,
+            6,
+            [self._diagnostic_maxima, self._diagnostic_sums, self._diagnostic_norms, self._diagnostic_status],
+            device=self.device,
+        )
+        return tuple(float(value) for value in self._diagnostic_norms.numpy()[:3])
 
     def _products_of(self, a, b):
         self._products.zero_()
@@ -1313,11 +1377,43 @@ class MonolithicLinearWorkspace:
         iterations, checks, replacements = 0, 0, 0
         ratios = (float("nan"),) * 3
         min_p_ap, min_r_z = float("nan"), float("nan")
+        applied_warm_start, initial_guess_norm, stagnation_window = None, float("nan"), None
+        residual_gap, gap_samples = (float("nan"),) * 3, 0
 
         def result(status):
             return MonolithicLinearSolveResult(
-                status, generation, iterations, checks, replacements, *ratios, min_p_ap, min_r_z
+                status,
+                generation,
+                iterations,
+                checks,
+                replacements,
+                *ratios,
+                min_p_ap,
+                min_r_z,
+                applied_warm_start,
+                initial_guess_norm,
+                residual_gap,
+                stagnation_window,
             )
+
+        def record_gap():
+            nonlocal residual_gap, gap_samples
+            wp.launch(
+                _combine_vectors,
+                self._r.size,
+                [self._r, self._true_r, self._diagnostic_vector, 1.0, -1.0],
+                device=self.device,
+            )
+            norms = self._diagnostic_block_norms(self._diagnostic_vector)
+            residual_gap = (
+                norms
+                if gap_samples == 0
+                else tuple(
+                    max(old, new) if np.isfinite(old) and np.isfinite(new) else float("nan")
+                    for old, new in zip(residual_gap, norms, strict=True)
+                )
+            )
+            gap_samples += 1
 
         if not self._current(generation) or not self._scaling_valid:
             return result(MonolithicLinearStatus.STALE_GENERATION)
@@ -1339,6 +1435,9 @@ class MonolithicLinearWorkspace:
         self._status.zero_()
         if warm_start == MonolithicPcgWarmStart.ZERO:
             y.zero_()
+        applied_warm_start = MonolithicPcgWarmStart(warm_start)
+        initial_guess_norm = self._diagnostic_block_norms(y)[0]
+        stagnation_window = config.stagnation_window
         ratios = self._true_residual(rhs_hat, y, config)
         checks += 1
         status = self._read_status()
@@ -1405,6 +1504,7 @@ class MonolithicLinearWorkspace:
             )
             if check:
                 ratios = self._true_residual(rhs_hat, y, config)
+                record_gap()
                 checks += 1
                 status = self._read_status()
                 if status != MonolithicLinearStatus.SUCCESS:
@@ -1456,6 +1556,8 @@ class MonolithicLinearWorkspace:
                     break
         # Failure diagnostics also come from an extra actual-operator matvec.
         ratios = self._true_residual(rhs_hat, y, config)
+        if iterations:
+            record_gap()
         checks += 1
         if self._read_status() == MonolithicLinearStatus.NONFINITE_ITERATION:
             status = MonolithicLinearStatus.NONFINITE_ITERATION

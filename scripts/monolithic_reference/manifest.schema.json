@@ -185,7 +185,7 @@
               "dimensions_m": {"type": "array", "items": {"type": "number", "minimum": 0}, "minItems": 3, "maxItems": 3}
             }
           },
-          "minItems": 1
+          "minItems": 0
         },
         "contact": {
           "type": "object",

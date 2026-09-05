@@ -6,17 +6,23 @@
 import copy
 import json
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import numpy as np
 
 from newton.tests.monolithic_test_utils import build_tiny_cpu_fixture
 from newton.tests.unittest_utils import add_function_test, get_test_devices
+from scripts.monolithic_reference.adapter import require_runtime_source, validate_adapter_scope, world_nodes
 from scripts.monolithic_reference.manifest import (
     ComparisonManifest,
+    MappingEntry,
+    WorktreeIdentity,
     canonical_manifest_bytes,
+    compare_runs,
     compute_manifest_sha256,
     load_manifest,
     require_reference_worktree,
@@ -31,6 +37,49 @@ class TestMonolithicReference(unittest.TestCase):
         self.manifest = load_manifest(
             Path(__file__).parents[2] / "scripts/monolithic_reference/fixtures/tiny_draft_v1.json"
         )
+
+    def test_runtime_import_provenance(self):
+        """A clean source tree cannot vouch for an interpreter importing another checkout."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "source"
+            root.mkdir()
+            inside = root / "module.py"
+            inside.touch()
+            outside = Path(directory) / "other.py"
+            outside.touch()
+            require_runtime_source(inside, root)
+            with self.assertRaises(ValueError):
+                require_runtime_source(outside, root)
+            alias = root / "alias.py"
+            alias.symlink_to(outside)
+            with self.assertRaises(ValueError):
+                require_runtime_source(alias, root)
+
+    def test_native_local_to_world_rotated_translated(self):
+        """Reject the identity-only shortcut using an independently known 90-degree rotation."""
+        local = [[1, 0, 0], [0, 1, 2], [-2, 3, 4]]
+        result = world_nodes(local, [0, 0, 2**-0.5, 2**-0.5], [0.3, -0.4, 0.5])
+        np.testing.assert_allclose(result, [[0.3, 0.6, 0.5], [-0.7, -0.4, 2.5], [-2.7, -2.4, 4.5]], atol=2e-15)
+
+    def test_adapter_rejects_unmapped_physics(self):
+        """A normal-loading/fixed-node input cannot silently become the no-contact fixture."""
+        path = Path(__file__).parents[2] / "scripts/monolithic_reference/fixtures/reference_no_contact_draft_v1.json"
+        manifest = load_manifest(path)
+        validate_adapter_scope(manifest.data["physics"])
+        for field, value in (
+            ("shapes", None),
+            ("contact", {}),
+            ("drive", {}),
+            ("fixed_nodes", [False, False, False, True]),
+            ("dt_s", None),
+            ("boundary_faces", [[1, 2, 3]]),
+            ("tet_indices", [[0, 2, 1, 3]]),
+        ):
+            with self.subTest(field=field):
+                physics = copy.deepcopy(manifest.data["physics"])
+                physics[field] = value
+                with self.assertRaises(ValueError):
+                    validate_adapter_scope(physics)
 
     def test_draft_is_not_frozen(self):
         """Accept a draft without claiming measured or frozen evidence."""
@@ -270,11 +319,163 @@ class TestMonolithicReference(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "dirty"):
                 require_reference_worktree(root, expected_sha=sha)
 
+    def test_runner_rejects_records_outside_request(self):
+        """Reject valid JSON from a misbehaving subprocess before publishing output."""
+        manifest = copy.deepcopy(self.manifest.data)
+        manifest["physics"].update(dt_s=0.001, substeps=2, shapes=[])
+        rows = []
+        for step in (1, 2):
+            row = self._step_record()
+            row.update(
+                step=step,
+                time_s=step * 0.001,
+                manifest_sha256=compute_manifest_sha256(ComparisonManifest(manifest)),
+                **manifest["repositories"],
+                link_xform=[[0, 0, 0, 0, 0, 0, 1]] * 2,
+                node_positions_m=manifest["physics"]["initial"]["x_m"],
+                residual_contribution=None,
+                generalized_physical_force=None,
+                physical_world_force_or_wrench=None,
+                unavailable_fields=dict.fromkeys(
+                    ("residual_contribution", "generalized_physical_force", "physical_world_force_or_wrench"),
+                    "Not measured by test producer",
+                ),
+            )
+            rows.append(row)
+        cases = {"count": rows[:1]}
+        for field, value in (
+            ("step", 37),
+            ("time_s", 99.0),
+            ("device", "cuda:99"),
+            ("build_type", "other"),
+            ("joint_q", []),
+            ("link_xform", []),
+            ("node_positions_m", []),
+            ("actual_parameters_json", '{"dt_s":0.002}'),
+        ):
+            changed = copy.deepcopy(rows)
+            for i, row in enumerate(changed):
+                row[field] = value + i if field in ("step", "time_s") else value
+            cases[field] = changed
+        for field, value in (
+            ("residual_contribution", {"q": [0, 0], "x": []}),
+            ("generalized_physical_force", [0, 0]),
+            ("physical_world_force_or_wrench", []),
+        ):
+            changed = copy.deepcopy(rows)
+            for row in changed:
+                row[field] = value
+                del row["unavailable_fields"][field]
+            cases[field] = changed
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = root / "manifest.json"
+            path.write_text(json.dumps(manifest))
+            identity = WorktreeIdentity(root, manifest["repositories"]["newton_sha"])
+
+            def fake_run(command, **_kwargs):
+                Path(command[command.index("--output") + 1]).write_text(
+                    "".join(json.dumps(row) + "\n" for row in current)
+                )
+                return subprocess.CompletedProcess(command, 0, "", "")
+
+            with (
+                patch("scripts.monolithic_reference.manifest.require_reference_worktree", return_value=identity),
+                patch("scripts.monolithic_reference.manifest.subprocess.run", side_effect=fake_run),
+            ):
+                current = rows
+                self.assertEqual(
+                    run_adapter(
+                        "newton",
+                        path,
+                        root / "valid",
+                        worktree=root,
+                        device="cpu",
+                        build_type="test",
+                        timeout_s=1,
+                        python_executable=Path(sys.executable),
+                    ),
+                    0,
+                )
+                for name, candidate in cases.items():
+                    current = candidate
+                    with self.subTest(case=name), self.assertRaises(ValueError):
+                        run_adapter(
+                            "newton",
+                            path,
+                            root / name,
+                            worktree=root,
+                            device="cpu",
+                            build_type="test",
+                            timeout_s=1,
+                            python_executable=Path(sys.executable),
+                        )
+                    self.assertFalse((root / name).exists())
+
+    def test_comparison_observes_links_and_run_quality(self):
+        """Preserve failure observations even when an unrelated mapping blocks acceptance."""
+        left = self._step_record()
+        left["link_xform"] = [[0, 0, 0, 0, 0, 0, 1]]
+        right = copy.deepcopy(left)
+        right.update(
+            implementation="superdex",
+            convergence_status="NONFINITE",
+            converged=False,
+            committed_unconverged=False,
+            rolled_back=True,
+            link_xform=[[1000, 0, 0, 0, 0, 1, 0]],
+        )
+        mapping = MappingEntry(
+            "contact.gap",
+            "physics.contact",
+            "none",
+            "none",
+            "m",
+            "UNMAPPED",
+            "No contact evidence",
+            ("normal-envelope",),
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            a, b, out = root / "a.jsonl", root / "b.jsonl", root / "out.json"
+            a.write_text(json.dumps(left) + "\n")
+            b.write_text(json.dumps(right) + "\n")
+            self.assertEqual(compare_runs(a, b, [mapping], out), 2)
+            report = json.loads(out.read_text())
+            self.assertEqual(report["differences"][0]["link_translation_max_m"], 1000)
+            self.assertAlmostEqual(report["differences"][0]["link_rotation_max_rad"], np.pi)
+            quality = report["quality"]["superdex"]
+            self.assertEqual(quality["status_counts"], {"NONFINITE": 1})
+            self.assertEqual(quality["rolled_back"], {"true": 1, "false": 0, "unavailable": 0})
+            self.assertEqual(quality["nonfinite_status_count"], 1)
+            self.assertEqual(report["differences"][0]["superdex_quality"]["convergence_status"], "NONFINITE")
+            right["rolled_back"] = None
+            right["unavailable_fields"] = {"rolled_back": "No native rollback API"}
+            b.write_text(json.dumps(right) + "\n")
+            compare_runs(a, b, [mapping], out)
+            self.assertEqual(json.loads(out.read_text())["quality"]["superdex"]["rolled_back"]["unavailable"], 1)
+            right["link_xform"] = [[0, 0, 0, 0, 0, 0, -1]]
+            b.write_text(json.dumps(right) + "\n")
+            compare_runs(a, b, [mapping], out)
+            self.assertEqual(json.loads(out.read_text())["differences"][0]["link_rotation_max_rad"], 0)
+            right["link_xform"] = []
+            b.write_text(json.dumps(right) + "\n")
+            with self.assertRaisesRegex(ValueError, "link_xform"):
+                compare_runs(a, b, [mapping], out)
+
+    def test_adapter_rejects_wrong_node_mass_distribution(self):
+        """A preserved total mass cannot justify incorrect native COM weights."""
+        path = Path(__file__).parents[2] / "scripts/monolithic_reference/fixtures/reference_no_contact_draft_v1.json"
+        physics = copy.deepcopy(load_manifest(path).data["physics"])
+        physics["node_masses_kg"] = [0.0015, 0.0005, 0.001, 0.001]
+        with self.assertRaisesRegex(ValueError, "mass"):
+            validate_adapter_scope(physics)
+
     def test_adapter_does_not_fabricate_results(self):
-        """Leave output absent when the unimplemented adapter is requested."""
+        """Leave output absent when invalid adapter inputs are requested."""
         with tempfile.TemporaryDirectory() as tmp:
             output = Path(tmp) / "output"
-            with self.assertRaises(NotImplementedError):
+            with self.assertRaises((OSError, ValueError)):
                 run_adapter(
                     "superdex",
                     Path("unused.json"),
@@ -286,9 +487,8 @@ class TestMonolithicReference(unittest.TestCase):
                 )
             self.assertFalse(output.exists())
 
-    def test_step_record_contract(self):
-        """Keep force and residual data separate and enforce terminal status consistency."""
-        record = {
+    def _step_record(self):
+        return {
             "step": 1,
             "time_s": 0.001,
             "implementation": "newton",
@@ -322,6 +522,10 @@ class TestMonolithicReference(unittest.TestCase):
             "rolled_back": False,
             "timing_s": {"assembly": 0, "collision": 0, "linear_solve": 0, "total": 0},
         }
+
+    def test_step_record_contract(self):
+        """Keep force and residual data separate and enforce terminal status consistency."""
+        record = self._step_record()
         validate_step_record(record)
         for field in ("residual_contribution", "physical_world_force_or_wrench", "generalized_physical_force"):
             incomplete = copy.deepcopy(record)
@@ -336,6 +540,84 @@ class TestMonolithicReference(unittest.TestCase):
         """Require separate physical force, generalized force and residual fields."""
         with self.assertRaisesRegex(ValueError, "force"):
             validate_step_record({"force": [1, 2, 3]})
+
+    def test_unavailable_measurements_require_reasons(self):
+        """Represent unavailable reference telemetry as null with exact field reasons."""
+        record = self._step_record()
+        record["implementation"] = "superdex"
+        record["linear_iterations"] = None
+        record["rolled_back"] = None
+        record["committed_unconverged"] = None
+        record["timing_s"]["linear_solve"] = None
+        record["unavailable_fields"] = {
+            "linear_iterations": "Pinned public SolverStats does not expose linear iterations",
+            "rolled_back": "Pinned public API does not expose rollback",
+            "committed_unconverged": "Pinned public API does not expose commit status",
+            "timing_s.linear_solve": "Public timing reports aggregate solve duration only",
+        }
+        validate_step_record(record)
+        for path in list(record["unavailable_fields"]):
+            missing = copy.deepcopy(record)
+            del missing["unavailable_fields"][path]
+            with self.subTest(path=path), self.assertRaisesRegex(ValueError, "unavailable"):
+                validate_step_record(missing)
+        stale = copy.deepcopy(record)
+        stale["unavailable_fields"]["time_s"] = "A fabricated unavailable marker for measured data"
+        with self.assertRaisesRegex(ValueError, "unavailable"):
+            validate_step_record(stale)
+
+    def test_record_rejects_array_dimension_mismatch(self):
+        """Reject incompatible force and residual dimensions instead of comparing wrong slices."""
+        record = self._step_record()
+        record["residual_contribution"]["q"] = [0.0]
+        with self.assertRaisesRegex(ValueError, "dimension"):
+            validate_step_record(record)
+
+    def test_comparison_preserves_mapping_limits(self):
+        """Report measured differences without turning intentionally different laws into an equality gate."""
+        left = self._step_record()
+        right = copy.deepcopy(left)
+        right["implementation"] = "superdex"
+        right["joint_q"][0] += 0.01
+        mapping = MappingEntry(
+            "contact.normal_law",
+            "physics.contact",
+            "hinge",
+            "PolyReLU",
+            "N/m^3",
+            "INTENTIONALLY_DIFFERENT",
+            "Different frozen laws",
+            (),
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            newton_output, superdex_output, output = (
+                root / "newton.jsonl",
+                root / "superdex.jsonl",
+                root / "comparison.json",
+            )
+            newton_output.write_text(json.dumps(left) + "\n")
+            superdex_output.write_text(json.dumps(right) + "\n")
+            self.assertEqual(compare_runs(newton_output, superdex_output, [mapping], output), 0)
+            report = json.loads(output.read_text())
+            self.assertEqual(report["status"], "OBSERVED")
+            self.assertAlmostEqual(report["differences"][0]["joint_q_max_absolute"], 0.01)
+            blocked = MappingEntry(
+                "control.command",
+                "physics.drive",
+                "force",
+                "unknown",
+                "N",
+                "UNMAPPED",
+                "No control adapter evidence",
+                ("trajectory",),
+            )
+            self.assertEqual(compare_runs(newton_output, superdex_output, [mapping, blocked], output), 2)
+            self.assertEqual(json.loads(output.read_text())["blocked_conclusions"], ["trajectory"])
+            right["manifest_sha256"] = "d" * 64
+            superdex_output.write_text(json.dumps(right) + "\n")
+            with self.assertRaisesRegex(ValueError, "manifest"):
+                compare_runs(newton_output, superdex_output, [mapping], output)
 
 
 def test_tiny_fixture(test, device):
