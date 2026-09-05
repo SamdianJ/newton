@@ -866,6 +866,8 @@ def _source_provenance(root: Path) -> dict:
         "newton/_src/solvers/monolithic/collision.py",
         "newton/_src/solvers/monolithic/contact.py",
         "newton/_src/solvers/monolithic/tet.py",
+        "newton/_src/solvers/monolithic/linear.py",
+        "newton/_src/solvers/monolithic/articulation.py",
         "newton/_src/solvers/monolithic/solver_monolithic.py",
     )
     sources = {path: hashlib.sha256((root / path).read_bytes()).hexdigest() for path in paths}

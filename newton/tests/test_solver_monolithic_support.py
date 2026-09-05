@@ -13,6 +13,7 @@ from newton.tests.unittest_utils import add_function_test, get_test_devices
 from scripts.monolithic_reference.calibrate_p1q3 import (
     _freeze_audit,
     _is_exact_supported_fixture,
+    _source_provenance,
     _validate_new_output,
     calibrate,
     measure_motion,
@@ -197,6 +198,25 @@ def test_artifact_output_is_immutable(test, device):
         _validate_new_output(Path(directory) / "new.json")
 
 
+def test_c4_source_provenance_is_closed(test, device):
+    """Hash every monolithic module used by the dynamic C4 path."""
+    del device
+    root = Path(__file__).resolve().parents[2]
+    provenance = _source_provenance(root)
+    required = {
+        "scripts/monolithic_reference/calibrate_p1q3.py",
+        "scripts/monolithic_reference/p1q3_oracle.py",
+        "newton/_src/solvers/monolithic/collision.py",
+        "newton/_src/solvers/monolithic/contact.py",
+        "newton/_src/solvers/monolithic/tet.py",
+        "newton/_src/solvers/monolithic/linear.py",
+        "newton/_src/solvers/monolithic/articulation.py",
+        "newton/_src/solvers/monolithic/solver_monolithic.py",
+    }
+    test.assertEqual(set(provenance["source_sha256"]), required)
+    test.assertEqual(len(provenance["source_set_sha256"]), 64)
+
+
 def test_broad_curvature_control(test, device):
     """Require real contact and resolved motion in broad edge/vertex controls."""
     for case in ("wide_edge_160", "wide_vertex_160"):
@@ -224,6 +244,7 @@ for function in (
     test_supported_shared_feature_motion,
     test_freeze_audit_rejects_incomplete_provenance,
     test_artifact_output_is_immutable,
+    test_c4_source_provenance_is_closed,
     test_broad_curvature_control,
 ):
     add_function_test(TestMonolithicSupport, function.__name__, function, devices=get_test_devices())
