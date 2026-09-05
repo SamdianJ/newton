@@ -314,6 +314,21 @@ def test_fixed_branch_and_stream(test, device):
     moving = builder.add_joint_prismatic(links[2], links[1], axis=newton.Axis.X, **passive)
     builder.add_articulation([root, fixed, moving])
     model = builder.finalize(device=device)
+    for name in ("joint_q_start", "joint_qd_start"):
+        original = getattr(model, name)
+        array = wp.clone(original)
+        setattr(model, name, array)
+        array.assign(np.asarray([0, 1, 2, 2], dtype=np.int32))
+        with test.assertRaisesRegex(ValueError, name):
+            MonolithicArticulationWorkspace(model)
+        setattr(model, name, original)
+    dimensions = model.joint_dof_dim.numpy().copy()
+    invalid_dimensions = dimensions.copy()
+    invalid_dimensions[1] = (1, 0)
+    model.joint_dof_dim.assign(invalid_dimensions)
+    with test.assertRaisesRegex(ValueError, "joint_dof_dim"):
+        MonolithicArticulationWorkspace(model)
+    model.joint_dof_dim.assign(dimensions)
     state = model.state()
     stream = wp.Stream(device) if device.is_cuda else None
     workspace = MonolithicArticulationWorkspace(model, stream=stream)
@@ -330,6 +345,28 @@ def test_fixed_branch_and_stream(test, device):
             eval_articulation_passive_candidate(model, state, workspace)
 
 
+def test_joint_prefix_layout_validation(test, device):
+    """Reject aliased coordinates, invalid prefix endpoints and incorrect joint dimensions before FK."""
+    model = build_tiny_cpu_fixture(device=device).model
+    for name in ("joint_q_start", "joint_qd_start"):
+        original = getattr(model, name)
+        array = wp.clone(original)
+        setattr(model, name, array)
+        for invalid in ([0, 0, 2], [1, 1, 2], [-1, 1, 2], [0, 1, 1], [0, 2, 2], [0, 1, 3], [0, 2, 1]):
+            array.assign(np.asarray(invalid, dtype=np.int32))
+            with patch("newton._src.solvers.monolithic.articulation.eval_fk") as fk:
+                with test.assertRaisesRegex(ValueError, name):
+                    MonolithicArticulationWorkspace(model)
+                fk.assert_not_called()
+        setattr(model, name, original)
+    original = model.joint_dof_dim.numpy().copy()
+    for invalid in ([[1, 0], [1, 0]], [[0, 1], [0, 0]], [[0, 2], [1, 0]], [[-1, 2], [1, 0]]):
+        model.joint_dof_dim.assign(np.asarray(invalid, dtype=np.int32))
+        with test.assertRaisesRegex(ValueError, "joint_dof_dim"):
+            MonolithicArticulationWorkspace(model)
+    model.joint_dof_dim.assign(original)
+
+
 class TestMonolithicArticulation(unittest.TestCase):
     """Exercise the private articulation component on supported devices."""
 
@@ -343,6 +380,7 @@ for _test in (
     test_inertia_validation,
     test_model_storage_validation,
     test_fixed_branch_and_stream,
+    test_joint_prefix_layout_validation,
 ):
     add_function_test(TestMonolithicArticulation, _test.__name__, _test, devices=get_test_devices())
 
