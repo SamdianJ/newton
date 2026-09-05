@@ -72,8 +72,8 @@ class TestMonolithicReference(unittest.TestCase):
         with self.assertRaises(ValueError):
             validate_manifest(ComparisonManifest(data), require_frozen=False)
 
-    def test_frozen_requires_physics_and_envelopes(self):
-        """Reject incomplete frozen physics independently of missing envelope evidence."""
+    def _frozen_manifest_data(self):
+        """Construct synthetic schema inputs without claiming measured evidence."""
         data = copy.deepcopy(self.manifest.data)
         data["status"] = "FROZEN"
         physics = data["physics"]
@@ -146,6 +146,11 @@ class TestMonolithicReference(unittest.TestCase):
         for mapping in data["mappings"]:
             mapping["status"] = "MATCHED"
             mapping["rationale"] = "Synthetic schema validation only, not measured evidence"
+        return data
+
+    def test_frozen_requires_physics_and_envelopes(self):
+        """Reject incomplete frozen physics independently of missing envelope evidence."""
+        data = self._frozen_manifest_data()
         validate_manifest(ComparisonManifest(data), require_frozen=True)
         paths = [
             ("physics", "fixed_nodes"),
@@ -175,6 +180,60 @@ class TestMonolithicReference(unittest.TestCase):
         data["mappings"][0]["status"] = "UNMAPPED"
         with self.assertRaisesRegex(ValueError, "UNMAPPED"):
             validate_manifest(ComparisonManifest(data), require_frozen=True)
+
+    def test_frozen_rejects_incoherent_physics(self):
+        """Reject inconsistent dimensions, topology, quadrature, scales and benchmark ranges."""
+        mutations = [
+            (("physics", "initial", "qd"), [0.1]),
+            (("physics", "joints", 1, "child"), 99),
+            (("physics", "joints", 1, "parent"), 1),
+            (("physics", "joints", 0, "axis"), [0, 0, 0]),
+            (("physics", "shapes", 0, "link"), 99),
+            (("physics", "shapes", 0, "xform"), [0, 0, 0, 0, 0, 0, 0]),
+            (("physics", "contact", "barycentric"), [[0, 0, 0]] * 3),
+            (("physics", "shapes", 0, "sdf", "runtime_scale"), [-1, -1, -1]),
+            (("physics", "shapes", 0, "sdf", "resolution"), [0, 1, 1]),
+            (("physics", "node_masses_kg", 0), 0),
+            (("physics", "node_masses_kg", 0), 1e-100),
+            (("physics", "gravity_m_s2", 0), 1e100),
+            (("physics", "tet_materials_pa_pa_pas", 0, 0), 0),
+            (("physics", "boundary_faces"), [[1, 2, 3]]),
+            (("physics", "tet_indices"), [[0, 2, 1, 3]]),
+            (("physics", "drive", "stiffness"), [1]),
+            (("physics", "drive", "trajectory", 0, "target_q"), [0.2]),
+            (("benchmark", "reference_envelope", "peak_force_n"), [10, 1]),
+            (("benchmark", "actual_closure_interval_m"), [1, 0]),
+            (("benchmark", "stages", "free_space_end_step"), 99),
+            (("benchmark", "approach_axis_world"), [0, 0, 0]),
+            (("benchmark", "soft_probe"), [99]),
+        ]
+        for path, value in mutations:
+            data = self._frozen_manifest_data()
+            owner = data
+            for key in path[:-1]:
+                owner = owner[key]
+            owner[path[-1]] = value
+            with self.subTest(field=path), self.assertRaises(ValueError):
+                validate_manifest(ComparisonManifest(data), require_frozen=True)
+
+    def test_frozen_volume_scale_provenance(self):
+        """Accept baked nonuniform scales and reject unsupported unbaked volume scales."""
+        data = self._frozen_manifest_data()
+        shape = data["physics"]["shapes"][0]
+        shape["type"] = "volume_sdf"
+        for scale in ([0, 0, 0], [-1, -1, -1], [1, 2, 1]):
+            shape["sdf"]["runtime_scale"] = scale
+            with self.subTest(scale=scale), self.assertRaises(ValueError):
+                validate_manifest(ComparisonManifest(data), require_frozen=True)
+        shape["sdf"]["runtime_scale"] = [2, 2, 2]
+        validate_manifest(ComparisonManifest(data), require_frozen=True)
+        shape["sdf"]["scale_baked"] = True
+        shape["sdf"]["runtime_scale"] = [1, 2, 3]
+        validate_manifest(ComparisonManifest(data), require_frozen=True)
+        shape["type"] = "box"
+        shape["sdf"]["scale_baked"] = False
+        shape["dimensions_m"] = [0.01, 0.02, 0.03]
+        validate_manifest(ComparisonManifest(data), require_frozen=True)
 
     def test_duplicate_json_keys_rejected(self):
         """Reject duplicate JSON keys before canonical hashing loses information."""

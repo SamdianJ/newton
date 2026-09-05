@@ -7,7 +7,9 @@ import hashlib
 import json
 import math
 import re
+import struct
 import subprocess
+from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
@@ -101,6 +103,8 @@ def _validate(value, schema, path, *, frozen):
         for index, child in enumerate(value):
             _validate(child, schema["items"], f"{path}[{index}]", frozen=frozen)
     elif kind in ("number", "integer"):
+        if frozen and kind == "number" and path.startswith("manifest.physics"):
+            value = _stored_float32(value)
         if (
             not math.isfinite(value)
             or value < schema.get("minimum", -math.inf)
@@ -165,6 +169,136 @@ def validate_manifest(manifest: ComparisonManifest, *, require_frozen: bool) -> 
     tets, materials = physics.get("tet_indices"), physics.get("tet_materials_pa_pa_pas")
     if tets is not None and materials is not None and len(tets) != len(materials):
         raise ValueError("physics: expected one material per tet")
+    if frozen:
+        _validate_frozen_physics(physics, data["benchmark"])
+
+
+def _stored_float32(value):
+    try:
+        return struct.unpack("f", struct.pack("f", value))[0]
+    except (OverflowError, struct.error) as error:
+        raise ValueError("physics value exceeds float32 storage") from error
+
+
+def _determinant(matrix):
+    a, b, c = matrix
+    return a[0] * (b[1] * c[2] - b[2] * c[1]) - a[1] * (b[0] * c[2] - b[2] * c[0]) + a[2] * (b[0] * c[1] - b[1] * c[0])
+
+
+def _require_unit(vector, path):
+    # Permit float32 representation roundoff, not an unnormalized input axis/quaternion.
+    if not math.isclose(sum(value * value for value in vector), 1.0, rel_tol=0.0, abs_tol=1e-6):
+        raise ValueError(f"{path}: expected a unit vector or quaternion")
+
+
+def _validate_frozen_physics(physics, benchmark):
+    joints, links, initial = physics["joints"], physics["links"], physics["initial"]
+    dof_count = sum(joint["type"] != "FIXED" for joint in joints)
+    for key in ("q", "qd"):
+        if len(initial[key]) != dof_count:
+            raise ValueError(f"physics.initial.{key}: expected one value per dynamic joint DoF")
+    parents = {}
+    for joint in joints:
+        parent, child = joint["parent"], joint["child"]
+        if parent >= len(links) or child >= len(links) or parent == child or child in parents:
+            raise ValueError("physics.joints: invalid parent/child indices or duplicate child")
+        parents[child] = parent
+        if joint["type"] != "FIXED":
+            _require_unit(joint["axis"], "physics.joints.axis")
+        for key in ("parent_xform", "child_xform"):
+            _require_unit(joint[key][3:], f"physics.joints.{key}")
+    if set(parents) != set(range(len(links))):
+        raise ValueError("physics.joints: every link must belong to a world-anchored tree")
+    for start in parents:
+        current = start
+        visited = set()
+        while current != -1:
+            if current in visited:
+                raise ValueError("physics.joints: cycle in world-anchored tree")
+            visited.add(current)
+            current = parents[current]
+    for link in links:
+        _require_unit(link["xform"][3:], "physics.links.xform")
+        inertia = link["inertia_kg_m2"]
+        if (
+            any(inertia[i][j] != inertia[j][i] for i in range(3) for j in range(3))
+            or inertia[0][0] <= 0
+            or inertia[0][0] * inertia[1][1] - inertia[0][1] ** 2 <= 0
+            or _determinant(inertia) <= 0
+        ):
+            raise ValueError("physics.links.inertia_kg_m2: expected symmetric positive-definite inertia")
+
+    faces = Counter()
+    rest = physics["rest_positions_m"]
+    if len({tuple(sorted(tet)) for tet in physics["tet_indices"]}) != len(physics["tet_indices"]):
+        raise ValueError("physics.tet_indices: duplicate tet")
+    for tet in physics["tet_indices"]:
+        edges = [[rest[index][axis] - rest[tet[0]][axis] for axis in range(3)] for index in tet[1:]]
+        if _determinant(edges) <= 0:
+            raise ValueError("physics.tet_indices: rest tet must have positive volume")
+        faces.update(tuple(sorted(tet[:opposite] + tet[opposite + 1 :])) for opposite in range(4))
+    actual_faces = [tuple(sorted(face)) for face in physics["boundary_faces"]]
+    boundary = {face for face, count in faces.items() if count == 1}
+    if (
+        any(count > 2 for count in faces.values())
+        or len(set(actual_faces)) != len(actual_faces)
+        or set(actual_faces) != boundary
+    ):
+        raise ValueError("physics.boundary_faces: expected exact manifold tet boundary without duplicates")
+    for node, fixed in enumerate(physics["fixed_nodes"]):
+        if not fixed and _stored_float32(physics["node_masses_kg"][node]) <= 0:
+            raise ValueError("physics.node_masses_kg: dynamic nodes need positive mass")
+        if fixed and any(initial["v_m_s"][node]):
+            raise ValueError("physics.initial.v_m_s: fixed nodes must have zero velocity")
+    if any(_stored_float32(material[0]) <= 0 for material in physics["tet_materials_pa_pa_pas"]):
+        raise ValueError("physics.tet_materials_pa_pa_pas: shear modulus must be positive")
+
+    for shape in physics["shapes"]:
+        if shape["link"] >= len(links):
+            raise ValueError("physics.shapes.link: out-of-range link")
+        _require_unit(shape["xform"][3:], "physics.shapes.xform")
+        sdf = shape["sdf"]
+        scale = [_stored_float32(value) for value in sdf["runtime_scale"]]
+        if any(value <= 0 for value in scale) or any(value <= 0 for value in sdf["resolution"]):
+            raise ValueError("physics.shapes.sdf: scale and resolution must be positive")
+        if shape["type"] == "volume_sdf" and not sdf["scale_baked"] and len(set(scale)) != 1:
+            raise ValueError("physics.shapes.sdf: unbaked volume scale must be exact-uniform float32")
+        dimensions = shape["dimensions_m"]
+        used_dimensions = {
+            "sphere": 1,
+            "box": 3,
+            "capsule": 2,
+            "cylinder": 2,
+            "cone": 2,
+            "infinite_plane": 0,
+            "volume_sdf": 3,
+        }
+        if any(value <= 0 for value in dimensions[: used_dimensions[shape["type"]]]):
+            raise ValueError("physics.shapes.dimensions_m: active primitive dimensions must be positive")
+
+    for slot, sample in enumerate(physics["contact"]["barycentric"]):
+        expected = [2 / 3 if axis == slot else 1 / 6 for axis in range(3)]
+        if [_stored_float32(value) for value in sample] != [_stored_float32(value) for value in expected]:
+            raise ValueError("physics.contact.barycentric: expected the three fixed P1Q3 slots")
+    drive = physics["drive"]
+    for key in ("stiffness", "damping"):
+        if len(drive[key]) != dof_count:
+            raise ValueError(f"physics.drive.{key}: expected one value per dynamic joint DoF")
+    previous_time = -math.inf
+    for sample in drive["trajectory"]:
+        if sample["time_s"] <= previous_time or any(len(sample[key]) != dof_count for key in ("target_q", "target_qd")):
+            raise ValueError("physics.drive.trajectory: require increasing times and joint-sized targets")
+        previous_time = sample["time_s"]
+
+    _require_unit(benchmark["approach_axis_world"], "benchmark.approach_axis_world")
+    if any(node >= len(rest) for node in benchmark["soft_probe"]):
+        raise ValueError("benchmark.soft_probe: out-of-range node")
+    stages = benchmark["stages"]
+    if not stages["free_space_end_step"] <= stages["contact_loading_end_step"] <= stages["settle_end_step"]:
+        raise ValueError("benchmark.stages: stage boundaries must be ordered")
+    for low, high in [benchmark["actual_closure_interval_m"], *benchmark["reference_envelope"].values()]:
+        if low > high:
+            raise ValueError("benchmark: interval lower bound exceeds upper bound")
 
 
 def require_reference_worktree(path: Path, *, expected_sha: str) -> WorktreeIdentity:

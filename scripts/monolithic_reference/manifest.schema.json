@@ -167,7 +167,7 @@
             "required": ["type", "link", "xform", "sdf", "dimensions_m"],
             "additionalProperties": false,
             "properties": {
-              "type": {"type": "string", "minLength": 1},
+              "type": {"enum": ["sphere", "box", "capsule", "cylinder", "cone", "infinite_plane", "volume_sdf"]},
               "link": {"type": "integer", "minimum": 0},
               "xform": {"type": "array", "items": {"type": "number"}, "minItems": 7, "maxItems": 7},
               "sdf": {
