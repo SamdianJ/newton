@@ -4,12 +4,22 @@
 """Verify DRAFT normal-loading measurements without claiming a frozen E2E gate."""
 
 import copy
+import json
+import tempfile
 import unittest
+from pathlib import Path
+from unittest.mock import patch
 
 import numpy as np
 
 from newton.tests.unittest_utils import add_function_test, get_test_devices
-from scripts.monolithic_reference.normal_loading import assess_run, command_at, load_fixture, run_loading
+from scripts.monolithic_reference.normal_loading import (
+    SolverMonolithic,
+    assess_run,
+    command_at,
+    load_fixture,
+    run_loading,
+)
 
 
 class TestNormalLoadingContract(unittest.TestCase):
@@ -33,6 +43,41 @@ class TestNormalLoadingContract(unittest.TestCase):
         rotation = np.asarray([[0, -1, 0], [1, 0, 0], [0, 0, 1]])
         transformed = positions @ rotation.T + [0.7, -0.4, 0.2]
         self.assertAlmostEqual(np.linalg.norm(transformed[3] - transformed[:3].mean(axis=0)), distance)
+
+    def test_reject_unsupported_or_invalid_fixture(self):
+        """Reject declarations this exact single-tet Z-plane runner cannot implement."""
+        fixture = load_fixture()
+        invalid = (
+            ("rigid", "shape_type", "sphere"),
+            ("rigid", "joint_type", "REVOLUTE"),
+            ("contact", "quadrature", "P1Q1"),
+            ("rigid", "approach_axis_world", [1, 0, 0]),
+            ("rigid", "mass_kg", -1),
+            ("rigid", "inertia_kg_m2", [1, 1]),
+            ("soft", "fixed_nodes", [False] * 4),
+            ("soft", "probe_nodes", [9]),
+            ("soft", "rest_positions_m", [[0, 0, 0]] * 4),
+            ("soft", "particle_radius_m", -1),
+            ("contact", "stiffness_n_m3", float("nan")),
+            ("drive", "free_end_s", 0),
+            ("drive", "loading_end_s", 0.1),
+            ("acceptance", "minimum_converged_ratio", 2),
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "fixture.json"
+            for section, name, value in invalid:
+                with self.subTest(field=f"{section}.{name}"):
+                    changed = copy.deepcopy(fixture)
+                    changed[section][name] = value
+                    path.write_text(json.dumps(changed))
+                    with self.assertRaises(ValueError):
+                        load_fixture(path)
+            for name, value in (("dt_s", 0), ("substeps", -1)):
+                changed = copy.deepcopy(fixture)
+                changed[name] = value
+                path.write_text(json.dumps(changed))
+                with self.assertRaises(ValueError):
+                    load_fixture(path)
 
 
 def test_short_normal_loading(test, device):
@@ -61,12 +106,54 @@ def test_short_normal_loading(test, device):
     test.assertFalse(summary["gates"]["converged_ratio"])
     test.assertFalse(summary["gates"]["consecutive_non_success"])
 
+    for field in ("q_sign_projection_error", "x_sign_projection_error"):
+        for value in (1.0, None, float("nan"), float("inf"), -float("inf")):
+            with test.subTest(field=field, value=value):
+                invalid = copy.deepcopy(result["records"])
+                invalid[0][field] = value
+                test.assertFalse(assess_run(invalid, fixture)["gates"]["contact_balance_and_sign"])
+    # A complete-looking prefix must never erase a subsequent execution failure.
+    prefix = result["records"] * 100
+    failed = assess_run(prefix, fixture, execution_error={"step": 1200, "reason": "interrupted"})
+    test.assertTrue(failed["gates"]["minimum_steps"])
+    test.assertFalse(failed["gates"]["execution_completed"])
+    test.assertFalse(failed["draft_numerical_pass"])
+
+
+def test_loading_failure_preserves_prefix(test, device):
+    """Keep a real successful state record when the following substep aborts."""
+    original = SolverMonolithic.step
+    for failure in (RuntimeError("publication failed"), KeyboardInterrupt()):
+        calls = 0
+
+        def fail_second(solver, *args, failure=failure, **kwargs):
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                raise failure
+            return original(solver, *args, **kwargs)
+
+        with patch.object(SolverMonolithic, "step", fail_second):
+            result = run_loading(load_fixture(), device=device, substeps=3)
+        test.assertEqual(len(result["records"]), 1)
+        test.assertTrue(result["records"][0]["converged"])
+        test.assertEqual(result["metadata"]["execution_error"]["step"], 1)
+        test.assertFalse(result["summary"]["gates"]["execution_completed"])
+        test.assertFalse(result["summary"]["draft_numerical_pass"])
+
 
 class TestMonolithicE2E(unittest.TestCase):
     """Run short physical CPU/CUDA smoke trajectories for the offline measurement tool."""
 
 
 add_function_test(TestMonolithicE2E, "test_short_normal_loading", test_short_normal_loading, devices=get_test_devices())
+
+add_function_test(
+    TestMonolithicE2E,
+    "test_loading_failure_preserves_prefix",
+    test_loading_failure_preserves_prefix,
+    devices=get_test_devices(),
+)
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

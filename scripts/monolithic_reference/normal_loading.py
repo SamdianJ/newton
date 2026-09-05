@@ -31,9 +31,105 @@ DEFAULT_FIXTURE = Path(__file__).with_name("fixtures") / "normal_loading_draft_v
 def load_fixture(path=DEFAULT_FIXTURE):
     """Read the explicitly unfrozen normal-loading input."""
     fixture = json.loads(Path(path).read_text())
-    if fixture["status"] != "DRAFT" or fixture["schema_version"] != "normal_loading_draft/v1":
-        raise ValueError("This runner only accepts the normal_loading_draft/v1 DRAFT fixture")
+    _validate_fixture(fixture)
     return fixture
+
+
+def _validate_fixture(fixture):
+    """Check only the concrete single-tet, Z-plane input this runner implements."""
+    rigid, soft, contact, drive, limits = (
+        fixture[name] for name in ("rigid", "soft", "contact", "drive", "acceptance")
+    )
+    if (
+        fixture["status"] != "DRAFT"
+        or fixture["schema_version"] != "normal_loading_draft/v1"
+        or fixture["calibration_status"] != "UNFROZEN"
+        or fixture["reference_envelope"] is not None
+    ):
+        raise ValueError("This runner only supports unfrozen normal_loading_draft/v1 input")
+    if rigid["shape_type"] != "infinite_plane" or rigid["joint_type"] != "PRISMATIC" or contact["quadrature"] != "P1Q3":
+        raise ValueError("Only PRISMATIC infinite_plane with P1Q3 is supported")
+    if rigid["approach_axis_world"] != [0.0, 0.0, 1.0]:
+        raise ValueError("The plane and compressive approach axis must be world +Z")
+    if (
+        drive["kind"] != "external frozen joint force: kp*(q_target-q)+kd*(qd_target-qd)"
+        or drive["trajectory"] != "quintic position and analytic velocity, followed by constant settle target"
+    ):
+        raise ValueError("Only the declared frozen-force quintic drive is supported")
+    for values, positive, nonnegative in (
+        (fixture, ("dt_s",), ()),
+        (rigid, ("mass_kg",), ()),
+        (soft, ("density_kg_m3", "mu_pa", "lambda_pa"), ("particle_radius_m",)),
+        (contact, ("stiffness_n_m3",), ("soft_contact_gap_m", "shape_margin_m")),
+        (drive, ("kp_n_m", "free_end_s", "loading_end_s", "free_target_m", "loading_target_m"), ("kd_n_s_m",)),
+        (
+            limits,
+            (
+                "min_det_f",
+                "penetration_acceptance_limit_m",
+                "delta_soft_min_m",
+                "force_floor_n",
+                "force_balance_relative_tolerance",
+                "linear_tolerance",
+            ),
+            (),
+        ),
+    ):
+        for name in positive + nonnegative:
+            value = values[name]
+            if (
+                not isinstance(value, (int, float))
+                or isinstance(value, bool)
+                or not math.isfinite(value)
+                or value < 0
+                or (name in positive and value == 0)
+            ):
+                raise ValueError(f"Invalid finite range for {name}")
+    for values, names in (
+        (fixture, ("substeps",)),
+        (limits, ("minimum_substeps", "onset_consecutive_substeps", "settled_window_substeps")),
+    ):
+        if any(type(values[name]) is not int or values[name] <= 0 for name in names):
+            raise ValueError("Step counts must be positive integers")
+    if type(limits["maximum_consecutive_non_success"]) is not int or limits["maximum_consecutive_non_success"] < 0:
+        raise ValueError("Maximum consecutive failures must be a nonnegative integer")
+    for name in ("minimum_converged_ratio", "free_space_completion_minimum"):
+        if not 0 < limits[name] <= 1:
+            raise ValueError(f"Invalid acceptance ratio {name}")
+    if not (
+        drive["free_end_s"] < drive["loading_end_s"] < fixture["substeps"] * fixture["dt_s"]
+        and drive["free_target_m"] < drive["loading_target_m"]
+    ):
+        raise ValueError("Drive must have ordered free/loading/settle phases and increasing targets")
+    for values, name in ((rigid, "inertia_kg_m2"), (rigid, "reference_point_body_m"), (fixture, "gravity_m_s2")):
+        vector = np.asarray(values[name], dtype=float)
+        if vector.shape != (3,) or not np.isfinite(vector).all() or (name == "inertia_kg_m2" and np.any(vector <= 0)):
+            raise ValueError(f"Invalid three-vector {name}")
+    interval = np.asarray(limits["closure_secant_interval_m"], dtype=float)
+    if interval.shape != (2,) or not np.isfinite(interval).all() or not 0 < interval[0] < interval[1]:
+        raise ValueError("Secant closure interval must be finite, positive and ordered")
+    if (
+        soft["tet_indices"] != [[0, 1, 2, 3]]
+        or soft["fixed_nodes"] != [False, False, False, True]
+        or soft["probe_nodes"] != [3]
+        or soft["surface_nodes"] != [0, 1, 2]
+        or soft["damping"] != 0
+    ):
+        raise ValueError("Only one ordered tetrahedron with fixed apex, three base nodes and zero damping is supported")
+    positions = np.asarray(soft["rest_positions_m"], dtype=float)
+    if positions.shape != (4, 3) or not np.isfinite(positions).all():
+        raise ValueError("Expected four finite three-dimensional rest positions")
+    if (
+        not np.all(positions[:3, 2] == positions[0, 2])
+        or positions[3, 2] <= positions[0, 2]
+        or np.linalg.det((positions[1:] - positions[0]).T) <= 0
+    ):
+        raise ValueError("Expected a positive-volume tetrahedron with horizontal base below the apex")
+    if (
+        not math.isfinite(rigid["initial_plane_z_m"])
+        or rigid["initial_plane_z_m"] + soft["particle_radius_m"] + contact["shape_margin_m"] >= positions[0, 2]
+    ):
+        raise ValueError("The initial plane must lie below the base with positive physical clearance")
 
 
 def command_at(time_s, fixture):
@@ -54,6 +150,7 @@ def command_at(time_s, fixture):
 
 def build_scene(fixture, *, device):
     """Build the declared single-finger articulation and anchored tetrahedron."""
+    _validate_fixture(fixture)
     rigid, soft, contact = fixture["rigid"], fixture["soft"], fixture["contact"]
     builder = newton.ModelBuilder(gravity=tuple(fixture["gravity_m_s2"]))
     body = builder.add_link(mass=rigid["mass_kg"], inertia=wp.diag(wp.vec3(*rigid["inertia_kg_m2"])))
@@ -211,7 +308,7 @@ def _measure(model, state, solver, fixture, step, time_s, command, frozen_force)
     )
 
 
-def assess_run(records, fixture):
+def assess_run(records, fixture, *, execution_error=None):
     """Apply the declared provisional gates and expose missing freeze/reference evidence."""
     limits = fixture["acceptance"]
     onset, streak, maximum_streak, failures = None, 0, 0, 0
@@ -241,8 +338,16 @@ def assess_run(records, fixture):
         )
 
     def contact_ok(r):
-        return all(
-            r["stats"][name] is not None and r["stats"][name] <= limits["force_balance_relative_tolerance"]
+        block_sign_ok = all(
+            r.get(name) is not None
+            and math.isfinite(r[name])
+            and 0.0 <= r[name] <= limits["force_balance_relative_tolerance"]
+            for name in ("q_sign_projection_error", "x_sign_projection_error")
+        )
+        return block_sign_ok and all(
+            r["stats"][name] is not None
+            and math.isfinite(r["stats"][name])
+            and 0.0 <= r["stats"][name] <= limits["force_balance_relative_tolerance"]
             for name in (
                 "contact_force_imbalance",
                 "contact_moment_imbalance",
@@ -252,6 +357,7 @@ def assess_run(records, fixture):
         )
 
     gates = {
+        "execution_completed": execution_error is None,
         "minimum_steps": count >= limits["minimum_substeps"],
         "finite_state": all(r["finite_state"] for r in records),
         "min_det_f": all(r["min_det_f"] is not None and r["min_det_f"] >= limits["min_det_f"] for r in records),
@@ -317,12 +423,12 @@ def run_loading(fixture, *, device="cpu", substeps=None):
         control.joint_f.assign(np.asarray([force], dtype=np.float32))
         try:
             solver.step(state, state, control, None, dt)
-        except RuntimeError as error:
-            execution_error = {"step": step, "time_s": time_s, "reason": str(error)}
+            record = _measure(model, state, solver, fixture, step, time_s, command, float(np.float32(force)))
+            record["active_sample_count"] = solver.last_stats.active_sample_count
+            records.append(record)
+        except (Exception, KeyboardInterrupt) as error:
+            execution_error = {"step": step, "time_s": time_s, "reason": f"{type(error).__name__}: {error}"}
             break
-        record = _measure(model, state, solver, fixture, step, time_s, command, float(np.float32(force)))
-        record["active_sample_count"] = solver.last_stats.active_sample_count
-        records.append(record)
     serialized = json.dumps(fixture, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()
     root = Path(__file__).resolve().parents[2]
     metadata = {
@@ -351,7 +457,11 @@ def run_loading(fixture, *, device="cpu", substeps=None):
         "normal_force_side": "physical force on rigid finger; compressive scalar is minus its projection on approach axis",
         "scope": "Draft C5/C6/C7 precheck; no frozen comparison manifest or reference envelope",
     }
-    return {"metadata": metadata, "records": records, "summary": assess_run(records, fixture)}
+    return {
+        "metadata": metadata,
+        "records": records,
+        "summary": assess_run(records, fixture, execution_error=execution_error),
+    }
 
 
 def main():
