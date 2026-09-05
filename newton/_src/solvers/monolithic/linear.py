@@ -740,12 +740,12 @@ def _pcg_update_direction(z: wp.array[float], p: wp.array[float], beta: wp.array
 
 
 @wp.kernel
-def _true_residual_sums(
+def _true_residual_maxima(
     ay: wp.array[float],
     rhs: wp.array[float],
     q_count: int,
     residual: wp.array[float],
-    sums: wp.array[float],
+    maxima: wp.array[float],
     status: wp.array[int],
 ):
     i = wp.tid()
@@ -753,18 +753,64 @@ def _true_residual_sums(
     residual[i] = value
     if not wp.isfinite(value) or not wp.isfinite(rhs[i]):
         wp.atomic_max(status, 0, 16)
+        return
     block = int(1)
     if i >= q_count:
         block = 2
-    wp.atomic_add(sums, 0, value * value)
-    wp.atomic_add(sums, block, value * value)
-    wp.atomic_add(sums, 3, rhs[i] * rhs[i])
-    wp.atomic_add(sums, block + 3, rhs[i] * rhs[i])
+    wp.atomic_max(maxima, 0, wp.abs(value))
+    wp.atomic_max(maxima, block, wp.abs(value))
+    wp.atomic_max(maxima, 3, wp.abs(rhs[i]))
+    wp.atomic_max(maxima, block + 3, wp.abs(rhs[i]))
+
+
+@wp.kernel
+def _true_residual_sums(
+    residual: wp.array[float],
+    rhs: wp.array[float],
+    q_count: int,
+    maxima: wp.array[float],
+    sums: wp.array[float],
+    status: wp.array[int],
+):
+    i = wp.tid()
+    if status[0] != 0:
+        return
+    block = int(1)
+    if i >= q_count:
+        block = 2
+    # Each slice has its own scale so a large x block cannot erase a tiny q block.
+    for local in range(2):
+        index = int(0)
+        if local == 1:
+            index = block
+        if maxima[index] > 0.0:
+            value = residual[i] / maxima[index]
+            wp.atomic_add(sums, index, value * value)
+        if maxima[index + 3] > 0.0:
+            value = rhs[i] / maxima[index + 3]
+            wp.atomic_add(sums, index + 3, value * value)
+
+
+@wp.kernel
+def _compute_true_residual_norms(
+    maxima: wp.array[float],
+    sums: wp.array[float],
+    norms: wp.array[float],
+    status: wp.array[int],
+):
+    i = wp.tid()
+    if status[0] != 0:
+        return
+    value = maxima[i] * wp.sqrt(sums[i])
+    if not wp.isfinite(value) or not wp.isfinite(sums[i]):
+        wp.atomic_max(status, 0, 16)
+        return
+    norms[i] = value
 
 
 @wp.kernel
 def _compute_monolithic_true_residual_ratios(
-    sums: wp.array[float],
+    norms: wp.array[float],
     floor_global: float,
     floor_q: float,
     floor_x: float,
@@ -772,12 +818,14 @@ def _compute_monolithic_true_residual_ratios(
     status: wp.array[int],
 ):
     i = wp.tid()
+    if status[0] != 0:
+        return
     floor = floor_global
     if i == 1:
         floor = floor_q
     elif i == 2:
         floor = floor_x
-    value = wp.sqrt(sums[i]) / wp.max(wp.sqrt(sums[i + 3]), floor)
+    value = norms[i] / wp.max(norms[i + 3], floor)
     ratios[i] = value
     if not wp.isfinite(value):
         wp.atomic_max(status, 0, 16)
@@ -878,6 +926,8 @@ class MonolithicLinearWorkspace:
             setattr(self, name, wp.zeros(1, dtype=float, device=device))
         self._products = wp.zeros(3, dtype=float, device=device)
         self._true_sums = wp.zeros(6, dtype=float, device=device)
+        self._true_maxima = wp.zeros(6, dtype=float, device=device)
+        self._true_norms = wp.zeros(6, dtype=float, device=device)
         self._ratios = wp.zeros(3, dtype=float, device=device)
         self._status = wp.zeros(1, dtype=int, device=device)
         self.floor_count = wp.zeros(1, dtype=int, device=device)
@@ -1206,19 +1256,35 @@ class MonolithicLinearWorkspace:
         wp.launch(_pcg_products, a.size, [a, b, self._products, self._status], device=self.device)
 
     def _true_residual(self, rhs, y, config):
+        self._status.zero_()
         self.operator.matvec(y, self._ap, self._ap, 1.0, 0.0)
         self._true_sums.zero_()
+        self._true_maxima.zero_()
+        self._true_norms.fill_(float("nan"))
+        self._ratios.fill_(float("nan"))
+        wp.launch(
+            _true_residual_maxima,
+            y.size,
+            [self._ap, rhs, self.layout.q_dof_count, self._true_r, self._true_maxima, self._status],
+            device=self.device,
+        )
         wp.launch(
             _true_residual_sums,
             y.size,
-            [self._ap, rhs, self.layout.q_dof_count, self._true_r, self._true_sums, self._status],
+            [self._true_r, rhs, self.layout.q_dof_count, self._true_maxima, self._true_sums, self._status],
+            device=self.device,
+        )
+        wp.launch(
+            _compute_true_residual_norms,
+            6,
+            [self._true_maxima, self._true_sums, self._true_norms, self._status],
             device=self.device,
         )
         wp.launch(
             _compute_monolithic_true_residual_ratios,
             3,
             [
-                self._true_sums,
+                self._true_norms,
                 config.residual_floor_global,
                 config.residual_floor_q,
                 config.residual_floor_x,
@@ -1261,7 +1327,7 @@ class MonolithicLinearWorkspace:
             not isinstance(config, MonolithicPcgConfig)
             or not self._vector_valid(rhs_hat)
             or not self._vector_valid(y)
-            or rhs_hat.ptr == y.ptr
+            or (rhs_hat.size > 0 and rhs_hat.ptr < y.ptr + y.size * 4 and y.ptr < rhs_hat.ptr + rhs_hat.size * 4)
             or warm_start not in (MonolithicPcgWarmStart.ZERO, MonolithicPcgWarmStart.SAME_GENERATION)
             or config.maximum_iterations > self.capacities.pcg_max_iterations
             or config.maximum_iterations + 2 > self.capacities.pcg_true_residual_check_count
@@ -1331,7 +1397,7 @@ class MonolithicLinearWorkspace:
             status = self._read_status()
             if status != MonolithicLinearStatus.SUCCESS:
                 break
-            denominator = max(float(np.sqrt(self._true_sums.numpy()[3])), config.residual_floor_global)
+            denominator = max(float(self._true_norms.numpy()[3]), config.residual_floor_global)
             check = (
                 iteration % config.true_residual_interval == 0
                 or iteration == config.maximum_iterations

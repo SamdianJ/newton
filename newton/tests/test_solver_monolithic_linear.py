@@ -884,12 +884,71 @@ def test_pcg_input_validation(test, device):
     test.assertEqual(workspace.recover_delta(y, rhs, generation=generation), MonolithicLinearStatus.NONFINITE_ITERATION)
 
 
+def test_pcg_extreme_true_residuals(test, device):
+    """Prevent tiny or huge float32 squared residuals from reporting false success."""
+    workspace, generation = _two_block_system(device, 0.0)
+    rhs = wp.full(4, 1e-25, dtype=float, device=device)
+    y = wp.zeros(4, dtype=float, device=device)
+    config = _pcg_config(residual_floor_global=1e-30, residual_floor_q=1e-30, residual_floor_x=1e-30)
+    result = workspace.solve_pcg(rhs, y, generation=generation, warm_start=MonolithicPcgWarmStart.ZERO, config=config)
+    test.assertEqual(result.status, MonolithicLinearStatus.NON_POSITIVE_PRECONDITIONED_RESIDUAL, result)
+    np.testing.assert_allclose((result.rho, result.rho_q, result.rho_x), 1.0, atol=1e-7)
+    np.testing.assert_array_equal(y.numpy(), 0)
+    # Check the actual operator directly: finite vector norms must survive square overflow.
+    rhs.fill_(1e20)
+    y.fill_(0.999e20)
+    workspace._status.zero_()
+    ratios = workspace._true_residual(rhs, y, config)
+    expected = abs(float(rhs.numpy()[0]) - float(y.numpy()[0])) / float(rhs.numpy()[0])
+    np.testing.assert_allclose(ratios, expected, rtol=2e-6)
+    test.assertEqual(workspace._read_status(), MonolithicLinearStatus.SUCCESS)
+    test.assertGreater(min(ratios), config.linear_tolerance)
+    # Each block has its own scale even when a neighboring block is much larger.
+    rhs.assign(np.array([1e-25, 1e20, 1e20, 1e20], dtype=np.float32))
+    y.assign(np.array([0, 1e20, 1e20, 1e20], dtype=np.float32))
+    ratios = workspace._true_residual(rhs, y, config)
+    test.assertAlmostEqual(ratios[1], 1.0, places=6)
+    test.assertEqual(ratios[2], 0.0)
+    rhs.fill_(3e38)
+    y.zero_()
+    workspace._true_residual(rhs, y, config)
+    test.assertEqual(workspace._read_status(), MonolithicLinearStatus.NONFINITE_ITERATION)
+    workspace, generation = _two_block_system(device, 1e-15)
+    rhs.assign(np.array([1e-25, 1.0, 0.0, 0.0], dtype=np.float32))
+    result = workspace.solve_pcg(rhs, y, generation=generation, warm_start=MonolithicPcgWarmStart.ZERO, config=config)
+    test.assertNotEqual(result.status, MonolithicLinearStatus.SUCCESS, result)
+    test.assertGreater(result.rho_q, config.linear_tolerance)
+
+
+def test_pcg_partial_overlap(test, device):
+    """Reject partially overlapping solution and RHS views without mutating either."""
+    workspace, generation = _two_block_system(device, 0.0)
+    for reverse in [False, True]:
+        original = np.arange(5, dtype=np.float32)
+        storage = wp.array(original, device=device)
+        rhs, y = (storage[1:], storage[:4]) if reverse else (storage[:4], storage[1:])
+        result = workspace.solve_pcg(
+            rhs, y, generation=generation, warm_start=MonolithicPcgWarmStart.ZERO, config=_pcg_config()
+        )
+        test.assertEqual(result.status, MonolithicLinearStatus.INVALID_ARGUMENT, result)
+        np.testing.assert_array_equal(storage.numpy(), original)
+    # Adjacent views share an allocation but have disjoint byte ranges.
+    storage = wp.array(np.r_[np.ones(4), np.zeros(4)].astype(np.float32), device=device)
+    result = workspace.solve_pcg(
+        storage[:4], storage[4:], generation=generation, warm_start=MonolithicPcgWarmStart.ZERO, config=_pcg_config()
+    )
+    test.assertEqual(result.status, MonolithicLinearStatus.SUCCESS, result)
+    np.testing.assert_array_equal(storage.numpy(), 1.0)
+
+
 class TestMonolithicLinear(unittest.TestCase):
     """Exercise assembly independently on each available device."""
 
 
 for device in get_test_devices():
     for test_function in [
+        test_pcg_extreme_true_residuals,
+        test_pcg_partial_overlap,
         test_pcg_recursive_drift,
         test_pcg_input_validation,
         test_pcg_dense_and_allocations,
