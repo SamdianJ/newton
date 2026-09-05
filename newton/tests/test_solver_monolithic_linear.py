@@ -346,6 +346,127 @@ def test_nonfinite_reduction(test, device):
             )
 
 
+def _fixed_pattern():
+    return {
+        "global_rows": np.r_[0, np.repeat(np.arange(2, 5), 3)],
+        "global_columns": np.r_[0, np.tile(np.arange(2, 5), 3)],
+        "internal_rows": np.array([0]),
+        "internal_columns": np.array([0]),
+    }
+
+
+@wp.kernel
+def _fixed_owners(aq: wp.array2d[float], ax_values: wp.array[wp.mat33], global_values: wp.array[float]):
+    aq[0, 0] = 2.0
+    ax_values[0] = wp.diag(wp.vec3(4.0))
+    global_values[0] = 2.0
+    for i in range(3):
+        global_values[1 + 3 * i + i] = 4.0
+
+
+def test_fixed_prefix_contact_and_reset(test, device):
+    """Preserve fixed owner slots beside appended contacts and reset each generation."""
+    workspace = _workspace(device)
+    pattern = _fixed_pattern()
+    workspace._set_fixed_triplet_pattern(**pattern)
+    pattern["global_rows"].fill(10)
+    generation = MonolithicLinearGeneration(1, 0, 1, 1)
+    assembly = workspace.begin_assembly(generation)
+    test.assertEqual(assembly.global_scalar_triplets.count.numpy()[0], 10)
+    test.assertEqual(assembly.ax_internal_triplets.count.numpy()[0], 1)
+    wp.launch(
+        _fixed_owners,
+        1,
+        [assembly.aq_actor_dense, assembly.ax_internal_triplets.values, assembly.global_scalar_triplets.values],
+        device=device,
+    )
+    wp.launch(_contact, 1, [assembly.contact_factors, assembly.global_scalar_triplets], device=device)
+    result = workspace.finalize_assembly(generation=generation)
+    test.assertEqual(result.status, MonolithicLinearStatus.SUCCESS)
+    test.assertEqual(result.global_triplet_count, 131)
+    owners = np.zeros((11, 11))
+    owners[:2, :2] = assembly.aq_actor_dense.numpy()
+    owners[2:, 2:] = _dense_bsr(workspace.ax_internal_bsr3)
+    g = np.r_[2.0, -1.0, np.arange(1, 10) * 0.1]
+    np.testing.assert_allclose(
+        workspace.densify_for_test(generation=generation).raw_matrix, owners + 3 * np.outer(g, g), atol=8e-7
+    )
+    # A raw producer can alter indices; the next assembly restores the frozen pattern.
+    assembly.global_scalar_triplets.rows.fill_(10)
+    next_generation = MonolithicLinearGeneration(1, 1, 2, 2)
+    fresh = workspace.begin_assembly(next_generation)
+    np.testing.assert_array_equal(fresh.global_scalar_triplets.rows.numpy()[:10], _fixed_pattern()["global_rows"])
+    test.assertEqual(fresh.global_scalar_triplets.count.numpy()[0], 10)
+    test.assertEqual(fresh.ax_internal_triplets.count.numpy()[0], 1)
+    test.assertEqual(workspace.finalize_assembly(generation=next_generation).status, MonolithicLinearStatus.SUCCESS)
+    np.testing.assert_array_equal(workspace.densify_for_test(generation=next_generation).raw_matrix, 0)
+    np.testing.assert_array_equal(_dense_bsr(workspace.ax_internal_bsr3), 0)
+    with test.assertRaises(ValueError):
+        workspace._set_fixed_triplet_pattern(**_fixed_pattern())
+
+
+def test_fixed_pattern_validation(test, device):
+    """Reject malformed patterns before changing the construction-time reservation."""
+    for field, invalid in [
+        ("global_rows", np.array([11] * 10)),
+        ("global_columns", np.array([-1] * 10)),
+        ("global_rows", np.zeros(257, dtype=int)),
+        ("global_rows", np.zeros((2, 5), dtype=int)),
+        ("global_columns", np.zeros(10, dtype=float)),
+        ("internal_rows", np.array([3])),
+        ("internal_columns", np.array([-1])),
+        ("internal_columns", np.array([2**32])),
+        ("internal_rows", np.zeros(9, dtype=int)),
+    ]:
+        with test.subTest(field=field, invalid=invalid):
+            workspace = _workspace(device)
+            pattern = _fixed_pattern()
+            pattern[field] = invalid
+            with test.assertRaises(ValueError):
+                workspace._set_fixed_triplet_pattern(**pattern)
+            workspace._set_fixed_triplet_pattern(**_fixed_pattern())
+            with test.assertRaises(ValueError):
+                workspace._set_fixed_triplet_pattern(**_fixed_pattern())
+            generation = MonolithicLinearGeneration(1, 0, 1, 1)
+            assembly = workspace.begin_assembly(generation)
+            test.assertEqual(assembly.global_scalar_triplets.count.numpy()[0], 10)
+            test.assertEqual(assembly.ax_internal_triplets.count.numpy()[0], 1)
+            test.assertEqual(workspace.finalize_assembly(generation=generation).status, MonolithicLinearStatus.SUCCESS)
+
+
+def test_fixed_raw_validation(test, device):
+    """Reject invalid raw producer writes and append overflow after a fixed prefix."""
+    for buffer_name, field, value, expected in [
+        ("global_scalar_triplets", "rows", 11, MonolithicLinearStatus.TRIPLET_INDEX_OUT_OF_RANGE),
+        ("global_scalar_triplets", "columns", -1, MonolithicLinearStatus.TRIPLET_INDEX_OUT_OF_RANGE),
+        ("ax_internal_triplets", "rows", 3, MonolithicLinearStatus.TRIPLET_INDEX_OUT_OF_RANGE),
+        ("ax_internal_triplets", "columns", -1, MonolithicLinearStatus.TRIPLET_INDEX_OUT_OF_RANGE),
+        ("global_scalar_triplets", "values", float("nan"), MonolithicLinearStatus.NONFINITE_CONTRIBUTION),
+        ("ax_internal_triplets", "values", wp.mat33(float("inf")), MonolithicLinearStatus.NONFINITE_CONTRIBUTION),
+        ("global_scalar_triplets", "count", -1, MonolithicLinearStatus.INVALID_ARGUMENT),
+        ("global_scalar_triplets", "count", 9, MonolithicLinearStatus.INVALID_ARGUMENT),
+        ("ax_internal_triplets", "count", 0, MonolithicLinearStatus.INVALID_ARGUMENT),
+        ("contact_factors", "count", -1, MonolithicLinearStatus.INVALID_ARGUMENT),
+    ]:
+        with test.subTest(buffer=buffer_name, field=field, value=value):
+            workspace = _workspace(device)
+            workspace._set_fixed_triplet_pattern(**_fixed_pattern())
+            generation = MonolithicLinearGeneration(1, 0, 1, 1)
+            assembly = workspace.begin_assembly(generation)
+            getattr(getattr(assembly, buffer_name), field).fill_(value)
+            test.assertEqual(workspace.finalize_assembly(generation=generation).status, expected)
+            with test.assertRaises(ValueError):
+                workspace.densify_for_test(generation=generation)
+    workspace = _workspace(device, global_capacity=10)
+    workspace._set_fixed_triplet_pattern(**_fixed_pattern())
+    generation = MonolithicLinearGeneration(1, 0, 1, 1)
+    assembly = workspace.begin_assembly(generation)
+    wp.launch(_append, 1, [assembly.global_scalar_triplets, 0, 1.0], device=device)
+    test.assertEqual(
+        workspace.finalize_assembly(generation=generation).status, MonolithicLinearStatus.GLOBAL_TRIPLET_OVERFLOW
+    )
+
+
 class TestMonolithicLinear(unittest.TestCase):
     """Exercise assembly independently on each available device."""
 
@@ -358,6 +479,9 @@ for device in get_test_devices():
         test_fixed_contact_and_weight,
         test_shared_fixture_layout,
         test_nonfinite_reduction,
+        test_fixed_prefix_contact_and_reset,
+        test_fixed_pattern_validation,
+        test_fixed_raw_validation,
     ]:
         add_function_test(TestMonolithicLinear, test_function.__name__, test_function, devices=[device])
 

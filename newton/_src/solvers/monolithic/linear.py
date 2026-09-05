@@ -306,6 +306,17 @@ def _create_triplets(struct_type, capacity, size, dtype, device, active_token, t
 
 
 @wp.kernel
+def _validate_triplets(
+    rows: wp.array[int], columns: wp.array[int], values: wp.array[Any], size: int, status: wp.array[int]
+):
+    index = wp.tid()
+    if rows[index] < 0 or rows[index] >= size or columns[index] < 0 or columns[index] >= size:
+        wp.atomic_max(status, 0, 3)
+    if not wp.isfinite(values[index]):
+        wp.atomic_max(status, 0, 7)
+
+
+@wp.kernel
 def _validate_bsr_finite(offsets: wp.array[int], values: wp.array[Any], status: wp.array[int]):
     row = wp.tid()
     for index in range(offsets[row], offsets[row + 1]):
@@ -321,10 +332,11 @@ def _validate_aq_finite(values: wp.array2d[float], status: wp.array[int]):
 
 
 class MonolithicLinearWorkspace:
-    """Own one current assembly; only guarded contribution helpers may mutate it.
+    """Own one current assembly with fixed producer slots and guarded appends.
 
-    Direct writes to device arrays bypass the assembly contract. Producers must
-    use the scatter helpers and reserve contact slots before filling them.
+    Fixed-slot producers write the current assembly's reserved prefix. Contact
+    producers reserve slots with guarded helpers. Raw array writes require the
+    caller to enforce the current generation; only helper writes are token-guarded.
     """
 
     def __init__(
@@ -362,6 +374,7 @@ class MonolithicLinearWorkspace:
         self._generation = None
         self._sealed = True
         self._valid = False
+        self._fixed_patterns = None
         self._global = _create_triplets(
             _MonolithicScalarTriplets,
             capacities.global_scalar_triplet_count,
@@ -393,6 +406,40 @@ class MonolithicLinearWorkspace:
         factors.active_token = self._active_token
         factors.token = 0
         self._factors = factors
+
+    def _set_fixed_triplet_pattern(
+        self,
+        *,
+        global_rows: np.ndarray,
+        global_columns: np.ndarray,
+        internal_rows: np.ndarray,
+        internal_columns: np.ndarray,
+    ) -> None:
+        """Reserve immutable owner patterns once, before the first assembly."""
+        if self._generation is not None or self._fixed_patterns is not None:
+            raise ValueError("Fixed triplet patterns must be configured once before assembly")
+        patterns = []
+        for row_indices, column_indices, buffer in [
+            (global_rows, global_columns, self._global),
+            (internal_rows, internal_columns, self._internal),
+        ]:
+            rows, columns = np.asarray(row_indices), np.asarray(column_indices)
+            if (
+                rows.ndim != 1
+                or columns.shape != rows.shape
+                or not np.issubdtype(rows.dtype, np.integer)
+                or not np.issubdtype(columns.dtype, np.integer)
+                or rows.size > buffer.capacity
+                or np.any(rows < 0)
+                or np.any(rows >= buffer.row_count)
+                or np.any(columns < 0)
+                or np.any(columns >= buffer.column_count)
+            ):
+                raise ValueError("Fixed triplet pattern must contain in-range integer pairs within capacity")
+            patterns.append((rows.astype(np.int32, copy=True), columns.astype(np.int32, copy=True)))
+        self._fixed_patterns = tuple(
+            tuple(wp.array(indices, dtype=int, device=self.device) for indices in pattern) for pattern in patterns
+        )
 
     def begin_assembly(self, generation: MonolithicLinearGeneration) -> MonolithicLinearAssembly:
         if self._generation is not None and (generation.step_index, generation.assembly_sequence) <= (
@@ -463,6 +510,15 @@ class MonolithicLinearWorkspace:
             current.count.zero_()
             current.status.zero_()
             setattr(self, name, current)
+        for index, buffer in enumerate((self._global, self._internal)):
+            buffer.values.zero_()
+            if self._fixed_patterns is not None:
+                rows, columns = self._fixed_patterns[index]
+                count = rows.size
+                if count:
+                    wp.copy(buffer.rows, rows, count=count)
+                    wp.copy(buffer.columns, columns, count=count)
+                buffer.count.fill_(count)
         self._factors.gq.zero_()
         self._factors.gx_columns.fill_(-1)
         self._factors.gx_values.zero_()
@@ -476,18 +532,35 @@ class MonolithicLinearWorkspace:
         self._active_token.zero_()
         counts = [int(buffer.count.numpy()[0]) for buffer in (self._global, self._internal, self._factors)]
         status = MonolithicLinearStatus.SUCCESS
-        for buffer, overflow in [
-            (self._global, MonolithicLinearStatus.GLOBAL_TRIPLET_OVERFLOW),
-            (self._internal, MonolithicLinearStatus.INTERNAL_TRIPLET_OVERFLOW),
-            (self._factors, MonolithicLinearStatus.CONTACT_FACTOR_OVERFLOW),
-        ]:
+        for index, (buffer, overflow) in enumerate(
+            [
+                (self._global, MonolithicLinearStatus.GLOBAL_TRIPLET_OVERFLOW),
+                (self._internal, MonolithicLinearStatus.INTERNAL_TRIPLET_OVERFLOW),
+                (self._factors, MonolithicLinearStatus.CONTACT_FACTOR_OVERFLOW),
+            ]
+        ):
             code = int(buffer.status.numpy()[0])
             if code:
                 status = MonolithicLinearStatus(code)
                 break
-            if int(buffer.count.numpy()[0]) > buffer.capacity:
+            minimum = self._fixed_patterns[index][0].size if self._fixed_patterns is not None and index < 2 else 0
+            if counts[index] < minimum:
+                status = MonolithicLinearStatus.INVALID_ARGUMENT
+                break
+            if counts[index] > buffer.capacity:
                 status = overflow
                 break
+        if status == MonolithicLinearStatus.SUCCESS:
+            # Fixed-slot kernels write raw arrays, bypassing append-time validation.
+            for buffer, count in zip((self._global, self._internal), counts[:2], strict=True):
+                if count:
+                    wp.launch(
+                        _validate_triplets,
+                        count,
+                        [buffer.rows, buffer.columns, buffer.values, buffer.row_count, self._global.status],
+                        device=self.device,
+                    )
+            status = MonolithicLinearStatus(int(self._global.status.numpy()[0]))
         if status == MonolithicLinearStatus.SUCCESS:
             try:
                 for matrix, triplets in [
