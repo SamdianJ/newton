@@ -236,7 +236,7 @@ class TestCalibrationInputs(unittest.TestCase):
         }
         self.assertEqual(set(candidate["portable_solver_internal_config"]), fields)
         self.assertNotIn("force_detection_floor_n", candidate["portable_solver_internal_config"])
-        self.assertEqual(candidate["portable_acceptance"]["force_detection_floor_n"], 4e-6)
+        self.assertEqual(candidate["portable_acceptance"]["force_detection_floor_n"], 1.2695789400826758e-05)
 
 
 def test_measured_active_and_inactive(test, device):

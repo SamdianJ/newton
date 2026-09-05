@@ -5,9 +5,9 @@
   "v01_status": "DRAFT",
   "runtime_use": "PROHIBITED_UNTIL_CALIBRATION_STATUS_FROZEN",
   "source_evidence": {
-    "artifact": "agents/tet/artifacts/pr5/components_matrix_draft.json",
-    "sha256": "25213dedbe5c34cc9af2cbda4e26303606bbdf55ce4085e13ab5500031ad11e5",
-    "limitation": "one-tet/single-seed component evidence; not freeze-profile evidence"
+    "artifact": "agents/tet/artifacts/c23/components_freeze_raw_r100.json",
+    "sha256": "6901db5c7bec36e6060757b822357f5a66326c0e30077767a1aee218a3049c15",
+    "limitation": "component evidence complete; normal-loading and C4 trajectory roles missing"
   },
   "coordinate_policy": {
     "ordered_sweep_magnitudes_m": [
@@ -29,7 +29,7 @@
       10.0
     ],
     "freeze_rule": "CPU/CUDA common contiguous PASS prefix; never recover after first failure",
-    "max_supported_abs_coordinate_m": null
+    "max_supported_abs_coordinate_m": 2.0
   },
   "required_freeze_axes": {
     "device_class": [
@@ -70,19 +70,19 @@
     "cpu": {
       "solver_internal_config": {
         "epsilon_d": 1e-06,
-        "residual_floor_global": 0.00062,
-        "residual_floor_q": 0.00013,
-        "residual_floor_x": 0.0006,
+        "residual_floor_global": 0.0001158172536800607,
+        "residual_floor_q": 2.1090331703277343e-05,
+        "residual_floor_x": 0.00011388078924312595,
         "merit_noise": 0.0,
-        "merit_absolute_global": 1.5e-06,
-        "merit_absolute_q": 7.2e-07,
-        "merit_absolute_x": 1.6e-06,
+        "merit_absolute_global": 6.763034882944481e-06,
+        "merit_absolute_q": 1.2404662397766817e-08,
+        "merit_absolute_x": 7.3049125684417234e-06,
         "merit_relative_global": 0.0001,
         "merit_relative_q": 0.0001,
         "merit_relative_x": 0.0001,
-        "step_tolerance_global": 2.6e-07,
-        "step_tolerance_q": 1.8e-07,
-        "step_tolerance_x": 2.8e-07,
+        "step_tolerance_global": 1.6873759893848113e-06,
+        "step_tolerance_q": 9.100767972176976e-10,
+        "step_tolerance_x": 1.8225743746537296e-06,
         "det_f_guard": 0.2,
         "regularization_values": [
           0.0,
@@ -95,25 +95,25 @@
         ]
       },
       "acceptance": {
-        "force_detection_floor_n": 4e-06
+        "force_detection_floor_n": 1.2695789400826758e-05
       }
     },
     "cuda": {
       "solver_internal_config": {
         "epsilon_d": 1e-06,
-        "residual_floor_global": 0.00068,
-        "residual_floor_q": 0.00015,
-        "residual_floor_x": 0.00066,
-        "merit_noise": 0.0,
-        "merit_absolute_global": 1.5e-06,
-        "merit_absolute_q": 7.2e-07,
-        "merit_absolute_x": 1.6e-06,
+        "residual_floor_global": 0.00017210128930635914,
+        "residual_floor_q": 1.9461918743246542e-05,
+        "residual_floor_x": 0.00017099733184977595,
+        "merit_noise": 7.92642972091695e-09,
+        "merit_absolute_global": 6.759642121792641e-06,
+        "merit_absolute_q": 1.2404662397766817e-08,
+        "merit_absolute_x": 7.301247967562272e-06,
         "merit_relative_global": 0.0001,
         "merit_relative_q": 0.0001,
         "merit_relative_x": 0.0001,
-        "step_tolerance_global": 2.6e-07,
-        "step_tolerance_q": 1.8e-07,
-        "step_tolerance_x": 2.8e-07,
+        "step_tolerance_global": 1.6873759893848113e-06,
+        "step_tolerance_q": 9.100770221088748e-10,
+        "step_tolerance_x": 1.8225743746537296e-06,
         "det_f_guard": 0.2,
         "regularization_values": [
           0.0,
@@ -126,25 +126,25 @@
         ]
       },
       "acceptance": {
-        "force_detection_floor_n": 2e-06
+        "force_detection_floor_n": 1.2695789400826758e-05
       }
     }
   },
   "portable_solver_internal_config": {
     "epsilon_d": 1e-06,
-    "residual_floor_global": 0.00068,
-    "residual_floor_q": 0.00015,
-    "residual_floor_x": 0.00066,
-    "merit_noise": 0.0,
-    "merit_absolute_global": 1.5e-06,
-    "merit_absolute_q": 7.2e-07,
-    "merit_absolute_x": 1.6e-06,
+    "residual_floor_global": 0.00017210128930635914,
+    "residual_floor_q": 2.1090331703277343e-05,
+    "residual_floor_x": 0.00017099733184977595,
+    "merit_noise": 7.92642972091695e-09,
+    "merit_absolute_global": 6.763034882944481e-06,
+    "merit_absolute_q": 1.2404662397766817e-08,
+    "merit_absolute_x": 7.3049125684417234e-06,
     "merit_relative_global": 0.0001,
     "merit_relative_q": 0.0001,
     "merit_relative_x": 0.0001,
-    "step_tolerance_global": 2.6e-07,
-    "step_tolerance_q": 1.8e-07,
-    "step_tolerance_x": 2.8e-07,
+    "step_tolerance_global": 1.6873759893848113e-06,
+    "step_tolerance_q": 9.100770221088748e-10,
+    "step_tolerance_x": 1.8225743746537296e-06,
     "det_f_guard": 0.2,
     "regularization_values": [
       0.0,
@@ -157,12 +157,16 @@
     ]
   },
   "portable_acceptance": {
-    "force_detection_floor_n": 4e-06
+    "force_detection_floor_n": 1.2695789400826758e-05
   },
   "open_gates": [
-    "complete freeze-profile raw matrix with at least 100 repeats from one clean source set",
-    "all supported records pass finite-difference, reduction and linear gates",
-    "trajectory evidence passes on CPU and CUDA",
-    "10 m outside controls are present and excluded from support"
+    "normal_loading_1000 trajectory evidence passes on CPU and CUDA",
+    "c4_supported_motion trajectory evidence and support hash pass on CPU and CUDA"
+  ],
+  "completed_component_gates": [
+    "complete 52-record freeze-profile raw matrix with 100 repeats from one clean source set",
+    "all core records pass finite-difference, reduction and linear gates",
+    "CPU/CUDA common coordinate prefix is 2 m; first failure is CPU mixed contact FD at 5 m",
+    "10 m controls are measured but excluded from support policy"
   ]
 }
