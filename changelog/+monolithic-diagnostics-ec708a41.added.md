@@ -1,0 +1,1 @@
+Expose current-scale reference merits, separate nonlinear convergence ratios, raw residual norms, accepted scaled steps and effective residual floors in experimental `SolverMonolithic.Stats` to support reproducible calibration and trajectory validation.
