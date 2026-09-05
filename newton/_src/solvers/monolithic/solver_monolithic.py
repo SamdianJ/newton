@@ -109,6 +109,14 @@ def _copy_particle_residual(values: wp.array[wp.vec3], offset: int, out: wp.arra
 
 
 @wp.kernel
+def _raw_residual_sums(values: wp.array[float], nq: int, out: wp.array[wp.float64]):
+    i = wp.tid()
+    value = wp.float64(values[i])
+    block = int(i >= nq)
+    wp.atomic_add(out, block, value * value)
+
+
+@wp.kernel
 def _build_dynamic_diagonal(
     mass: wp.array3d[float],
     particle_mass: wp.array[float],
@@ -551,12 +559,48 @@ class SolverMonolithic(SolverBase):
         """Normalized particle scaled residual [dimensionless]; NaN when unmeasured."""
         merit_initial: float = math.nan
         """First current merit using its initial scale; not a convergence denominator."""
+        merit_q_initial: float = math.nan
+        """Joint merit at the first current evaluation, using its initial scale."""
+        merit_x_initial: float = math.nan
+        """Particle merit at the first current evaluation, using its initial scale."""
         merit_final: float = math.nan
         """Last evaluated current merit; on rollback this can describe a discarded state."""
         merit_q_final: float = math.nan
         """Joint block of the last evaluated current merit."""
         merit_x_final: float = math.nan
         """Particle block of the last evaluated current merit."""
+        merit_reference: float = math.nan
+        """Initial residual RMS re-evaluated with the last current scale."""
+        merit_q_reference: float = math.nan
+        """Joint reference RMS using the last current scale."""
+        merit_x_reference: float = math.nan
+        """Particle reference RMS using the last current scale."""
+        convergence_ratio: float = math.nan
+        """Current merit / (absolute gate + relative gate * reference); must be <= 1."""
+        convergence_ratio_q: float = math.nan
+        """Joint convergence ratio; must be <= 1 independently of the global gate."""
+        convergence_ratio_x: float = math.nan
+        """Particle convergence ratio; must be <= 1 independently of the global gate."""
+        scale_generation: int = -1
+        """Current assembly sequence for the reported merit/reference/gates."""
+        raw_residual_q_norm: float = math.nan
+        """Unscaled joint L2 norm [mixed N, N*m]; diagnostic only."""
+        raw_residual_x_norm: float = math.nan
+        """Unscaled particle L2 norm [N]; diagnostic only."""
+        scaled_step: float = math.nan
+        """RMS of the last accepted alpha*y in its solve scale; NaN before acceptance."""
+        scaled_step_q: float = math.nan
+        """Joint RMS of the last accepted alpha*y in its solve scale."""
+        scaled_step_x: float = math.nan
+        """Particle RMS of the last accepted alpha*y in its solve scale."""
+        merit_noise: float = math.nan
+        """Actual absolute allowance in the trial merit decrease condition."""
+        residual_floor_global: float = math.nan
+        """Actual global scaled linear residual denominator floor."""
+        residual_floor_q: float = math.nan
+        """Actual joint scaled linear residual denominator floor."""
+        residual_floor_x: float = math.nan
+        """Actual particle scaled linear residual denominator floor."""
         accepted_alpha: float = math.nan
         lambda_value: float = math.nan
         min_p_ap: float = math.nan
@@ -682,6 +726,7 @@ class SolverMonolithic(SolverBase):
         self._metric_vector = wp.zeros(size, dtype=float, device=model.device)
         self._metric_slices = (self._metric_vector, self._metric_vector[:nq], self._metric_vector[nq:])
         self._norm_values = wp.zeros(3, dtype=float, device=model.device)
+        self._raw_norm_sums = wp.zeros(2, dtype=wp.float64, device=model.device)
         self._norm_outputs = tuple(self._norm_values[i : i + 1] for i in range(3))
         self._rhs_hat = wp.zeros(size, dtype=float, device=model.device)
         self._y = wp.zeros(size, dtype=float, device=model.device)
@@ -736,6 +781,10 @@ class SolverMonolithic(SolverBase):
             "residual_replacements": 0,
             "preconditioner_kind": "actor_block",
             "triplet_capacity": self._linear.capacities.global_scalar_triplet_count,
+            "merit_noise": self._config.merit_noise,
+            "residual_floor_global": self._config.residual_floor_global,
+            "residual_floor_q": self._config.residual_floor_q,
+            "residual_floor_x": self._config.residual_floor_x,
         }
         reason = None
         try:
@@ -1014,11 +1063,37 @@ class SolverMonolithic(SolverBase):
             current = self._evaluate_current(transaction.accepted, dt)
             if iteration == 0:
                 wp.copy(self._residual_ref, transaction.accepted.residual)
-                self._metrics["merit_initial"] = current.merit
+                self._metrics.update(
+                    merit_initial=current.merit, merit_q_initial=current.merit_q, merit_x_initial=current.merit_x
+                )
             merit = (current.merit, current.merit_q, current.merit_x)
             reference = self._rms(self._residual_ref)
+            self._raw_norm_sums.zero_()
+            wp.launch(
+                _raw_residual_sums,
+                self._layout.scalar_dof_count,
+                [transaction.accepted.residual, self._layout.q_dof_count, self._raw_norm_sums],
+                device=self.model.device,
+            )
+            raw_norms = np.sqrt(self._raw_norm_sums.numpy())
+            ratios = tuple(
+                value / (getattr(config, f"merit_absolute_{block}") + getattr(config, f"merit_relative_{block}") * ref)
+                for block, value, ref in zip(("global", "q", "x"), merit, reference, strict=True)
+            )
             self._metrics.update(
-                merit_final=merit[0], merit_q_final=merit[1], merit_x_final=merit[2], min_det_f=current.min_det_f
+                merit_final=merit[0],
+                merit_q_final=merit[1],
+                merit_x_final=merit[2],
+                min_det_f=current.min_det_f,
+                merit_reference=reference[0],
+                merit_q_reference=reference[1],
+                merit_x_reference=reference[2],
+                convergence_ratio=ratios[0],
+                convergence_ratio_q=ratios[1],
+                convergence_ratio_x=ratios[2],
+                scale_generation=self._generation.assembly_sequence,
+                raw_residual_q_norm=float(raw_norms[0]),
+                raw_residual_x_norm=float(raw_norms[1]),
             )
             if self._converged(merit, reference):
                 return self.Status.SUCCESS
@@ -1090,6 +1165,11 @@ class SolverMonolithic(SolverBase):
                     if trial.merit <= (1.0 - 1.0e-4 * alpha) * merit[0] + config.merit_noise:
                         transaction.accept_trial()
                         self._metrics["accepted_alpha"] = alpha
+                        self._metrics.update(
+                            scaled_step=alpha * step_rms[0],
+                            scaled_step_q=alpha * step_rms[1],
+                            scaled_step_x=alpha * step_rms[2],
+                        )
                         small_step = all(
                             alpha * value <= getattr(config, f"step_tolerance_{block}")
                             for block, value in zip(("global", "q", "x"), step_rms, strict=True)
