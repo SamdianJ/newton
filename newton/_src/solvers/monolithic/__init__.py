@@ -1,13 +1,14 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 The Newton Developers
 # SPDX-License-Identifier: Apache-2.0
 
-"""Experimental monolithic solver components and fixed P1Q3 collision.
+"""Experimental implicit articulated rigid/tet solver with P1Q3 contact.
 
 .. experimental::
 
-The collision pipeline can detect tet-face contacts independently. The solver
-validates its model and allocates owned buffers at construction; physical
-stepping and final contact force publication remain unimplemented.
+The solver advances supported single-articulation/tet models with normal-only
+contact, scaled PCG and transactional state/force publication. Numerical defaults
+have tiny-fixture validation; broader asset and trajectory calibration is pending.
+The collision pipeline can also detect tet-face contacts independently.
 """
 
 from .collision import MonolithicCollisionPipeline
