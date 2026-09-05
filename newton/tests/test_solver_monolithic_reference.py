@@ -14,7 +14,7 @@ import numpy as np
 
 from newton.tests.monolithic_test_utils import build_tiny_cpu_fixture
 from newton.tests.unittest_utils import add_function_test, get_test_devices
-from scripts.monolithic_reference.adapter import validate_adapter_scope, world_nodes
+from scripts.monolithic_reference.adapter import require_runtime_source, validate_adapter_scope, world_nodes
 from scripts.monolithic_reference.manifest import (
     ComparisonManifest,
     MappingEntry,
@@ -34,6 +34,23 @@ class TestMonolithicReference(unittest.TestCase):
         self.manifest = load_manifest(
             Path(__file__).parents[2] / "scripts/monolithic_reference/fixtures/tiny_draft_v1.json"
         )
+
+    def test_runtime_import_provenance(self):
+        """A clean source tree cannot vouch for an interpreter importing another checkout."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "source"
+            root.mkdir()
+            inside = root / "module.py"
+            inside.touch()
+            outside = Path(directory) / "other.py"
+            outside.touch()
+            require_runtime_source(inside, root)
+            with self.assertRaises(ValueError):
+                require_runtime_source(outside, root)
+            alias = root / "alias.py"
+            alias.symlink_to(outside)
+            with self.assertRaises(ValueError):
+                require_runtime_source(alias, root)
 
     def test_native_local_to_world_rotated_translated(self):
         """Reject the identity-only shortcut using an independently known 90-degree rotation."""

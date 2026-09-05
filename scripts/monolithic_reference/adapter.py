@@ -20,6 +20,12 @@ else:
     from manifest import _validate_body_and_mesh_inputs, compute_manifest_sha256, load_manifest, validate_step_record
 
 
+def require_runtime_source(module_file, worktree):
+    """Reject an interpreter whose editable import resolves outside the guarded source."""
+    if not Path(module_file).resolve().is_relative_to(Path(worktree).resolve()):
+        raise ValueError("Runtime import is outside the guarded source worktree")
+
+
 def world_nodes(local, quaternion, translation):
     """Map native local nodes to world coordinates using an xyzw quaternion."""
 
@@ -100,6 +106,7 @@ def _newton(manifest, args, output):
 
     import newton  # noqa: PLC0415 - Resolve the selected guarded worktree first.
 
+    require_runtime_source(newton.__file__, args.worktree)
     physics = manifest.data["physics"]
     builder = newton.ModelBuilder(gravity=physics["gravity_m_s2"], up_axis=newton.Axis.Z)
     for link in physics["links"]:
@@ -207,6 +214,7 @@ def _newton(manifest, args, output):
 def _superdex(manifest, args, output):
     import superdex.physics as p  # noqa: PLC0415 - SuperDex remains an isolated offline dependency.
 
+    require_runtime_source(p.__file__, args.worktree)
     if args.device != "cpu" or p.uses_double_precision():
         raise ValueError("Measured reference adapter requires CPU float32 build")
     physics = manifest.data["physics"]
