@@ -285,6 +285,67 @@ def test_shared_fixture_layout(test, device):
     )
 
 
+@wp.kernel
+def _overflow_reduction(
+    aq: wp.array2d[float],
+    ax: _MonolithicMat33Triplets,
+    triplets: _MonolithicScalarTriplets,
+    q_count: int,
+    x_count: int,
+    owner_scatter: bool,
+):
+    for _ in range(2):
+        if owner_scatter:
+            if q_count > 0:
+                _accumulate_monolithic_actor_q_entry(aq, triplets, 0, 0, 3.0e38)
+            if x_count > 0:
+                _accumulate_monolithic_internal_x_block(ax, triplets, 0, 0, wp.diag(wp.vec3(3.0e38)), q_count)
+        else:
+            _append_monolithic_scalar_triplet(triplets, 0, 0, 3.0e38)
+
+
+def test_nonfinite_reduction(test, device):
+    """Reject overflow from finite contributions in global and owner reductions."""
+    for q_count, x_count, owner_scatter in [(1, 0, False), (1, 0, True), (0, 1, True), (1, 1, True)]:
+        with test.subTest(q_count=q_count, x_count=x_count, owner_scatter=owner_scatter):
+            workspace = MonolithicLinearWorkspace(
+                MonolithicLinearLayout(q_count, x_count),
+                MonolithicLinearCapacities(20, 2, 0, 1, 1),
+                wp.array(np.arange(x_count), dtype=int, device=device),
+                device=device,
+            )
+            generation = MonolithicLinearGeneration(1, 0, 1, 1)
+            assembly = workspace.begin_assembly(generation)
+            wp.launch(
+                _overflow_reduction,
+                1,
+                [
+                    assembly.aq_actor_dense,
+                    assembly.ax_internal_triplets,
+                    assembly.global_scalar_triplets,
+                    q_count,
+                    x_count,
+                    owner_scatter,
+                ],
+                device=device,
+            )
+            result = workspace.finalize_assembly(generation=generation)
+            test.assertFalse(np.isfinite(workspace.k_global_scalar_bsr.values.numpy()[0]))
+            if owner_scatter and q_count:
+                test.assertFalse(np.isfinite(assembly.aq_actor_dense.numpy()[0, 0]))
+            if owner_scatter and x_count:
+                test.assertFalse(np.isfinite(workspace.ax_internal_bsr3.values.numpy()[0, 0, 0]))
+            test.assertEqual(result.status, MonolithicLinearStatus.NONFINITE_CONTRIBUTION)
+            with test.assertRaises(ValueError):
+                workspace.densify_for_test(generation=generation)
+            next_generation = MonolithicLinearGeneration(1, 1, 2, 2)
+            fresh = workspace.begin_assembly(next_generation)
+            wp.launch(_append, 1, [fresh.global_scalar_triplets, 0, 1.0], device=device)
+            test.assertEqual(
+                workspace.finalize_assembly(generation=next_generation).status, MonolithicLinearStatus.SUCCESS
+            )
+
+
 class TestMonolithicLinear(unittest.TestCase):
     """Exercise assembly independently on each available device."""
 
@@ -296,6 +357,7 @@ for device in get_test_devices():
         test_capacity_and_invalid_contributions,
         test_fixed_contact_and_weight,
         test_shared_fixture_layout,
+        test_nonfinite_reduction,
     ]:
         add_function_test(TestMonolithicLinear, test_function.__name__, test_function, devices=[device])
 

@@ -9,6 +9,7 @@ numerical solving belong to the subsequent solver phase.
 
 import enum
 from dataclasses import dataclass
+from typing import Any
 
 import numpy as np
 import warp as wp
@@ -304,6 +305,21 @@ def _create_triplets(struct_type, capacity, size, dtype, device, active_token, t
     return triplets
 
 
+@wp.kernel
+def _validate_bsr_finite(offsets: wp.array[int], values: wp.array[Any], status: wp.array[int]):
+    row = wp.tid()
+    for index in range(offsets[row], offsets[row + 1]):
+        if not wp.isfinite(values[index]):
+            wp.atomic_max(status, 0, 7)
+
+
+@wp.kernel
+def _validate_aq_finite(values: wp.array2d[float], status: wp.array[int]):
+    row, column = wp.tid()
+    if not wp.isfinite(values[row, column]):
+        wp.atomic_max(status, 0, 7)
+
+
 class MonolithicLinearWorkspace:
     """Own one current assembly; only guarded contribution helpers may mutate it.
 
@@ -483,6 +499,22 @@ class MonolithicLinearWorkspace:
                     )
             except RuntimeError:
                 status = MonolithicLinearStatus.BSR_BUILD_FAILURE
+        if status == MonolithicLinearStatus.SUCCESS:
+            # Finite local terms can overflow during owner or duplicate reductions.
+            for matrix in (self.k_global_scalar_bsr, self.ax_internal_bsr3):
+                wp.launch(
+                    _validate_bsr_finite,
+                    matrix.nrow,
+                    [matrix.offsets, matrix.values, self._global.status],
+                    device=self.device,
+                )
+            wp.launch(
+                _validate_aq_finite,
+                self.aq_actor_dense.shape,
+                [self.aq_actor_dense, self._global.status],
+                device=self.device,
+            )
+            status = MonolithicLinearStatus(int(self._global.status.numpy()[0]))
         self._valid = status == MonolithicLinearStatus.SUCCESS
         return MonolithicLinearBuildResult(
             status,
