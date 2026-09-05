@@ -26,8 +26,15 @@ _BARYCENTRIC = np.asarray(
     dtype=np.float64,
 )
 _WEIGHTS = np.asarray(
-    (0.225, 0.132394152788506, 0.132394152788506, 0.132394152788506, 0.125939180544827,
-     0.125939180544827, 0.125939180544827),
+    (
+        0.225,
+        0.132394152788506,
+        0.132394152788506,
+        0.132394152788506,
+        0.125939180544827,
+        0.125939180544827,
+        0.125939180544827,
+    ),
     dtype=np.float64,
 )
 
@@ -156,9 +163,7 @@ def _integrate_triangle(
     sample_phi, _ = _sdf(_BARYCENTRIC @ triangle, shape, center, scale)
     maximum_penetration = float(np.maximum(particle_radius - sample_phi, 0.0).max())
     if depth >= max_depth or (
-        depth >= 2
-        and not uncertain_zero
-        and error[0] <= force_absolute_tolerance + relative_tolerance * abs(fine[0])
+        depth >= 2 and not uncertain_zero and error[0] <= force_absolute_tolerance + relative_tolerance * abs(fine[0])
     ):
         return fine, error, 4, maximum_penetration
 
