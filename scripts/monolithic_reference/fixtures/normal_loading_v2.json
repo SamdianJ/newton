@@ -2,11 +2,17 @@
   "schema_version": "normal_loading/v2",
   "fixture_id": "monolithic_single_finger_normal_loading_v2",
   "status": "DRAFT",
-  "calibration_status": "UNFROZEN",
-  "support_status": "UNFROZEN",
+  "calibration_status": "FROZEN",
+  "support_status": "FROZEN",
   "reference_status": "BLOCKED",
-  "calibration_provenance": null,
-  "support_provenance": null,
+  "calibration_provenance": {
+    "version": "monolithic_calibration_frozen/v1",
+    "sha256": "1c74a24f8d69fd107ae86031a26a0d06ec58f79fadea41f104b9624f61908937"
+  },
+  "support_provenance": {
+    "version": "p1q3-resolved-local-v1/schema-v3",
+    "sha256": "26e1b45bfb870eb8bed2a9257ce1295ea31c26e874982da02e0331b35ec51cee"
+  },
   "reference_provenance": {
     "reason": "The active-contact SuperDex reference mapping and response envelope are not closed."
   },
@@ -62,7 +68,7 @@
     "penetration_acceptance_limit_m": 0.001,
     "delta_soft_min_m": 0.005,
     "free_space_completion_minimum": 0.95,
-    "force_floor_n": 0.000001,
+    "force_floor_n": 0.000012695789400826758,
     "onset_consecutive_substeps": 3,
     "force_balance_relative_tolerance": 0.0001,
     "linear_tolerance": 0.0001,

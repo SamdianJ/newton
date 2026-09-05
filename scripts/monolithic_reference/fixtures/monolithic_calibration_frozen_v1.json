@@ -1,0 +1,43 @@
+{
+  "schema_version": "monolithic_calibration_frozen/v1",
+  "calibration_status": "FROZEN",
+  "v01_status": "DRAFT",
+  "runtime_authority": true,
+  "evidence": {
+    "component_raw_sha256": "6901db5c7bec36e6060757b822357f5a66326c0e30077767a1aee218a3049c15",
+    "trajectory_sha256": "07d18701fb48063486cf00f6136333dbdac27941ad561109e82b0a7f2995ec88",
+    "c4_support_sha256": "26e1b45bfb870eb8bed2a9257ce1295ea31c26e874982da02e0331b35ec51cee",
+    "calibration_freeze_sha256": "9b045167461cbf3d270ca2e7ed692703809f506fbfc843c1bd7adca97e311815"
+  },
+  "scope": {
+    "component_cases": 52,
+    "component_repeats": 100,
+    "devices": ["cpu", "cuda"],
+    "maximum_passing_exact_fixture_translation_offset_m": 2.0,
+    "maximum_observed_absolute_world_coordinate_m": 2.042508363723755,
+    "first_failing_exact_fixture_translation_offset_m": 5.0,
+    "coordinate_note": "Exact stored one-tet calibration fixture translations only; not a general world-coordinate range.",
+    "c4_support": "Exact fixture IDs in p1q3-resolved-local-v1; no interval or phase interpolation."
+  },
+  "solver_internal_config": {
+    "epsilon_d": 1e-06,
+    "residual_floor_global": 0.00017210128930635914,
+    "residual_floor_q": 2.1090331703277343e-05,
+    "residual_floor_x": 0.00017099733184977595,
+    "merit_noise": 7.92642972091695e-09,
+    "merit_absolute_global": 6.763034882944481e-06,
+    "merit_absolute_q": 2.5e-07,
+    "merit_absolute_x": 7.3049125684417234e-06,
+    "merit_relative_global": 0.0001,
+    "merit_relative_q": 0.0001,
+    "merit_relative_x": 0.0001,
+    "step_tolerance_global": 1.6873759893848113e-06,
+    "step_tolerance_q": 9.100770221088748e-10,
+    "step_tolerance_x": 1.8225743746537296e-06,
+    "det_f_guard": 0.2,
+    "regularization_values": [0.0, 0.0001, 0.001, 0.01, 0.1, 1.0, 10.0]
+  },
+  "acceptance": {
+    "force_detection_floor_n": 1.2695789400826758e-05
+  }
+}

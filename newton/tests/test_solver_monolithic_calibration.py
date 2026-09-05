@@ -14,6 +14,7 @@ from unittest.mock import patch
 
 import numpy as np
 
+from newton._src.solvers.monolithic.solver_monolithic import _SolverMonolithicInternalConfig
 from newton.tests.unittest_utils import add_function_test, get_test_devices
 from scripts.monolithic_reference.calibrate_components import (
     CalibrationCase,
@@ -430,6 +431,23 @@ class TestCalibrationInputs(unittest.TestCase):
         self.assertEqual(set(candidate["portable_solver_internal_config"]), fields)
         self.assertNotIn("force_detection_floor_n", candidate["portable_solver_internal_config"])
         self.assertEqual(candidate["portable_acceptance"]["force_detection_floor_n"], 1.2695789400826758e-05)
+
+    def test_frozen_calibration_is_the_runtime_authority(self):
+        """Keep production defaults identical to the reviewed compact freeze manifest."""
+        path = (
+            Path(__file__).parents[2]
+            / "scripts/monolithic_reference/fixtures/monolithic_calibration_frozen_v1.json"
+        )
+        frozen = json.loads(path.read_text())
+        self.assertEqual(frozen["schema_version"], "monolithic_calibration_frozen/v1")
+        self.assertEqual(frozen["calibration_status"], "FROZEN")
+        self.assertEqual(frozen["v01_status"], "DRAFT")
+        self.assertTrue(frozen["runtime_authority"])
+        runtime = json.loads(json.dumps(asdict(_SolverMonolithicInternalConfig())))
+        self.assertEqual(runtime, frozen["solver_internal_config"])
+        self.assertEqual(frozen["acceptance"]["force_detection_floor_n"], 1.2695789400826758e-05)
+        for digest in frozen["evidence"].values():
+            self.assertEqual(len(digest), 64)
 
 
 def test_measured_active_and_inactive(test, device):
