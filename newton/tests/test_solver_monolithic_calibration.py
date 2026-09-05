@@ -242,6 +242,7 @@ def test_measured_active_and_inactive(test, device):
     for active in (False, True):
         case = CalibrationCase("test", 1e4, 0.3, 0.001, 1.0, 0.0, active, 87)
         result = calibrate_case(device, case=case, repeats=3)
+        json.dumps(result, allow_nan=False)
         test.assertEqual(result["status"], "DRAFT")
         test.assertEqual(result["parameters"]["seed"], 87)
         test.assertEqual(len(result["fixture_sha256"]), 64)
@@ -277,6 +278,7 @@ def test_freeze_profile_smoke(test, device):
         and case.active_contact
     )
     result = calibrate_case(device, case=case, repeats=2, profile="freeze")
+    json.dumps(result, allow_nan=False)
     test.assertEqual(result["status"], "RAW_MEASUREMENT")
     test.assertEqual(result["observed"], {"tet_count": 8, "active_sample_count": 12})
     test.assertEqual(result["gates"]["contact_cardinality"], "PASS")

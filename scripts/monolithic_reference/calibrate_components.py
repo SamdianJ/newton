@@ -75,6 +75,12 @@ def _block_rms(values):
     return [float(np.linalg.norm(block) / math.sqrt(len(block))) for block in (values, values[:2], values[2:])]
 
 
+def _finite_diagnostic(value):
+    """Encode an unbounded/nonfinite diagnostic as JSON null, never Infinity."""
+    value = float(value)
+    return value if math.isfinite(value) else None
+
+
 class _Probe:
     def __init__(self, device, dt):
         self.fixture = build_tiny_cpu_fixture(device=device)
@@ -182,7 +188,7 @@ def _fd_sweep(device):
         "deformation": f.tolist(),
         "determinant": float(np.linalg.det(f)),
         "variable_scale": 1.0,
-        "projected_condition": float(np.linalg.cond(projected.astype(np.float64))),
+        "projected_condition": _finite_diagnostic(np.linalg.cond(projected.astype(np.float64))),
         "records": records,
     }
 
@@ -246,7 +252,9 @@ def calibrate(device, *, dt, repeats):
         "epsilon_d": 1e-6,
         "dynamic_diagonal": dynamic_diagonal.tolist(),
         "diagonal_floor_count": int(np.count_nonzero(diagonal != np.diag(matrix))),
-        "scaled_condition": float(np.linalg.cond(scale[:, None] * matrix.astype(np.float64) * scale[None, :])),
+        "scaled_condition": _finite_diagnostic(
+            np.linalg.cond(scale[:, None] * matrix.astype(np.float64) * scale[None, :])
+        ),
         "scaled_norm_samples": samples.tolist(),
         "norm_peak_to_peak": spread.tolist(),
         "norm_float64_reference_absolute_error_max": errors.max(axis=0).tolist(),
@@ -1026,7 +1034,7 @@ def _material_sweep(device, case):
         deformation=f.tolist(),
         direction=direction.tolist(),
         seed=case.seed,
-        condition_indicator=float(np.linalg.cond(projected.astype(np.float64))),
+        condition_indicator=_finite_diagnostic(np.linalg.cond(projected.astype(np.float64))),
         variable_scale=1.0,
         first_piola_stress=stress.tolist(),
         physical_world_force_or_wrench="N/A: constitutive stress probe",
@@ -1136,7 +1144,7 @@ def _tet_nodal_sweep(probe):
         variable_scale_metres=0.01 * case.coordinate_scale,
         seed=case.seed,
         direction=direction.tolist(),
-        condition_indicator=float(np.max(np.linalg.cond(raw))),
+        condition_indicator=_finite_diagnostic(np.max(np.linalg.cond(raw))),
         residual_contribution=analytic.tolist(),
         physical_world_force_or_wrench=(-analytic).tolist(),
         generalized_physical_force=(-analytic).tolist(),
@@ -1183,7 +1191,7 @@ def _fk_sweep(probe):
     probe.set_z(base)
     result = _fd_status(records, ("q_radians", "q_metres"), device)
     result.update(
-        condition_indicator=float(np.linalg.cond(analytic)),
+        condition_indicator=_finite_diagnostic(np.linalg.cond(analytic)),
         point_local=local.tolist(),
         variable_scales=[1.0, case.coordinate_scale],
         analytic=analytic.tolist(),
@@ -1281,7 +1289,7 @@ def _contact_sweep(probe):
     result.update(
         variable_scales=units.tolist(),
         active_samples=count,
-        condition_indicator=float(np.linalg.cond(analytic)),
+        condition_indicator=_finite_diagnostic(np.linalg.cond(analytic)),
         minimum_absolute_gap=float(np.min(np.abs(gaps))),
     )
     return result
@@ -1393,7 +1401,7 @@ def calibrate_case(device, *, case, repeats, profile="quick"):
                     "zero_rhs_block": zero_block,
                     "true_norm_max": np.max(errors, axis=0).tolist(),
                     "true_norm_peak_to_peak": np.ptp(errors, axis=0).tolist(),
-                    "scaled_condition": float(np.linalg.cond(matrix)),
+                    "scaled_condition": _finite_diagnostic(np.linalg.cond(matrix)),
                 }
             )
     probe.evaluate(base)
