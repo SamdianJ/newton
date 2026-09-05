@@ -15,6 +15,13 @@ import warp as wp
 
 from ...sim import Contacts, Control, JointType, Model, State, eval_fk
 from ..solver import SolverBase
+from .articulation import (
+    MonolithicArticulationWorkspace,
+    _validate_joint_coordinate_layout,
+    recover_articulation_candidate_rates,
+)
+from .collision import MonolithicCollisionPipeline
+from .tet import validate_tet_scope
 
 
 @dataclass(frozen=True, slots=True)
@@ -75,11 +82,9 @@ def _build_layout(model: Model) -> _MonolithicLayout:
     particle_to_dynamic = np.full(model.particle_count, -1, dtype=np.int32)
     particle_to_dynamic[dynamic] = np.arange(len(dynamic), dtype=np.int32)
     moving = types != JointType.FIXED
-    q_map = model.joint_q_start.numpy()[:-1][moving]
+    q_map = _validate_joint_coordinate_layout(model)
     qd_map = model.joint_qd_start.numpy()[:-1][moving]
     nq = len(q_map)
-    if nq != model.joint_dof_count or nq != model.joint_coord_count:
-        raise ValueError("Inconsistent revolute/prismatic coordinate layout")
 
     def array(values):
         return wp.array(values, dtype=wp.int32, device=model.device)
@@ -234,25 +239,6 @@ def _predict_coordinates(
         z[i] += dt * particle_qd[particle_ids[(i - nq) // 3]][(i - nq) % 3]
 
 
-# Pure BE kinematics for PR-0. Move/reuse in articulation/tet owners when those
-# modules land; no inertia, force or material formulas belong to the shell.
-@wp.kernel
-def _recover_joint_kinematics(
-    z: wp.array[float],
-    q0: wp.array[float],
-    v0: wp.array[float],
-    q_map: wp.array[int],
-    v_map: wp.array[int],
-    dt: float,
-    velocity: wp.array[float],
-    acceleration: wp.array[float],
-):
-    i = wp.tid()
-    displacement = z[i] - q0[q_map[i]]
-    velocity[v_map[i]] = displacement / dt
-    acceleration[i] = (displacement / dt - v0[v_map[i]]) / dt
-
-
 @wp.kernel
 def _recover_particle_kinematics(
     x: wp.array[wp.vec3],
@@ -365,15 +351,16 @@ class _Candidate:
             device=self._model.device,
         )
         wp.launch(
-            _recover_joint_kinematics,
+            recover_articulation_candidate_rates,
             layout.q_dof_count,
             inputs=[
-                self.z,
+                layout.q_dof_to_joint_q,
+                0,
+                layout.q_dof_count,
+                1.0 / dt,
+                state.joint_q,
                 origin.joint_q,
                 origin.joint_qd,
-                layout.q_dof_to_joint_q,
-                layout.q_dof_to_joint_qd,
-                dt,
                 state.joint_qd,
                 self.qdd,
             ],
@@ -406,9 +393,10 @@ class _Candidate:
 class SolverMonolithic(SolverBase):
     """Experimental monolithic solver shell; simulation stepping is not implemented.
 
-    The constructor, :meth:`step`, and :meth:`update_contacts` currently raise
-    :class:`NotImplementedError`. The articulation, tet, contact, and nonlinear
-    solve implementations must land before this experimental API can run.
+    Construction validates the supported model and allocates owned collision
+    buffers. :meth:`step` and :meth:`update_contacts` raise
+    :class:`NotImplementedError` until the nonlinear solve and final contact
+    force publication are implemented.
 
     .. experimental::
         This class may change without the normal deprecation period.
@@ -493,25 +481,74 @@ class SolverMonolithic(SolverBase):
         self,
         model: Model,
         *,
-        collision_pipeline,
+        collision_pipeline: MonolithicCollisionPipeline,
         contact_stiffness: float,
         newton_max_iterations: int = 10,
         line_search_max_iterations: int = 8,
         linear_max_iterations: int = 200,
         linear_tolerance: float = 1.0e-4,
     ) -> None:
-        raise NotImplementedError("Monolithic physics and collision pipeline are not implemented")
+        """Validate the model and allocate solver-owned candidate/contact buffers.
+
+        Args:
+            model: Model containing one articulation and one connected tet body.
+            collision_pipeline: Fixed P1Q3 pipeline constructed for this model.
+            contact_stiffness: Normal penalty stiffness [N/m^3].
+            newton_max_iterations: Positive nonlinear iteration limit.
+            line_search_max_iterations: Positive backtracking iteration limit.
+            linear_max_iterations: Positive linear iteration limit.
+            linear_tolerance: Positive relative linear residual tolerance.
+        """
+        if not isinstance(collision_pipeline, MonolithicCollisionPipeline):
+            raise ValueError("Monolithic requires a MonolithicCollisionPipeline")
+        if collision_pipeline.model is not model:
+            raise ValueError("collision_pipeline and solver must use the same model")
+        for name, value in (("contact_stiffness", contact_stiffness), ("linear_tolerance", linear_tolerance)):
+            if (
+                not math.isfinite(value)
+                or value <= 0.0
+                or value > float(np.finfo(np.float32).max)
+                or np.float32(value) <= 0.0
+            ):
+                raise ValueError(f"{name} must be finite and positive in float32")
+        for name, value in (
+            ("newton_max_iterations", newton_max_iterations),
+            ("line_search_max_iterations", line_search_max_iterations),
+            ("linear_max_iterations", linear_max_iterations),
+        ):
+            if isinstance(value, bool) or not isinstance(value, (int, np.integer)) or value <= 0:
+                raise ValueError(f"{name} must be a positive integer")
+        self._layout = _build_layout(model)
+        validate_tet_scope(
+            model,
+            dynamic_particle_ids=self._layout.dynamic_particle_ids.numpy(),
+            particle_to_dynamic=self._layout.particle_to_dynamic.numpy(),
+        )
+        self._articulation = MonolithicArticulationWorkspace(model)
+        super().__init__(
+            model,
+            collision_pipeline=collision_pipeline,
+            collision_frequency_type=dict.fromkeys(self.CollisionSlot, self.CollisionFrequencyType.NONE),
+        )
+        self._trial_contacts = collision_pipeline.contacts()
+        self._transaction = _StepTransaction(model, self._layout)
+        self.contact_stiffness = contact_stiffness
+        self.newton_max_iterations = newton_max_iterations
+        self.line_search_max_iterations = line_search_max_iterations
+        self.linear_max_iterations = linear_max_iterations
+        self.linear_tolerance = linear_tolerance
 
     @property
     def last_stats(self) -> SolverMonolithic.Stats:
         """Return diagnostics from the last completed step."""
-        raise NotImplementedError("Monolithic stepping is not implemented")
+        return self._transaction.last_stats
 
     def step(
         self, state_in: State, state_out: State, control: Control | None, contacts: Contacts | None, dt: float
     ) -> None:
         """Advance by ``dt`` [s] once the monolithic physics implementation exists."""
-        raise NotImplementedError("Monolithic physics and collision pipeline are not implemented")
+        self._resolve_step_contacts(contacts)
+        raise NotImplementedError("Monolithic nonlinear stepping is not implemented")
 
     def update_contacts(self, contacts: Contacts, state: State | None = None) -> None:
         """Publish final physical contact forces once contact evaluation exists."""

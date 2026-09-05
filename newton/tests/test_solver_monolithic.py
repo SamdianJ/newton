@@ -2,12 +2,26 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import unittest
+import warnings
 from dataclasses import FrozenInstanceError
+from unittest.mock import patch
 
 import numpy as np
 import warp as wp
 
 import newton
+from newton._src.solvers.monolithic.articulation import (
+    MonolithicArticulationWorkspace,
+    eval_articulation_passive_candidate,
+    scatter_articulation_actor_tangent,
+)
+from newton._src.solvers.monolithic.linear import (
+    MonolithicLinearCapacities,
+    MonolithicLinearGeneration,
+    MonolithicLinearLayout,
+    MonolithicLinearStatus,
+    MonolithicLinearWorkspace,
+)
 from newton._src.solvers.monolithic.solver_monolithic import (
     SolverMonolithic,
     _build_layout,
@@ -15,6 +29,13 @@ from newton._src.solvers.monolithic.solver_monolithic import (
     _FrozenStepInputs,
     _StepTransaction,
 )
+from newton._src.solvers.monolithic.tet import (
+    TetScatterBuffers,
+    assemble_tet_residual_tangent,
+    build_tet_triplet_pattern,
+    create_tet_assembly_workspace,
+)
+from newton.solvers.experimental.monolithic import MonolithicCollisionPipeline
 from newton.tests.monolithic_test_utils import build_tiny_cpu_fixture
 from newton.tests.unittest_utils import add_function_test, get_test_devices
 
@@ -328,17 +349,159 @@ def test_terminal_destination_validation(test, device):
             test.assertEqual(transaction.last_stats.status, SolverMonolithic.Status.NOT_RUN)
 
 
+def test_pipeline_ownership(test, device):
+    """Allocate separate final/trial buffers and reject external contacts before mutation."""
+    fixture = _fixture(device)
+    pipeline = MonolithicCollisionPipeline(fixture.model)
+    solver = SolverMonolithic(fixture.model, collision_pipeline=pipeline, contact_stiffness=1.0)
+    test.assertIs(solver.collision_pipeline, pipeline)
+    test.assertIsNot(solver.contacts, solver._trial_contacts)
+    pipeline.validate_contacts(solver.contacts)
+    pipeline.validate_contacts(solver._trial_contacts)
+    test.assertEqual(solver.last_stats.status, SolverMonolithic.Status.NOT_RUN)
+    for slot in solver.CollisionSlot:
+        test.assertEqual(solver.collision_frequency_type[slot], solver.CollisionFrequencyType.NONE)
+    fixture.state_next.particle_q.fill_(wp.vec3(42.0))
+    before = fixture.state_next.particle_q.numpy().copy()
+    generation = solver.contacts.contact_generation.numpy().copy()
+    for external in (solver.contacts, solver._trial_contacts, pipeline.contacts()):
+        with test.assertRaisesRegex(ValueError, "must be None"):
+            solver.step(fixture.state, fixture.state_next, fixture.control, external, 0.01)
+    with test.assertRaises(NotImplementedError):
+        solver.step(fixture.state, fixture.state_next, fixture.control, None, 0.01)
+    with test.assertRaises(NotImplementedError):
+        solver.update_contacts(solver.contacts, fixture.state_next)
+    np.testing.assert_array_equal(fixture.state_next.particle_q.numpy(), before)
+    np.testing.assert_array_equal(solver.contacts.contact_generation.numpy(), generation)
+    test.assertEqual(solver.last_stats.status, SolverMonolithic.Status.NOT_RUN)
+
+
+def test_constructor_validation(test, device):
+    """Reject invalid pipelines and solver parameters before allocating owned contacts."""
+    fixture = _fixture(device)
+    pipeline = MonolithicCollisionPipeline(fixture.model)
+    other = _fixture(device)
+    for invalid in (None, newton.CollisionPipeline(fixture.model), MonolithicCollisionPipeline(other.model)):
+        with test.assertRaises(ValueError):
+            SolverMonolithic(fixture.model, collision_pipeline=invalid, contact_stiffness=1.0)
+    for name in ("contact_stiffness", "linear_tolerance"):
+        for value in (0.0, -1.0, float("nan"), float("inf"), 1.0e-50, 1.0e100):
+            kwargs = {"contact_stiffness": 1.0, name: value}
+            with (
+                warnings.catch_warnings(),
+                patch.object(pipeline, "contacts", side_effect=AssertionError("premature allocation")),
+            ):
+                warnings.simplefilter("error", RuntimeWarning)
+                with test.assertRaises(ValueError):
+                    SolverMonolithic(fixture.model, collision_pipeline=pipeline, **kwargs)
+    for name in ("newton_max_iterations", "line_search_max_iterations", "linear_max_iterations"):
+        for value in (0, -1, 1.5, True):
+            with patch.object(pipeline, "contacts", side_effect=AssertionError("premature allocation")):
+                with test.assertRaises(ValueError):
+                    SolverMonolithic(fixture.model, collision_pipeline=pipeline, contact_stiffness=1.0, **{name: value})
+    for name in ("joint_armature", "tet_materials"):
+        values = getattr(fixture.model, name).numpy().copy()
+        invalid = values.copy()
+        if name == "tet_materials":
+            invalid[:, 2] = 1.0
+        else:
+            invalid[:] = 1.0
+        getattr(fixture.model, name).assign(invalid)
+        with patch.object(pipeline, "contacts", side_effect=AssertionError("premature allocation")):
+            with test.assertRaises(ValueError):
+                SolverMonolithic(fixture.model, collision_pipeline=pipeline, contact_stiffness=1.0)
+        getattr(fixture.model, name).assign(values)
+
+
+def test_physical_owner_assembly(test, device):
+    """Assemble real articulation/tet producers into one positive-definite 14-DoF BSR."""
+    fixture = _fixture(device)
+    model = fixture.model
+    layout = _build_layout(model)
+    nq = layout.q_dof_count
+    pattern = build_tet_triplet_pattern(model.tet_indices.numpy(), layout.particle_to_dynamic.numpy(), x_dof_start=nq)
+    global_rows = np.concatenate((np.repeat(np.arange(nq), nq), pattern.global_rows)).astype(np.int32)
+    global_columns = np.concatenate((np.tile(np.arange(nq), nq), pattern.global_columns)).astype(np.int32)
+    linear = MonolithicLinearWorkspace(
+        MonolithicLinearLayout(nq, layout.dynamic_particle_count),
+        MonolithicLinearCapacities(len(global_rows), len(pattern.ax_rows), 0, 0, 0),
+        layout.particle_to_dynamic,
+        device=device,
+    )
+    linear._set_fixed_triplet_pattern(
+        global_rows=global_rows,
+        global_columns=global_columns,
+        internal_rows=pattern.ax_rows,
+        internal_columns=pattern.ax_columns,
+    )
+    articulation = MonolithicArticulationWorkspace(model)
+    tet = create_tet_assembly_workspace(pattern, tet_count=model.tet_count, device=device)
+    residual = wp.zeros(layout.dynamic_particle_count, dtype=wp.vec3, device=device)
+    matrices = []
+    for sequence, stretch in enumerate((1.0, 1.1, 1.0)):
+        state = model.state()
+        state.assign(fixture.state)
+        state.particle_q.assign(fixture.state.particle_q.numpy() * np.array([stretch, 1.0, 1.0]))
+        state.joint_q.assign(fixture.state.joint_q.numpy() + np.array([stretch - 1.0, 0.0]))
+        eval_articulation_passive_candidate(model, state, articulation)
+        generation = MonolithicLinearGeneration(1, sequence, 0, sequence)
+        assembly = linear.begin_assembly(generation)
+        triplets = assembly.global_scalar_triplets
+        wp.launch(
+            scatter_articulation_actor_tangent,
+            (nq, nq),
+            [
+                0,
+                nq,
+                0,
+                0,
+                100.0,
+                articulation.M,
+                assembly.aq_actor_dense,
+                triplets.rows,
+                triplets.columns,
+                triplets.values,
+            ],
+            device=device,
+        )
+        assemble_tet_residual_tangent(
+            model,
+            candidate_particle_q=state.particle_q,
+            particle_q_n=fixture.state.particle_q,
+            particle_qd_n=fixture.state.particle_qd,
+            frozen_particle_f=fixture.state.particle_f,
+            dynamic_particle_ids=layout.dynamic_particle_ids,
+            particle_to_dynamic=layout.particle_to_dynamic,
+            residual_x=residual,
+            dt=0.1,
+            min_det_f_guard=0.2,
+            workspace=tet,
+            scatter=TetScatterBuffers(assembly.ax_internal_triplets.values, triplets.values[nq * nq :]),
+        )
+        test.assertEqual(int(tet.failure_flags.numpy()[0]), 0)
+        test.assertGreaterEqual(float(tet.min_det_f.numpy()[0]), 0.2)
+        result = linear.finalize_assembly(generation=generation)
+        test.assertEqual(result.status, MonolithicLinearStatus.SUCCESS)
+        test.assertEqual(result.global_triplet_count, len(global_rows))
+        matrix = linear.densify_for_test(generation=generation).raw_matrix
+        owner = np.zeros((14, 14))
+        owner[:nq, :nq] = assembly.aq_actor_dense.numpy()
+        blocks = assembly.ax_internal_triplets.values.numpy()
+        for row, column, block in zip(pattern.ax_rows, pattern.ax_columns, blocks, strict=True):
+            owner[nq + 3 * row : nq + 3 * row + 3, nq + 3 * column : nq + 3 * column + 3] += block
+        np.testing.assert_allclose(matrix, owner, rtol=5e-5, atol=1e-6)
+        np.testing.assert_array_equal(matrix[:nq, nq:], 0.0)
+        np.testing.assert_array_equal(matrix[nq:, :nq], 0.0)
+        np.testing.assert_allclose(matrix, matrix.T, rtol=5e-5, atol=1e-6)
+        test.assertGreater(np.linalg.eigvalsh(matrix)[0], 0.0)
+        test.assertTrue(np.isfinite(residual.numpy()).all())
+        matrices.append(matrix)
+    np.testing.assert_allclose(matrices[0], matrices[2], rtol=5e-5, atol=1e-6)
+    test.assertGreater(np.linalg.norm(matrices[0] - matrices[1]), 0.0)
+
+
 class TestSolverMonolithic(unittest.TestCase):
-    def test_unimplemented_public_solver(self):
-        """Reject public construction and stepping until the physics modules exist."""
-        fixture = _fixture("cpu")
-        with self.assertRaises(NotImplementedError):
-            SolverMonolithic(fixture.model, collision_pipeline=None, contact_stiffness=1.0)
-        shell = object.__new__(SolverMonolithic)
-        with self.assertRaises(NotImplementedError):
-            shell.step(fixture.state, fixture.state_next, None, None, 0.1)
-        with self.assertRaises(NotImplementedError):
-            shell.update_contacts(None)
+    pass
 
 
 for test_function in (
@@ -351,6 +514,9 @@ for test_function in (
     test_scope_topology,
     test_state_extension_rejection,
     test_terminal_destination_validation,
+    test_pipeline_ownership,
+    test_constructor_validation,
+    test_physical_owner_assembly,
 ):
     add_function_test(TestSolverMonolithic, test_function.__name__, test_function, devices=get_test_devices())
 
