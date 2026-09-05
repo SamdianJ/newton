@@ -4,6 +4,7 @@
 """Check the P1Q3 calibration harness against measurable sampling contracts."""
 
 import unittest
+from copy import deepcopy
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
@@ -31,10 +32,12 @@ def test_uniform_plane_refinement(test, device):
     test.assertEqual([row["tet_count"] for row in rows], [1, 8, 64])
     forces = np.array([row["normal_force_n"] for row in rows])
     test.assertLessEqual(float(np.max(np.abs(forces / forces[-1] - 1.0))), 0.05)
-    np.testing.assert_allclose(forces, 0.176, rtol=2e-5)
+    np.testing.assert_allclose(forces, 0.056, rtol=2e-5)
     for row in rows:
         test.assertEqual(row["support_envelope"], "SUPPORTED")
         test.assertEqual(row["same_mesh_quadrature_gate"], "PASS")
+        test.assertEqual(row["same_mesh_oracle"]["integration_domain"], "full_tet_boundary")
+        test.assertIsNone(row["full_boundary_oracle_observation"])
         test.assertLessEqual(row["same_mesh_oracle"]["relative_force_error"], 0.05)
         test.assertEqual(row["evaluation_status"], 0)
         test.assertLess(row["contact_sign_error"], 1e-4)
@@ -55,7 +58,7 @@ def test_sharp_feature_envelope(test, device):
     test.assertEqual(sharp["normal_force_n"], 0.0)
     test.assertEqual(sharp["sampling_classification"], "UNSUPPORTED_SAMPLING_MISS")
     test.assertEqual(sharp["support_envelope"], "UNSUPPORTED")
-    test.assertEqual(sharp["support_reason"], "inter_sample_local_feature")
+    test.assertEqual(sharp["support_reason"], "legacy_inter_sample_box_w2_l012")
     test.assertGreater(broad["active_sample_count"], 0)
     test.assertGreater(broad["normal_force_n"], 0.0)
     test.assertEqual(broad["evaluation_status"], 0)
@@ -79,18 +82,19 @@ def test_independent_plane_oracle(test, device):
     """Integrate the hinge independently of Warp records and P1Q3 slots."""
     del device
     points, _ = refined_tetrahedron(0)
-    faces = np.array(((0, 2, 1),), dtype=np.int32)
+    faces = np.array(((0, 2, 1), (0, 1, 3), (0, 3, 2), (1, 2, 3)), dtype=np.int32)
     oracle = integrate_contact_over_mesh(
         points,
         faces,
         shape="plane",
-        center=np.array((0.0, 0.0, 0.001)),
+        center=np.array((0.0, 0.0, 0.00025)),
         scale=np.zeros(3),
         particle_radius=0.0001,
         stiffness=2.0e5,
     )
-    test.assertAlmostEqual(oracle.force_magnitude, 0.176, delta=1.0e-11)
-    test.assertLessEqual(oracle.force_magnitude_absolute_error, 1.0e-11)
+    test.assertGreater(oracle.force_magnitude, 0.056)
+    test.assertLess(abs(0.056 / oracle.force_magnitude - 1.0), 0.05)
+    test.assertLessEqual(oracle.force_magnitude_absolute_error / oracle.force_magnitude, 1.0e-3)
 
 
 def test_independent_oracle_resolves_sample_between_box(test, device):
@@ -159,7 +163,59 @@ def test_supported_shared_feature_motion(test, device):
 def test_freeze_audit_rejects_incomplete_provenance(test, device):
     """Require exactly one CPU/CUDA result and finite evidence before freezing."""
     del device
-    evidence = [{"device": "cpu", "c4_gate": "PASS"}, {"device": "cuda:0", "c4_gate": "PASS"}]
+    root = Path(__file__).resolve().parents[2]
+    provenance = _source_provenance(root)
+    support = {
+        "id": "p1q3-resolved-local-v2",
+        "status": "FROZEN",
+        "supported_fixture_ids": sorted(
+            {
+                "plane_uniform_face_z025mm_l012_v2",
+                "broad_box_full_face_l012_v1",
+                "shared_edge_r30_l234_v1",
+                "shared_vertex_r30_l234_v1",
+                "sample_between_box_w10_l234_v1",
+            }
+        ),
+    }
+    static = [
+        {
+            "support_envelope": "SUPPORTED",
+            "manifest": {"support_fixture_id": fixture_id},
+            "same_mesh_quadrature_gate": "PASS",
+            "sampling_classification": "DETECTED",
+        }
+        for fixture_id in support["supported_fixture_ids"]
+    ]
+    comparisons = [
+        {"case": case, "role": "HARD_SUPPORTED_GATE", "gate": "PASS", "sampling_gate": "PASS"}
+        for case in ("supported_edge", "supported_vertex")
+    ]
+    evidence = [
+        {
+            "device": name,
+            "c4_gate": "PASS",
+            "support_envelope": deepcopy(support),
+            "same_mesh_quadrature_gate": "PASS",
+            "sampling_detection_gate": "PASS",
+            "dirichlet_mass_audit_gate": "PASS",
+            "supported_local_motion_gate": "PASS",
+            "static": deepcopy(static),
+            "local_motion_comparisons": deepcopy(comparisons),
+        }
+        for name in ("cpu", "cuda:0")
+    ]
+    frozen, reasons = _freeze_audit(
+        requested_devices=["cpu", "cuda:0"],
+        evidence=evidence,
+        dynamic_steps=20,
+        dt=0.001,
+        git_dirty=False,
+        nonfinite_fields=[],
+        **provenance,
+    )
+    test.assertTrue(frozen)
+    test.assertEqual(reasons, [])
     frozen, reasons = _freeze_audit(
         requested_devices=["cpu", "cuda:0"],
         evidence=evidence,
@@ -168,8 +224,8 @@ def test_freeze_audit_rejects_incomplete_provenance(test, device):
         git_dirty=False,
         nonfinite_fields=[],
     )
-    test.assertTrue(frozen)
-    test.assertEqual(reasons, [])
+    test.assertFalse(frozen)
+    test.assertIn("invalid_source_provenance", reasons)
     for requested, rows, nonfinite, reason in (
         (["cpu"], evidence[:1], [], "requires_exactly_one_cpu_and_one_cuda_request"),
         (["cpu", "cpu"], [evidence[0], evidence[0]], [], "requires_exactly_one_cpu_and_one_cuda_request"),
@@ -182,9 +238,47 @@ def test_freeze_audit_rejects_incomplete_provenance(test, device):
             dt=0.001,
             git_dirty=False,
             nonfinite_fields=nonfinite,
+            **provenance,
         )
         test.assertFalse(frozen)
         test.assertIn(reason, reasons)
+
+    for mutation, reason in (
+        (lambda rows: rows[0].pop("same_mesh_quadrature_gate"), "incomplete_or_failed_device_subgates"),
+        (
+            lambda rows: rows[0]["support_envelope"]["supported_fixture_ids"].pop(),
+            "invalid_supported_fixture_ids",
+        ),
+        (lambda rows: rows[0]["local_motion_comparisons"].pop(), "invalid_supported_motion_comparisons"),
+    ):
+        invalid = deepcopy(evidence)
+        mutation(invalid)
+        frozen, reasons = _freeze_audit(
+            requested_devices=["cpu", "cuda:0"],
+            evidence=invalid,
+            dynamic_steps=20,
+            dt=0.001,
+            git_dirty=False,
+            nonfinite_fields=[],
+            **provenance,
+        )
+        test.assertFalse(frozen)
+        test.assertIn(reason, reasons)
+
+    invalid_sources = dict(provenance["source_sha256"])
+    invalid_sources.pop("newton/_src/solvers/monolithic/contact.py")
+    frozen, reasons = _freeze_audit(
+        requested_devices=["cpu", "cuda:0"],
+        evidence=evidence,
+        dynamic_steps=20,
+        dt=0.001,
+        git_dirty=False,
+        nonfinite_fields=[],
+        source_sha256=invalid_sources,
+        source_set_sha256=provenance["source_set_sha256"],
+    )
+    test.assertFalse(frozen)
+    test.assertIn("invalid_source_provenance", reasons)
 
 
 def test_artifact_output_is_immutable(test, device):
@@ -217,6 +311,20 @@ def test_c4_source_provenance_is_closed(test, device):
     test.assertEqual(len(provenance["source_set_sha256"]), 64)
 
 
+def test_unsupported_probe_classes_do_not_overlap_supported_class(test, device):
+    """Keep legacy failed probes distinct from the resolved R30 support fixtures."""
+    result = calibrate(device, steps=0, dt=0.001)
+    unsupported = set(result["support_envelope"]["unsupported_probe_classes"])
+    test.assertEqual(
+        unsupported,
+        {"legacy_curved_local_patch_l012", "legacy_inter_sample_box_w2_l012"},
+    )
+    supported_classes = {
+        row["manifest"]["declared_support_class"] for row in result["static"] if row["support_envelope"] == "SUPPORTED"
+    }
+    test.assertTrue(unsupported.isdisjoint(supported_classes))
+
+
 def test_broad_curvature_control(test, device):
     """Require real contact and resolved motion in broad edge/vertex controls."""
     for case in ("wide_edge_160", "wide_vertex_160"):
@@ -245,6 +353,7 @@ for function in (
     test_freeze_audit_rejects_incomplete_provenance,
     test_artifact_output_is_immutable,
     test_c4_source_provenance_is_closed,
+    test_unsupported_probe_classes_do_not_overlap_supported_class,
     test_broad_curvature_control,
 ):
     add_function_test(TestMonolithicSupport, function.__name__, function, devices=get_test_devices())

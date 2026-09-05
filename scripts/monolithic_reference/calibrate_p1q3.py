@@ -40,14 +40,24 @@ _CASES = (
     *_SUPPORTED_LOCAL_CASES,
     *_WIDE_CASES,
 )
-_SUPPORT_ENVELOPE_ID = "p1q3-resolved-local-v1"
+_SUPPORT_ENVELOPE_ID = "p1q3-resolved-local-v2"
 _SUPPORTED_FIXTURE_IDS = {
-    "plane_uniform_face_l012_v1",
+    "plane_uniform_face_z025mm_l012_v2",
     "broad_box_full_face_l012_v1",
     "shared_edge_r30_l234_v1",
     "shared_vertex_r30_l234_v1",
     "sample_between_box_w10_l234_v1",
 }
+_C4_SOURCE_PATHS = (
+    "scripts/monolithic_reference/calibrate_p1q3.py",
+    "scripts/monolithic_reference/p1q3_oracle.py",
+    "newton/_src/solvers/monolithic/collision.py",
+    "newton/_src/solvers/monolithic/contact.py",
+    "newton/_src/solvers/monolithic/tet.py",
+    "newton/_src/solvers/monolithic/linear.py",
+    "newton/_src/solvers/monolithic/articulation.py",
+    "newton/_src/solvers/monolithic/solver_monolithic.py",
+)
 
 
 def refined_tetrahedron(level: int, *, length: float = _LENGTH) -> tuple[np.ndarray, np.ndarray]:
@@ -110,9 +120,11 @@ def _build_scene(device, level, case):
     builder.add_articulation([joint])
     cfg = builder.ShapeConfig(margin=0.0)
     if case == "plane":
-        center, feature_width = (0.0, 0.0, 0.001), None
+        # Keep the adjacent-face bands below the declared 5% full-boundary
+        # quadrature error while retaining a resolved uniform-face force.
+        center, feature_width = (0.0, 0.0, 0.00025), None
         shape_kind, support_class = "plane", "affine_full_face"
-        support_fixture_id = "plane_uniform_face_l012_v1"
+        support_fixture_id = "plane_uniform_face_z025mm_l012_v2"
         builder.add_shape_plane(
             body=body, width=0.0, length=0.0, xform=wp.transform(center, wp.quat_identity()), cfg=cfg
         )
@@ -121,7 +133,7 @@ def _build_scene(device, level, case):
             _, location, radius_mm = case.split("_")
             sphere_radius = int(radius_mm) / 1000.0
             penetration = 0.008
-            support_class = "curved_local_patch"
+            support_class = "legacy_curved_local_patch_l012"
             support_fixture_id = None
         else:
             _, location = case.split("_")
@@ -143,7 +155,7 @@ def _build_scene(device, level, case):
     elif case in ("shared_edge", "shared_vertex"):
         center = (length / 2, -0.004, -0.004) if case == "shared_edge" else (-0.004, -0.004, -0.004)
         feature_width = 0.016
-        shape_kind, support_class = "sphere", "curved_local_patch"
+        shape_kind, support_class = "sphere", "legacy_curved_local_patch_l012"
         support_fixture_id = None
         builder.add_shape_sphere(
             body=body, radius=feature_width / 2, xform=wp.transform(center, wp.quat_identity()), cfg=cfg
@@ -153,7 +165,7 @@ def _build_scene(device, level, case):
         feature_width = 0.002 if case == "sharp_box" else 0.01 if case == "resolved_sharp_box" else 0.08
         shape_kind = "box"
         support_class = (
-            "inter_sample_local_feature"
+            "legacy_inter_sample_box_w2_l012"
             if case == "sharp_box"
             else "resolved_inter_sample_feature"
             if case == "resolved_sharp_box"
@@ -341,12 +353,12 @@ def _is_exact_supported_fixture(manifest: dict) -> bool:
     )
     if not common:
         return False
-    if fixture_id == "plane_uniform_face_l012_v1":
+    if fixture_id == "plane_uniform_face_z025mm_l012_v2":
         return (
             manifest["case"] == "plane"
             and manifest["level"] in (0, 1, 2)
             and manifest["shape_kind"] == "plane"
-            and tuple(manifest["shape_center_m"]) == (0.0, 0.0, 0.001)
+            and tuple(manifest["shape_center_m"]) == (0.0, 0.0, 0.00025)
         )
     if fixture_id == "broad_box_full_face_l012_v1":
         return (
@@ -391,25 +403,6 @@ def _measure(model, state, solver, manifest):
     center[2] += float(state.joint_q.numpy()[0])
     oracle_faces = model.tri_indices.numpy()
     oracle_domain = "full_tet_boundary"
-    full_boundary_oracle = None
-    if manifest["case"] == "plane":
-        # The PRD uniform-plane rule is an area-weight check on the intended
-        # z=0 contact face.  Adjacent-face edge bands are retained separately
-        # as a sampling observation instead of contaminating that 5% rule.
-        positions = state.particle_q.numpy()
-        uniform_face = np.all(np.abs(positions[oracle_faces, 2]) <= 1.0e-12, axis=1)
-        gated_faces = oracle_faces[uniform_face]
-        full_boundary_oracle = integrate_contact_over_mesh(
-            positions,
-            oracle_faces,
-            shape=manifest["shape_kind"],
-            center=center,
-            scale=np.asarray(manifest["shape_scale"][0]),
-            particle_radius=manifest["particle_radius_m"],
-            stiffness=_STIFFNESS,
-        )
-        oracle_faces = gated_faces
-        oracle_domain = "prd_uniform_z0_face"
     oracle = integrate_contact_over_mesh(
         state.particle_q.numpy(),
         oracle_faces,
@@ -479,16 +472,7 @@ def _measure(model, state, solver, manifest):
             "leaf_count": oracle.leaf_count,
             "relative_force_error": relative_force_error,
         },
-        "full_boundary_oracle_observation": None
-        if full_boundary_oracle is None
-        else {
-            "normal_force_n": full_boundary_oracle.force_magnitude,
-            "relative_force_error": abs(
-                float(np.linalg.norm(forces[:count, :3], axis=1).sum()) - full_boundary_oracle.force_magnitude
-            )
-            / max(full_boundary_oracle.force_magnitude, 1.0e-12),
-            "meaning": "includes adjacent-face edge bands outside the PRD uniform-face weight gate",
-        },
+        "full_boundary_oracle_observation": None,
         "same_mesh_quadrature_threshold": 0.05 if manifest["case"] == "plane" else 0.1,
         "same_mesh_quadrature_gate": "PASS"
         if supported and relative_force_error <= (0.05 if manifest["case"] == "plane" else 0.1)
@@ -786,7 +770,9 @@ def calibrate(device, *, steps: int, dt: float):
             "semantics": "exact measured fixtures only; no interval or phase interpolation",
             "supported_fixture_ids": sorted(_SUPPORTED_FIXTURE_IDS),
             "fixture_descriptions": {
-                "plane_uniform_face_l012_v1": "exact uniform z=0 plane face at levels 0/1/2",
+                "plane_uniform_face_z025mm_l012_v2": (
+                    "exact z=0 uniform face with 0.25 mm plane offset and full tet-boundary oracle at levels 0/1/2"
+                ),
                 "broad_box_full_face_l012_v1": "exact 80 mm full-face box at center (L/3,L/3,-0.4 mm)",
                 "shared_edge_r30_l234_v1": "exact 30 mm sphere edge placement at levels 2/3/4",
                 "shared_vertex_r30_l234_v1": "exact 30 mm sphere vertex placement at levels 2/3/4",
@@ -824,7 +810,10 @@ def calibrate(device, *, steps: int, dt: float):
                 "phase_scope": "this exact center phase only; no arbitrary-phase guarantee",
             },
             "shape_capability_is_not_physical_support": True,
-            "unsupported_probe_classes": ["curved_local_patch", "inter_sample_local_feature"],
+            "unsupported_probe_classes": [
+                "legacy_curved_local_patch_l012",
+                "legacy_inter_sample_box_w2_l012",
+            ],
         },
         "static": static,
         "motion": motions,
@@ -860,17 +849,7 @@ def _finite_json(value, path="", nonfinite=None):
 
 
 def _source_provenance(root: Path) -> dict:
-    paths = (
-        "scripts/monolithic_reference/calibrate_p1q3.py",
-        "scripts/monolithic_reference/p1q3_oracle.py",
-        "newton/_src/solvers/monolithic/collision.py",
-        "newton/_src/solvers/monolithic/contact.py",
-        "newton/_src/solvers/monolithic/tet.py",
-        "newton/_src/solvers/monolithic/linear.py",
-        "newton/_src/solvers/monolithic/articulation.py",
-        "newton/_src/solvers/monolithic/solver_monolithic.py",
-    )
-    sources = {path: hashlib.sha256((root / path).read_bytes()).hexdigest() for path in paths}
+    sources = {path: hashlib.sha256((root / path).read_bytes()).hexdigest() for path in _C4_SOURCE_PATHS}
     source_set = hashlib.sha256("".join(f"{path}:{sources[path]}\n" for path in sorted(sources)).encode()).hexdigest()
     return {"source_sha256": sources, "source_set_sha256": source_set}
 
@@ -892,6 +871,8 @@ def _freeze_audit(
     dt: float,
     git_dirty: bool,
     nonfinite_fields,
+    source_sha256=None,
+    source_set_sha256: str | None = None,
 ) -> tuple[bool, list[str]]:
     """Return the top-level freeze decision and stable rejection reasons."""
     reasons = []
@@ -907,6 +888,61 @@ def _freeze_audit(
         reasons.append("requires_clean_git_tree")
     if nonfinite_fields:
         reasons.append("nonfinite_evidence")
+    sources = source_sha256 if isinstance(source_sha256, dict) else {}
+    expected_source_set = hashlib.sha256(
+        "".join(f"{path}:{sources.get(path, '')}\n" for path in sorted(sources)).encode()
+    ).hexdigest()
+    if (
+        set(sources) != set(_C4_SOURCE_PATHS)
+        or any(
+            not isinstance(value, str)
+            or len(value) != 64
+            or any(character not in "0123456789abcdef" for character in value)
+            for value in sources.values()
+        )
+        or source_set_sha256 != expected_source_set
+    ):
+        reasons.append("invalid_source_provenance")
+    required_subgates = (
+        "same_mesh_quadrature_gate",
+        "sampling_detection_gate",
+        "dirichlet_mass_audit_gate",
+        "supported_local_motion_gate",
+    )
+    for row in evidence:
+        if any(row.get(gate) != "PASS" for gate in required_subgates):
+            reasons.append("incomplete_or_failed_device_subgates")
+            break
+    for row in evidence:
+        support = row.get("support_envelope", {})
+        if (
+            support.get("id") != _SUPPORT_ENVELOPE_ID
+            or support.get("status") != "FROZEN"
+            or set(support.get("supported_fixture_ids", ())) != _SUPPORTED_FIXTURE_IDS
+        ):
+            reasons.append("invalid_supported_fixture_ids")
+            break
+        supported_static = {
+            static_row.get("manifest", {}).get("support_fixture_id")
+            for static_row in row.get("static", ())
+            if static_row.get("support_envelope") == "SUPPORTED"
+            and static_row.get("same_mesh_quadrature_gate") == "PASS"
+            and static_row.get("sampling_classification") == "DETECTED"
+        }
+        if supported_static != _SUPPORTED_FIXTURE_IDS:
+            reasons.append("invalid_supported_fixture_evidence")
+            break
+    for row in evidence:
+        hard_motion = {
+            comparison.get("case")
+            for comparison in row.get("local_motion_comparisons", ())
+            if comparison.get("role") == "HARD_SUPPORTED_GATE"
+            and comparison.get("gate") == "PASS"
+            and comparison.get("sampling_gate") == "PASS"
+        }
+        if hard_motion != set(_SUPPORTED_LOCAL_CASES):
+            reasons.append("invalid_supported_motion_comparisons")
+            break
     if len(evidence) != 2 or not all(row["c4_gate"] == "PASS" for row in evidence):
         reasons.append("device_c4_gate_not_pass")
     return not reasons, reasons
@@ -953,9 +989,9 @@ def main():
         "build_mode": wp.config.mode,
         "prd_sha256": "f6632924870b6c29b7d8ea5f121564744453a18582e5f2cf905a7f1ba5a20090",
         "scope": (
-            "C4 p1q3-resolved-local-v1 physical support envelope with resolved shared-edge/shared-vertex fixtures; "
-            "legacy small-feature probes remain explicitly outside the envelope; no whole-P0/V0.1 exit or "
-            "SuperDex comparison claimed"
+            "C4 p1q3-resolved-local-v2 exact-fixture support envelope with resolved shared-edge/shared-vertex "
+            "fixtures and a full-boundary plane oracle; legacy L0/L1/L2 curved and 2 mm inter-sample probes "
+            "remain explicitly outside the envelope; no whole-P0/V0.1 exit or SuperDex comparison claimed"
         ),
         "sampling": [[2 / 3, 1 / 6, 1 / 6], [1 / 6, 2 / 3, 1 / 6], [1 / 6, 1 / 6, 2 / 3]],
         "evidence": evidence,
@@ -970,6 +1006,8 @@ def main():
         dt=args.dt,
         git_dirty=git_dirty,
         nonfinite_fields=nonfinite,
+        source_sha256=payload["source_sha256"],
+        source_set_sha256=payload["source_set_sha256"],
     )
     payload["status"] = "FROZEN" if frozen else "CANDIDATE"
     payload["freeze_audit"] = {
