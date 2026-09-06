@@ -26,6 +26,8 @@ from newton.solvers.experimental.monolithic import MonolithicCollisionPipeline, 
 
 import newton
 
+from .internal_envelope import assess_envelope, load_envelope
+
 FIXTURE_DIRECTORY = Path(__file__).with_name("fixtures")
 LEGACY_FIXTURE = FIXTURE_DIRECTORY / "normal_loading_draft_v1.json"
 DEFAULT_FIXTURE = FIXTURE_DIRECTORY / "normal_loading_v2.json"
@@ -101,13 +103,19 @@ def _validate_fixture(fixture):
         fixture[name] for name in ("rigid", "soft", "contact", "drive", "acceptance")
     )
     schema_version = fixture["schema_version"]
-    if fixture["status"] != "DRAFT" or schema_version not in ("normal_loading_draft/v1", "normal_loading/v2"):
+    if (fixture["status"], schema_version) not in (
+        ("DRAFT", "normal_loading_draft/v1"),
+        ("DRAFT", "normal_loading/v2"),
+        ("FROZEN", "normal_loading/v3"),
+    ):
         raise ValueError("This runner only supports DRAFT normal_loading_draft/v1 or normal_loading/v2 input")
     if schema_version == "normal_loading_draft/v1":
         if fixture["calibration_status"] != "UNFROZEN" or fixture["reference_envelope"] is not None:
             raise ValueError("Legacy normal_loading_draft/v1 must remain unfrozen")
     else:
         _validate_status_axes(fixture)
+    if fixture["status"] == "FROZEN":
+        load_envelope(fixture)
     if rigid["shape_type"] != "infinite_plane" or rigid["joint_type"] != "PRISMATIC" or contact["quadrature"] != "P1Q3":
         raise ValueError("Only PRISMATIC infinite_plane with P1Q3 is supported")
     if rigid["approach_axis_world"] != [0.0, 0.0, 1.0]:
@@ -390,11 +398,16 @@ def assess_run(records, fixture, *, execution_error=None):
     completion = free[-1]["joint_q"][0] / max(free[-1]["command_q_m"], 1e-30) if free else None
 
     def ratios_ok(r):
-        return all(value is not None and value <= 1.0 for value in r["nonlinear_convergence_ratios"])
+        values = r["nonlinear_convergence_ratios"]
+        return len(values) == 3 and all(
+            isinstance(value, (int, float)) and math.isfinite(value) and 0.0 <= value <= 1.0 for value in values
+        )
 
     def linear_ok(r):
         return r["linear_iterations"] == 0 or all(
-            r["stats"][name] is not None and r["stats"][name] <= limits["linear_tolerance"]
+            isinstance(r["stats"][name], (int, float))
+            and math.isfinite(r["stats"][name])
+            and 0.0 <= r["stats"][name] <= limits["linear_tolerance"]
             for name in ("rho", "rho_q", "rho_x")
         )
 
@@ -438,6 +451,13 @@ def assess_run(records, fixture, *, execution_error=None):
         "converged_linear_gates": all(linear_ok(r) for r in records if r["converged"]),
         "contact_balance_and_sign": all(contact_ok(r) for r in records if not r["rolled_back"]),
     }
+    if fixture["status"] == "FROZEN":
+        numerical_gates["exact_frozen_trajectory"] = count == fixture["substeps"] and all(
+            r.get("step") == i
+            and r.get("time_s") == (i + 1) * fixture["dt_s"]
+            and r.get("phase") == command_at((i + 1) * fixture["dt_s"], fixture)[2]
+            for i, r in enumerate(records)
+        )
     evidence_gates = {
         "frozen_calibration": _axis_status(fixture, "calibration") == "FROZEN",
         "frozen_support": _axis_status(fixture, "support") == "FROZEN",
@@ -453,7 +473,7 @@ def assess_run(records, fixture, *, execution_error=None):
     if closure.size and closure.max() >= high:
         interval = [next(i for i, value in enumerate(closure) if value >= bound) for bound in (low, high)]
         secant = float((force[interval[1]] - force[interval[0]]) / (closure[interval[1]] - closure[interval[0]]))
-    return {
+    summary = {
         "gates": gates,
         "e2e_numerical_pass": e2e_numerical_pass,
         "draft_numerical_pass": e2e_numerical_pass,
@@ -464,12 +484,19 @@ def assess_run(records, fixture, *, execution_error=None):
         "rollback_rate": sum(r["rolled_back"] for r in records) / max(count, 1),
         "maximum_consecutive_non_success": maximum_streak,
         "contact_onset_step": onset,
+        "contact_onset_relative_m": records[onset]["relative_rigid_probe_m"] if onset is not None else None,
         "free_space_completion": completion,
         "peak_force_n": float(force.max()) if force.size else None,
         "settled_force_n": float(np.mean([r["normal_compressive_force_n"] for r in settle])) if settle else None,
         "secant_stiffness_n_m": secant,
         "curve_work_j": float(np.trapezoid(force, closure)) if force.size > 1 else None,
     }
+
+    envelope = assess_envelope(records, summary, fixture)
+    summary["internal_envelope"] = envelope
+    summary["gates"]["internal_envelope_pass"] = envelope["pass"]
+    summary["v01_exit"] = _v01_exit({"e2e_numerical_pass": e2e_numerical_pass, **summary["gates"]})
+    return summary
 
 
 def _v01_exit(gates):
@@ -479,7 +506,7 @@ def _v01_exit(gates):
     independent evidence axis, but is deferred until after V0.2 and therefore
     does not block this exit decision.
     """
-    required = ("e2e_numerical_pass", "frozen_calibration", "frozen_support")
+    required = ("e2e_numerical_pass", "frozen_calibration", "frozen_support", "internal_envelope_pass")
     return all(gates.get(name) is True for name in required)
 
 
@@ -523,6 +550,8 @@ def _apply_candidate_internal_config(solver, requested):
 
 def run_loading(fixture, *, device="cpu", substeps=None, candidate_internal_config=None):
     """Run the fixed input, preserving every unsuccessful substep in the evidence."""
+    if candidate_internal_config is not None and fixture["status"] == "FROZEN":
+        raise ValueError("A frozen release run cannot override production calibration")
     model, state, control, solver = build_scene(fixture, device=device)
     if candidate_internal_config is not None:
         _apply_candidate_internal_config(solver, candidate_internal_config)
@@ -548,7 +577,7 @@ def run_loading(fixture, *, device="cpu", substeps=None, candidate_internal_conf
     serialized = json.dumps(fixture, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()
     root = Path(__file__).resolve().parents[2]
     metadata = {
-        "status": "DRAFT",
+        "status": fixture["status"],
         "record_schema": "normal_loading_measurements/v2",
         "calibration_status": _axis_status(fixture, "calibration"),
         "support_status": _axis_status(fixture, "support"),

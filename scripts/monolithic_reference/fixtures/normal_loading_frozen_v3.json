@@ -1,0 +1,138 @@
+{
+  "schema_version": "normal_loading/v3",
+  "fixture_id": "monolithic_single_finger_normal_loading_frozen_v3",
+  "status": "FROZEN",
+  "calibration_status": "FROZEN",
+  "support_status": "FROZEN",
+  "reference_status": "BLOCKED",
+  "calibration_provenance": {
+    "version": "monolithic_calibration_frozen/v1",
+    "sha256": "fae955077f9a59380f6d38b4b1ea6cbc6574c2615f57f91dac35f21aa6265b6f"
+  },
+  "support_provenance": {
+    "version": "p1q3-resolved-local-v2/schema-v3",
+    "sha256": "53000e3c374475902244a76c24c0f3d82561836ac9fb34c9045c92b34894dfe2"
+  },
+  "reference_provenance": {
+    "reason": "The active-contact SuperDex reference mapping and response envelope are not closed."
+  },
+  "reference_envelope": null,
+  "units": "SI: m, kg, s, N, Pa; normal stiffness N/m^3",
+  "dt_s": 0.001,
+  "substeps": 1000,
+  "gravity_m_s2": [
+    0.0,
+    0.0,
+    0.0
+  ],
+  "rigid": {
+    "mass_kg": 0.1,
+    "inertia_kg_m2": [
+      0.001,
+      0.001,
+      0.001
+    ],
+    "initial_plane_z_m": -0.005,
+    "approach_axis_world": [
+      0.0,
+      0.0,
+      1.0
+    ],
+    "reference_point_body_m": [
+      0.0,
+      0.0,
+      0.0
+    ],
+    "joint_type": "PRISMATIC",
+    "shape_type": "infinite_plane"
+  },
+  "soft": {
+    "rest_positions_m": [
+      [
+        -0.02,
+        -0.015,
+        0.0
+      ],
+      [
+        0.02,
+        -0.015,
+        0.0
+      ],
+      [
+        0.0,
+        0.03,
+        0.0
+      ],
+      [
+        0.0,
+        0.0,
+        0.03
+      ]
+    ],
+    "tet_indices": [
+      [
+        0,
+        1,
+        2,
+        3
+      ]
+    ],
+    "fixed_nodes": [
+      false,
+      false,
+      false,
+      true
+    ],
+    "density_kg_m3": 1000.0,
+    "mu_pa": 3846.15380859375,
+    "lambda_pa": 5769.23095703125,
+    "damping": 0.0,
+    "particle_radius_m": 0.001,
+    "probe_nodes": [
+      3
+    ],
+    "surface_nodes": [
+      0,
+      1,
+      2
+    ],
+    "soft_response_definition": "Initial minus current Euclidean distance from fixed apex probe to bottom-surface centroid; invariant under rigid translation and rotation",
+    "closure_definition": "Approach-axis rigid reference displacement relative to fixed soft probe, with zero at first sustained contact onset"
+  },
+  "contact": {
+    "stiffness_n_m3": 10000000.0,
+    "soft_contact_gap_m": 0.002,
+    "shape_margin_m": 0.0,
+    "quadrature": "P1Q3"
+  },
+  "drive": {
+    "kind": "external frozen joint force: kp*(q_target-q)+kd*(qd_target-qd)",
+    "kp_n_m": 2000.0,
+    "kd_n_s_m": 30.0,
+    "free_end_s": 0.2,
+    "loading_end_s": 0.7,
+    "free_target_m": 0.003,
+    "loading_target_m": 0.012,
+    "trajectory": "quintic position and analytic velocity, followed by constant settle target"
+  },
+  "acceptance": {
+    "minimum_substeps": 1000,
+    "minimum_converged_ratio": 0.99,
+    "maximum_consecutive_non_success": 2,
+    "min_det_f": 0.2,
+    "penetration_acceptance_limit_m": 0.001,
+    "delta_soft_min_m": 0.005,
+    "free_space_completion_minimum": 0.95,
+    "force_floor_n": 1.2695789400826758e-05,
+    "onset_consecutive_substeps": 3,
+    "force_balance_relative_tolerance": 0.0001,
+    "linear_tolerance": 0.0001,
+    "closure_secant_interval_m": [
+      0.001,
+      0.005
+    ],
+    "settled_window_substeps": 100,
+    "note": "Numerical gates and calibration/support/reference status are independent. V0.1 exit requires the numerical, calibration, and support gates; the SuperDex reference axis remains reported but is deferred until after V0.2."
+  },
+  "internal_envelope_sha256": "c593f84cf63f29a51032961fc1f6157c324ff0928596208dcb006b9d2c996ee4"
+}

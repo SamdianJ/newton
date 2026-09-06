@@ -1,0 +1,2861 @@
+{
+  "schema_version": "internal_normal_envelope/v1",
+  "status": "FROZEN",
+  "physics_sha256": "7e88040915b17aab8ef1f98a10c498e546946f66190eebf8364833768d5a6c7a",
+  "calibration_provenance": {
+    "version": "monolithic_calibration_frozen/v1",
+    "sha256": "fae955077f9a59380f6d38b4b1ea6cbc6574c2615f57f91dac35f21aa6265b6f"
+  },
+  "support_provenance": {
+    "version": "p1q3-resolved-local-v2/schema-v3",
+    "sha256": "53000e3c374475902244a76c24c0f3d82561836ac9fb34c9045c92b34894dfe2"
+  },
+  "method": "float64 homogeneous Kim Pxx=Pyy=0; -A0*Pzz/3=A0*kn*penetration; q_target=q+force/kp",
+  "budget_policy": {
+    "relative_spatial": 0.05,
+    "closure_sampling_m": 6.750000000000001e-05,
+    "quintic_max_velocity_m_s": 0.03375000000000001,
+    "quintic_max_acceleration_m_s2": 0.2078460969082654,
+    "total_mass_kg": 0.109,
+    "inertial_force_n": 0.02265522456300093,
+    "maximum_static_slope_n_m": 157.31431499587174,
+    "force_absolute_n": 0.033286636614623104,
+    "provenance": "C4 plane 5 percent plus 2 dt*vmax axis uncertainty plus total_mass*amax; no dynamic trajectory fit"
+  },
+  "metrics": {
+    "contact_onset_relative_m": [
+      -0.0310675,
+      -0.030932499999999998
+    ],
+    "secant_stiffness_n_m": [
+      92.10496285401058,
+      136.83878695929917
+    ],
+    "peak_force_n": [
+      0.8260795806392801,
+      0.9831124556847267
+    ],
+    "settled_force_n": [
+      0.8260795806392801,
+      0.9831124556847267
+    ],
+    "curve_work_j": [
+      0.0027225739143760296,
+      0.0036666297888853453
+    ]
+  },
+  "static_endpoint_closure_m": 0.0075477019909189974,
+  "static_curve": [
+    {
+      "closure_m": 0.0,
+      "force_n": 0.0,
+      "lateral_stretch": 1.0,
+      "axial_stretch": 1.0,
+      "penetration_m": 0.0
+    },
+    {
+      "closure_m": 2.2750129892808275e-05,
+      "force_n": 0.002251169035266812,
+      "lateral_stretch": 1.0002250308920806,
+      "axial_stretch": 0.99925,
+      "penetration_m": 2.501298928074235e-07
+    },
+    {
+      "closure_m": 4.5500519920798385e-05,
+      "force_n": 0.004504679287200123,
+      "lateral_stretch": 1.0004501233630965,
+      "axial_stretch": 0.9985,
+      "penetration_m": 5.005199208000137e-07
+    },
+    {
+      "closure_m": 6.82511706046681e-05,
+      "force_n": 0.006760535442019762,
+      "lateral_stretch": 1.0006752771151062,
+      "axial_stretch": 0.99775,
+      "penetration_m": 7.511706046688624e-07
+    },
+    {
+      "closure_m": 9.100208246607868e-05,
+      "force_n": 0.009018742194707392,
+      "lateral_stretch": 1.00090049184812,
+      "axial_stretch": 0.997,
+      "penetration_m": 1.0020824660785992e-06
+    },
+    {
+      "closure_m": 0.0001137532560276682,
+      "force_n": 0.011279304249005494,
+      "lateral_stretch": 1.0011257672600882,
+      "axial_stretch": 0.99625,
+      "penetration_m": 1.253256027667277e-06
+    },
+    {
+      "closure_m": 0.00013650469181304475,
+      "force_n": 0.013542226317416587,
+      "lateral_stretch": 1.0013511030468898,
+      "axial_stretch": 0.9955,
+      "penetration_m": 1.5046918130462874e-06
+    },
+    {
+      "closure_m": 0.00015925639034679968,
+      "force_n": 0.015807513121203494,
+      "lateral_stretch": 1.0015764989023188,
+      "axial_stretch": 0.99475,
+      "penetration_m": 1.7563903468003883e-06
+    },
+    {
+      "closure_m": 0.00018200835215448753,
+      "force_n": 0.018075169390386517,
+      "lateral_stretch": 1.0018019545180743,
+      "axial_stretch": 0.994,
+      "penetration_m": 2.008352154487391e-06
+    },
+    {
+      "closure_m": 0.00020476057776263899,
+      "force_n": 0.020345199863741906,
+      "lateral_stretch": 1.0020274695837452,
+      "axial_stretch": 0.99325,
+      "penetration_m": 2.2605777626379895e-06
+    },
+    {
+      "closure_m": 0.0002275130676987544,
+      "force_n": 0.02261760928880262,
+      "lateral_stretch": 1.0022530437868014,
+      "axial_stretch": 0.9925,
+      "penetration_m": 2.513067698755847e-06
+    },
+    {
+      "closure_m": 0.00025026582249131654,
+      "force_n": 0.02489240242185424,
+      "lateral_stretch": 1.002478676812578,
+      "axial_stretch": 0.99175,
+      "penetration_m": 2.765822491317138e-06
+    },
+    {
+      "closure_m": 0.0002730188426697706,
+      "force_n": 0.027169584027933413,
+      "lateral_stretch": 1.0027043683442656,
+      "axial_stretch": 0.991,
+      "penetration_m": 3.0188426697703793e-06
+    },
+    {
+      "closure_m": 0.00029577212876453725,
+      "force_n": 0.02944915888082556,
+      "lateral_stretch": 1.0029301180628953,
+      "axial_stretch": 0.99025,
+      "penetration_m": 3.2721287645361737e-06
+    },
+    {
+      "closure_m": 0.00031852568130700555,
+      "force_n": 0.031731131763062574,
+      "lateral_stretch": 1.0031559256473284,
+      "axial_stretch": 0.9895,
+      "penetration_m": 3.5256813070069525e-06
+    },
+    {
+      "closure_m": 0.00034127950082954623,
+      "force_n": 0.034015507465920754,
+      "lateral_stretch": 1.0033817907742422,
+      "axial_stretch": 0.98875,
+      "penetration_m": 3.7795008295467504e-06
+    },
+    {
+      "closure_m": 0.0003640335878654909,
+      "force_n": 0.036302290789415444,
+      "lateral_stretch": 1.0036077131181165,
+      "axial_stretch": 0.988,
+      "penetration_m": 4.033587865490605e-06
+    },
+    {
+      "closure_m": 0.0003867879429491456,
+      "force_n": 0.038591486542299984,
+      "lateral_stretch": 1.0038336923512234,
+      "axial_stretch": 0.98725,
+      "penetration_m": 4.287942949144443e-06
+    },
+    {
+      "closure_m": 0.00040954256661578325,
+      "force_n": 0.04088309954206139,
+      "lateral_stretch": 1.0040597281436112,
+      "axial_stretch": 0.9865,
+      "penetration_m": 4.542566615784599e-06
+    },
+    {
+      "closure_m": 0.000432297459401657,
+      "force_n": 0.04317713461491698,
+      "lateral_stretch": 1.0042858201630938,
+      "axial_stretch": 0.98575,
+      "penetration_m": 4.797459401657442e-06
+    },
+    {
+      "closure_m": 0.0004550526218439792,
+      "force_n": 0.045473596595809275,
+      "lateral_stretch": 1.004511968075236,
+      "axial_stretch": 0.985,
+      "penetration_m": 5.052621843978809e-06
+    },
+    {
+      "closure_m": 0.0004778080544809349,
+      "force_n": 0.04777249032840294,
+      "lateral_stretch": 1.004738171543341,
+      "axial_stretch": 0.98425,
+      "penetration_m": 5.30805448093366e-06
+    },
+    {
+      "closure_m": 0.0005005637578516743,
+      "force_n": 0.05007382066507911,
+      "lateral_stretch": 1.004964430228437,
+      "axial_stretch": 0.9835,
+      "penetration_m": 5.563757851675457e-06
+    },
+    {
+      "closure_m": 0.0005233197324963255,
+      "force_n": 0.05237759246693235,
+      "lateral_stretch": 1.005190743789264,
+      "axial_stretch": 0.98275,
+      "penetration_m": 5.819732496325817e-06
+    },
+    {
+      "closure_m": 0.0005460759789559742,
+      "force_n": 0.054683810603763185,
+      "lateral_stretch": 1.0054171118822595,
+      "axial_stretch": 0.982,
+      "penetration_m": 6.075978955973687e-06
+    },
+    {
+      "closure_m": 0.0005688324977726763,
+      "force_n": 0.05699247995407508,
+      "lateral_stretch": 1.0056435341615464,
+      "axial_stretch": 0.98125,
+      "penetration_m": 6.332497772675009e-06
+    },
+    {
+      "closure_m": 0.0005915892894894506,
+      "force_n": 0.05930360540506645,
+      "lateral_stretch": 1.0058700102789175,
+      "axial_stretch": 0.9805,
+      "penetration_m": 6.589289489451828e-06
+    },
+    {
+      "closure_m": 0.0006143463546502915,
+      "force_n": 0.061617191852627096,
+      "lateral_stretch": 1.0060965398838237,
+      "axial_stretch": 0.97975,
+      "penetration_m": 6.846354650291899e-06
+    },
+    {
+      "closure_m": 0.0006371036938001486,
+      "force_n": 0.06393324420133205,
+      "lateral_stretch": 1.0063231226233593,
+      "axial_stretch": 0.979,
+      "penetration_m": 7.103693800148005e-06
+    },
+    {
+      "closure_m": 0.0006598613074849382,
+      "force_n": 0.06625176736443157,
+      "lateral_stretch": 1.0065497581422473,
+      "axial_stretch": 0.97825,
+      "penetration_m": 7.361307484936841e-06
+    },
+    {
+      "closure_m": 0.0006826191962515377,
+      "force_n": 0.06857276626384837,
+      "lateral_stretch": 1.0067764460828268,
+      "axial_stretch": 0.9775,
+      "penetration_m": 7.619196251538708e-06
+    },
+    {
+      "closure_m": 0.0007053773606477964,
+      "force_n": 0.07089624583017011,
+      "lateral_stretch": 1.0070031860850386,
+      "axial_stretch": 0.97675,
+      "penetration_m": 7.877360647796679e-06
+    },
+    {
+      "closure_m": 0.0007281358012225162,
+      "force_n": 0.07322221100263976,
+      "lateral_stretch": 1.00722997778641,
+      "axial_stretch": 0.976,
+      "penetration_m": 8.135801222515528e-06
+    },
+    {
+      "closure_m": 0.0007508945185254626,
+      "force_n": 0.0755506667291496,
+      "lateral_stretch": 1.0074568208220422,
+      "axial_stretch": 0.97525,
+      "penetration_m": 8.394518525461066e-06
+    },
+    {
+      "closure_m": 0.0007736535131073583,
+      "force_n": 0.07788161796623388,
+      "lateral_stretch": 1.0076837148245945,
+      "axial_stretch": 0.9745,
+      "penetration_m": 8.65351310735932e-06
+    },
+    {
+      "closure_m": 0.0007964127855198953,
+      "force_n": 0.08021506967905954,
+      "lateral_stretch": 1.0079106594242708,
+      "axial_stretch": 0.97375,
+      "penetration_m": 8.912785519895505e-06
+    },
+    {
+      "closure_m": 0.0008191723363157137,
+      "force_n": 0.08255102684141753,
+      "lateral_stretch": 1.0081376542488047,
+      "axial_stretch": 0.973,
+      "penetration_m": 9.17233631571306e-06
+    },
+    {
+      "closure_m": 0.0008419321660484144,
+      "force_n": 0.08488949443571563,
+      "lateral_stretch": 1.0083646989234447,
+      "axial_stretch": 0.97225,
+      "penetration_m": 9.432166048412847e-06
+    },
+    {
+      "closure_m": 0.000864692275272551,
+      "force_n": 0.08723047745296715,
+      "lateral_stretch": 1.0085917930709403,
+      "axial_stretch": 0.9715,
+      "penetration_m": 9.692275272551906e-06
+    },
+    {
+      "closure_m": 0.0008874526645436425,
+      "force_n": 0.08957398089278328,
+      "lateral_stretch": 1.0088189363115259,
+      "axial_stretch": 0.97075,
+      "penetration_m": 9.952664543642587e-06
+    },
+    {
+      "closure_m": 0.0009102133344181521,
+      "force_n": 0.09192000976336256,
+      "lateral_stretch": 1.009046128262907,
+      "axial_stretch": 0.97,
+      "penetration_m": 1.0213334418151396e-05
+    },
+    {
+      "closure_m": 0.0009329742854534995,
+      "force_n": 0.0942685690814807,
+      "lateral_stretch": 1.0092733685402453,
+      "axial_stretch": 0.96925,
+      "penetration_m": 1.0474285453497855e-05
+    },
+    {
+      "closure_m": 0.0009557355182080524,
+      "force_n": 0.0966196638724799,
+      "lateral_stretch": 1.0095006567561424,
+      "axial_stretch": 0.9685,
+      "penetration_m": 1.0735518208053323e-05
+    },
+    {
+      "closure_m": 0.00097849703324114,
+      "force_n": 0.09897329917025988,
+      "lateral_stretch": 1.009727992520626,
+      "axial_stretch": 0.96775,
+      "penetration_m": 1.0997033241139985e-05
+    },
+    {
+      "closure_m": 0.0010012588311130303,
+      "force_n": 0.10132948001726486,
+      "lateral_stretch": 1.0099553754411335,
+      "axial_stretch": 0.967,
+      "penetration_m": 1.1258831113029428e-05
+    },
+    {
+      "closure_m": 0.0010240209123849398,
+      "force_n": 0.10368821146447145,
+      "lateral_stretch": 1.0101828051224975,
+      "axial_stretch": 0.96625,
+      "penetration_m": 1.1520912384941271e-05
+    },
+    {
+      "closure_m": 0.0010467832776190416,
+      "force_n": 0.1060494985713809,
+      "lateral_stretch": 1.01041028116693,
+      "axial_stretch": 0.9655,
+      "penetration_m": 1.1783277619042323e-05
+    },
+    {
+      "closure_m": 0.0010695459273784447,
+      "force_n": 0.10841334640600264,
+      "lateral_stretch": 1.0106378031740066,
+      "axial_stretch": 0.96475,
+      "penetration_m": 1.2045927378444737e-05
+    },
+    {
+      "closure_m": 0.0010923088622272056,
+      "force_n": 0.11077976004484327,
+      "lateral_stretch": 1.0108653707406512,
+      "axial_stretch": 0.964,
+      "penetration_m": 1.2308862227204809e-05
+    },
+    {
+      "closure_m": 0.0011150720827303234,
+      "force_n": 0.11314874457289567,
+      "lateral_stretch": 1.01109298346112,
+      "axial_stretch": 0.9632499999999999,
+      "penetration_m": 1.2572082730321741e-05
+    },
+    {
+      "closure_m": 0.0011378355894537352,
+      "force_n": 0.11552030508362301,
+      "lateral_stretch": 1.0113206409269857,
+      "axial_stretch": 0.9625,
+      "penetration_m": 1.2835589453735891e-05
+    },
+    {
+      "closure_m": 0.0011605993829643276,
+      "force_n": 0.11789444667894695,
+      "lateral_stretch": 1.0115483427271212,
+      "axial_stretch": 0.96175,
+      "penetration_m": 1.309938296432744e-05
+    },
+    {
+      "closure_m": 0.0011833634638299157,
+      "force_n": 0.12027117446923329,
+      "lateral_stretch": 1.0117760884476845,
+      "axial_stretch": 0.961,
+      "penetration_m": 1.336346382991481e-05
+    },
+    {
+      "closure_m": 0.0012061278326192515,
+      "force_n": 0.12265049357327722,
+      "lateral_stretch": 1.0120038776721012,
+      "axial_stretch": 0.96025,
+      "penetration_m": 1.3627832619253024e-05
+    },
+    {
+      "closure_m": 0.0012288924899020316,
+      "force_n": 0.12503240911829147,
+      "lateral_stretch": 1.0122317099810496,
+      "axial_stretch": 0.9595,
+      "penetration_m": 1.3892489902032385e-05
+    },
+    {
+      "closure_m": 0.0012516574362488766,
+      "force_n": 0.1274169262398865,
+      "lateral_stretch": 1.0124595849524431,
+      "axial_stretch": 0.95875,
+      "penetration_m": 1.4157436248876279e-05
+    },
+    {
+      "closure_m": 0.001274422672231341,
+      "force_n": 0.12980405008205853,
+      "lateral_stretch": 1.0126875021614143,
+      "axial_stretch": 0.958,
+      "penetration_m": 1.4422672231339836e-05
+    },
+    {
+      "closure_m": 0.00129718819842191,
+      "force_n": 0.13219378579717322,
+      "lateral_stretch": 1.012915461180298,
+      "axial_stretch": 0.9572499999999999,
+      "penetration_m": 1.4688198421908137e-05
+    },
+    {
+      "closure_m": 0.001319954015393994,
+      "force_n": 0.13458613854594967,
+      "lateral_stretch": 1.0131434615786157,
+      "axial_stretch": 0.9565,
+      "penetration_m": 1.4954015393994408e-05
+    },
+    {
+      "closure_m": 0.0013427201237219384,
+      "force_n": 0.13698111349744355,
+      "lateral_stretch": 1.0133715029230568,
+      "axial_stretch": 0.95575,
+      "penetration_m": 1.5220123721938171e-05
+    },
+    {
+      "closure_m": 0.0013654865239810044,
+      "force_n": 0.1393787158290293,
+      "lateral_stretch": 1.0135995847774637,
+      "axial_stretch": 0.955,
+      "penetration_m": 1.5486523981003257e-05
+    },
+    {
+      "closure_m": 0.0013882532167473747,
+      "force_n": 0.14177895072638333,
+      "lateral_stretch": 1.0138277067028132,
+      "axial_stretch": 0.95425,
+      "penetration_m": 1.5753216747375927e-05
+    },
+    {
+      "closure_m": 0.0014110202025981627,
+      "force_n": 0.144181823383469,
+      "lateral_stretch": 1.0140558682572005,
+      "axial_stretch": 0.9535,
+      "penetration_m": 1.602020259816322e-05
+    },
+    {
+      "closure_m": 0.0014337874821113907,
+      "force_n": 0.14658733900251375,
+      "lateral_stretch": 1.0142840689958212,
+      "axial_stretch": 0.95275,
+      "penetration_m": 1.6287482111390416e-05
+    },
+    {
+      "closure_m": 0.0014565550558660004,
+      "force_n": 0.14899550279399346,
+      "lateral_stretch": 1.0145123084709542,
+      "axial_stretch": 0.952,
+      "penetration_m": 1.6555055865999272e-05
+    },
+    {
+      "closure_m": 0.0014793229244418444,
+      "force_n": 0.1514063199766119,
+      "lateral_stretch": 1.0147405862319439,
+      "axial_stretch": 0.95125,
+      "penetration_m": 1.6822924441845765e-05
+    },
+    {
+      "closure_m": 0.0015020910884196979,
+      "force_n": 0.15381979577728397,
+      "lateral_stretch": 1.0149689018251835,
+      "axial_stretch": 0.9505,
+      "penetration_m": 1.709108841969822e-05
+    },
+    {
+      "closure_m": 0.0015248595483812353,
+      "force_n": 0.156235935431114,
+      "lateral_stretch": 1.0151972547940968,
+      "axial_stretch": 0.94975,
+      "penetration_m": 1.735954838123489e-05
+    },
+    {
+      "closure_m": 0.0015476283049090428,
+      "force_n": 0.15865474418137387,
+      "lateral_stretch": 1.0154256446791199,
+      "axial_stretch": 0.949,
+      "penetration_m": 1.7628304909041542e-05
+    },
+    {
+      "closure_m": 0.0015703973585866082,
+      "force_n": 0.16107622727948423,
+      "lateral_stretch": 1.0156540710176836,
+      "axial_stretch": 0.94825,
+      "penetration_m": 1.789735858660936e-05
+    },
+    {
+      "closure_m": 0.0015931667099983323,
+      "force_n": 0.16350038998499475,
+      "lateral_stretch": 1.015882533344196,
+      "axial_stretch": 0.9475,
+      "penetration_m": 1.816670999833275e-05
+    },
+    {
+      "closure_m": 0.0016159363597295074,
+      "force_n": 0.16592723756555977,
+      "lateral_stretch": 1.0161110311900234,
+      "axial_stretch": 0.94675,
+      "penetration_m": 1.843635972950664e-05
+    },
+    {
+      "closure_m": 0.0016387063083663255,
+      "force_n": 0.16835677529691706,
+      "lateral_stretch": 1.0163395640834723,
+      "axial_stretch": 0.946,
+      "penetration_m": 1.8706308366324117e-05
+    },
+    {
+      "closure_m": 0.0016614765564958729,
+      "force_n": 0.1707890084628644,
+      "lateral_stretch": 1.0165681315497712,
+      "axial_stretch": 0.94525,
+      "penetration_m": 1.8976556495873823e-05
+    },
+    {
+      "closure_m": 0.0016842471047061377,
+      "force_n": 0.17322394235524108,
+      "lateral_stretch": 1.0167967331110523,
+      "axial_stretch": 0.9445,
+      "penetration_m": 1.92471047061379e-05
+    },
+    {
+      "closure_m": 0.0017070179535859892,
+      "force_n": 0.17566158227389767,
+      "lateral_stretch": 1.0170253682863324,
+      "axial_stretch": 0.94375,
+      "penetration_m": 1.9517953585988628e-05
+    },
+    {
+      "closure_m": 0.0017297891037251877,
+      "force_n": 0.17810193352667678,
+      "lateral_stretch": 1.0172540365914937,
+      "axial_stretch": 0.943,
+      "penetration_m": 1.9789103725186307e-05
+    },
+    {
+      "closure_m": 0.0017525605557143754,
+      "force_n": 0.1805450014293863,
+      "lateral_stretch": 1.0174827375392663,
+      "axial_stretch": 0.94225,
+      "penetration_m": 2.0060555714376254e-05
+    },
+    {
+      "closure_m": 0.0017753323101450862,
+      "force_n": 0.18299079130577728,
+      "lateral_stretch": 1.0177114706392079,
+      "axial_stretch": 0.9415,
+      "penetration_m": 2.0332310145086365e-05
+    },
+    {
+      "closure_m": 0.0017981043676097246,
+      "force_n": 0.18543930848751528,
+      "lateral_stretch": 1.0179402353976852,
+      "axial_stretch": 0.94075,
+      "penetration_m": 2.060436760972392e-05
+    },
+    {
+      "closure_m": 0.0018208767287015743,
+      "force_n": 0.18789055831415535,
+      "lateral_stretch": 1.0181690313178546,
+      "axial_stretch": 0.94,
+      "penetration_m": 2.0876728701572816e-05
+    },
+    {
+      "closure_m": 0.00184364939401479,
+      "force_n": 0.19034454613311808,
+      "lateral_stretch": 1.018397857899643,
+      "axial_stretch": 0.93925,
+      "penetration_m": 2.1149394014790898e-05
+    },
+    {
+      "closure_m": 0.0018664223641444064,
+      "force_n": 0.19280127729965887,
+      "lateral_stretch": 1.0186267146397283,
+      "axial_stretch": 0.9385,
+      "penetration_m": 2.1422364144406542e-05
+    },
+    {
+      "closure_m": 0.0018891956396863167,
+      "force_n": 0.19526075717684344,
+      "lateral_stretch": 1.0188556010315186,
+      "axial_stretch": 0.93775,
+      "penetration_m": 2.1695639686315936e-05
+    },
+    {
+      "closure_m": 0.0019119692212372814,
+      "force_n": 0.19772299113551856,
+      "lateral_stretch": 1.0190845165651343,
+      "axial_stretch": 0.9369999999999999,
+      "penetration_m": 2.1969221237279838e-05
+    },
+    {
+      "closure_m": 0.0019347431093949194,
+      "force_n": 0.2001879845542829,
+      "lateral_stretch": 1.019313460727387,
+      "axial_stretch": 0.93625,
+      "penetration_m": 2.2243109394920325e-05
+    },
+    {
+      "closure_m": 0.001957517304757718,
+      "force_n": 0.20265574281946114,
+      "lateral_stretch": 1.0195424330017597,
+      "axial_stretch": 0.9355,
+      "penetration_m": 2.2517304757717903e-05
+    },
+    {
+      "closure_m": 0.001980291807925009,
+      "force_n": 0.2051262713250704,
+      "lateral_stretch": 1.019771432868387,
+      "axial_stretch": 0.93475,
+      "penetration_m": 2.2791807925007822e-05
+    },
+    {
+      "closure_m": 0.002003066619496979,
+      "force_n": 0.20759957547279329,
+      "lateral_stretch": 1.020000459804034,
+      "axial_stretch": 0.9339999999999999,
+      "penetration_m": 2.306661949697703e-05
+    },
+    {
+      "closure_m": 0.0020258417400746596,
+      "force_n": 0.21007566067194416,
+      "lateral_stretch": 1.020229513282077,
+      "axial_stretch": 0.93325,
+      "penetration_m": 2.3341740074660462e-05
+    },
+    {
+      "closure_m": 0.002048617170259938,
+      "force_n": 0.21255453233944194,
+      "lateral_stretch": 1.0204585927724814,
+      "axial_stretch": 0.9325,
+      "penetration_m": 2.3617170259937992e-05
+    },
+    {
+      "closure_m": 0.0020713929106555315,
+      "force_n": 0.21503619589977552,
+      "lateral_stretch": 1.0206876977417834,
+      "axial_stretch": 0.93175,
+      "penetration_m": 2.3892910655530613e-05
+    },
+    {
+      "closure_m": 0.002094168961864995,
+      "force_n": 0.21752065678497107,
+      "lateral_stretch": 1.020916827653066,
+      "axial_stretch": 0.931,
+      "penetration_m": 2.4168961864996787e-05
+    },
+    {
+      "closure_m": 0.0021169453244927285,
+      "force_n": 0.22000792043456247,
+      "lateral_stretch": 1.0211459819659414,
+      "axial_stretch": 0.93025,
+      "penetration_m": 2.4445324492729162e-05
+    },
+    {
+      "closure_m": 0.0021397219991439505,
+      "force_n": 0.2224979922955537,
+      "lateral_stretch": 1.0213751601365268,
+      "axial_stretch": 0.9295,
+      "penetration_m": 2.4721999143950412e-05
+    },
+    {
+      "closure_m": 0.0021624989864247107,
+      "force_n": 0.22499087782238827,
+      "lateral_stretch": 1.0216043616174257,
+      "axial_stretch": 0.92875,
+      "penetration_m": 2.4998986424709808e-05
+    },
+    {
+      "closure_m": 0.0021852762869418807,
+      "force_n": 0.2274865824769117,
+      "lateral_stretch": 1.0218335858577046,
+      "axial_stretch": 0.9279999999999999,
+      "penetration_m": 2.5276286941879078e-05
+    },
+    {
+      "closure_m": 0.002208053901303148,
+      "force_n": 0.2299851117283381,
+      "lateral_stretch": 1.0220628323028724,
+      "axial_stretch": 0.92725,
+      "penetration_m": 2.555390130314868e-05
+    },
+    {
+      "closure_m": 0.002230831830117024,
+      "force_n": 0.23248647105321515,
+      "lateral_stretch": 1.022292100394859,
+      "axial_stretch": 0.9265,
+      "penetration_m": 2.5831830117023905e-05
+    },
+    {
+      "closure_m": 0.002253610073992822,
+      "force_n": 0.234990665935385,
+      "lateral_stretch": 1.022521389571993,
+      "axial_stretch": 0.92575,
+      "penetration_m": 2.6110073992820557e-05
+    },
+    {
+      "closure_m": 0.0022763886335406595,
+      "force_n": 0.23749770186594962,
+      "lateral_stretch": 1.0227506992689792,
+      "axial_stretch": 0.925,
+      "penetration_m": 2.638863354066107e-05
+    },
+    {
+      "closure_m": 0.0022991675093714694,
+      "force_n": 0.24000758434323158,
+      "lateral_stretch": 1.022980028916878,
+      "axial_stretch": 0.92425,
+      "penetration_m": 2.6667509371470175e-05
+    },
+    {
+      "closure_m": 0.002321946702096971,
+      "force_n": 0.24252031887273673,
+      "lateral_stretch": 1.0232093779430815,
+      "axial_stretch": 0.9235,
+      "penetration_m": 2.6946702096970747e-05
+    },
+    {
+      "closure_m": 0.0023447262123296804,
+      "force_n": 0.2450359109671143,
+      "lateral_stretch": 1.0234387457712923,
+      "axial_stretch": 0.92275,
+      "penetration_m": 2.722621232967937e-05
+    },
+    {
+      "closure_m": 0.002367506040682904,
+      "force_n": 0.24755436614611864,
+      "lateral_stretch": 1.0236681318215004,
+      "axial_stretch": 0.9219999999999999,
+      "penetration_m": 2.7506040682902072e-05
+    },
+    {
+      "closure_m": 0.0023902861877707292,
+      "force_n": 0.2500756899365671,
+      "lateral_stretch": 1.0238975355099604,
+      "axial_stretch": 0.92125,
+      "penetration_m": 2.7786187770729678e-05
+    },
+    {
+      "closure_m": 0.002413066654208034,
+      "force_n": 0.25259988787230236,
+      "lateral_stretch": 1.0241269562491693,
+      "axial_stretch": 0.9205,
+      "penetration_m": 2.8066654208033597e-05
+    },
+    {
+      "closure_m": 0.002435847440610462,
+      "force_n": 0.2551269654941463,
+      "lateral_stretch": 1.0243563934478426,
+      "axial_stretch": 0.91975,
+      "penetration_m": 2.8347440610460702e-05
+    },
+    {
+      "closure_m": 0.0024586285475944277,
+      "force_n": 0.25765692834986115,
+      "lateral_stretch": 1.0245858465108917,
+      "axial_stretch": 0.919,
+      "penetration_m": 2.8628547594429017e-05
+    },
+    {
+      "closure_m": 0.0024814099757771223,
+      "force_n": 0.2601897819941074,
+      "lateral_stretch": 1.024815314839401,
+      "axial_stretch": 0.91825,
+      "penetration_m": 2.8909975777123047e-05
+    },
+    {
+      "closure_m": 0.002504191725776489,
+      "force_n": 0.2627255319883955,
+      "lateral_stretch": 1.025044797830603,
+      "axial_stretch": 0.9175,
+      "penetration_m": 2.9191725776488386e-05
+    },
+    {
+      "closure_m": 0.002526973798211229,
+      "force_n": 0.26526418390104667,
+      "lateral_stretch": 1.0252742948778562,
+      "axial_stretch": 0.91675,
+      "penetration_m": 2.9473798211227408e-05
+    },
+    {
+      "closure_m": 0.002549756193700796,
+      "force_n": 0.2678057433071449,
+      "lateral_stretch": 1.0255038053706207,
+      "axial_stretch": 0.9159999999999999,
+      "penetration_m": 2.9756193700793877e-05
+    },
+    {
+      "closure_m": 0.0025725389128653875,
+      "force_n": 0.270350215788492,
+      "lateral_stretch": 1.0257333286944341,
+      "axial_stretch": 0.91525,
+      "penetration_m": 3.0038912865388e-05
+    },
+    {
+      "closure_m": 0.002595321956325952,
+      "force_n": 0.27289760693356246,
+      "lateral_stretch": 1.0259628642308876,
+      "axial_stretch": 0.9145,
+      "penetration_m": 3.0321956325951385e-05
+    },
+    {
+      "closure_m": 0.0026181053247041628,
+      "force_n": 0.2754479223374535,
+      "lateral_stretch": 1.0261924113576013,
+      "axial_stretch": 0.91375,
+      "penetration_m": 3.0605324704161503e-05
+    },
+    {
+      "closure_m": 0.0026408890186224256,
+      "force_n": 0.27800116760184,
+      "lateral_stretch": 1.026421969448201,
+      "axial_stretch": 0.913,
+      "penetration_m": 3.088901862242667e-05
+    },
+    {
+      "closure_m": 0.0026636730387038805,
+      "force_n": 0.2805573483349245,
+      "lateral_stretch": 1.0266515378722922,
+      "axial_stretch": 0.91225,
+      "penetration_m": 3.11730387038805e-05
+    },
+    {
+      "closure_m": 0.002686457385572377,
+      "force_n": 0.2831164701513884,
+      "lateral_stretch": 1.026881115995436,
+      "axial_stretch": 0.9115,
+      "penetration_m": 3.145738557237649e-05
+    },
+    {
+      "closure_m": 0.002709242059852484,
+      "force_n": 0.28567853867234005,
+      "lateral_stretch": 1.027110703179124,
+      "axial_stretch": 0.91075,
+      "penetration_m": 3.1742059852482225e-05
+    },
+    {
+      "closure_m": 0.002732027062169473,
+      "force_n": 0.288243559525267,
+      "lateral_stretch": 1.0273402987807536,
+      "axial_stretch": 0.91,
+      "penetration_m": 3.202706216947411e-05
+    },
+    {
+      "closure_m": 0.002754812393149331,
+      "force_n": 0.2908115383439826,
+      "lateral_stretch": 1.0275699021536022,
+      "axial_stretch": 0.90925,
+      "penetration_m": 3.23123931493314e-05
+    },
+    {
+      "closure_m": 0.002777598053418731,
+      "force_n": 0.29338248076857254,
+      "lateral_stretch": 1.027799512646802,
+      "axial_stretch": 0.9085,
+      "penetration_m": 3.2598053418730284e-05
+    },
+    {
+      "closure_m": 0.00280038404360504,
+      "force_n": 0.2959563924453437,
+      "lateral_stretch": 1.0280291296053143,
+      "axial_stretch": 0.90775,
+      "penetration_m": 3.288404360503819e-05
+    },
+    {
+      "closure_m": 0.0028231703643363066,
+      "force_n": 0.2985332790267683,
+      "lateral_stretch": 1.0282587523699045,
+      "axial_stretch": 0.907,
+      "penetration_m": 3.3170364336307586e-05
+    },
+    {
+      "closure_m": 0.00284595701624127,
+      "force_n": 0.30111314617143115,
+      "lateral_stretch": 1.028488380277114,
+      "axial_stretch": 0.90625,
+      "penetration_m": 3.345701624127013e-05
+    },
+    {
+      "closure_m": 0.002868743999949331,
+      "force_n": 0.3036959995439718,
+      "lateral_stretch": 1.0287180126592372,
+      "axial_stretch": 0.9055,
+      "penetration_m": 3.37439999493302e-05
+    },
+    {
+      "closure_m": 0.0028915313160905605,
+      "force_n": 0.3062818448150304,
+      "lateral_stretch": 1.0289476488442928,
+      "axial_stretch": 0.9047499999999999,
+      "penetration_m": 3.403131609055893e-05
+    },
+    {
+      "closure_m": 0.0029143189652956866,
+      "force_n": 0.3088706876611869,
+      "lateral_stretch": 1.029177288155998,
+      "axial_stretch": 0.904,
+      "penetration_m": 3.431896529568744e-05
+    },
+    {
+      "closure_m": 0.002937106948196101,
+      "force_n": 0.31146253376490735,
+      "lateral_stretch": 1.0294069299137416,
+      "axial_stretch": 0.90325,
+      "penetration_m": 3.460694819610082e-05
+    },
+    {
+      "closure_m": 0.0029598952654238324,
+      "force_n": 0.3140573888144819,
+      "lateral_stretch": 1.029636573432558,
+      "axial_stretch": 0.9025,
+      "penetration_m": 3.489526542383132e-05
+    },
+    {
+      "closure_m": 0.0029826839176115534,
+      "force_n": 0.3166552585039652,
+      "lateral_stretch": 1.0298662180230997,
+      "axial_stretch": 0.9017499999999999,
+      "penetration_m": 3.518391761155169e-05
+    },
+    {
+      "closure_m": 0.0030054729053925677,
+      "force_n": 0.3192561485331162,
+      "lateral_stretch": 1.0300958629916095,
+      "axial_stretch": 0.901,
+      "penetration_m": 3.547290539256846e-05
+    },
+    {
+      "closure_m": 0.0030282622294008155,
+      "force_n": 0.3218600646073384,
+      "lateral_stretch": 1.0303255076398938,
+      "axial_stretch": 0.90025,
+      "penetration_m": 3.576222940081538e-05
+    },
+    {
+      "closure_m": 0.0030510518902708466,
+      "force_n": 0.3244670124376136,
+      "lateral_stretch": 1.030555151265295,
+      "axial_stretch": 0.8995,
+      "penetration_m": 3.605189027084596e-05
+    },
+    {
+      "closure_m": 0.0030738418886378286,
+      "force_n": 0.32707699774044163,
+      "lateral_stretch": 1.0307847931606635,
+      "axial_stretch": 0.8987499999999999,
+      "penetration_m": 3.634188863782685e-05
+    },
+    {
+      "closure_m": 0.00309663222513753,
+      "force_n": 0.3296900262377738,
+      "lateral_stretch": 1.0310144326143298,
+      "axial_stretch": 0.898,
+      "penetration_m": 3.663222513753042e-05
+    },
+    {
+      "closure_m": 0.0031194229004063282,
+      "force_n": 0.33230610365695057,
+      "lateral_stretch": 1.031244068910076,
+      "axial_stretch": 0.89725,
+      "penetration_m": 3.692290040632784e-05
+    },
+    {
+      "closure_m": 0.0031422139150811823,
+      "force_n": 0.33492523573063293,
+      "lateral_stretch": 1.0314737013271082,
+      "axial_stretch": 0.8965,
+      "penetration_m": 3.7213915081181434e-05
+    },
+    {
+      "closure_m": 0.003165005269799639,
+      "force_n": 0.33754742819673567,
+      "lateral_stretch": 1.0317033291400277,
+      "axial_stretch": 0.8957499999999999,
+      "penetration_m": 3.75052697996373e-05
+    },
+    {
+      "closure_m": 0.003187796965199817,
+      "force_n": 0.3401726867983602,
+      "lateral_stretch": 1.0319329516188016,
+      "axial_stretch": 0.895,
+      "penetration_m": 3.7796965199817805e-05
+    },
+    {
+      "closure_m": 0.0032105890019204146,
+      "force_n": 0.3428010172837263,
+      "lateral_stretch": 1.032162568028735,
+      "axial_stretch": 0.89425,
+      "penetration_m": 3.808900192041403e-05
+    },
+    {
+      "closure_m": 0.003233381380600679,
+      "force_n": 0.3454324254061009,
+      "lateral_stretch": 1.0323921776304412,
+      "axial_stretch": 0.8935,
+      "penetration_m": 3.838138060067788e-05
+    },
+    {
+      "closure_m": 0.003256174101880416,
+      "force_n": 0.34806691692372604,
+      "lateral_stretch": 1.032621779679812,
+      "axial_stretch": 0.8927499999999999,
+      "penetration_m": 3.8674101880414006e-05
+    },
+    {
+      "closure_m": 0.0032789671663999717,
+      "force_n": 0.3507044975997497,
+      "lateral_stretch": 1.032851373427989,
+      "axial_stretch": 0.892,
+      "penetration_m": 3.8967166399972185e-05
+    },
+    {
+      "closure_m": 0.0033017605748002395,
+      "force_n": 0.353345173202152,
+      "lateral_stretch": 1.033080958121333,
+      "axial_stretch": 0.89125,
+      "penetration_m": 3.926057480023911e-05
+    },
+    {
+      "closure_m": 0.003324554327722631,
+      "force_n": 0.35598894950367094,
+      "lateral_stretch": 1.0333105330013954,
+      "axial_stretch": 0.8905,
+      "penetration_m": 3.95543277226301e-05
+    },
+    {
+      "closure_m": 0.0033473484258090794,
+      "force_n": 0.3586358322817264,
+      "lateral_stretch": 1.033540097304887,
+      "axial_stretch": 0.88975,
+      "penetration_m": 3.984842580908071e-05
+    },
+    {
+      "closure_m": 0.0033701428697020383,
+      "force_n": 0.36128582731834735,
+      "lateral_stretch": 1.0337696502636469,
+      "axial_stretch": 0.889,
+      "penetration_m": 4.014286970203859e-05
+    },
+    {
+      "closure_m": 0.0033929376600444552,
+      "force_n": 0.36393894040009195,
+      "lateral_stretch": 1.033999191104614,
+      "axial_stretch": 0.88825,
+      "penetration_m": 4.043766004445466e-05
+    },
+    {
+      "closure_m": 0.0034157327974797757,
+      "force_n": 0.36659517731797064,
+      "lateral_stretch": 1.034228719049795,
+      "axial_stretch": 0.8875,
+      "penetration_m": 4.0732797479774514e-05
+    },
+    {
+      "closure_m": 0.0034385282826519315,
+      "force_n": 0.36925454386736684,
+      "lateral_stretch": 1.0344582333162327,
+      "axial_stretch": 0.8867499999999999,
+      "penetration_m": 4.102828265192965e-05
+    },
+    {
+      "closure_m": 0.003461324116205328,
+      "force_n": 0.37191704584795765,
+      "lateral_stretch": 1.0346877331159767,
+      "axial_stretch": 0.886,
+      "penetration_m": 4.132411620532863e-05
+    },
+    {
+      "closure_m": 0.0034841202987848483,
+      "force_n": 0.374582689063632,
+      "lateral_stretch": 1.0349172176560504,
+      "axial_stretch": 0.88525,
+      "penetration_m": 4.1620298784848e-05
+    },
+    {
+      "closure_m": 0.0035069168310358245,
+      "force_n": 0.3772514793224074,
+      "lateral_stretch": 1.03514668613842,
+      "axial_stretch": 0.8845,
+      "penetration_m": 4.191683103582304e-05
+    },
+    {
+      "closure_m": 0.0035297137136040377,
+      "force_n": 0.37992342243634847,
+      "lateral_stretch": 1.0353761377599622,
+      "axial_stretch": 0.88375,
+      "penetration_m": 4.221371360403872e-05
+    },
+    {
+      "closure_m": 0.0035525109471357197,
+      "force_n": 0.38259852422148116,
+      "lateral_stretch": 1.035605571712433,
+      "axial_stretch": 0.883,
+      "penetration_m": 4.251094713572013e-05
+    },
+    {
+      "closure_m": 0.0035753085322775234,
+      "force_n": 0.3852767904977077,
+      "lateral_stretch": 1.035834987182435,
+      "axial_stretch": 0.88225,
+      "penetration_m": 4.280853227752308e-05
+    },
+    {
+      "closure_m": 0.0035981064696765253,
+      "force_n": 0.3879582270887178,
+      "lateral_stretch": 1.0360643833513838,
+      "axial_stretch": 0.8815,
+      "penetration_m": 4.31064696765242e-05
+    },
+    {
+      "closure_m": 0.0036209047599802136,
+      "force_n": 0.39064283982190484,
+      "lateral_stretch": 1.0362937593954775,
+      "axial_stretch": 0.8807499999999999,
+      "penetration_m": 4.340475998021165e-05
+    },
+    {
+      "closure_m": 0.0036437034038364745,
+      "force_n": 0.3933306345282713,
+      "lateral_stretch": 1.0365231144856615,
+      "axial_stretch": 0.88,
+      "penetration_m": 4.370340383647459e-05
+    },
+    {
+      "closure_m": 0.0036665024018935947,
+      "force_n": 0.3960216170423437,
+      "lateral_stretch": 1.036752447787596,
+      "axial_stretch": 0.87925,
+      "penetration_m": 4.400240189359374e-05
+    },
+    {
+      "closure_m": 0.0036893017548002326,
+      "force_n": 0.3987157932020784,
+      "lateral_stretch": 1.0369817584616243,
+      "axial_stretch": 0.8785,
+      "penetration_m": 4.430175480023093e-05
+    },
+    {
+      "closure_m": 0.0037121014632054174,
+      "force_n": 0.4014131688487682,
+      "lateral_stretch": 1.0372110456627361,
+      "axial_stretch": 0.87775,
+      "penetration_m": 4.460146320541869e-05
+    },
+    {
+      "closure_m": 0.0037349015277585496,
+      "force_n": 0.4041137498269501,
+      "lateral_stretch": 1.037440308540536,
+      "axial_stretch": 0.877,
+      "penetration_m": 4.490152775855001e-05
+    },
+    {
+      "closure_m": 0.0037577019491093684,
+      "force_n": 0.4068175419843103,
+      "lateral_stretch": 1.0376695462392076,
+      "axial_stretch": 0.87625,
+      "penetration_m": 4.520194910936781e-05
+    },
+    {
+      "closure_m": 0.003780502727907955,
+      "force_n": 0.40952455117158515,
+      "lateral_stretch": 1.037898757897481,
+      "axial_stretch": 0.8755,
+      "penetration_m": 4.55027279079539e-05
+    },
+    {
+      "closure_m": 0.003803303864804721,
+      "force_n": 0.4122347832424677,
+      "lateral_stretch": 1.038127942648597,
+      "axial_stretch": 0.8747499999999999,
+      "penetration_m": 4.5803864804718636e-05
+    },
+    {
+      "closure_m": 0.0038261053604503894,
+      "force_n": 0.41494824405350406,
+      "lateral_stretch": 1.0383570996202716,
+      "axial_stretch": 0.874,
+      "penetration_m": 4.610536045038934e-05
+    },
+    {
+      "closure_m": 0.0038489072154960008,
+      "force_n": 0.417664939463999,
+      "lateral_stretch": 1.038586227934663,
+      "axial_stretch": 0.87325,
+      "penetration_m": 4.640721549599989e-05
+    },
+    {
+      "closure_m": 0.00387170943059288,
+      "force_n": 0.4203848753359069,
+      "lateral_stretch": 1.0388153267083335,
+      "axial_stretch": 0.8724999999999999,
+      "penetration_m": 4.670943059287854e-05
+    },
+    {
+      "closure_m": 0.003894512006392636,
+      "force_n": 0.42310805753373665,
+      "lateral_stretch": 1.039044395052217,
+      "axial_stretch": 0.87175,
+      "penetration_m": 4.7012006392637406e-05
+    },
+    {
+      "closure_m": 0.00391731494354716,
+      "force_n": 0.4258344919244428,
+      "lateral_stretch": 1.03927343207158,
+      "axial_stretch": 0.871,
+      "penetration_m": 4.7314943547160307e-05
+    },
+    {
+      "closure_m": 0.003940118242708592,
+      "force_n": 0.4285641843773205,
+      "lateral_stretch": 1.0395024368659878,
+      "axial_stretch": 0.87025,
+      "penetration_m": 4.761824270859117e-05
+    },
+    {
+      "closure_m": 0.003962921904529324,
+      "force_n": 0.43129714076390063,
+      "lateral_stretch": 1.039731408529267,
+      "axial_stretch": 0.8694999999999999,
+      "penetration_m": 4.792190452932229e-05
+    },
+    {
+      "closure_m": 0.003985725929661985,
+      "force_n": 0.4340333669578401,
+      "lateral_stretch": 1.0399603461494697,
+      "axial_stretch": 0.8687499999999999,
+      "penetration_m": 4.8225929661982236e-05
+    },
+    {
+      "closure_m": 0.004008530318759424,
+      "force_n": 0.43677286883481253,
+      "lateral_stretch": 1.0401892488088358,
+      "axial_stretch": 0.868,
+      "penetration_m": 4.853031875942361e-05
+    },
+    {
+      "closure_m": 0.004031335072474712,
+      "force_n": 0.4395156522723988,
+      "lateral_stretch": 1.040418115583756,
+      "axial_stretch": 0.86725,
+      "penetration_m": 4.8835072474710975e-05
+    },
+    {
+      "closure_m": 0.0040541401914611095,
+      "force_n": 0.4422617231499711,
+      "lateral_stretch": 1.040646945544735,
+      "axial_stretch": 0.8664999999999999,
+      "penetration_m": 4.91401914611079e-05
+    },
+    {
+      "closure_m": 0.004076945676372064,
+      "force_n": 0.4450110873485829,
+      "lateral_stretch": 1.0408757377563531,
+      "axial_stretch": 0.86575,
+      "penetration_m": 4.9445676372064766e-05
+    },
+    {
+      "closure_m": 0.004099751527861206,
+      "force_n": 0.44776375075085284,
+      "lateral_stretch": 1.0411044912772291,
+      "axial_stretch": 0.865,
+      "penetration_m": 4.975152786120587e-05
+    },
+    {
+      "closure_m": 0.004122557746582317,
+      "force_n": 0.4505197192408458,
+      "lateral_stretch": 1.0413332051599813,
+      "axial_stretch": 0.86425,
+      "penetration_m": 5.00577465823162e-05
+    },
+    {
+      "closure_m": 0.00414536433318933,
+      "force_n": 0.45327899870395766,
+      "lateral_stretch": 1.041561878451189,
+      "axial_stretch": 0.8634999999999999,
+      "penetration_m": 5.036433318932863e-05
+    },
+    {
+      "closure_m": 0.00416817128833631,
+      "force_n": 0.45604159502679337,
+      "lateral_stretch": 1.041790510191355,
+      "axial_stretch": 0.86275,
+      "penetration_m": 5.067128833631038e-05
+    },
+    {
+      "closure_m": 0.00419097861267745,
+      "force_n": 0.4588075140970488,
+      "lateral_stretch": 1.0420190994148646,
+      "axial_stretch": 0.862,
+      "penetration_m": 5.097861267744986e-05
+    },
+    {
+      "closure_m": 0.004213786306867044,
+      "force_n": 0.4615767618033836,
+      "lateral_stretch": 1.0422476451499483,
+      "axial_stretch": 0.86125,
+      "penetration_m": 5.1286306867042624e-05
+    },
+    {
+      "closure_m": 0.0042365943715594765,
+      "force_n": 0.4643493440353011,
+      "lateral_stretch": 1.0424761464186407,
+      "axial_stretch": 0.8605,
+      "penetration_m": 5.15943715594779e-05
+    },
+    {
+      "closure_m": 0.004259402807409224,
+      "force_n": 0.46712526668302207,
+      "lateral_stretch": 1.0427046022367419,
+      "axial_stretch": 0.85975,
+      "penetration_m": 5.1902807409224676e-05
+    },
+    {
+      "closure_m": 0.004282211615070817,
+      "force_n": 0.46990453563735446,
+      "lateral_stretch": 1.042933011613776,
+      "axial_stretch": 0.859,
+      "penetration_m": 5.221161507081716e-05
+    },
+    {
+      "closure_m": 0.004305020795198842,
+      "force_n": 0.47268715678956696,
+      "lateral_stretch": 1.043161373552952,
+      "axial_stretch": 0.85825,
+      "penetration_m": 5.2520795198840774e-05
+    },
+    {
+      "closure_m": 0.004327830348447919,
+      "force_n": 0.4754731360312588,
+      "lateral_stretch": 1.0433896870511215,
+      "axial_stretch": 0.8574999999999999,
+      "penetration_m": 5.283034844791764e-05
+    },
+    {
+      "closure_m": 0.004350640275472691,
+      "force_n": 0.4782624792542252,
+      "lateral_stretch": 1.0436179510987396,
+      "axial_stretch": 0.85675,
+      "penetration_m": 5.314027547269169e-05
+    },
+    {
+      "closure_m": 0.004373450576927815,
+      "force_n": 0.4810551923503289,
+      "lateral_stretch": 1.0438461646798225,
+      "axial_stretch": 0.856,
+      "penetration_m": 5.3450576927814324e-05
+    },
+    {
+      "closure_m": 0.004396261253467929,
+      "force_n": 0.48385128121135795,
+      "lateral_stretch": 1.0440743267719061,
+      "axial_stretch": 0.85525,
+      "penetration_m": 5.376125346792866e-05
+    },
+    {
+      "closure_m": 0.004419072305747653,
+      "force_n": 0.48665075172889194,
+      "lateral_stretch": 1.0443024363460034,
+      "axial_stretch": 0.8545,
+      "penetration_m": 5.407230574765466e-05
+    },
+    {
+      "closure_m": 0.004441883734421574,
+      "force_n": 0.4894536097941653,
+      "lateral_stretch": 1.0445304923665633,
+      "axial_stretch": 0.85375,
+      "penetration_m": 5.438373442157392e-05
+    },
+    {
+      "closure_m": 0.004464695540144214,
+      "force_n": 0.4922598612979249,
+      "lateral_stretch": 1.0447584937914283,
+      "axial_stretch": 0.853,
+      "penetration_m": 5.469554014421388e-05
+    },
+    {
+      "closure_m": 0.004487507723570034,
+      "force_n": 0.4950695121302861,
+      "lateral_stretch": 1.0449864395717907,
+      "axial_stretch": 0.85225,
+      "penetration_m": 5.500772357003179e-05
+    },
+    {
+      "closure_m": 0.0045103202853534015,
+      "force_n": 0.49788256818059135,
+      "lateral_stretch": 1.0452143286521494,
+      "axial_stretch": 0.8514999999999999,
+      "penetration_m": 5.532028535339904e-05
+    },
+    {
+      "closure_m": 0.004533133226148584,
+      "force_n": 0.500699035337263,
+      "lateral_stretch": 1.0454421599702677,
+      "axial_stretch": 0.85075,
+      "penetration_m": 5.563322614858478e-05
+    },
+    {
+      "closure_m": 0.00455594654660974,
+      "force_n": 0.5035189194876593,
+      "lateral_stretch": 1.0456699324571286,
+      "axial_stretch": 0.85,
+      "penetration_m": 5.5946546609739916e-05
+    },
+    {
+      "closure_m": 0.0045787602473908815,
+      "force_n": 0.5063422265179207,
+      "lateral_stretch": 1.0458976450368915,
+      "axial_stretch": 0.84925,
+      "penetration_m": 5.626024739088008e-05
+    },
+    {
+      "closure_m": 0.0046015743291458674,
+      "force_n": 0.5091689623128207,
+      "lateral_stretch": 1.0461252966268464,
+      "axial_stretch": 0.8485,
+      "penetration_m": 5.657432914586897e-05
+    },
+    {
+      "closure_m": 0.004624388792528401,
+      "force_n": 0.5119991327556137,
+      "lateral_stretch": 1.0463528861373708,
+      "axial_stretch": 0.84775,
+      "penetration_m": 5.688879252840152e-05
+    },
+    {
+      "closure_m": 0.004647203638191987,
+      "force_n": 0.5148327437278795,
+      "lateral_stretch": 1.046580412471884,
+      "axial_stretch": 0.847,
+      "penetration_m": 5.7203638191986604e-05
+    },
+    {
+      "closure_m": 0.00467001886678993,
+      "force_n": 0.5176698011093668,
+      "lateral_stretch": 1.0468078745268017,
+      "axial_stretch": 0.84625,
+      "penetration_m": 5.751886678992964e-05
+    },
+    {
+      "closure_m": 0.004692834478975317,
+      "force_n": 0.5205103107778343,
+      "lateral_stretch": 1.0470352711914899,
+      "axial_stretch": 0.8454999999999999,
+      "penetration_m": 5.783447897531492e-05
+    },
+    {
+      "closure_m": 0.004715650475400988,
+      "force_n": 0.5233542786088906,
+      "lateral_stretch": 1.04726260134822,
+      "axial_stretch": 0.84475,
+      "penetration_m": 5.815047540098785e-05
+    },
+    {
+      "closure_m": 0.004738466856719538,
+      "force_n": 0.5262017104758344,
+      "lateral_stretch": 1.047489863872122,
+      "axial_stretch": 0.844,
+      "penetration_m": 5.8466856719537156e-05
+    },
+    {
+      "closure_m": 0.004761283623583278,
+      "force_n": 0.529052612249485,
+      "lateral_stretch": 1.0477170576311368,
+      "axial_stretch": 0.8432499999999999,
+      "penetration_m": 5.878362358327611e-05
+    },
+    {
+      "closure_m": 0.004784100776644223,
+      "force_n": 0.5319069897980201,
+      "lateral_stretch": 1.0479441814859711,
+      "axial_stretch": 0.8425,
+      "penetration_m": 5.9100776644224457e-05
+    },
+    {
+      "closure_m": 0.00480691831655409,
+      "force_n": 0.5347648489868072,
+      "lateral_stretch": 1.0481712342900484,
+      "axial_stretch": 0.84175,
+      "penetration_m": 5.941831655408969e-05
+    },
+    {
+      "closure_m": 0.004829736243964249,
+      "force_n": 0.5376261956782322,
+      "lateral_stretch": 1.048398214889462,
+      "axial_stretch": 0.841,
+      "penetration_m": 5.9736243964248026e-05
+    },
+    {
+      "closure_m": 0.004852554559525727,
+      "force_n": 0.5404910357315266,
+      "lateral_stretch": 1.048625122122927,
+      "axial_stretch": 0.8402499999999999,
+      "penetration_m": 6.0054559525725175e-05
+    },
+    {
+      "closure_m": 0.004875373263889179,
+      "force_n": 0.5433593750025955,
+      "lateral_stretch": 1.0488519548217317,
+      "axial_stretch": 0.8394999999999999,
+      "penetration_m": 6.0373263889177274e-05
+    },
+    {
+      "closure_m": 0.004898192357704871,
+      "force_n": 0.5462312193438383,
+      "lateral_stretch": 1.0490787118096885,
+      "axial_stretch": 0.83875,
+      "penetration_m": 6.0692357704870926e-05
+    },
+    {
+      "closure_m": 0.004921011841622664,
+      "force_n": 0.5491065746039733,
+      "lateral_stretch": 1.049305391903086,
+      "axial_stretch": 0.838,
+      "penetration_m": 6.1011841622663694e-05
+    },
+    {
+      "closure_m": 0.004943831716291985,
+      "force_n": 0.5519854466278551,
+      "lateral_stretch": 1.049531993910638,
+      "axial_stretch": 0.8372499999999999,
+      "penetration_m": 6.13317162919839e-05
+    },
+    {
+      "closure_m": 0.004966651982361809,
+      "force_n": 0.5548678412562905,
+      "lateral_stretch": 1.0497585166334347,
+      "axial_stretch": 0.8365,
+      "penetration_m": 6.165198236181006e-05
+    },
+    {
+      "closure_m": 0.004989472640480651,
+      "force_n": 0.5577537643258577,
+      "lateral_stretch": 1.0499849588648922,
+      "axial_stretch": 0.83575,
+      "penetration_m": 6.197264048065085e-05
+    },
+    {
+      "closure_m": 0.005012293691296525,
+      "force_n": 0.560643221668715,
+      "lateral_stretch": 1.0502113193907014,
+      "axial_stretch": 0.835,
+      "penetration_m": 6.22936912965239e-05
+    },
+    {
+      "closure_m": 0.005035115135456937,
+      "force_n": 0.563536219112414,
+      "lateral_stretch": 1.0504375969887785,
+      "axial_stretch": 0.8342499999999999,
+      "penetration_m": 6.261513545693489e-05
+    },
+    {
+      "closure_m": 0.005057936973608859,
+      "force_n": 0.5664327624797061,
+      "lateral_stretch": 1.0506637904292118,
+      "axial_stretch": 0.8334999999999999,
+      "penetration_m": 6.293697360885624e-05
+    },
+    {
+      "closure_m": 0.005080759206398706,
+      "force_n": 0.569332857588351,
+      "lateral_stretch": 1.0508898984742117,
+      "axial_stretch": 0.83275,
+      "penetration_m": 6.325920639870566e-05
+    },
+    {
+      "closure_m": 0.005103581834472326,
+      "force_n": 0.5722365102509184,
+      "lateral_stretch": 1.051115919878057,
+      "axial_stretch": 0.832,
+      "penetration_m": 6.358183447232426e-05
+    },
+    {
+      "closure_m": 0.005126404858474956,
+      "force_n": 0.5751437262745906,
+      "lateral_stretch": 1.0513418533870447,
+      "axial_stretch": 0.8312499999999999,
+      "penetration_m": 6.390485847495451e-05
+    },
+    {
+      "closure_m": 0.0051492282790512175,
+      "force_n": 0.5780545114609619,
+      "lateral_stretch": 1.051567697739434,
+      "axial_stretch": 0.8305,
+      "penetration_m": 6.422827905121799e-05
+    },
+    {
+      "closure_m": 0.005172052096845093,
+      "force_n": 0.5809688716058345,
+      "lateral_stretch": 1.0517934516653964,
+      "axial_stretch": 0.82975,
+      "penetration_m": 6.455209684509272e-05
+    },
+    {
+      "closure_m": 0.005194876312499892,
+      "force_n": 0.5838868124990149,
+      "lateral_stretch": 1.0520191138869595,
+      "axial_stretch": 0.829,
+      "penetration_m": 6.487631249989054e-05
+    },
+    {
+      "closure_m": 0.005217700926658235,
+      "force_n": 0.5868083399241025,
+      "lateral_stretch": 1.0522446831179542,
+      "axial_stretch": 0.8282499999999999,
+      "penetration_m": 6.520092665823361e-05
+    },
+    {
+      "closure_m": 0.005240525939962034,
+      "force_n": 0.5897334596582829,
+      "lateral_stretch": 1.0524701580639604,
+      "axial_stretch": 0.8274999999999999,
+      "penetration_m": 6.552593996203143e-05
+    },
+    {
+      "closure_m": 0.0052633513530524565,
+      "force_n": 0.5926621774721134,
+      "lateral_stretch": 1.0526955374222513,
+      "axial_stretch": 0.82675,
+      "penetration_m": 6.585135305245704e-05
+    },
+    {
+      "closure_m": 0.005286177166569924,
+      "force_n": 0.5955944991293083,
+      "lateral_stretch": 1.0529208198817392,
+      "axial_stretch": 0.826,
+      "penetration_m": 6.617716656992314e-05
+    },
+    {
+      "closure_m": 0.005309003381154057,
+      "force_n": 0.5985304303865195,
+      "lateral_stretch": 1.0531460041229186,
+      "axial_stretch": 0.82525,
+      "penetration_m": 6.650338115405772e-05
+    },
+    {
+      "closure_m": 0.0053318299974436795,
+      "force_n": 0.6014699769931188,
+      "lateral_stretch": 1.0533710888178114,
+      "axial_stretch": 0.8245,
+      "penetration_m": 6.682999744367986e-05
+    },
+    {
+      "closure_m": 0.005354657016076775,
+      "force_n": 0.6044131446909718,
+      "lateral_stretch": 1.0535960726299096,
+      "axial_stretch": 0.82375,
+      "penetration_m": 6.715701607677464e-05
+    },
+    {
+      "closure_m": 0.00537748443769047,
+      "force_n": 0.6073599392142153,
+      "lateral_stretch": 1.0538209542141184,
+      "axial_stretch": 0.823,
+      "penetration_m": 6.748443769046836e-05
+    },
+    {
+      "closure_m": 0.005400312262921005,
+      "force_n": 0.6103103662890281,
+      "lateral_stretch": 1.0540457322167,
+      "axial_stretch": 0.8222499999999999,
+      "penetration_m": 6.781226292100312e-05
+    },
+    {
+      "closure_m": 0.005423140492403711,
+      "force_n": 0.6132644316333987,
+      "lateral_stretch": 1.0542704052752137,
+      "axial_stretch": 0.8215,
+      "penetration_m": 6.814049240371097e-05
+    },
+    {
+      "closure_m": 0.005445969126772989,
+      "force_n": 0.616222140956895,
+      "lateral_stretch": 1.05449497201846,
+      "axial_stretch": 0.82075,
+      "penetration_m": 6.846912677298833e-05
+    },
+    {
+      "closure_m": 0.00546879816666227,
+      "force_n": 0.6191834999604251,
+      "lateral_stretch": 1.0547194310664203,
+      "axial_stretch": 0.82,
+      "penetration_m": 6.879816666226945e-05
+    },
+    {
+      "closure_m": 0.0054916276127039984,
+      "force_n": 0.622148514336,
+      "lateral_stretch": 1.054943781030199,
+      "axial_stretch": 0.81925,
+      "penetration_m": 6.912761270400001e-05
+    },
+    {
+      "closure_m": 0.005514457465529609,
+      "force_n": 0.6251171897664921,
+      "lateral_stretch": 1.0551680205119625,
+      "axial_stretch": 0.8185,
+      "penetration_m": 6.945746552961023e-05
+    },
+    {
+      "closure_m": 0.005537287725769488,
+      "force_n": 0.6280895319253895,
+      "lateral_stretch": 1.0553921481048811,
+      "axial_stretch": 0.81775,
+      "penetration_m": 6.978772576948772e-05
+    },
+    {
+      "closure_m": 0.005560118394052951,
+      "force_n": 0.6310655464765503,
+      "lateral_stretch": 1.0556161623930673,
+      "axial_stretch": 0.817,
+      "penetration_m": 7.011839405295004e-05
+    },
+    {
+      "closure_m": 0.005582949471008219,
+      "force_n": 0.6340452390739505,
+      "lateral_stretch": 1.0558400619515156,
+      "axial_stretch": 0.8162499999999999,
+      "penetration_m": 7.044947100821673e-05
+    },
+    {
+      "closure_m": 0.005605780957262382,
+      "force_n": 0.6370286153614338,
+      "lateral_stretch": 1.0560638453460405,
+      "axial_stretch": 0.8155,
+      "penetration_m": 7.078095726238154e-05
+    },
+    {
+      "closure_m": 0.005628612853441384,
+      "force_n": 0.6400156809724531,
+      "lateral_stretch": 1.0562875111332155,
+      "axial_stretch": 0.81475,
+      "penetration_m": 7.111285344138368e-05
+    },
+    {
+      "closure_m": 0.005651445160169981,
+      "force_n": 0.6430064415298126,
+      "lateral_stretch": 1.0565110578603096,
+      "axial_stretch": 0.814,
+      "penetration_m": 7.144516016997917e-05
+    },
+    {
+      "closure_m": 0.005674277878071711,
+      "force_n": 0.6460009026454058,
+      "lateral_stretch": 1.0567344840652269,
+      "axial_stretch": 0.81325,
+      "penetration_m": 7.177787807171175e-05
+    },
+    {
+      "closure_m": 0.005697111007768883,
+      "force_n": 0.6489990699199525,
+      "lateral_stretch": 1.0569577882764405,
+      "axial_stretch": 0.8125,
+      "penetration_m": 7.211100776888361e-05
+    },
+    {
+      "closure_m": 0.005719944549882526,
+      "force_n": 0.652000948942727,
+      "lateral_stretch": 1.057180969012931,
+      "axial_stretch": 0.81175,
+      "penetration_m": 7.244454988252521e-05
+    },
+    {
+      "closure_m": 0.005742778505032367,
+      "force_n": 0.6550065452912913,
+      "lateral_stretch": 1.0574040247841217,
+      "axial_stretch": 0.8109999999999999,
+      "penetration_m": 7.27785050323657e-05
+    },
+    {
+      "closure_m": 0.005765612873836804,
+      "force_n": 0.6580158645312181,
+      "lateral_stretch": 1.0576269540898133,
+      "axial_stretch": 0.8102499999999999,
+      "penetration_m": 7.3112873836802e-05
+    },
+    {
+      "closure_m": 0.005788447656912868,
+      "force_n": 0.6610289122158151,
+      "lateral_stretch": 1.05784975542012,
+      "axial_stretch": 0.8095,
+      "penetration_m": 7.344765691286834e-05
+    },
+    {
+      "closure_m": 0.0058112828548762055,
+      "force_n": 0.6640456938858448,
+      "lateral_stretch": 1.0580724272554027,
+      "axial_stretch": 0.80875,
+      "penetration_m": 7.378285487620497e-05
+    },
+    {
+      "closure_m": 0.0058341184683410275,
+      "force_n": 0.66706621506924,
+      "lateral_stretch": 1.0582949680662035,
+      "axial_stretch": 0.8079999999999999,
+      "penetration_m": 7.411846834102667e-05
+    },
+    {
+      "closure_m": 0.00585695449792009,
+      "force_n": 0.6700904812808174,
+      "lateral_stretch": 1.058517376313179,
+      "axial_stretch": 0.80725,
+      "penetration_m": 7.445449792009082e-05
+    },
+    {
+      "closure_m": 0.005879790944224666,
+      "force_n": 0.6731184980219884,
+      "lateral_stretch": 1.0587396504470332,
+      "axial_stretch": 0.8065,
+      "penetration_m": 7.479094422466538e-05
+    },
+    {
+      "closure_m": 0.005902627807864497,
+      "force_n": 0.6761502707804643,
+      "lateral_stretch": 1.0589617889084497,
+      "axial_stretch": 0.80575,
+      "penetration_m": 7.512780786449603e-05
+    },
+    {
+      "closure_m": 0.005925465089447775,
+      "force_n": 0.6791858050299602,
+      "lateral_stretch": 1.0591837901280232,
+      "axial_stretch": 0.8049999999999999,
+      "penetration_m": 7.546508944777335e-05
+    },
+    {
+      "closure_m": 0.005948302789581103,
+      "force_n": 0.6822251062298959,
+      "lateral_stretch": 1.059405652526192,
+      "axial_stretch": 0.8042499999999999,
+      "penetration_m": 7.580278958109954e-05
+    },
+    {
+      "closure_m": 0.005971140908869454,
+      "force_n": 0.6852681798250894,
+      "lateral_stretch": 1.059627374513167,
+      "axial_stretch": 0.8035,
+      "penetration_m": 7.614090886945437e-05
+    },
+    {
+      "closure_m": 0.0059939794479161625,
+      "force_n": 0.6883150312454551,
+      "lateral_stretch": 1.0598489544888636,
+      "axial_stretch": 0.80275,
+      "penetration_m": 7.647944791616168e-05
+    },
+    {
+      "closure_m": 0.006016818407322856,
+      "force_n": 0.6913656659056886,
+      "lateral_stretch": 1.0600703908428308,
+      "axial_stretch": 0.8019999999999999,
+      "penetration_m": 7.681840732285429e-05
+    },
+    {
+      "closure_m": 0.006039657787689438,
+      "force_n": 0.6944200892049545,
+      "lateral_stretch": 1.0602916819541797,
+      "axial_stretch": 0.80125,
+      "penetration_m": 7.715778768943938e-05
+    },
+    {
+      "closure_m": 0.006062497589614063,
+      "force_n": 0.6974783065265694,
+      "lateral_stretch": 1.060512826191513,
+      "axial_stretch": 0.8005,
+      "penetration_m": 7.749758961406327e-05
+    },
+    {
+      "closure_m": 0.006085337813693076,
+      "force_n": 0.7005403232376807,
+      "lateral_stretch": 1.060733821912854,
+      "axial_stretch": 0.79975,
+      "penetration_m": 7.783781369307563e-05
+    },
+    {
+      "closure_m": 0.006108178460520995,
+      "force_n": 0.70360614468894,
+      "lateral_stretch": 1.0609546674655705,
+      "axial_stretch": 0.7989999999999999,
+      "penetration_m": 7.817846052099334e-05
+    },
+    {
+      "closure_m": 0.006131019530690467,
+      "force_n": 0.7066757762141781,
+      "lateral_stretch": 1.061175361186307,
+      "axial_stretch": 0.7982499999999999,
+      "penetration_m": 7.851953069046423e-05
+    },
+    {
+      "closure_m": 0.006153861024792231,
+      "force_n": 0.7097492231300695,
+      "lateral_stretch": 1.0613959014009064,
+      "axial_stretch": 0.7975,
+      "penetration_m": 7.886102479222994e-05
+    },
+    {
+      "closure_m": 0.00617670294341509,
+      "force_n": 0.7128264907357984,
+      "lateral_stretch": 1.0616162864243386,
+      "axial_stretch": 0.79675,
+      "penetration_m": 7.920294341508872e-05
+    },
+    {
+      "closure_m": 0.00619954528714586,
+      "force_n": 0.7159075843127197,
+      "lateral_stretch": 1.0618365145606248,
+      "axial_stretch": 0.7959999999999999,
+      "penetration_m": 7.954528714585775e-05
+    },
+    {
+      "closure_m": 0.006222388056569334,
+      "force_n": 0.7189925091240117,
+      "lateral_stretch": 1.0620565841027625,
+      "axial_stretch": 0.79525,
+      "penetration_m": 7.988805656933463e-05
+    },
+    {
+      "closure_m": 0.00624523125226826,
+      "force_n": 0.7220812704143341,
+      "lateral_stretch": 1.062276493332649,
+      "axial_stretch": 0.7945,
+      "penetration_m": 8.023125226825934e-05
+    },
+    {
+      "closure_m": 0.006268074874823276,
+      "force_n": 0.7251738734094738,
+      "lateral_stretch": 1.0624962405210063,
+      "axial_stretch": 0.79375,
+      "penetration_m": 8.057487482327487e-05
+    },
+    {
+      "closure_m": 0.00629091892481289,
+      "force_n": 0.7282703233159872,
+      "lateral_stretch": 1.0627158239273022,
+      "axial_stretch": 0.7929999999999999,
+      "penetration_m": 8.091892481288746e-05
+    },
+    {
+      "closure_m": 0.00631376340281343,
+      "force_n": 0.7313706253208462,
+      "lateral_stretch": 1.0629352417996738,
+      "axial_stretch": 0.7922499999999999,
+      "penetration_m": 8.126340281342736e-05
+    },
+    {
+      "closure_m": 0.006336608309399008,
+      "force_n": 0.7344747845910714,
+      "lateral_stretch": 1.0631544923748493,
+      "axial_stretch": 0.7915,
+      "penetration_m": 8.160830939900793e-05
+    },
+    {
+      "closure_m": 0.006359453645141486,
+      "force_n": 0.7375828062733651,
+      "lateral_stretch": 1.063373573878068,
+      "axial_stretch": 0.79075,
+      "penetration_m": 8.195364514148501e-05
+    },
+    {
+      "closure_m": 0.006382299410610417,
+      "force_n": 0.7406946954937411,
+      "lateral_stretch": 1.0635924845230023,
+      "axial_stretch": 0.7899999999999999,
+      "penetration_m": 8.229941061041568e-05
+    },
+    {
+      "closure_m": 0.006405145606373015,
+      "force_n": 0.7438104573571471,
+      "lateral_stretch": 1.0638112225116763,
+      "axial_stretch": 0.78925,
+      "penetration_m": 8.264560637301635e-05
+    },
+    {
+      "closure_m": 0.006427992232994122,
+      "force_n": 0.7469300969470868,
+      "lateral_stretch": 1.064029786034386,
+      "axial_stretch": 0.7885,
+      "penetration_m": 8.299223299412075e-05
+    },
+    {
+      "closure_m": 0.006450839291036139,
+      "force_n": 0.7500536193252336,
+      "lateral_stretch": 1.0642481732696167,
+      "axial_stretch": 0.78775,
+      "penetration_m": 8.333929103613707e-05
+    },
+    {
+      "closure_m": 0.006473686781059008,
+      "force_n": 0.7531810295310443,
+      "lateral_stretch": 1.0644663823839629,
+      "axial_stretch": 0.7869999999999999,
+      "penetration_m": 8.368678105900492e-05
+    },
+    {
+      "closure_m": 0.006496534703620151,
+      "force_n": 0.756312332581363,
+      "lateral_stretch": 1.0646844115320435,
+      "axial_stretch": 0.78625,
+      "penetration_m": 8.403470362015144e-05
+    },
+    {
+      "closure_m": 0.006519383059274448,
+      "force_n": 0.7594475334700296,
+      "lateral_stretch": 1.06490225885642,
+      "axial_stretch": 0.7855,
+      "penetration_m": 8.438305927444773e-05
+    },
+    {
+      "closure_m": 0.006542231848574165,
+      "force_n": 0.7625866371674708,
+      "lateral_stretch": 1.065119922487512,
+      "axial_stretch": 0.78475,
+      "penetration_m": 8.473184857416342e-05
+    },
+    {
+      "closure_m": 0.006565081072068921,
+      "force_n": 0.7657296486202992,
+      "lateral_stretch": 1.0653374005435123,
+      "axial_stretch": 0.784,
+      "penetration_m": 8.508107206892214e-05
+    },
+    {
+      "closure_m": 0.006587930730305655,
+      "force_n": 0.7688765727509006,
+      "lateral_stretch": 1.065554691130302,
+      "axial_stretch": 0.78325,
+      "penetration_m": 8.543073030565562e-05
+    },
+    {
+      "closure_m": 0.0066107808238285585,
+      "force_n": 0.7720274144570192,
+      "lateral_stretch": 1.0657717923413643,
+      "axial_stretch": 0.7825,
+      "penetration_m": 8.578082382855768e-05
+    },
+    {
+      "closure_m": 0.006633631353179038,
+      "force_n": 0.7751821786113359,
+      "lateral_stretch": 1.0659887022576984,
+      "axial_stretch": 0.78175,
+      "penetration_m": 8.613135317903732e-05
+    },
+    {
+      "closure_m": 0.006656482318895674,
+      "force_n": 0.778340870061046,
+      "lateral_stretch": 1.066205418947731,
+      "axial_stretch": 0.7809999999999999,
+      "penetration_m": 8.648231889567178e-05
+    },
+    {
+      "closure_m": 0.006679333721514158,
+      "force_n": 0.7815034936274288,
+      "lateral_stretch": 1.06642194046723,
+      "axial_stretch": 0.78025,
+      "penetration_m": 8.683372151415875e-05
+    },
+    {
+      "closure_m": 0.006702185561567269,
+      "force_n": 0.7846700541054125,
+      "lateral_stretch": 1.0666382648592139,
+      "axial_stretch": 0.7795,
+      "penetration_m": 8.718556156726806e-05
+    },
+    {
+      "closure_m": 0.006725037839584795,
+      "force_n": 0.7878405562631364,
+      "lateral_stretch": 1.0668543901538636,
+      "axial_stretch": 0.7787499999999999,
+      "penetration_m": 8.753783958479294e-05
+    },
+    {
+      "closure_m": 0.0067478905560935,
+      "force_n": 0.7910150048415056,
+      "lateral_stretch": 1.0670703143684324,
+      "axial_stretch": 0.778,
+      "penetration_m": 8.789055609350062e-05
+    },
+    {
+      "closure_m": 0.006770743711617083,
+      "force_n": 0.7941934045537432,
+      "lateral_stretch": 1.0672860355071534,
+      "axial_stretch": 0.77725,
+      "penetration_m": 8.824371161708258e-05
+    },
+    {
+      "closure_m": 0.006793597306676105,
+      "force_n": 0.7973757600849358,
+      "lateral_stretch": 1.067501551561151,
+      "axial_stretch": 0.7765,
+      "penetration_m": 8.859730667610398e-05
+    },
+    {
+      "closure_m": 0.006816451341787954,
+      "force_n": 0.8005620760915748,
+      "lateral_stretch": 1.0677168605083458,
+      "axial_stretch": 0.7757499999999999,
+      "penetration_m": 8.895134178795275e-05
+    },
+    {
+      "closure_m": 0.006839305817466791,
+      "force_n": 0.8037523572010911,
+      "lateral_stretch": 1.0679319603133626,
+      "axial_stretch": 0.7749999999999999,
+      "penetration_m": 8.930581746678789e-05
+    },
+    {
+      "closure_m": 0.0068621607342234875,
+      "force_n": 0.8069466080113857,
+      "lateral_stretch": 1.0681468489274364,
+      "axial_stretch": 0.77425,
+      "penetration_m": 8.96607342234873e-05
+    },
+    {
+      "closure_m": 0.0068850160925655966,
+      "force_n": 0.8101448330903595,
+      "lateral_stretch": 1.068361524288319,
+      "axial_stretch": 0.7735,
+      "penetration_m": 9.001609256559549e-05
+    },
+    {
+      "closure_m": 0.006907871892997271,
+      "force_n": 0.8133470369754265,
+      "lateral_stretch": 1.0685759843201823,
+      "axial_stretch": 0.7727499999999999,
+      "penetration_m": 9.037189299726962e-05
+    },
+    {
+      "closure_m": 0.006930728136019225,
+      "force_n": 0.8165532241730336,
+      "lateral_stretch": 1.0687902269335225,
+      "axial_stretch": 0.772,
+      "penetration_m": 9.072813601922596e-05
+    },
+    {
+      "closure_m": 0.006953584822128685,
+      "force_n": 0.8197633991581692,
+      "lateral_stretch": 1.0690042500250645,
+      "axial_stretch": 0.77125,
+      "penetration_m": 9.108482212868547e-05
+    },
+    {
+      "closure_m": 0.006976441951819319,
+      "force_n": 0.8229775663738644,
+      "lateral_stretch": 1.0692180514776621,
+      "axial_stretch": 0.7705,
+      "penetration_m": 9.144195181931828e-05
+    },
+    {
+      "closure_m": 0.006999299525581189,
+      "force_n": 0.8261957302306956,
+      "lateral_stretch": 1.0694316291602017,
+      "axial_stretch": 0.7697499999999999,
+      "penetration_m": 9.17995255811884e-05
+    },
+    {
+      "closure_m": 0.0070221575439007,
+      "force_n": 0.8294178951062748,
+      "lateral_stretch": 1.0696449809275028,
+      "axial_stretch": 0.7689999999999999,
+      "penetration_m": 9.21575439006972e-05
+    },
+    {
+      "closure_m": 0.007045016007260527,
+      "force_n": 0.8326440653447352,
+      "lateral_stretch": 1.0698581046202165,
+      "axial_stretch": 0.76825,
+      "penetration_m": 9.251600726052613e-05
+    },
+    {
+      "closure_m": 0.007067874916139581,
+      "force_n": 0.8358742452562193,
+      "lateral_stretch": 1.0700709980647267,
+      "axial_stretch": 0.7675,
+      "penetration_m": 9.287491613957992e-05
+    },
+    {
+      "closure_m": 0.0070907342710129296,
+      "force_n": 0.8391084391163453,
+      "lateral_stretch": 1.0702836590730473,
+      "axial_stretch": 0.7667499999999999,
+      "penetration_m": 9.323427101292725e-05
+    },
+    {
+      "closure_m": 0.007113594072351742,
+      "force_n": 0.8423466511656839,
+      "lateral_stretch": 1.07049608544272,
+      "axial_stretch": 0.766,
+      "penetration_m": 9.359407235174265e-05
+    },
+    {
+      "closure_m": 0.007136454320623247,
+      "force_n": 0.8455888856092229,
+      "lateral_stretch": 1.0707082749567116,
+      "axial_stretch": 0.76525,
+      "penetration_m": 9.395432062324699e-05
+    },
+    {
+      "closure_m": 0.007159315016290648,
+      "force_n": 0.848835146615819,
+      "lateral_stretch": 1.0709202253833094,
+      "axial_stretch": 0.7645,
+      "penetration_m": 9.431501629064656e-05
+    },
+    {
+      "closure_m": 0.007182176159813074,
+      "force_n": 0.8520854383176553,
+      "lateral_stretch": 1.0711319344760168,
+      "axial_stretch": 0.7637499999999999,
+      "penetration_m": 9.467615981307281e-05
+    },
+    {
+      "closure_m": 0.007205037751645524,
+      "force_n": 0.8553397648096863,
+      "lateral_stretch": 1.0713433999734465,
+      "axial_stretch": 0.7629999999999999,
+      "penetration_m": 9.50377516455207e-05
+    },
+    {
+      "closure_m": 0.007227899792238786,
+      "force_n": 0.8585981301490748,
+      "lateral_stretch": 1.0715546195992152,
+      "axial_stretch": 0.76225,
+      "penetration_m": 9.539979223878609e-05
+    },
+    {
+      "closure_m": 0.007250762282039404,
+      "force_n": 0.8618605383546324,
+      "lateral_stretch": 1.0717655910618356,
+      "axial_stretch": 0.7615,
+      "penetration_m": 9.57622820394036e-05
+    },
+    {
+      "closure_m": 0.007273625221489583,
+      "force_n": 0.8651269934062377,
+      "lateral_stretch": 1.0719763120546073,
+      "axial_stretch": 0.7607499999999999,
+      "penetration_m": 9.612522148958196e-05
+    },
+    {
+      "closure_m": 0.00729648861102714,
+      "force_n": 0.8683974992442631,
+      "lateral_stretch": 1.0721867802555085,
+      "axial_stretch": 0.76,
+      "penetration_m": 9.648861102714034e-05
+    },
+    {
+      "closure_m": 0.0073193524510854445,
+      "force_n": 0.871672059768992,
+      "lateral_stretch": 1.0723969933270867,
+      "axial_stretch": 0.75925,
+      "penetration_m": 9.685245108544355e-05
+    },
+    {
+      "closure_m": 0.007342216742093337,
+      "force_n": 0.8749506788400191,
+      "lateral_stretch": 1.072606948916345,
+      "axial_stretch": 0.7585,
+      "penetration_m": 9.721674209333546e-05
+    },
+    {
+      "closure_m": 0.007365081484475075,
+      "force_n": 0.8782333602756566,
+      "lateral_stretch": 1.0728166446546323,
+      "axial_stretch": 0.7577499999999999,
+      "penetration_m": 9.758148447507295e-05
+    },
+    {
+      "closure_m": 0.007387946678650262,
+      "force_n": 0.8815201078523299,
+      "lateral_stretch": 1.0730260781575305,
+      "axial_stretch": 0.7569999999999999,
+      "penetration_m": 9.794667865025887e-05
+    },
+    {
+      "closure_m": 0.007410812325033774,
+      "force_n": 0.8848109253039641,
+      "lateral_stretch": 1.073235247024739,
+      "axial_stretch": 0.75625,
+      "penetration_m": 9.831232503377378e-05
+    },
+    {
+      "closure_m": 0.0074336784240357084,
+      "force_n": 0.8881058163213669,
+      "lateral_stretch": 1.0734441488399626,
+      "axial_stretch": 0.7555,
+      "penetration_m": 9.867842403570743e-05
+    },
+    {
+      "closure_m": 0.007456544976061291,
+      "force_n": 0.891404784551601,
+      "lateral_stretch": 1.073652781170793,
+      "axial_stretch": 0.7547499999999999,
+      "penetration_m": 9.9044976061289e-05
+    },
+    {
+      "closure_m": 0.007479411981510816,
+      "force_n": 0.8947078335973516,
+      "lateral_stretch": 1.073861141568594,
+      "axial_stretch": 0.754,
+      "penetration_m": 9.941198151081685e-05
+    },
+    {
+      "closure_m": 0.007502279440779588,
+      "force_n": 0.8980149670162921,
+      "lateral_stretch": 1.0740692275683836,
+      "axial_stretch": 0.75325,
+      "penetration_m": 9.977944077958801e-05
+    },
+    {
+      "closure_m": 0.0075251473542578265,
+      "force_n": 0.9013261883204312,
+      "lateral_stretch": 1.0742770366887155,
+      "axial_stretch": 0.7525,
+      "penetration_m": 0.00010014735425782569
+    },
+    {
+      "closure_m": 0.007548015722330609,
+      "force_n": 0.9046415009754638,
+      "lateral_stretch": 1.0744845664315594,
+      "axial_stretch": 0.7517499999999999,
+      "penetration_m": 0.0001005157223306071
+    },
+    {
+      "closure_m": 0.007570884545377792,
+      "force_n": 0.9079609084001082,
+      "lateral_stretch": 1.0746918142821806,
+      "axial_stretch": 0.7509999999999999,
+      "penetration_m": 0.00010088454537778981
+    },
+    {
+      "closure_m": 0.007593753823773938,
+      "force_n": 0.9112844139654359,
+      "lateral_stretch": 1.074898777709018,
+      "axial_stretch": 0.75025,
+      "penetration_m": 0.00010125382377393733
+    },
+    {
+      "closure_m": 0.007616623557888246,
+      "force_n": 0.9146120209942038,
+      "lateral_stretch": 1.0751054541635627,
+      "axial_stretch": 0.7494999999999999,
+      "penetration_m": 0.00010162355788824486
+    },
+    {
+      "closure_m": 0.007639493748084461,
+      "force_n": 0.9179437327601616,
+      "lateral_stretch": 1.0753118410802336,
+      "axial_stretch": 0.74875,
+      "penetration_m": 0.0001019937480844624
+    },
+    {
+      "closure_m": 0.007662364394720818,
+      "force_n": 0.9212795524873685,
+      "lateral_stretch": 1.0755179358762532,
+      "axial_stretch": 0.748,
+      "penetration_m": 0.00010236439472081872
+    },
+    {
+      "closure_m": 0.007685235498149944,
+      "force_n": 0.924619483349491,
+      "lateral_stretch": 1.0757237359515217,
+      "axial_stretch": 0.74725,
+      "penetration_m": 0.00010273549814994344
+    },
+    {
+      "closure_m": 0.00770810705871879,
+      "force_n": 0.9279635284690986,
+      "lateral_stretch": 1.075929238688491,
+      "axial_stretch": 0.7464999999999999,
+      "penetration_m": 0.00010310705871878873
+    },
+    {
+      "closure_m": 0.007730979076768552,
+      "force_n": 0.9313116909169495,
+      "lateral_stretch": 1.0761344414520366,
+      "axial_stretch": 0.7457499999999999,
+      "penetration_m": 0.00010347907676854995
+    },
+    {
+      "closure_m": 0.007753851552634589,
+      "force_n": 0.9346639737112713,
+      "lateral_stretch": 1.076339341589329,
+      "axial_stretch": 0.7449999999999999,
+      "penetration_m": 0.0001038515526345857
+    },
+    {
+      "closure_m": 0.0077767244866463366,
+      "force_n": 0.9380203798170264,
+      "lateral_stretch": 1.0765439364297031,
+      "axial_stretch": 0.74425,
+      "penetration_m": 0.00010422448664633626
+    },
+    {
+      "closure_m": 0.007799597879127243,
+      "force_n": 0.9413809121451807,
+      "lateral_stretch": 1.0767482232845293,
+      "axial_stretch": 0.7434999999999999,
+      "penetration_m": 0.0001045978791272423
+    },
+    {
+      "closure_m": 0.00782247173039466,
+      "force_n": 0.9447455735519528,
+      "lateral_stretch": 1.0769521994470792,
+      "axial_stretch": 0.74275,
+      "penetration_m": 0.00010497173039466141
+    },
+    {
+      "closure_m": 0.007845346040759786,
+      "force_n": 0.9481143668380627,
+      "lateral_stretch": 1.0771558621923938,
+      "axial_stretch": 0.742,
+      "penetration_m": 0.00010534604075978475
+    },
+    {
+      "closure_m": 0.007868220810527553,
+      "force_n": 0.9514872947479684,
+      "lateral_stretch": 1.0773592087771493,
+      "axial_stretch": 0.74125,
+      "penetration_m": 0.00010572081052755206
+    },
+    {
+      "closure_m": 0.007891096039996569,
+      "force_n": 0.9548643599690954,
+      "lateral_stretch": 1.0775622364395212,
+      "axial_stretch": 0.7404999999999999,
+      "penetration_m": 0.00010609603999656615
+    },
+    {
+      "closure_m": 0.00791397172945901,
+      "force_n": 0.9582455651310567,
+      "lateral_stretch": 1.077764942399048,
+      "axial_stretch": 0.7397499999999999,
+      "penetration_m": 0.0001064717294590063
+    },
+    {
+      "closure_m": 0.007936847879200544,
+      "force_n": 0.9616309128048668,
+      "lateral_stretch": 1.0779673238564946,
+      "axial_stretch": 0.7389999999999999,
+      "penetration_m": 0.00010684787920054076
+    },
+    {
+      "closure_m": 0.007959724489500239,
+      "force_n": 0.9650204055021429,
+      "lateral_stretch": 1.0781693779937112,
+      "axial_stretch": 0.73825,
+      "penetration_m": 0.00010722448950023809
+    },
+    {
+      "closure_m": 0.00798260156063048,
+      "force_n": 0.9684140456743012,
+      "lateral_stretch": 1.0783711019734954,
+      "axial_stretch": 0.7374999999999999,
+      "penetration_m": 0.00010760156063047792
+    },
+    {
+      "closure_m": 0.00800547909285686,
+      "force_n": 0.971811835711741,
+      "lateral_stretch": 1.078572492939451,
+      "axial_stretch": 0.73675,
+      "penetration_m": 0.00010797909285686012
+    },
+    {
+      "closure_m": 0.008028357086438113,
+      "force_n": 0.975213777943023,
+      "lateral_stretch": 1.078773548015844,
+      "axial_stretch": 0.736,
+      "penetration_m": 0.00010835708643811367
+    },
+    {
+      "closure_m": 0.008051235541626005,
+      "force_n": 0.978619874634035,
+      "lateral_stretch": 1.0789742643074605,
+      "axial_stretch": 0.73525,
+      "penetration_m": 0.00010873554162600389
+    },
+    {
+      "closure_m": 0.008074114458665241,
+      "force_n": 0.9820301279871526,
+      "lateral_stretch": 1.0791746388994619,
+      "axial_stretch": 0.7344999999999999,
+      "penetration_m": 0.00010911445866523918
+    },
+    {
+      "closure_m": 0.00809699383779338,
+      "force_n": 0.985444540140386,
+      "lateral_stretch": 1.0793746688572383,
+      "axial_stretch": 0.7337499999999999,
+      "penetration_m": 0.00010949383779337622
+    },
+    {
+      "closure_m": 0.008119873679240728,
+      "force_n": 0.9888631131665205,
+      "lateral_stretch": 1.0795743512262614,
+      "axial_stretch": 0.7329999999999999,
+      "penetration_m": 0.00010987367924072451
+    },
+    {
+      "closure_m": 0.008142753983230252,
+      "force_n": 0.9922858490722477,
+      "lateral_stretch": 1.0797736830319367,
+      "axial_stretch": 0.73225,
+      "penetration_m": 0.00011025398323024974
+    },
+    {
+      "closure_m": 0.008165634749977477,
+      "force_n": 0.9957127497972851,
+      "lateral_stretch": 1.0799726612794527,
+      "axial_stretch": 0.7314999999999999,
+      "penetration_m": 0.00011063474997747612
+    },
+    {
+      "closure_m": 0.008188515979690386,
+      "force_n": 0.9991438172134859,
+      "lateral_stretch": 1.0801712829536305,
+      "axial_stretch": 0.73075,
+      "penetration_m": 0.00011101597969038732
+    },
+    {
+      "closure_m": 0.008211397672569327,
+      "force_n": 1.0025790531239418,
+      "lateral_stretch": 1.0803695450187714,
+      "axial_stretch": 0.73,
+      "penetration_m": 0.00011139767256932687
+    },
+    {
+      "closure_m": 0.008234279828806899,
+      "force_n": 1.006018459262074,
+      "lateral_stretch": 1.0805674444185036,
+      "axial_stretch": 0.72925,
+      "penetration_m": 0.00011177982880689711
+    },
+    {
+      "closure_m": 0.008257162448587858,
+      "force_n": 1.0094620372907124,
+      "lateral_stretch": 1.0807649780756265,
+      "axial_stretch": 0.7284999999999999,
+      "penetration_m": 0.00011216244858785693
+    },
+    {
+      "closure_m": 0.008280045532089022,
+      "force_n": 1.0129097888011669,
+      "lateral_stretch": 1.0809621428919551,
+      "axial_stretch": 0.7277499999999999,
+      "penetration_m": 0.00011254553208901854
+    },
+    {
+      "closure_m": 0.008302929079479144,
+      "force_n": 1.01636171531229,
+      "lateral_stretch": 1.0811589357481621,
+      "axial_stretch": 0.727,
+      "penetration_m": 0.00011292907947914332
+    },
+    {
+      "closure_m": 0.008325813090918836,
+      "force_n": 1.0198178182695252,
+      "lateral_stretch": 1.0813553535036193,
+      "axial_stretch": 0.72625,
+      "penetration_m": 0.00011331309091883613
+    },
+    {
+      "closure_m": 0.008348697566560438,
+      "force_n": 1.0232780990439465,
+      "lateral_stretch": 1.0815513929962366,
+      "axial_stretch": 0.7255,
+      "penetration_m": 0.0001136975665604385
+    },
+    {
+      "closure_m": 0.00837158250654792,
+      "force_n": 1.026742558931289,
+      "lateral_stretch": 1.0817470510423008,
+      "axial_stretch": 0.72475,
+      "penetration_m": 0.00011408250654792101
+    },
+    {
+      "closure_m": 0.008394467911016775,
+      "force_n": 1.0302111991509642,
+      "lateral_stretch": 1.0819423244363129,
+      "axial_stretch": 0.724,
+      "penetration_m": 0.00011446791101677379
+    },
+    {
+      "closure_m": 0.008417353780093898,
+      "force_n": 1.033684020845071,
+      "lateral_stretch": 1.0821372099508222,
+      "axial_stretch": 0.72325,
+      "penetration_m": 0.00011485378009389678
+    },
+    {
+      "closure_m": 0.00844024011389749,
+      "force_n": 1.0371610250773902,
+      "lateral_stretch": 1.082331704336262,
+      "axial_stretch": 0.7224999999999999,
+      "penetration_m": 0.0001152401138974878
+    },
+    {
+      "closure_m": 0.008463126912536933,
+      "force_n": 1.0406422128323698,
+      "lateral_stretch": 1.0825258043207813,
+      "axial_stretch": 0.7217499999999999,
+      "penetration_m": 0.00011562691253692998
+    },
+    {
+      "closure_m": 0.008486014176112678,
+      "force_n": 1.0441275850140999,
+      "lateral_stretch": 1.082719506610076,
+      "axial_stretch": 0.721,
+      "penetration_m": 0.00011601417611267776
+    },
+    {
+      "closure_m": 0.008508901904716142,
+      "force_n": 1.0476171424452747,
+      "lateral_stretch": 1.0829128078872192,
+      "axial_stretch": 0.72025,
+      "penetration_m": 0.00011640190471614163
+    },
+    {
+      "closure_m": 0.008531790098429571,
+      "force_n": 1.0511108858661442,
+      "lateral_stretch": 1.0831057048124886,
+      "axial_stretch": 0.7195,
+      "penetration_m": 0.00011679009842957158
+    },
+    {
+      "closure_m": 0.00855467875732594,
+      "force_n": 1.0546088159334541,
+      "lateral_stretch": 1.0832981940231936,
+      "axial_stretch": 0.71875,
+      "penetration_m": 0.00011717875732593934
+    },
+    {
+      "closure_m": 0.00857756788146882,
+      "force_n": 1.0581109332193734,
+      "lateral_stretch": 1.0834902721335011,
+      "axial_stretch": 0.718,
+      "penetration_m": 0.00011756788146881928
+    },
+    {
+      "closure_m": 0.00860045747091227,
+      "force_n": 1.0616172382104103,
+      "lateral_stretch": 1.0836819357342584,
+      "axial_stretch": 0.7172499999999999,
+      "penetration_m": 0.00011795747091226781
+    },
+    {
+      "closure_m": 0.008623347525700703,
+      "force_n": 1.0651277313063168,
+      "lateral_stretch": 1.0838731813928155,
+      "axial_stretch": 0.7164999999999999,
+      "penetration_m": 0.00011834752570070187
+    },
+    {
+      "closure_m": 0.00864623804586878,
+      "force_n": 1.06864241281898,
+      "lateral_stretch": 1.084064005652846,
+      "axial_stretch": 0.7157499999999999,
+      "penetration_m": 0.00011873804586877555
+    },
+    {
+      "closure_m": 0.008669129031441255,
+      "force_n": 1.072161282971301,
+      "lateral_stretch": 1.0842544050341665,
+      "axial_stretch": 0.715,
+      "penetration_m": 0.00011912903144125566
+    },
+    {
+      "closure_m": 0.008692020482432897,
+      "force_n": 1.0756843418960664,
+      "lateral_stretch": 1.0844443760325528,
+      "axial_stretch": 0.7142499999999999,
+      "penetration_m": 0.00011952048243289627
+    },
+    {
+      "closure_m": 0.008714912398848309,
+      "force_n": 1.0792115896347951,
+      "lateral_stretch": 1.0846339151195568,
+      "axial_stretch": 0.7135,
+      "penetration_m": 0.00011991239884831057
+    },
+    {
+      "closure_m": 0.008737804780681844,
+      "force_n": 1.0827430261365902,
+      "lateral_stretch": 1.084823018742321,
+      "axial_stretch": 0.71275,
+      "penetration_m": 0.00012030478068184335
+    },
+    {
+      "closure_m": 0.00876069762791744,
+      "force_n": 1.0862786512569589,
+      "lateral_stretch": 1.0850116833233892,
+      "axial_stretch": 0.712,
+      "penetration_m": 0.00012069762791743987
+    },
+    {
+      "closure_m": 0.008783590940528517,
+      "force_n": 1.0898184647566336,
+      "lateral_stretch": 1.0851999052605201,
+      "axial_stretch": 0.7112499999999999,
+      "penetration_m": 0.00012109094052851485
+    },
+    {
+      "closure_m": 0.00880648471847782,
+      "force_n": 1.0933624663003745,
+      "lateral_stretch": 1.0853876809264948,
+      "axial_stretch": 0.7104999999999999,
+      "penetration_m": 0.00012148471847781938
+    },
+    {
+      "closure_m": 0.00882937896171731,
+      "force_n": 1.0969106554557582,
+      "lateral_stretch": 1.0855750066689245,
+      "axial_stretch": 0.7097499999999999,
+      "penetration_m": 0.00012187896171730646
+    },
+    {
+      "closure_m": 0.008852273670187994,
+      "force_n": 1.1004630316919555,
+      "lateral_stretch": 1.085761878810057,
+      "axial_stretch": 0.709,
+      "penetration_m": 0.00012227367018799505
+    },
+    {
+      "closure_m": 0.008875168843819834,
+      "force_n": 1.1040195943784925,
+      "lateral_stretch": 1.0859482936465807,
+      "axial_stretch": 0.7082499999999999,
+      "penetration_m": 0.0001226688438198325
+    },
+    {
+      "closure_m": 0.008898064482531555,
+      "force_n": 1.1075803427840003,
+      "lateral_stretch": 1.0861342474494264,
+      "axial_stretch": 0.7075,
+      "penetration_m": 0.00012306448253155558
+    },
+    {
+      "closure_m": 0.00892096058623055,
+      "force_n": 1.1111452760749516,
+      "lateral_stretch": 1.086319736463569,
+      "axial_stretch": 0.70675,
+      "penetration_m": 0.00012346058623055017
+    },
+    {
+      "closure_m": 0.00894385715481271,
+      "force_n": 1.1147143933143782,
+      "lateral_stretch": 1.0865047569078257,
+      "axial_stretch": 0.706,
+      "penetration_m": 0.0001238571548127087
+    },
+    {
+      "closure_m": 0.008966754188162288,
+      "force_n": 1.1182876934605823,
+      "lateral_stretch": 1.0866893049746529,
+      "axial_stretch": 0.7052499999999999,
+      "penetration_m": 0.00012425418816228693
+    },
+    {
+      "closure_m": 0.008989651686151762,
+      "force_n": 1.121865175365825,
+      "lateral_stretch": 1.0868733768299421,
+      "axial_stretch": 0.7044999999999999,
+      "penetration_m": 0.00012465168615175833
+    },
+    {
+      "closure_m": 0.00901254964864167,
+      "force_n": 1.1254468377750075,
+      "lateral_stretch": 1.0870569686128135,
+      "axial_stretch": 0.7037499999999999,
+      "penetration_m": 0.0001250496486416675
+    },
+    {
+      "closure_m": 0.009035448075480483,
+      "force_n": 1.1290326793243308,
+      "lateral_stretch": 1.0872400764354062,
+      "axial_stretch": 0.703,
+      "penetration_m": 0.0001254480754804812
+    },
+    {
+      "closure_m": 0.00905834696650444,
+      "force_n": 1.1326226985399501,
+      "lateral_stretch": 1.0874226963826705,
+      "axial_stretch": 0.7022499999999999,
+      "penetration_m": 0.00012584696650443891
+    },
+    {
+      "closure_m": 0.0090812463215374,
+      "force_n": 1.136216893836601,
+      "lateral_stretch": 1.0876048245121526,
+      "axial_stretch": 0.7015,
+      "penetration_m": 0.0001262463215374001
+    },
+    {
+      "closure_m": 0.00910414614039069,
+      "force_n": 1.1398152635162224,
+      "lateral_stretch": 1.0877864568537832,
+      "axial_stretch": 0.70075,
+      "penetration_m": 0.00012664614039069138
+    },
+    {
+      "closure_m": 0.009127046422862953,
+      "force_n": 1.1434178057665583,
+      "lateral_stretch": 1.0879675894096603,
+      "axial_stretch": 0.7,
+      "penetration_m": 0.00012704642286295092
+    }
+  ],
+  "curve_interval_m": [
+    0.0,
+    0.007480201990918998
+  ]
+}

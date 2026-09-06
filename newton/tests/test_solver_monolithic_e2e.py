@@ -91,9 +91,10 @@ class TestNormalLoadingContract(unittest.TestCase):
             "frozen_calibration": True,
             "frozen_support": True,
             "frozen_reference": False,
+            "internal_envelope_pass": True,
         }
         self.assertTrue(_v01_exit(gates))
-        for name in ("e2e_numerical_pass", "frozen_calibration", "frozen_support"):
+        for name in ("e2e_numerical_pass", "frozen_calibration", "frozen_support", "internal_envelope_pass"):
             with self.subTest(name=name):
                 changed = dict(gates)
                 changed[name] = False
@@ -201,6 +202,16 @@ def test_short_normal_loading(test, device):
                 invalid = copy.deepcopy(result["records"])
                 invalid[0][field] = value
                 test.assertFalse(assess_run(invalid, fixture)["gates"]["contact_balance_and_sign"])
+    for value in (-float("inf"), -1.0, float("inf"), float("nan")):
+        invalid = copy.deepcopy(result["records"])
+        invalid[0]["nonlinear_convergence_ratios"] = [value, 0, 0]
+        test.assertFalse(assess_run(invalid, fixture)["gates"]["converged_nonlinear_gates"])
+        invalid[0]["linear_iterations"] = 1
+        invalid[0]["stats"].update(rho=value, rho_q=0, rho_x=0)
+        test.assertFalse(assess_run(invalid, fixture)["gates"]["converged_linear_gates"])
+    invalid = copy.deepcopy(result["records"])
+    invalid[0]["nonlinear_convergence_ratios"] = []
+    test.assertFalse(assess_run(invalid, fixture)["gates"]["converged_nonlinear_gates"])
     # A complete-looking prefix must never erase a subsequent execution failure.
     prefix = result["records"] * 100
     failed = assess_run(prefix, fixture, execution_error={"step": 1200, "reason": "interrupted"})

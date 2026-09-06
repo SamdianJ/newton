@@ -1,0 +1,93 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "normal_loading_frozen_v3.schema.json",
+  "title": "Frozen Newton internal normal-loading fixture",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "status",
+    "calibration_status",
+    "support_status",
+    "reference_status",
+    "calibration_provenance",
+    "support_provenance",
+    "reference_provenance",
+    "reference_envelope",
+    "internal_envelope_sha256"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "normal_loading/v3"
+    },
+    "status": {
+      "const": "FROZEN"
+    },
+    "calibration_status": {
+      "enum": [
+        "UNFROZEN",
+        "CANDIDATE",
+        "FROZEN"
+      ]
+    },
+    "support_status": {
+      "enum": [
+        "UNFROZEN",
+        "CANDIDATE",
+        "FROZEN"
+      ]
+    },
+    "reference_status": {
+      "enum": [
+        "UNFROZEN",
+        "CANDIDATE",
+        "BLOCKED",
+        "FROZEN"
+      ]
+    },
+    "calibration_provenance": {
+      "$ref": "#/$defs/provenance"
+    },
+    "support_provenance": {
+      "$ref": "#/$defs/provenance"
+    },
+    "reference_provenance": {
+      "$ref": "#/$defs/provenance"
+    },
+    "internal_envelope_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    }
+  },
+  "$defs": {
+    "provenance": {
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "version": {
+              "type": "string",
+              "minLength": 1
+            },
+            "sha256": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            "reason": {
+              "type": "string",
+              "minLength": 1
+            },
+            "candidate_private_config": {
+              "type": [
+                "object",
+                "null"
+              ]
+            }
+          }
+        }
+      ]
+    }
+  }
+}
