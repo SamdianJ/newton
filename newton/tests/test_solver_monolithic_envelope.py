@@ -4,8 +4,12 @@
 """Verify independently calibrated normal-response acceptance."""
 
 import copy
+import tempfile
 import unittest
 from itertools import pairwise
+from unittest.mock import patch
+
+import numpy as np
 
 from scripts.monolithic_reference.internal_envelope import FROZEN_FIXTURE, assess_envelope, load_envelope, static_curve
 from scripts.monolithic_reference.normal_loading import _v01_exit, load_fixture
@@ -52,6 +56,34 @@ class TestInternalEnvelope(unittest.TestCase):
                 self.assertFalse(assess_envelope(records, changed, fixture)["pass"])
         records[100]["normal_compressive_force_n"] += 1
         self.assertFalse(assess_envelope(records, summary, fixture)["pass"])
+
+    def test_frozen_cli_fails_for_physical_envelope_failure(self):
+        """Return a failing process status when frozen numerics pass but response fails."""
+        from scripts.monolithic_reference.normal_loading import main  # noqa: PLC0415
+
+        result = {"metadata": {}, "records": [], "summary": {"draft_numerical_pass": True, "v01_exit": False}}
+        with tempfile.TemporaryDirectory() as directory:
+            with (
+                patch("sys.argv", ["normal_loading", "--fixture", str(FROZEN_FIXTURE), "--output", directory]),
+                patch("scripts.monolithic_reference.normal_loading.run_loading", return_value=result),
+            ):
+                self.assertEqual(main(), 1)
+
+    def test_impact_modal_bound_matches_declared_discrete_model(self):
+        """Bound both independent initial perturbations over actual matrix powers."""
+        fixture = load_fixture(FROZEN_FIXTURE)
+        budget = load_envelope(fixture)["impact_budget"]
+        transition = np.asarray(budget["transition"])
+        amplitudes = np.asarray(budget["modal_amplitudes_n"])
+        decay = np.asarray(budget["modal_decay"])
+        for sign in (-1, 1):
+            state = np.asarray(
+                [budget["initial_penetration_bound_m"], 0, sign * budget["initial_velocity_bound_m_s"], 0]
+            )
+            for step in range(100):
+                force = abs(budget["contact_stiffness_n_m"] * (state[0] - state[1]))
+                self.assertLessEqual(force, float(np.sum(amplitudes * decay**step)) + 1e-12)
+                state = transition @ state
 
     def test_exit_requires_internal_envelope(self):
         """Keep a numerical-only or missing-envelope result outside release acceptance."""

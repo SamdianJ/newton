@@ -20,8 +20,8 @@ import newton
 
 DIRECTORY = Path(__file__).with_name("fixtures")
 FROZEN_FIXTURE = DIRECTORY / "normal_loading_frozen_v3.json"
-ENVELOPE = DIRECTORY / "internal_normal_envelope_v1.json"
-ENVELOPE_SHA256 = "c593f84cf63f29a51032961fc1f6157c324ff0928596208dcb006b9d2c996ee4"
+ENVELOPE = DIRECTORY / "internal_normal_envelope_v2.json"
+ENVELOPE_SHA256 = "0ebffba07e670e1b39a9cd579543df460770d4c4d4fc10e51fdcd313988616c6"
 
 
 def physics_sha256(fixture):
@@ -68,6 +68,55 @@ def static_curve(fixture, *, count=401):
     return result
 
 
+def impact_budget(fixture, curve):
+    """Linearize the initial normal impact with actual BE/frozen-PD timing.
+
+    This is a declared two-mode calibration model, not a rigorous bound for
+    arbitrary nonlinear assets. Modal absolute sums bound its initial phase.
+    """
+    rest = np.asarray(fixture["soft"]["rest_positions_m"])
+    area = np.linalg.norm(np.cross(rest[1] - rest[0], rest[2] - rest[0])) / 2
+    volume = abs(np.linalg.det((rest[1:] - rest[0]).T)) / 6
+    masses = np.asarray([fixture["rigid"]["mass_kg"], 0.75 * volume * fixture["soft"]["density_kg_m3"]])
+    mass = np.diag(masses)
+    contact = area * fixture["contact"]["stiffness_n_m3"]
+    slope = (curve[1]["force_n"] - curve[0]["force_n"]) / (curve[1]["closure_m"] - curve[0]["closure_m"])
+    soft = 1 / (1 / slope - 1 / contact)
+    stiffness = np.asarray([[contact, -contact], [-contact, contact + soft]])
+    drive = fixture["drive"]
+    dt = fixture["dt_s"]
+    control_stiffness = np.diag([drive["kp_n_m"], 0])
+    damping = np.diag([drive["kd_n_s_m"], 0])
+    vx = -dt * np.linalg.solve(mass + dt * dt * stiffness, stiffness + control_stiffness)
+    vv = np.linalg.solve(mass + dt * dt * stiffness, mass - dt * damping)
+    transition = np.block([[np.eye(2) + dt * vx, dt * vv], [vx, vv]])
+    eigenvalues, eigenvectors = np.linalg.eig(transition)
+    vmax = 1.875 * (drive["loading_target_m"] - drive["free_target_m"]) / (drive["loading_end_s"] - drive["free_end_s"])
+    # First force-producing record may be up to one timestep past activation.
+    # Add independent initial position and velocity absolute modal sums.
+    initial = np.diag([vmax * dt, 0, vmax, 0])
+    amplitudes = np.abs(np.asarray([contact, -contact, 0, 0]) @ eigenvectors) * np.sum(
+        np.abs(np.linalg.solve(eigenvectors, initial)), axis=1
+    )
+    radii = np.abs(eigenvalues)
+    if not np.all(radii < 1):
+        raise ValueError("Declared BE/PD impact linearization is unstable")
+    return {
+        "method": "two-DOF initial normal linearization; contact/soft BE and explicit frozen PD; absolute modal phase sum",
+        "scope": "initial small-strain base-face impact of this exact fixture; not a nonlinear theorem",
+        "anchor": "n=0 at first force-producing record in the sustained onset streak",
+        "dirichlet_mass_rule": "three dynamic vertices each rho*V0/4; fixed apex removed",
+        "masses_kg": masses.tolist(),
+        "contact_stiffness_n_m": float(contact),
+        "soft_static_tangent_n_m": float(soft),
+        "transition": transition.tolist(),
+        "initial_velocity_bound_m_s": vmax,
+        "initial_penetration_bound_m": vmax * dt,
+        "modal_amplitudes_n": amplitudes.tolist(),
+        "modal_decay": radii.tolist(),
+    }
+
+
 def make_envelope(fixture):
     """Declare static bounds and a priori spatial/inertial/sampling budgets."""
     curve = static_curve(fixture)
@@ -112,7 +161,8 @@ def make_envelope(fixture):
         + rigid["reference_point_body_m"][2]
     )
     return {
-        "schema_version": "internal_normal_envelope/v1",
+        "schema_version": "internal_normal_envelope/v2",
+        "impact_budget": impact_budget(fixture, curve),
         "status": "FROZEN",
         "physics_sha256": physics_sha256(fixture),
         "calibration_provenance": fixture["calibration_provenance"],
@@ -177,7 +227,7 @@ def assess_envelope(records, summary, fixture):
     samples = records[origin:] if type(origin) is int and 0 <= origin < len(records) else []
     valid = bool(samples)
     reached = 0.0
-    for record in samples:
+    for sample_index, record in enumerate(samples):
         closure = record.get("actual_closure_m")
         force = record.get("normal_compressive_force_n")
         if not all(isinstance(v, (int, float)) and math.isfinite(v) for v in (closure, force)):
@@ -185,9 +235,14 @@ def assess_envelope(records, summary, fixture):
             continue
         reached = max(reached, closure)
         expected = float(np.interp(closure, x, f))
+        impact = envelope["impact_budget"]
+        transient = sum(
+            amplitude * decay**sample_index
+            for amplitude, decay in zip(impact["modal_amplitudes_n"], impact["modal_decay"], strict=True)
+        )
         valid &= (
             0 <= closure <= x[-1]
-            and abs(force - expected) <= budget["relative_spatial"] * expected + budget["force_absolute_n"]
+            and abs(force - expected) <= budget["relative_spatial"] * expected + budget["force_absolute_n"] + transient
         )
     gates["force_displacement_curve"] = bool(valid and reached >= envelope["curve_interval_m"][1])
     return {"pass": all(gates.values()), "gates": gates, "observations": observations}

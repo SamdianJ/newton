@@ -212,6 +212,16 @@ def test_short_normal_loading(test, device):
     invalid = copy.deepcopy(result["records"])
     invalid[0]["nonlinear_convergence_ratios"] = []
     test.assertFalse(assess_run(invalid, fixture)["gates"]["converged_nonlinear_gates"])
+    for field, value in (
+        ("min_det_f", float("inf")),
+        ("penetration_m", -1),
+        ("soft_response_m", float("inf")),
+        ("linear_iterations", -1),
+        ("node_positions_m", [[float("nan")] * 3] * 4),
+    ):
+        invalid = copy.deepcopy(result["records"])
+        invalid[0][field] = value
+        test.assertFalse(assess_run(invalid, fixture)["gates"]["finite_state"])
     # A complete-looking prefix must never erase a subsequent execution failure.
     prefix = result["records"] * 100
     failed = assess_run(prefix, fixture, execution_error={"step": 1200, "reason": "interrupted"})

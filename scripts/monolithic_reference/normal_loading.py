@@ -430,11 +430,52 @@ def assess_run(records, fixture, *, execution_error=None):
             )
         )
 
+    def finite_record(r):
+        arrays = {
+            "joint_q": (1,),
+            "joint_qd": (1,),
+            "link_xform": (1, 7),
+            "node_positions_m": (4, 3),
+            "soft_com_m": (3,),
+            "normal_physical_force_n": (3,),
+            "physical_world_force_or_wrench": (1, 6),
+            "generalized_physical_force": (10,),
+        }
+        for name, shape in arrays.items():
+            values = np.asarray(r.get(name))
+            if values.shape != shape or values.dtype.kind not in "iuf" or not np.isfinite(values).all():
+                return False
+        for name in (
+            "min_det_f",
+            "penetration_m",
+            "soft_response_m",
+            "relative_rigid_probe_m",
+            "normal_compressive_force_n",
+            "command_q_m",
+            "command_qd_m_s",
+            "frozen_joint_force_n",
+        ):
+            value = r.get(name)
+            if type(value) not in (int, float) or not math.isfinite(value):
+                return False
+        if r["penetration_m"] < 0:
+            return False
+        for name in ("linear_iterations", "nonlinear_iterations", "active_sample_count"):
+            if type(r.get(name)) is not int or r[name] < 0:
+                return False
+        for name in ("finite_state", "converged", "rolled_back", "committed_unconverged"):
+            if type(r.get(name)) is not bool:
+                return False
+        return r["finite_state"]
+
     numerical_gates = {
         "execution_completed": execution_error is None,
         "minimum_steps": count >= limits["minimum_substeps"],
-        "finite_state": all(r["finite_state"] for r in records),
-        "min_det_f": all(r["min_det_f"] is not None and r["min_det_f"] >= limits["min_det_f"] for r in records),
+        "finite_state": all(finite_record(r) for r in records),
+        "min_det_f": all(
+            r["min_det_f"] is not None and math.isfinite(r["min_det_f"]) and r["min_det_f"] >= limits["min_det_f"]
+            for r in records
+        ),
         "converged_ratio": converged_ratio >= limits["minimum_converged_ratio"],
         "consecutive_non_success": maximum_streak <= limits["maximum_consecutive_non_success"],
         "free_space_no_force": bool(free)
@@ -637,12 +678,14 @@ def main():
     args = parser.parse_args()
     args.output.mkdir(parents=True, exist_ok=True)
     candidate = json.loads(args.candidate_internal_config.read_text()) if args.candidate_internal_config else None
-    result = run_loading(load_fixture(args.fixture), device=args.device, candidate_internal_config=candidate)
+    fixture = load_fixture(args.fixture)
+    result = run_loading(fixture, device=args.device, candidate_internal_config=candidate)
     for key in ("metadata", "summary"):
         (args.output / f"{key}.json").write_text(json.dumps(result[key], indent=2, allow_nan=False) + "\n")
     (args.output / "steps.jsonl").write_text("".join(json.dumps(r, allow_nan=False) + "\n" for r in result["records"]))
     print(json.dumps(result["summary"], indent=2))
-    return 0 if result["summary"]["draft_numerical_pass"] else 1
+    passed = result["summary"]["v01_exit" if fixture["status"] == "FROZEN" else "draft_numerical_pass"]
+    return 0 if passed else 1
 
 
 if __name__ == "__main__":

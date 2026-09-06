@@ -134,5 +134,5 @@
     "settled_window_substeps": 100,
     "note": "Numerical gates and calibration/support/reference status are independent. V0.1 exit requires the numerical, calibration, and support gates; the SuperDex reference axis remains reported but is deferred until after V0.2."
   },
-  "internal_envelope_sha256": "c593f84cf63f29a51032961fc1f6157c324ff0928596208dcb006b9d2c996ee4"
+  "internal_envelope_sha256": "0ebffba07e670e1b39a9cd579543df460770d4c4d4fc10e51fdcd313988616c6"
 }
