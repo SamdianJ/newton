@@ -473,8 +473,13 @@ def assess_run(records, fixture, *, execution_error=None):
 
 
 def _v01_exit(gates):
-    """Require numerical acceptance plus every independently frozen evidence axis."""
-    required = ("e2e_numerical_pass", "frozen_calibration", "frozen_support", "frozen_reference")
+    """Require numerical acceptance and Newton-local evidence frozen for V0.1.
+
+    The cross-implementation SuperDex reference remains reported as an
+    independent evidence axis, but is deferred until after V0.2 and therefore
+    does not block this exit decision.
+    """
+    required = ("e2e_numerical_pass", "frozen_calibration", "frozen_support")
     return all(gates.get(name) is True for name in required)
 
 

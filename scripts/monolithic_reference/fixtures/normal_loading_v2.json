@@ -74,6 +74,6 @@
     "linear_tolerance": 0.0001,
     "closure_secant_interval_m": [0.001, 0.005],
     "settled_window_substeps": 100,
-    "note": "Numerical gates and calibration/support/reference status are independent; V0.1 exit requires all four."
+    "note": "Numerical gates and calibration/support/reference status are independent. V0.1 exit requires the numerical, calibration, and support gates; the SuperDex reference axis remains reported but is deferred until after V0.2."
   }
 }

@@ -147,3 +147,27 @@ count and effective parameters. Native total timing excludes offline queries;
 Newton total timing surrounds a synchronized solver step. Neither includes a
 comparable calibrated stage breakdown, and these tiny timings are not C5
 performance evidence.
+
+## Newton release profiling
+
+`profile_release.py` is the opt-in Newton-only C5 harness. It measures the
+versioned single-finger fixture and a level-3 refined tet mesh on CPU/CUDA,
+compares P1Q3 with the existing adaptive-face narrow phase, and records
+synchronized p50/p95 timings for collision, contact, BSR construction,
+preconditioner factorization, PCG, and the whole step. It also runs offline
+diagonal-preconditioner and disabled-contact-cross-block negative controls,
+brackets the fixture-specific contact-stiffness lower bound, and audits native,
+process/driver, and Python device allocations. Component timers overlap their
+enclosing current/trial timers and must not be summed.
+
+```bash
+uv run python -m scripts.monolithic_reference.profile_release \
+  --output /new/output/directory --device cpu --device cuda:0
+```
+
+The profiler rejects an existing output directory and publishes a source hash,
+Newton commit, worktree-cleanliness bit, raw samples, and an artifact SHA-256.
+Its negative controls are process-local instrumentation and do not alter the
+production solver configuration. SuperDex is deliberately not executed and is
+not a V0.1 exit gate; its constitutive/mass-model alignment is deferred until
+after V0.2.

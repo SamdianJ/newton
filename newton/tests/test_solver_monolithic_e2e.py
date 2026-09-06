@@ -85,15 +85,15 @@ class TestNormalLoadingContract(unittest.TestCase):
             with self.assertRaises(ValueError):
                 load_fixture(path)
 
-    def test_v01_exit_requires_numerics_and_all_three_frozen_axes(self):
+    def test_v01_exit_requires_numerics_and_local_frozen_axes(self):
         gates = {
             "e2e_numerical_pass": True,
             "frozen_calibration": True,
             "frozen_support": True,
-            "frozen_reference": True,
+            "frozen_reference": False,
         }
         self.assertTrue(_v01_exit(gates))
-        for name in gates:
+        for name in ("e2e_numerical_pass", "frozen_calibration", "frozen_support"):
             with self.subTest(name=name):
                 changed = dict(gates)
                 changed[name] = False
