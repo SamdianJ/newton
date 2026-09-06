@@ -3,18 +3,29 @@
 
 """Smoke-test the opt-in monolithic release profiler contracts."""
 
+import copy
+import hashlib
+import json
+import tempfile
 import unittest
+from pathlib import Path
+from unittest.mock import patch
 
 from newton.tests.unittest_utils import add_function_test, get_test_devices
+from scripts.monolithic_reference.normal_loading import assess_run
 from scripts.monolithic_reference.profile_release import (
+    _save_trajectories,
     _select_stiffness_lower_bound,
     profile_collision_kernels,
+    run_profiled_medium,
     run_profiled_normal,
+    summarize_records,
 )
 
 
 class TestReleaseProfileHelpers(unittest.TestCase):
     def test_stiffness_lower_bound_is_fail_closed(self):
+        """Reject a lower bound without a measured failing predecessor."""
         rows = [
             {"stiffness_n_m3": 2.0, "physical_numerical_gate": "PASS"},
             {"stiffness_n_m3": 1.0, "physical_numerical_gate": "FAIL"},
@@ -26,6 +37,7 @@ class TestReleaseProfileHelpers(unittest.TestCase):
 
 
 def test_collision_profile(test, device):
+    """Run both collision kernels on matching candidate pairs."""
     result = profile_collision_kernels(device, repeats=2, medium_level=1)
     test.assertEqual({row["asset"] for row in result}, {"formal_single_finger", "refined_tet_level_1"})
     for row in result:
@@ -38,16 +50,72 @@ def test_collision_profile(test, device):
 
 
 def test_short_profiled_normal(test, device):
+    """Preserve full trajectory evidence and recomputable diagnostics."""
     result = run_profiled_normal(device, variant="actor_block", substeps=3, allocation_audit=True)
     test.assertEqual(result["variant"], "actor_block")
     test.assertEqual(result["substeps"], 3)
     test.assertEqual(len(result["step_ms_samples"]), 3)
     test.assertTrue(result["all_finite"])
+    records = result["records"]
+    test.assertEqual(len(records), 3)
+    test.assertEqual(result["diagnostics"], summarize_records(records))
+    test.assertGreater(result["diagnostics"]["matrix_nnz"]["p50"], 0)
+    for name in ("rho", "rho_q", "rho_x"):
+        test.assertEqual(
+            result["diagnostics"][name]["measured_count"], sum(r["stats"][name] is not None for r in records)
+        )
+    changed = copy.deepcopy(records)
+    changed[0]["rolled_back"] = True
+    test.assertEqual(summarize_records(changed)["rollback_count"], 1)
+    with tempfile.TemporaryDirectory() as directory:
+        report = {"run": copy.deepcopy(result)}
+        hashes = _save_trajectories(report, Path(directory))
+        artifact = report["run"]["trajectory"]
+        saved = Path(directory) / artifact["path"]
+        test.assertEqual(hashes[artifact["path"]], hashlib.sha256(saved.read_bytes()).hexdigest())
+        restored = [json.loads(line) for line in saved.read_text().splitlines()]
+        test.assertEqual(restored, records)
+        test.assertEqual(summarize_records(restored), result["diagnostics"])
+        test.assertEqual(assess_run(restored, result["fixture"]), result["assessment"])
     audit = result["allocation_audit"]
     test.assertEqual(audit["allocation_gate"], "PASS")
     test.assertEqual(audit["unexpected_python_device_allocations"], 0)
     test.assertIn("collision_candidate", result["stages"])
     test.assertIn("whole_step", result["percentiles_ms"])
+    for name in (
+        "preconditioner_q_setup",
+        "preconditioner_q_factor",
+        "preconditioner_x_setup",
+        "preconditioner_x_factor",
+        "preconditioner_q_apply",
+        "preconditioner_x_apply",
+    ):
+        test.assertGreater(result["stages"][name]["calls"], 0)
+
+
+def test_medium_records(test, device):
+    """Retain medium trajectory states and independent quality diagnostics."""
+    result = run_profiled_medium(device, level=1, substeps=2, profile_stages=False)
+    test.assertEqual(result["diagnostics"]["record_count"], 2)
+    test.assertEqual(result["diagnostics"]["rollback_count"], 0)
+    test.assertEqual(result["diagnostics"]["nonfinite_state_count"], 0)
+    test.assertGreater(result["diagnostics"]["matrix_nnz"]["p50"], 0)
+    test.assertEqual(len(result["records"][0]["node_positions_m"]), result["particle_count"])
+
+
+def test_uninstrumented_normal(test, device):
+    """Measure a production step without stage patches or allocation hooks."""
+    with (
+        patch("scripts.monolithic_reference.profile_release._StageProfile", side_effect=AssertionError),
+        patch("scripts.monolithic_reference.profile_release._AllocationAudit", side_effect=AssertionError),
+    ):
+        result = run_profiled_normal(device, substeps=2, profile_stages=False)
+    test.assertFalse(result["measurement_mode"]["stage_instrumentation"])
+    test.assertFalse(result["measurement_mode"]["allocation_tracker"])
+    test.assertEqual(result["stages"], {})
+    test.assertIsNone(result["allocation_audit"])
+    with test.assertRaises(ValueError):
+        run_profiled_normal(device, variant="diagonal", substeps=1, profile_stages=False)
 
 
 class TestReleaseProfileDevices(unittest.TestCase):
@@ -62,6 +130,12 @@ add_function_test(
     "test_short_profiled_normal",
     test_short_profiled_normal,
     devices=get_test_devices(),
+)
+
+
+add_function_test(TestReleaseProfileDevices, "test_medium_records", test_medium_records, devices=get_test_devices())
+add_function_test(
+    TestReleaseProfileDevices, "test_uninstrumented_normal", test_uninstrumented_normal, devices=get_test_devices()
 )
 
 
