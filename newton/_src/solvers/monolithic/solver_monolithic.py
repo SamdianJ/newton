@@ -502,8 +502,8 @@ class SolverMonolithic(SolverBase):
     """Solve articulated rigid/tet motion with a common implicit position update.
 
     This experimental implementation supports normal-only P1Q3 contact and
-    static fixed particles. Numerical defaults currently use tiny-fixture
-    development calibration; broader asset and trajectory validation is pending.
+    static fixed particles. Numerical defaults are calibrated on the declared
+    component and normal-loading fixtures; other asset ranges are not certified.
 
     .. experimental::
         This class may change without the normal deprecation period.

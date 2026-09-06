@@ -78,6 +78,43 @@ def test_free_fall(test, device):
     _assert_state_equal(test, fixture.state, initial)
 
 
+def test_alpha_scaled_decrease_boundary(test, device):
+    """Accept an actual smooth trial that separates alpha-scaled and fixed decrease gates."""
+    fixture, solver = _free_scene(device, gravity=(0.0, 0.0, -1000.0), newton_max_iterations=1)
+    solver._config = replace(solver._config, merit_noise=0.0)
+    recover = solver._linear.recover_delta
+    evaluate = solver._evaluate_trial
+    measured = []
+
+    def overshoot(y, delta, **kwargs):
+        status = recover(y, delta, **kwargs)
+        # An intentionally overlong direction forces backtracking in a smooth
+        # translating tet. Residual evaluation and candidate states remain real.
+        delta.assign(delta.numpy() * np.float32(3.99985))
+        y.assign(y.numpy() * np.float32(3.99985))
+        return status
+
+    def measure(candidate, dt):
+        result = evaluate(candidate, dt)
+        measured.append(result.merit)
+        return result
+
+    with (
+        patch.object(solver._linear, "recover_delta", side_effect=overshoot),
+        patch.object(solver, "_evaluate_trial", side_effect=measure),
+        test.assertLogs(_LOGGER, level="WARNING"),
+    ):
+        solver.step(fixture.state, fixture.state_next, fixture.control, None, 0.01)
+    stats = solver.last_stats
+    test.assertEqual(stats.status, SolverMonolithic.Status.NONLINEAR_MAX_ITERATIONS)
+    test.assertFalse(stats.rolled_back)
+    test.assertEqual(stats.accepted_alpha, 0.5)
+    test.assertEqual(len(measured), 2)
+    test.assertGreater(measured[0], stats.merit_initial)
+    test.assertGreater(measured[1], (1.0 - 1.0e-4) * stats.merit_initial)
+    test.assertLessEqual(measured[1], (1.0 - 1.0e-4 * 0.5) * stats.merit_initial)
+
+
 def test_optional_contact_force_attribute(test, device):
     """Finish a normal step without an optional force array and reject explicit force publication."""
     fixture, solver = _free_scene(device, request_force=False)
@@ -500,6 +537,7 @@ class TestMonolithicStep(unittest.TestCase):
 for _test in (
     test_stationary_current_convergence,
     test_free_fall,
+    test_alpha_scaled_decrease_boundary,
     test_optional_contact_force_attribute,
     test_frozen_forces_and_in_place,
     test_final_contact_generation_and_ownership,
