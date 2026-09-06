@@ -269,6 +269,13 @@ class _StageProfile:
         return wrapped
 
     def __enter__(self):
+        try:
+            return self._install()
+        except BaseException:
+            self.__exit__(None, None, None)
+            raise
+
+    def _install(self):
         solver, workspace = self.solver, self.solver._linear
         original_collide = solver._collide
         original_launch = wp.launch
@@ -378,8 +385,10 @@ class _StageProfile:
         return self
 
     def __exit__(self, exc_type, exc_value, traceback):
-        self.stack.close()
-        self.solver._linear.preconditioner = self._actor_operator
+        try:
+            self.stack.close()
+        finally:
+            self.solver._linear.preconditioner = self._actor_operator
 
     def summary(self):
         return {

@@ -11,8 +11,11 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+import warp as wp
+
+import scripts.monolithic_reference.profile_release as release_profile
 from newton.tests.unittest_utils import add_function_test, get_test_devices
-from scripts.monolithic_reference.normal_loading import assess_run
+from scripts.monolithic_reference.normal_loading import assess_run, build_scene, load_fixture
 from scripts.monolithic_reference.profile_release import (
     _save_trajectories,
     _select_stiffness_lower_bound,
@@ -34,6 +37,43 @@ class TestReleaseProfileHelpers(unittest.TestCase):
         self.assertEqual(_select_stiffness_lower_bound(rows), 2.0)
         self.assertIsNone(_select_stiffness_lower_bound([*rows[:1], {"stiffness_n_m3": 1.0}]))
         self.assertIsNone(_select_stiffness_lower_bound([]))
+
+
+def test_profile_enter_cleanup(test, device):
+    """Restore every patch when profile entry fails before or after inverse replacement."""
+    for failure in ("construct_inverse", "after_inverse_replacement"):
+        _model, _state, _control, solver = build_scene(load_fixture(), device=device)
+        workspace = solver._linear
+        profile = release_profile._StageProfile(solver, "diagonal")
+        originals = [(wp, "launch", wp.launch)]
+        for owner, names in (
+            (solver, ("_collide", "_evaluate_current", "_evaluate_trial")),
+            (
+                release_profile.solver_module,
+                ("assemble_current_contacts", "evaluate_trial_contacts", "evaluate_final_contacts"),
+            ),
+            (workspace, ("finalize_assembly", "factor_actor_preconditioner", "solve_pcg", "preconditioner")),
+        ):
+            originals.extend((owner, name, getattr(owner, name)) for name in names)
+        enter_context = profile.stack.enter_context
+
+        def fail_after_replacement(context, _enter_context=enter_context):
+            if context.attribute == "solve_pcg":
+                raise RuntimeError("injected entry failure")
+            return _enter_context(context)
+
+        injection = (
+            patch.object(release_profile, "_DiagonalInverse", side_effect=RuntimeError("injected entry failure"))
+            if failure == "construct_inverse"
+            else patch.object(profile.stack, "enter_context", side_effect=fail_after_replacement)
+        )
+        try:
+            with injection, test.assertRaisesRegex(RuntimeError, "injected entry failure"):
+                profile.__enter__()
+            for owner, name, original in originals:
+                test.assertEqual(getattr(owner, name), original, (failure, name))
+        finally:
+            profile.__exit__(None, None, None)
 
 
 def test_collision_profile(test, device):
@@ -136,6 +176,11 @@ add_function_test(
 add_function_test(TestReleaseProfileDevices, "test_medium_records", test_medium_records, devices=get_test_devices())
 add_function_test(
     TestReleaseProfileDevices, "test_uninstrumented_normal", test_uninstrumented_normal, devices=get_test_devices()
+)
+
+
+add_function_test(
+    TestReleaseProfileDevices, "test_profile_enter_cleanup", test_profile_enter_cleanup, devices=get_test_devices()
 )
 
 
