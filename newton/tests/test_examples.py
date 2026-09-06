@@ -1304,6 +1304,15 @@ add_example_test(
 )
 
 
+add_example_test(
+    TestSoftbodyExamples,
+    name="softbody.example_monolithic_normal_loading",
+    devices=test_devices,
+    test_options={"num-frames": 100},
+    use_viewer=True,
+)
+
+
 class TestKaminoExamples(unittest.TestCase):
     pass
 
