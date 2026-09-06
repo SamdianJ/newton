@@ -27,6 +27,18 @@ from scripts.monolithic_reference.profile_release import (
 
 
 class TestReleaseProfileHelpers(unittest.TestCase):
+    def test_formal_fixture_and_stiffness_candidates_are_separate(self):
+        """Use pinned release evidence only for the unchanged formal fixture."""
+        formal = release_profile._normal_fixture()
+        candidate = release_profile._normal_fixture(200000.0)
+        self.assertEqual(formal["status"], "FROZEN")
+        self.assertEqual(formal["schema_version"], "normal_loading/v3")
+        self.assertEqual(candidate["status"], "DRAFT")
+        self.assertEqual(candidate["schema_version"], "normal_loading/v2")
+        self.assertEqual(candidate["contact"]["stiffness_n_m3"], 200000.0)
+        self.assertNotEqual(formal["contact"]["stiffness_n_m3"], candidate["contact"]["stiffness_n_m3"])
+        self.assertEqual(release_profile._normal_fixture(), formal)
+
     def test_stiffness_lower_bound_is_fail_closed(self):
         """Reject a lower bound without a measured failing predecessor."""
         rows = [
@@ -96,6 +108,8 @@ def test_short_profiled_normal(test, device):
     test.assertEqual(result["substeps"], 3)
     test.assertEqual(len(result["step_ms_samples"]), 3)
     test.assertTrue(result["all_finite"])
+    test.assertEqual(result["fixture"]["status"], "FROZEN")
+    test.assertFalse(result["assessment"]["v01_exit"])
     records = result["records"]
     test.assertEqual(len(records), 3)
     test.assertEqual(result["diagnostics"], summarize_records(records))

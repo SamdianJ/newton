@@ -34,7 +34,9 @@ from newton._src.geometry.soft_contacts_sdf import SDF_FACE_ITERS, SDF_LS_ITERS,
 from newton._src.solvers.monolithic import linear
 from newton._src.solvers.monolithic.collision import create_monolithic_p1q3_face_contacts
 from scripts.monolithic_reference.calibrate_p1q3 import _build_scene as build_refined_scene
+from scripts.monolithic_reference.internal_envelope import FROZEN_FIXTURE
 from scripts.monolithic_reference.normal_loading import (
+    DEFAULT_FIXTURE,
     _json_value,
     assess_run,
     build_scene,
@@ -476,7 +478,7 @@ def _launch_adaptive_face(model, state, pipeline, contacts):
 
 def _collision_asset(device, asset, medium_level):
     if asset == "formal_single_finger":
-        fixture = load_fixture()
+        fixture = load_fixture(FROZEN_FIXTURE)
         model, state, _control, solver = build_scene(fixture, device=device)
         manifest = {
             "fixture_id": fixture["fixture_id"],
@@ -543,7 +545,7 @@ def profile_collision_kernels(device, *, repeats=30, medium_level=3):
 
 
 def _normal_fixture(stiffness=None):
-    fixture = copy.deepcopy(load_fixture())
+    fixture = copy.deepcopy(load_fixture(FROZEN_FIXTURE if stiffness is None else DEFAULT_FIXTURE))
     if stiffness is not None:
         fixture["contact"]["stiffness_n_m3"] = float(stiffness)
     return fixture
