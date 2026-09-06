@@ -231,24 +231,53 @@ def measure(device):
     }
 
 
+def _matches(values, expected, *, atol=1e-6):
+    actual, target = np.asarray(values), np.asarray(expected)
+    return (
+        actual.shape == target.shape and np.isfinite(actual).all() and np.allclose(actual, target, rtol=1e-6, atol=atol)
+    )
+
+
 def assess(result):
-    """Check state accuracy, decreasing integrator differences and isolated signs."""
+    """Check recorded states and forces against the fixed scene's analytical physics."""
+    steps = result["steps"]
+    terms = result["isolated_forces"]
+    if len(steps) != 3 or len(terms) != 3 or {row["term"] for row in terms} != {"gravity", "joint_f", "body_f"}:
+        return False
     errors, position_errors, transform_errors = [], [], []
-    for row in result["steps"]:
+    for row, dt in zip(steps, (0.02, 0.01, 0.005), strict=True):
         if (
-            not row["converged"]
+            row["dt_s"] != dt
+            or not row["converged"]
             or row["rolled_back"]
             or row["status"] != "SUCCESS"
             or row["active_sample_count"] != 0
+            or row["q_dof_count"] != 1
             or row["x_dof_count"] != 12
-            or row["soft_free_fall_error_m"] > 2e-6
+            or not 0.0 <= row["soft_free_fall_error_m"] <= 2e-6
+            or not _matches(row["joint_q_initial"], [0.125])
+            or not _matches(row["joint_qd_initial"], [2.0])
+            or not _matches(row["frozen_joint_f"], [0.7])
+            or not _matches(row["frozen_body_f"], [[0.0, 0.4, 0.0, 0.0, 0.0, 0.2]])
+            or not _matches(row["gravity"], [[0.0, -9.81, 0.0]])
         ):
             return False
-        q = np.asarray(row["joint_q_monolithic"])
-        v = np.asarray(row["joint_qd_monolithic"])
-        if not (np.isfinite(q).all() and np.isfinite(v).all()):
+        q_be, v_be = _scalar_be(dt)
+        if not _matches(row["joint_q_scalar_be"], [q_be], atol=1e-12) or not _matches(
+            row["joint_qd_scalar_be"], [v_be], atol=1e-12
+        ):
             return False
-        if np.max(np.abs(q - row["joint_q_scalar_be"])) > 2e-7 or np.max(np.abs(v - row["joint_qd_scalar_be"])) > 4e-5:
+        for solver in ("monolithic", "featherstone"):
+            q, v = np.asarray(row[f"joint_q_{solver}"]), np.asarray(row[f"joint_qd_{solver}"])
+            if q.shape != (1,) or v.shape != (1,) or not np.isfinite(q).all() or not np.isfinite(v).all():
+                return False
+            angle, speed = float(q[0]), float(v[0])
+            pose = [[0.0, 0.0, 0.0, 0.0, 0.0, math.sin(angle / 2), math.cos(angle / 2)]]
+            twist = [[-0.5 * math.sin(angle) * speed, 0.5 * math.cos(angle) * speed, 0.0, 0.0, 0.0, speed]]
+            if not _matches(row[f"body_q_{solver}"], pose) or not _matches(row[f"body_qd_{solver}"], twist):
+                return False
+        q, v = np.asarray(row["joint_q_monolithic"]), np.asarray(row["joint_qd_monolithic"])
+        if np.max(np.abs(q - q_be)) > 2e-7 or np.max(np.abs(v - v_be)) > 4e-5:
             return False
         errors.append(float(np.linalg.norm(v - row["joint_qd_featherstone"])))
         position_errors.append(float(np.linalg.norm(q - row["joint_q_featherstone"])))
@@ -257,24 +286,40 @@ def assess(result):
         )
         if not (0.0 <= row["convergence_ratio"] <= 1.0 and 0.0 <= row["convergence_ratio_q"] <= 1.0):
             return False
-    if len(errors) != 3 or not (errors[1] < 0.4 * errors[0] and errors[2] < 0.4 * errors[1] and errors[-1] < 2e-4):
+    if not (errors[1] < 0.4 * errors[0] and errors[2] < 0.4 * errors[1] and errors[-1] < 2e-4):
         return False
     for differences in (position_errors, transform_errors):
         if not (differences[1] < 0.25 * differences[0] and differences[2] < 0.25 * differences[1]):
             return False
-    for row in result["isolated_forces"]:
-        r, q, expected = (
-            np.asarray(row[key])
-            for key in ("residual_contribution", "generalized_physical_force", "independent_generalized_force")
-        )
-        if not all(np.isfinite(values).all() for values in (r, q, expected)):
-            return False
-        if (
-            np.linalg.norm(r + q) / np.linalg.norm(q) > 1e-6
-            or np.linalg.norm(q - expected) / np.linalg.norm(expected) > 1e-6
+    expected_wrenches = {
+        "gravity": [[0.0, -19.62, 0.0, 0.0, 0.0, 0.0]],
+        "body_f": [[0.0, 0.4, 0.0, 0.0, 0.0, 0.2]],
+    }
+    jacobian = np.asarray([-0.5 * math.sin(0.125), 0.5 * math.cos(0.125), 0.0, 0.0, 0.0, 1.0])
+    for row in terms:
+        term = row["term"]
+        if term == "joint_f":
+            if row["physical_world_force_or_wrench"] is not None:
+                return False
+            expected = 0.7
+        else:
+            physical = expected_wrenches[term]
+            if not _matches(row["physical_world_force_or_wrench"], physical):
+                return False
+            expected = float(jacobian @ physical[0])
+        # The fixed fixture has nonzero forces; absolute comparison cannot accept 0/0 NaN ratios.
+        for key, value in (
+            ("residual_contribution", -expected),
+            ("generalized_physical_force", expected),
+            ("independent_generalized_force", expected),
         ):
+            if not _matches(row[key], [value]):
+                return False
+        residual = float(row["residual_contribution"][0])
+        generalized = float(row["generalized_physical_force"][0])
+        if abs(residual + generalized) / abs(expected) > 1e-6 or abs(generalized - expected) / abs(expected) > 1e-6:
             return False
-    return len(result["isolated_forces"]) == 3
+    return True
 
 
 def main():
