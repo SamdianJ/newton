@@ -115,6 +115,28 @@ def test_alpha_scaled_decrease_boundary(test, device):
     test.assertLessEqual(measured[1], (1.0 - 1.0e-4 * 0.5) * stats.merit_initial)
 
 
+def test_fixed_tet_rigid_step(test, device):
+    """Advance a rigid subsystem while every tet node remains a static Dirichlet node."""
+    fixture = build_tiny_cpu_fixture(device=device)
+    model = fixture.model
+    model.gravity.zero_()
+    model.particle_mass.zero_()
+    model.particle_inv_mass.zero_()
+    fixture.state.joint_qd.zero_()
+    fixture.state.body_qd.zero_()
+    fixture.state.particle_qd.zero_()
+    fixture.control.joint_f.assign(np.asarray([0.0, 0.5], dtype=np.float32))
+    initial = _snapshot(fixture.state)
+    solver = SolverMonolithic(model, collision_pipeline=MonolithicCollisionPipeline(model), contact_stiffness=1.0e5)
+    solver.step(fixture.state, fixture.state_next, fixture.control, None, 0.01)
+    test.assertTrue(solver.last_stats.converged)
+    test.assertEqual(solver.last_stats.particle_block_count, 0)
+    test.assertEqual(solver.last_stats.merit_x_final, 0.0)
+    np.testing.assert_allclose(fixture.state_next.joint_q.numpy(), initial["joint_q"] + [0.0, 0.0001], atol=1e-7)
+    np.testing.assert_array_equal(fixture.state_next.particle_q.numpy(), initial["particle_q"])
+    np.testing.assert_array_equal(fixture.state_next.particle_qd.numpy(), initial["particle_qd"])
+
+
 def test_optional_contact_force_attribute(test, device):
     """Finish a normal step without an optional force array and reject explicit force publication."""
     fixture, solver = _free_scene(device, request_force=False)
@@ -538,6 +560,7 @@ for _test in (
     test_stationary_current_convergence,
     test_free_fall,
     test_alpha_scaled_decrease_boundary,
+    test_fixed_tet_rigid_step,
     test_optional_contact_force_attribute,
     test_frozen_forces_and_in_place,
     test_final_contact_generation_and_ownership,

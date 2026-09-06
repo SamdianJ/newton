@@ -746,7 +746,11 @@ class SolverMonolithic(SolverBase):
         self._dynamic_diagonal = wp.zeros(size, dtype=float, device=model.device)
         self._residual_ref = wp.zeros(size, dtype=float, device=model.device)
         self._metric_vector = wp.zeros(size, dtype=float, device=model.device)
-        self._metric_slices = (self._metric_vector, self._metric_vector[:nq], self._metric_vector[nq:])
+        self._metric_slices = (
+            self._metric_vector,
+            self._metric_vector[:nq] if nq else wp.empty(0, dtype=float, device=model.device),
+            self._metric_vector[nq:] if nx else wp.empty(0, dtype=float, device=model.device),
+        )
         self._norm_values = wp.zeros(3, dtype=float, device=model.device)
         self._raw_norm_sums = wp.zeros(2, dtype=wp.float64, device=model.device)
         self._norm_outputs = tuple(self._norm_values[i : i + 1] for i in range(3))
@@ -986,7 +990,10 @@ class SolverMonolithic(SolverBase):
             model,
             **self._tet_arguments(candidate, dt),
             scatter=TetScatterBuffers(
-                assembly.ax_internal_triplets.values, triplets.values[nq * nq : nq * nq + self._tet_triplet_count]
+                assembly.ax_internal_triplets.values,
+                triplets.values[nq * nq : nq * nq + self._tet_triplet_count]
+                if self._tet_triplet_count
+                else self._metric_slices[2],
             ),
         )
         min_det = self._check_tet()
