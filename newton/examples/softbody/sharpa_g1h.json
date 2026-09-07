@@ -1,0 +1,223 @@
+{
+  "schema": "sharpa-g1h/v1",
+  "parameter_source": "simulation fixture calibration; not hardware identification",
+  "gravity": [
+    0,
+    0,
+    -9.81
+  ],
+  "dt": 0.001,
+  "duration": 4.0,
+  "joints": {
+    "left_thumb_CMC_FE": {
+      "target_ke": 33.0,
+      "target_kd": 0.33,
+      "limit_ke": 330.0,
+      "limit_kd": 0.33,
+      "friction": 0.0066,
+      "limit_width": 0.01,
+      "friction_velocity_scale": 0.01
+    },
+    "left_thumb_CMC_AA": {
+      "target_ke": 33.0,
+      "target_kd": 0.33,
+      "limit_ke": 330.0,
+      "limit_kd": 0.33,
+      "friction": 0.0066,
+      "limit_width": 0.01,
+      "friction_velocity_scale": 0.01
+    },
+    "left_thumb_MCP_FE": {
+      "target_ke": 18.64,
+      "target_kd": 0.1864,
+      "limit_ke": 186.4,
+      "limit_kd": 0.1864,
+      "friction": 0.0037280000000000004,
+      "limit_width": 0.01,
+      "friction_velocity_scale": 0.01
+    },
+    "left_thumb_MCP_AA": {
+      "target_ke": 18.64,
+      "target_kd": 0.1864,
+      "limit_ke": 186.4,
+      "limit_kd": 0.1864,
+      "friction": 0.0037280000000000004,
+      "limit_width": 0.01,
+      "friction_velocity_scale": 0.01
+    },
+    "left_thumb_IP": {
+      "target_ke": 6.38,
+      "target_kd": 0.06380000000000001,
+      "limit_ke": 63.800000000000004,
+      "limit_kd": 0.06380000000000001,
+      "friction": 0.001276,
+      "limit_width": 0.01,
+      "friction_velocity_scale": 0.01
+    },
+    "left_index_MCP_FE": {
+      "target_ke": 18.64,
+      "target_kd": 0.1864,
+      "limit_ke": 186.4,
+      "limit_kd": 0.1864,
+      "friction": 0.0037280000000000004,
+      "limit_width": 0.01,
+      "friction_velocity_scale": 0.01
+    },
+    "left_index_MCP_AA": {
+      "target_ke": 18.64,
+      "target_kd": 0.1864,
+      "limit_ke": 186.4,
+      "limit_kd": 0.1864,
+      "friction": 0.0037280000000000004,
+      "limit_width": 0.01,
+      "friction_velocity_scale": 0.01
+    },
+    "left_index_PIP": {
+      "target_ke": 6.38,
+      "target_kd": 0.06380000000000001,
+      "limit_ke": 63.800000000000004,
+      "limit_kd": 0.06380000000000001,
+      "friction": 0.001276,
+      "limit_width": 0.01,
+      "friction_velocity_scale": 0.01
+    },
+    "left_index_DIP": {
+      "target_ke": 1.89369,
+      "target_kd": 0.018936900000000003,
+      "limit_ke": 18.9369,
+      "limit_kd": 0.018936900000000003,
+      "friction": 0.00037873800000000005,
+      "limit_width": 0.01,
+      "friction_velocity_scale": 0.01
+    },
+    "left_middle_MCP_FE": {
+      "target_ke": 18.64,
+      "target_kd": 0.1864,
+      "limit_ke": 186.4,
+      "limit_kd": 0.1864,
+      "friction": 0.0037280000000000004,
+      "limit_width": 0.01,
+      "friction_velocity_scale": 0.01
+    },
+    "left_middle_MCP_AA": {
+      "target_ke": 18.64,
+      "target_kd": 0.1864,
+      "limit_ke": 186.4,
+      "limit_kd": 0.1864,
+      "friction": 0.0037280000000000004,
+      "limit_width": 0.01,
+      "friction_velocity_scale": 0.01
+    },
+    "left_middle_PIP": {
+      "target_ke": 6.38,
+      "target_kd": 0.06380000000000001,
+      "limit_ke": 63.800000000000004,
+      "limit_kd": 0.06380000000000001,
+      "friction": 0.001276,
+      "limit_width": 0.01,
+      "friction_velocity_scale": 0.01
+    },
+    "left_middle_DIP": {
+      "target_ke": 1.89369,
+      "target_kd": 0.018936900000000003,
+      "limit_ke": 18.9369,
+      "limit_kd": 0.018936900000000003,
+      "friction": 0.00037873800000000005,
+      "limit_width": 0.01,
+      "friction_velocity_scale": 0.01
+    },
+    "left_ring_MCP_FE": {
+      "target_ke": 18.64,
+      "target_kd": 0.1864,
+      "limit_ke": 186.4,
+      "limit_kd": 0.1864,
+      "friction": 0.0037280000000000004,
+      "limit_width": 0.01,
+      "friction_velocity_scale": 0.01
+    },
+    "left_ring_MCP_AA": {
+      "target_ke": 18.64,
+      "target_kd": 0.1864,
+      "limit_ke": 186.4,
+      "limit_kd": 0.1864,
+      "friction": 0.0037280000000000004,
+      "limit_width": 0.01,
+      "friction_velocity_scale": 0.01
+    },
+    "left_ring_PIP": {
+      "target_ke": 6.38,
+      "target_kd": 0.06380000000000001,
+      "limit_ke": 63.800000000000004,
+      "limit_kd": 0.06380000000000001,
+      "friction": 0.001276,
+      "limit_width": 0.01,
+      "friction_velocity_scale": 0.01
+    },
+    "left_ring_DIP": {
+      "target_ke": 1.89369,
+      "target_kd": 0.018936900000000003,
+      "limit_ke": 18.9369,
+      "limit_kd": 0.018936900000000003,
+      "friction": 0.00037873800000000005,
+      "limit_width": 0.01,
+      "friction_velocity_scale": 0.01
+    },
+    "left_pinky_CMC": {
+      "target_ke": 5.285,
+      "target_kd": 0.05285,
+      "limit_ke": 52.849999999999994,
+      "limit_kd": 0.05285,
+      "friction": 0.001057,
+      "limit_width": 0.01,
+      "friction_velocity_scale": 0.01
+    },
+    "left_pinky_MCP_FE": {
+      "target_ke": 18.64,
+      "target_kd": 0.1864,
+      "limit_ke": 186.4,
+      "limit_kd": 0.1864,
+      "friction": 0.0037280000000000004,
+      "limit_width": 0.01,
+      "friction_velocity_scale": 0.01
+    },
+    "left_pinky_MCP_AA": {
+      "target_ke": 18.64,
+      "target_kd": 0.1864,
+      "limit_ke": 186.4,
+      "limit_kd": 0.1864,
+      "friction": 0.0037280000000000004,
+      "limit_width": 0.01,
+      "friction_velocity_scale": 0.01
+    },
+    "left_pinky_PIP": {
+      "target_ke": 6.38,
+      "target_kd": 0.06380000000000001,
+      "limit_ke": 63.800000000000004,
+      "limit_kd": 0.06380000000000001,
+      "friction": 0.001276,
+      "limit_width": 0.01,
+      "friction_velocity_scale": 0.01
+    },
+    "left_pinky_DIP": {
+      "target_ke": 1.89369,
+      "target_kd": 0.018936900000000003,
+      "limit_ke": 18.9369,
+      "limit_kd": 0.018936900000000003,
+      "friction": 0.00037873800000000005,
+      "limit_width": 0.01,
+      "friction_velocity_scale": 0.01
+    }
+  },
+  "gates": {
+    "moving_threshold": 0.001,
+    "max_tracking_error": 0.05,
+    "final_tracking_error": 0.02,
+    "hold_drift": 0.005,
+    "hold_speed": 0.05,
+    "completion_min": 0.95,
+    "limit_violation": 0.005,
+    "velocity_ratio": 1.001,
+    "effort_ratio": 1.00001,
+    "converged_fraction": 0.99
+  }
+}
