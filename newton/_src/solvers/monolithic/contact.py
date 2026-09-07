@@ -14,6 +14,7 @@ from ...sim import Contacts, Model, State
 from .articulation import MonolithicArticulationWorkspace, articulation_point_jacobian_column
 from .collision import MonolithicCollisionPipeline
 from .linear import (
+    MonolithicContactFactorKind,
     MonolithicLinearAssembly,
     MonolithicLinearGeneration,
     MonolithicLinearWorkspace,
@@ -28,6 +29,37 @@ class _MonolithicReturnedStateRole(enum.IntEnum):
     STATE_OUT_CONVERGED = 0
     STATE_OUT_SOFT_STOP = 1
     STATE_IN_ROLLBACK = 2
+
+
+@dataclass(frozen=True, slots=True)
+class _MonolithicHistoryIdentity:
+    """Reserved PR-6B identity; hashes bind immutable topology and configuration.
+
+    This defines the history contract, not a live history implementation.
+    Pending and committed buffers are not allocated by the current workspace.
+    """
+
+    topology_sha256: str
+    config_sha256: str
+    config_generation: int
+    history_epoch: int
+
+    def __post_init__(self):
+        for value in (self.topology_sha256, self.config_sha256):
+            if not isinstance(value, str) or len(value) != 64 or any(c not in "0123456789abcdef" for c in value):
+                raise ValueError("History requires lowercase topology/config SHA-256 identities")
+        for value in (self.config_generation, self.history_epoch):
+            if type(value) is not int or value < 0:
+                raise ValueError("History generations must be nonnegative integers")
+
+
+@wp.struct
+class _MonolithicHistoryBuffer:
+    """Reserved fixed candidate-tid storage; vectors use the rigid body local frame."""
+
+    valid: wp.array[int]
+    xi_local: wp.array[wp.vec3]
+    normal_local: wp.array[wp.vec3]
 
 
 @dataclass(frozen=True, slots=True, eq=False)
@@ -67,6 +99,9 @@ def evaluate_monolithic_p1q3_contacts(
     triplets: _MonolithicScalarTriplets,
     factor_count: wp.array[int],
     factor_contact_record: wp.array[int],
+    record_candidate_tid: wp.array[int],
+    factor_kind: wp.array[int],
+    factor_candidate_tid: wp.array[int],
     factor_gap: wp.array[float],
     contact_W: wp.array[float],
     contact_Gq: wp.array2d[float],
@@ -138,6 +173,8 @@ def evaluate_monolithic_p1q3_contacts(
         if factor < 0:
             return
         factor_contact_record[factor] = record
+        factor_kind[factor] = wp.static(int(MonolithicContactFactorKind.NORMAL))
+        factor_candidate_tid[factor] = record_candidate_tid[record]
         factor_gap[factor] = gap
         contact_W[factor] = weight
     articulation = body_to_articulation[body]
@@ -197,6 +234,7 @@ def _validate_record_slots(
     barycentric: wp.array[wp.vec3],
     shapes: wp.array[int],
     seen: wp.array[int],
+    record_candidate_tid: wp.array[int],
     status: wp.array[int],
 ):
     tid = wp.tid()
@@ -217,6 +255,7 @@ def _validate_record_slots(
     if shapes[record] != pair[1]:
         wp.atomic_max(status, 0, 1)
     wp.atomic_add(seen, record, 1)
+    record_candidate_tid[record] = tid
 
 
 @wp.kernel
@@ -346,6 +385,7 @@ class MonolithicContactWorkspace:
         self._final_contact_count = 0
         capacity, device = pipeline.soft_contact_max, model.device
         self.factor_contact_record = wp.full(capacity, -1, dtype=int, device=device)
+        self._record_candidate_tid = wp.full(capacity, -1, dtype=int, device=device)
         self.factor_gap = wp.zeros(capacity, dtype=float, device=device)
         self.final_force_linear = wp.zeros(capacity, dtype=wp.vec3, device=device)
         self.final_force_moment = wp.zeros(capacity, dtype=wp.vec3, device=device)
@@ -435,6 +475,7 @@ class MonolithicContactWorkspace:
                     contacts.soft_contact_barycentric,
                     contacts.soft_contact_shape,
                     self._seen,
+                    self._record_candidate_tid,
                     self._publication_status,
                 ],
                 device=self.model.device,
@@ -504,6 +545,7 @@ def _evaluate(mode, model, state, contacts, pipeline, articulation, workspace, o
                 contacts.soft_contact_barycentric,
                 contacts.soft_contact_shape,
                 workspace._seen,
+                workspace._record_candidate_tid,
                 out_status,
             ],
             device=model.device,
@@ -550,6 +592,9 @@ def _evaluate(mode, model, state, contacts, pipeline, articulation, workspace, o
             assembly.global_scalar_triplets if assembly is not None else workspace._dummy_triplets,
             factors.count if factors is not None else workspace._dummy_factor_count,
             workspace.factor_contact_record if factors is not None else workspace._dummy_int,
+            workspace._record_candidate_tid,
+            factors.kind if factors is not None else workspace._dummy_int,
+            factors.candidate_tid if factors is not None else workspace._dummy_int,
             workspace.factor_gap if factors is not None else workspace._dummy_scalar,
             factors.weights if factors is not None else workspace._dummy_scalar,
             factors.gq if factors is not None else workspace._dummy_gq,

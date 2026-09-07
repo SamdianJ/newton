@@ -86,6 +86,9 @@ requires requesting the force attribute before constructing the solver.
 Optional implicit joint terms
 -----------------------------
 
+See :ref:`monolithic-p1-contract` for the versioned P1 input, factor/history,
+joint and Sharpa fixture contracts, including the still-disabled capabilities.
+
 The external-force example above is unchanged. To enable implicit joint PD,
 physical joint limits and regularized joint friction, pass
 ``SolverMonolithic.JointTerms`` when constructing the solver:

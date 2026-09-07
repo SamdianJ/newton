@@ -5,6 +5,7 @@
 
 import csv
 import hashlib
+import json
 import re
 import warnings
 import xml.etree.ElementTree as ET
@@ -41,13 +42,92 @@ def sha256(path):
     return hashlib.sha256(Path(path).read_bytes()).hexdigest()
 
 
+def load_fixture(path):
+    """Read an unambiguous G1H JSON fixture and validate its versioned contract."""
+
+    def unique_object(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError(f"Duplicate fixture key: {key}")
+            result[key] = value
+        return result
+
+    parameters = json.loads(Path(path).read_text(encoding="utf-8-sig"), object_pairs_hook=unique_object)
+    validate_fixture(parameters)
+    return parameters
+
+
+def validate_fixture(parameters):
+    """Validate the G1H v1 SI-unit fixture before importing or allocating a model."""
+
+    def keys(value, expected, name):
+        expected = tuple(expected)
+        if not isinstance(value, dict) or set(value) != set(expected):
+            raise ValueError(f"{name} must contain exactly {sorted(expected)}")
+
+    def number(value, name, *, positive=False):
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not np.isfinite(value)
+            or value < 0
+            or value > np.finfo(np.float32).max
+            or (positive and np.float32(value) <= 0)
+        ):
+            raise ValueError(f"{name} must be {'positive' if positive else 'nonnegative'} finite float32")
+
+    keys(parameters, ("schema", "parameter_source", "gravity", "dt", "duration", "joints", "gates"), "fixture")
+    if parameters["schema"] != "sharpa-g1h/v1":
+        raise ValueError("Expected sharpa-g1h/v1 fixture schema")
+    if not isinstance(parameters["parameter_source"], str) or not parameters["parameter_source"].strip():
+        raise ValueError("Fixture must identify the simulation parameter source")
+    gravity = parameters["gravity"]
+    if not isinstance(gravity, (tuple, list)) or len(gravity) != 3:
+        raise ValueError("gravity must contain three finite SI acceleration components")
+    for value in gravity:
+        number(abs(value) if isinstance(value, (int, float)) and not isinstance(value, bool) else value, "gravity")
+    number(parameters["dt"], "dt", positive=True)
+    number(parameters["duration"], "duration", positive=True)
+    dt = parameters["dt"]
+    if dt > 0.01 or abs(round(0.01 / dt) * dt - 0.01) > 1e-12 or parameters["duration"] != 4.0:
+        raise ValueError("G1H requires a four-second trajectory and dt dividing 10 ms")
+    keys(parameters["joints"], (row[1] for row in JOINT_MAPPING), "joints")
+    fields = ("target_ke", "target_kd", "limit_ke", "limit_kd", "friction", "limit_width", "friction_velocity_scale")
+    for name, cfg in parameters["joints"].items():
+        keys(cfg, fields, name)
+        for field, value in cfg.items():
+            number(value, f"{name}.{field}", positive=field in ("limit_width", "friction_velocity_scale"))
+    gates = parameters["gates"]
+    keys(
+        gates,
+        (
+            "moving_threshold",
+            "max_tracking_error",
+            "final_tracking_error",
+            "hold_drift",
+            "hold_speed",
+            "completion_min",
+            "limit_violation",
+            "velocity_ratio",
+            "effort_ratio",
+            "converged_fraction",
+        ),
+        "gates",
+    )
+    for name, value in gates.items():
+        number(value, f"gates.{name}", positive=True)
+    if not 0 < gates["completion_min"] <= 1 or not 0.99 <= gates["converged_fraction"] <= 1:
+        raise ValueError("G1H requires completion in (0, 1] and at least 99% convergence")
+
+
 class ClosureTrajectory:
     """Interpolate time-stamped joint angles [rad] in model DOF order."""
 
     def __init__(self, path, joint_names, lower, upper, velocity, *, mapping=JOINT_MAPPING):
         with Path(path).open(encoding="utf-8-sig", newline="") as stream:
             rows = list(csv.reader(stream))
-        if not rows or rows[0][0] != "Time(sec)":
+        if not rows or not rows[0] or rows[0][0] != "Time(sec)":
             raise ValueError("Expected Time(sec) CSV header")
         channels = []
         for header in rows[0][1:]:
@@ -60,7 +140,8 @@ class ClosureTrajectory:
         source = {row[0]: row for row in mapping}
         target = {row[1]: row for row in mapping}
         if (
-            len(channels) != 22
+            len(mapping) != 22
+            or len(channels) != 22
             or len(set(channels)) != 22
             or set(channels) != set(source)
             or len(source) != 22
@@ -106,6 +187,7 @@ class ClosureTrajectory:
 
 def load_hand(asset_dir, *, device, parameters):
     """Load the base URDF with explicit scalar properties and no collision."""
+    validate_fixture(parameters)
     asset_dir = Path(asset_dir).resolve()
     path = asset_dir / "left_sharpa_wave.urdf"
     root = ET.parse(path).getroot()

@@ -12,13 +12,13 @@ from newton.solvers.experimental.monolithic import SolverMonolithic
 
 import newton
 import newton.examples
-from newton.examples.softbody.sharpa_close import ClosureTrajectory, load_hand, sha256
+from newton.examples.softbody.sharpa_close import ClosureTrajectory, load_fixture, load_hand, sha256
 
 
 class Example:
     def __init__(self, viewer, args):
         self.viewer = viewer
-        self.parameters = json.loads(Path(args.fixture).read_text())
+        self.parameters = load_fixture(args.fixture)
         self.model, self.manifest = load_hand(args.asset_dir, device=args.device, parameters=self.parameters)
         self.trajectory = ClosureTrajectory(
             args.trajectory,
@@ -55,6 +55,8 @@ class Example:
         self.records = []
         self.output = Path(args.output) if args.output else None
         self.manifest.update(
+            schema="sharpa-g1h-manifest/v1",
+            contract="monolithic-p1-contract/v1",
             trajectory_sha256=sha256(args.trajectory),
             fixture_sha256=sha256(args.fixture),
             mapping=self.trajectory.mapping,

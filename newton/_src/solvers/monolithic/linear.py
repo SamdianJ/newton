@@ -41,6 +41,14 @@ class MonolithicPcgWarmStart(enum.IntEnum):
     SAME_GENERATION = 1
 
 
+class MonolithicContactFactorKind(enum.IntEnum):
+    """Private scalar factor tags; tangent emission awaits PR-6B."""
+
+    NONE = 0
+    NORMAL = 1
+    TANGENT = 2
+
+
 @dataclass(frozen=True, slots=True)
 class MonolithicPcgConfig:
     maximum_iterations: int
@@ -108,17 +116,37 @@ class MonolithicLinearCapacities:
     pcg_true_residual_check_count: int
 
     def __post_init__(self):
-        if (
-            min(
-                self.global_scalar_triplet_count,
-                self.internal_mat33_triplet_count,
-                self.contact_factor_count,
-                self.pcg_max_iterations,
-                self.pcg_true_residual_check_count,
-            )
-            < 0
+        for value in (
+            self.global_scalar_triplet_count,
+            self.internal_mat33_triplet_count,
+            self.contact_factor_count,
+            self.pcg_max_iterations,
+            self.pcg_true_residual_check_count,
         ):
-            raise ValueError("Capacities must be nonnegative")
+            if (
+                isinstance(value, (bool, np.bool_))
+                or not isinstance(value, (int, np.integer))
+                or not 0 <= value < 2**31
+            ):
+                raise ValueError("Capacities must be nonnegative int32 integers")
+
+    @classmethod
+    def for_p1(cls, layout, *, tet_count, static_pair_count, friction, pcg_max_iterations):
+        """Bound P1 storage without allocating or enabling pending contact physics.
+
+        Each pair has three history slots and each slot has one normal factor
+        plus two tangential factors when friction is enabled. Python integer
+        arithmetic avoids overflow before the final int32 capacity check.
+        """
+        counts = (layout.q_dof_count, layout.dynamic_particle_count, tet_count, static_pair_count, pcg_max_iterations)
+        if type(friction) is not bool or any(
+            isinstance(v, (bool, np.bool_)) or not isinstance(v, (int, np.integer)) or v < 0 for v in counts
+        ):
+            raise ValueError("P1 capacity counts must be nonnegative integers and friction must be bool")
+        q, n, t, pairs, iterations = map(int, counts)
+        factors = 3 * pairs * (3 if friction else 1)
+        internal = n + 16 * t
+        return cls(q * q + 9 * internal + factors * (q + 9) ** 2, internal, factors, iterations, iterations + 2)
 
 
 @dataclass(frozen=True, slots=True)
@@ -127,6 +155,8 @@ class MonolithicLinearGeneration:
     nonlinear_iteration: int
     contact_generation: int
     assembly_sequence: int
+    config_generation: int = 0
+    history_epoch: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -204,6 +234,8 @@ class _MonolithicContactFactors:
     gx_columns: wp.array2d[int]
     gx_values: wp.array2d[float]
     weights: wp.array[float]
+    kind: wp.array[int]
+    candidate_tid: wp.array[int]
     count: wp.array[int]
     status: wp.array[int]
     capacity: int
@@ -906,6 +938,8 @@ class MonolithicLinearWorkspace:
         factors.gx_columns = wp.full((capacities.contact_factor_count, 9), -1, dtype=int, device=device)
         factors.gx_values = wp.zeros((capacities.contact_factor_count, 9), dtype=float, device=device)
         factors.weights = wp.zeros(capacities.contact_factor_count, dtype=float, device=device)
+        factors.kind = wp.zeros(capacities.contact_factor_count, dtype=int, device=device)
+        factors.candidate_tid = wp.full(capacities.contact_factor_count, -1, dtype=int, device=device)
         factors.count = wp.zeros(1, dtype=int, device=device)
         factors.status = wp.zeros(1, dtype=int, device=device)
         factors.capacity = capacities.contact_factor_count
@@ -1053,6 +1087,8 @@ class MonolithicLinearWorkspace:
                     "gx_columns",
                     "gx_values",
                     "weights",
+                    "kind",
+                    "candidate_tid",
                     "count",
                     "status",
                     "capacity",

@@ -624,6 +624,18 @@ class SolverMonolithic(SolverBase):
         NONLINEAR_STAGNATION = "nonlinear_stagnation"
         NONLINEAR_MAX_ITERATIONS = "nonlinear_max_iterations"
 
+    class MaterialModel(str, enum.Enum):
+        """Experimental P1 material names; Smith remains disabled pending G2."""
+
+        KIM_STABLE_NO_LOG = "kim_stable_no_log"
+        SMITH_LOG_STABILIZED = "smith_log_stabilized"
+
+    class MassMode(str, enum.Enum):
+        """Experimental P1 mass names; consistent mass remains disabled pending G2."""
+
+        LUMPED = "lumped"
+        CONSISTENT = "consistent"
+
     @dataclass(frozen=True, slots=True)
     class JointTerms:
         """Opt in to scalar joint physics; omitted terms retain V0.1 rejection.
@@ -785,6 +797,12 @@ class SolverMonolithic(SolverBase):
         collision_pipeline: MonolithicCollisionPipeline,
         contact_stiffness: float,
         joint_terms: SolverMonolithic.JointTerms | None = None,
+        material_model: SolverMonolithic.MaterialModel | str = MaterialModel.KIM_STABLE_NO_LOG,
+        mass_mode: SolverMonolithic.MassMode | str = MassMode.LUMPED,
+        tet_rest_density: wp.array[float] | None = None,
+        normal_smoothing_width: float = 0.0,
+        friction_coefficient: float = 0.0,
+        tangential_stiffness: float | None = None,
         newton_max_iterations: int = 10,
         line_search_max_iterations: int = 8,
         linear_max_iterations: int = 200,
@@ -797,6 +815,12 @@ class SolverMonolithic(SolverBase):
             collision_pipeline: Fixed P1Q3 pipeline constructed for this model.
             contact_stiffness: Normal penalty stiffness [N/m^3].
             joint_terms: Optional scalar joint physics. None keeps V0.1 behavior.
+            material_model: Experimental P1 name; currently only Kim is enabled.
+            mass_mode: Experimental P1 name; currently only lumped mass is enabled.
+            tet_rest_density: Reserved per-tet density [kg/m^3]; must currently be None.
+            normal_smoothing_width: Reserved normal smoothing width [m]; must be zero.
+            friction_coefficient: Reserved dimensionless contact friction; must be zero.
+            tangential_stiffness: Reserved tangential penalty [N/m^3]; must be None.
             newton_max_iterations: Positive nonlinear iteration limit.
             line_search_max_iterations: Positive backtracking iteration limit.
             linear_max_iterations: Positive linear iteration limit.
@@ -807,6 +831,12 @@ class SolverMonolithic(SolverBase):
             collision_pipeline=collision_pipeline,
             contact_stiffness=contact_stiffness,
             joint_terms=joint_terms,
+            material_model=material_model,
+            mass_mode=mass_mode,
+            tet_rest_density=tet_rest_density,
+            normal_smoothing_width=normal_smoothing_width,
+            friction_coefficient=friction_coefficient,
+            tangential_stiffness=tangential_stiffness,
             newton_max_iterations=newton_max_iterations,
             line_search_max_iterations=line_search_max_iterations,
             linear_max_iterations=linear_max_iterations,
@@ -836,11 +866,43 @@ class SolverMonolithic(SolverBase):
         contact_stiffness,
         joint_terms,
         joint_diagnostic,
+        material_model=MaterialModel.KIM_STABLE_NO_LOG,
+        mass_mode=MassMode.LUMPED,
+        tet_rest_density=None,
+        normal_smoothing_width=0.0,
+        friction_coefficient=0.0,
+        tangential_stiffness=None,
         newton_max_iterations=10,
         line_search_max_iterations=8,
         linear_max_iterations=200,
         linear_tolerance=1.0e-4,
     ):
+        # Freeze names now; accepting an option must never silently run different physics.
+        material_model = self.MaterialModel(material_model)
+        mass_mode = self.MassMode(mass_mode)
+        for name, value in (
+            ("normal_smoothing_width", normal_smoothing_width),
+            ("friction_coefficient", friction_coefficient),
+            ("tangential_stiffness", tangential_stiffness),
+        ):
+            if value is None and name == "tangential_stiffness":
+                continue
+            if (
+                isinstance(value, (bool, np.bool_))
+                or not isinstance(value, (int, float, np.integer, np.floating))
+                or not math.isfinite(value)
+                or value < 0
+                or value > np.finfo(np.float32).max
+            ):
+                raise ValueError(f"{name} must be nonnegative finite float32")
+        if material_model != self.MaterialModel.KIM_STABLE_NO_LOG or mass_mode != self.MassMode.LUMPED:
+            raise ValueError("P1 Smith material and consistent mass are not implemented (PR-6A / G2)")
+        if tet_rest_density is not None:
+            raise ValueError("tet_rest_density requires the unimplemented consistent mass mode")
+        if normal_smoothing_width != 0 or friction_coefficient != 0 or tangential_stiffness is not None:
+            raise ValueError("P1 normal smoothing and contact friction are not implemented (PR-6B / G3-G4)")
+        self._config_generation = 0  # Immutable per solver; rebuild instead of reconfiguring.
+        self._history_epoch = 0  # No history storage or commits until PR-6B is enabled.
         self._joint_diagnostic = joint_diagnostic
         if not joint_diagnostic:
             if not isinstance(collision_pipeline, MonolithicCollisionPipeline):
@@ -1187,6 +1249,8 @@ class SolverMonolithic(SolverBase):
             self._metrics["nonlinear_iterations"],
             int(self._trial_contacts.contact_generation.numpy()[0]) if not self._joint_diagnostic else 0,
             self._assembly_sequence,
+            config_generation=self._config_generation,
+            history_epoch=self._history_epoch,
         )
         self._generation = generation
         assembly = self._linear.begin_assembly(generation)

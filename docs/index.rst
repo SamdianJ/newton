@@ -20,6 +20,7 @@ Newton Physics
    guide/visualization
    guide/tutorials
    guide/monolithic
+   guide/monolithic_p1_contract
    Development <guide/development>
    Source Code Guidelines <guide/source_code_guidelines>
    Review Guidelines <guide/review_guidelines>
