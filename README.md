@@ -899,6 +899,12 @@ If you run the examples from a source checkout with uv, use
       </a>
       <br><code>python -m newton.examples monolithic_tet_compare</code>
     </td>
+    <td align="center" width="33%">
+      <a href="newton/examples/softbody/example_monolithic_tet_response.py">
+        <img width="320" src="docs/images/examples/example_monolithic_tet_response.jpg" alt="Nonlinear material and released vibration comparison">
+      </a>
+      <br><code>python -m newton.examples monolithic_tet_response --experiment material</code>
+    </td>
   </tr>
   <tr>
     <td colspan="3"><h3>Kamino Examples</h3></td>
