@@ -137,7 +137,42 @@ rejected trials do not publish their diagnostics. Without ``joint_terms`` the
 fields remain absent/None and the generation is -1.
 
 The G1 component tests cover CPU and CUDA. They do not certify the Sharpa
-hand-closing action (G1H), a q-only solver, or soft-object grasping.
+hand-closing action (G1H) or soft-object grasping. G1H has a separate fixture below.
+
+Sharpa joint closure diagnostic
+-------------------------------
+
+The internal G1H example uses the base 22-DoF Sharpa URDF and a time-stamped
+four-second CSV closure, with no particles, contacts or SDF. Supply the local
+asset directory and trajectory explicitly; these external assets are not bundled:
+
+.. code-block:: bash
+
+    python -m newton.examples monolithic_sharpa_close \
+        --asset-dir /path/to/left_sharpa_wave --trajectory /path/to/motion.csv \
+        --device cuda:0 --viewer null --test --output /path/to/results
+
+Use ``--device cpu`` for the matching CPU fixture, or omit ``--viewer null``
+for visualization. The fixture uses 1 ms physical steps, implicit PD, joint
+limits and nonzero joint friction. Its gains are simulation calibration
+parameters, not identified hardware properties. The signed CSV adapter defines
+an URDF closure; it does not assert equivalence to the source CAD coordinates.
+
+The example's private joint diagnostic factory is an internal test entry, not a
+supported general rigid-only mode. It reuses the production nonlinear and linear
+solver and state transactions. Particle/tet/contact metrics are not applicable
+(and use NaN in solver stats), not successful measurements. The normal public
+constructor continues to require a connected tet body.
+
+Joint candidates accumulate a displacement relative to the beginning of the
+step. BE velocities are recovered from that displacement before absolute
+positions are rounded into float32 State storage. This preserves sub-ULP motion
+at nonzero joint angles; differencing two stored absolute positions can lose it.
+The change applies to the shared candidate path, including rigid/tet steps.
+
+Outputs include the asset/parameter manifest, step trace and per-joint summary.
+A rollback stops the trajectory without advancing simulated time. This action
+has no self-collision and does not certify soft-ball grasping or mesh contact.
 
 Current support boundaries
 --------------------------

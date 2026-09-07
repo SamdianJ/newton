@@ -887,6 +887,14 @@ If you run the examples from a source checkout with uv, use
     </td>
   </tr>
   <tr>
+    <td align="center" width="33%">
+      <a href="newton/examples/softbody/example_monolithic_sharpa_close.py">
+        <img width="320" src="docs/images/examples/example_monolithic_sharpa_close.jpg" alt="Sharpa joint closure diagnostic">
+      </a>
+      <br><code>python -m newton.examples monolithic_sharpa_close --asset-dir /path/to/left_sharpa_wave --trajectory /path/to/motion.csv</code>
+    </td>
+  </tr>
+  <tr>
     <td colspan="3"><h3>Kamino Examples</h3></td>
   </tr>
   <tr>

@@ -14,6 +14,7 @@ from types import MappingProxyType
 import numpy as np
 import warp as wp
 
+from ...geometry import ShapeFlags
 from ...sim import Contacts, Control, JointType, Model, State, eval_fk
 from ..solver import SolverBase
 from .articulation import (
@@ -148,8 +149,16 @@ class _MonolithicLayout:
     body_to_link_index: wp.array[int]
 
 
-def _build_layout(model: Model) -> _MonolithicLayout:
-    if model.articulation_count != 1 or model.tet_count == 0:
+def _build_layout(model: Model, *, joint_diagnostic: bool = False) -> _MonolithicLayout:
+    if joint_diagnostic:
+        flags = model.shape_flags.numpy()
+        if (
+            model.particle_count
+            or model.tet_count
+            or np.any(flags & int(ShapeFlags.COLLIDE_SHAPES | ShapeFlags.COLLIDE_PARTICLES))
+        ):
+            raise ValueError("Joint diagnostic requires zero particles/tets and collision-disabled shapes")
+    if model.articulation_count != 1 or (model.tet_count == 0 and not joint_diagnostic):
         raise ValueError("Monolithic requires one articulation and one connected tet body")
     starts = model.articulation_start.numpy()
     ends = model.articulation_end.numpy()
@@ -170,11 +179,11 @@ def _build_layout(model: Model) -> _MonolithicLayout:
         body_to_link[child] = link
     if roots != 1 or len(seen) != model.body_count:
         raise ValueError("Monolithic requires one world-anchored tree owning all bodies")
-    tets = model.tet_indices.numpy()
+    tets = model.tet_indices.numpy() if model.tet_count else np.empty((0, 4), dtype=np.int32)
     if np.any(tets < 0) or np.any(tets >= model.particle_count) or any(len(set(t)) != 4 for t in tets):
         raise ValueError("Invalid tet topology")
     target = np.unique(tets)
-    connected = set(tets[0])
+    connected = set(tets[0]) if len(tets) else set()
     remaining = list(tets[1:])
     while remaining:
         pending = []
@@ -219,7 +228,7 @@ def _validate_scope(model: Model, layout: _MonolithicLayout) -> None:
     """Validate participating world labels; collision asset gates belong to PR-4A."""
     bodies = np.flatnonzero(layout.body_to_articulation.numpy() >= 0)
     shapes = np.isin(model.shape_body.numpy(), bodies)
-    target = np.unique(model.tet_indices.numpy())
+    target = np.unique(model.tet_indices.numpy()) if model.tet_count else np.empty(0, dtype=np.int32)
     labels = np.concatenate(
         (model.body_world.numpy()[bodies], model.shape_world.numpy()[shapes], model.particle_world.numpy()[target])
     )
@@ -246,6 +255,8 @@ def _validate_state(model: Model, state: State) -> None:
     )
     for name, count, dtype in attributes:
         value = getattr(state, name)
+        if count == 0 and name.startswith("particle_") and value is None:
+            continue
         if value is None or value.shape != (count,) or value.dtype != dtype or value.device != model.device:
             raise ValueError(f"Invalid state array shape, dtype or device: {name}")
     supported = {name for name, _, _ in attributes}
@@ -259,7 +270,9 @@ def _validate_state(model: Model, state: State) -> None:
 
 
 def _validate_dirichlet(model: Model, layout: _MonolithicLayout, state: State) -> None:
-    target = np.unique(model.tet_indices.numpy())
+    if not model.tet_count:
+        return
+    target = np.unique(model.tet_indices.numpy()) if model.tet_count else np.empty(0, dtype=np.int32)
     fixed = target[layout.particle_to_dynamic.numpy()[target] < 0]
     if np.any(state.particle_qd.numpy()[fixed] != 0.0):
         raise ValueError("Static Dirichlet particles require exactly zero input velocity")
@@ -269,7 +282,9 @@ class _FrozenStepInputs:
     def __init__(self, model: Model):
         self.joint_f = wp.zeros(model.joint_dof_count, dtype=float, device=model.device)
         self.body_f = wp.zeros(model.body_count, dtype=wp.spatial_vector, device=model.device)
-        self.particle_f = wp.zeros(model.particle_count, dtype=wp.vec3, device=model.device)
+        self.particle_f = (
+            wp.zeros(model.particle_count, dtype=wp.vec3, device=model.device) if model.particle_count else None
+        )
 
     def snapshot(self, state_in: State, control: Control) -> None:
         for target, source in (
@@ -277,6 +292,8 @@ class _FrozenStepInputs:
             (self.body_f, state_in.body_f),
             (self.particle_f, state_in.particle_f),
         ):
+            if target is None and source is None:
+                continue
             if (
                 source is None
                 or target.shape != source.shape
@@ -286,7 +303,8 @@ class _FrozenStepInputs:
                 raise ValueError("Invalid frozen input shape, dtype or device")
         wp.copy(self.joint_f, control.joint_f)
         wp.copy(self.body_f, state_in.body_f)
-        wp.copy(self.particle_f, state_in.particle_f)
+        if self.particle_f is not None:
+            wp.copy(self.particle_f, state_in.particle_f)
 
 
 @wp.kernel
@@ -351,6 +369,40 @@ def _predict_coordinates(
 
 
 @wp.kernel
+def _initialize_joint_displacement(
+    velocity: wp.array[float],
+    qd_map: wp.array[int],
+    dt: float,
+    displacement: wp.array[float],
+):
+    i = wp.tid()
+    displacement[i] = dt * velocity[qd_map[i]]
+
+
+@wp.kernel
+def _recover_joint_displacement(
+    displacement: wp.array[float],
+    q_map: wp.array[int],
+    qd_map: wp.array[int],
+    q_n: wp.array[float],
+    v_n: wp.array[float],
+    dt: float,
+    q: wp.array[float],
+    v: wp.array[float],
+    acceleration: wp.array[float],
+    z: wp.array[float],
+):
+    i = wp.tid()
+    # Rebase BE at q_n: subtracting rounded absolute angles loses sub-ULP updates.
+    velocity = displacement[i] / dt
+    position = q_n[q_map[i]] + displacement[i]
+    q[q_map[i]] = position
+    z[i] = position
+    v[qd_map[i]] = velocity
+    acceleration[i] = (velocity - v_n[qd_map[i]]) / dt
+
+
+@wp.kernel
 def _recover_particle_kinematics(
     x: wp.array[wp.vec3],
     x0: wp.array[wp.vec3],
@@ -379,7 +431,10 @@ class _Candidate:
         _validate_state(model, self.state)
         self.z = wp.zeros(layout.scalar_dof_count, device=model.device)
         self.qdd = wp.zeros(layout.q_dof_count, device=model.device)
-        self.particle_acceleration = wp.zeros(model.particle_count, dtype=wp.vec3, device=model.device)
+        self.joint_displacement = wp.zeros(layout.q_dof_count, device=model.device)
+        self.particle_acceleration = (
+            wp.zeros(model.particle_count, dtype=wp.vec3, device=model.device) if model.particle_count else None
+        )
         self.residual = wp.zeros(layout.scalar_dof_count, device=model.device)
         self.generation = 0
 
@@ -418,7 +473,13 @@ class _Candidate:
             ],
             device=self._model.device,
         )
-        self._recover(dt)
+        wp.launch(
+            _initialize_joint_displacement,
+            layout.q_dof_count,
+            [state_in.joint_qd, layout.q_dof_to_joint_qd, dt, self.joint_displacement],
+            device=self._model.device,
+        )
+        self._recover(dt, from_displacement=True)
         self.generation = 0
         self._trial_source = None
 
@@ -441,12 +502,18 @@ class _Candidate:
             inputs=[accepted.z, delta, alpha, self.z],
             device=self._model.device,
         )
-        self._recover(dt)
+        wp.launch(
+            _form_monolithic_trial,
+            self._layout.q_dof_count,
+            [accepted.joint_displacement, delta, alpha, self.joint_displacement],
+            device=self._model.device,
+        )
+        self._recover(dt, from_displacement=True)
         self.generation += 1
         self._trial_source = accepted
         self._trial_source_generation = accepted.generation
 
-    def _recover(self, dt: float) -> None:
+    def _recover(self, dt: float, *, from_displacement: bool = False) -> None:
         layout, state, origin = self._layout, self.state, self._origin
         wp.launch(
             _unpack_monolithic_unknowns,
@@ -461,37 +528,64 @@ class _Candidate:
             ],
             device=self._model.device,
         )
-        wp.launch(
-            recover_articulation_candidate_rates,
-            layout.q_dof_count,
-            inputs=[
-                layout.q_dof_to_joint_q,
-                0,
+        if from_displacement:
+            wp.launch(
+                _recover_joint_displacement,
                 layout.q_dof_count,
-                1.0 / dt,
-                state.joint_q,
-                origin.joint_q,
-                origin.joint_qd,
-                state.joint_qd,
-                self.qdd,
-            ],
-            device=self._model.device,
-        )
-        self.particle_acceleration.zero_()
-        wp.launch(
-            _recover_particle_kinematics,
-            layout.dynamic_particle_count,
-            inputs=[
-                state.particle_q,
-                origin.particle_q,
-                origin.particle_qd,
-                layout.dynamic_particle_ids,
-                dt,
-                state.particle_qd,
-                self.particle_acceleration,
-            ],
-            device=self._model.device,
-        )
+                [
+                    self.joint_displacement,
+                    layout.q_dof_to_joint_q,
+                    layout.q_dof_to_joint_qd,
+                    origin.joint_q,
+                    origin.joint_qd,
+                    dt,
+                    state.joint_q,
+                    state.joint_qd,
+                    self.qdd,
+                    self.z,
+                ],
+                device=self._model.device,
+            )
+        else:
+            # Offline absolute-coordinate probes intentionally measure stored-q quantization.
+            wp.launch(
+                recover_articulation_candidate_rates,
+                layout.q_dof_count,
+                [
+                    layout.q_dof_to_joint_q,
+                    0,
+                    layout.q_dof_count,
+                    1.0 / dt,
+                    state.joint_q,
+                    origin.joint_q,
+                    origin.joint_qd,
+                    state.joint_qd,
+                    self.qdd,
+                ],
+                device=self._model.device,
+            )
+            wp.launch(
+                _initialize_joint_displacement,
+                layout.q_dof_count,
+                [state.joint_qd, layout.q_dof_to_joint_qd, dt, self.joint_displacement],
+                device=self._model.device,
+            )
+        if layout.dynamic_particle_count:
+            self.particle_acceleration.zero_()
+            wp.launch(
+                _recover_particle_kinematics,
+                layout.dynamic_particle_count,
+                inputs=[
+                    state.particle_q,
+                    origin.particle_q,
+                    origin.particle_qd,
+                    layout.dynamic_particle_ids,
+                    dt,
+                    state.particle_qd,
+                    self.particle_acceleration,
+                ],
+                device=self._model.device,
+            )
         self.residual.zero_()
         eval_fk(self._model, state.joint_q, state.joint_qd, state)
 
@@ -708,10 +802,51 @@ class SolverMonolithic(SolverBase):
             linear_max_iterations: Positive linear iteration limit.
             linear_tolerance: Positive relative linear residual tolerance.
         """
-        if not isinstance(collision_pipeline, MonolithicCollisionPipeline):
-            raise ValueError("Monolithic requires a MonolithicCollisionPipeline")
-        if collision_pipeline.model is not model:
-            raise ValueError("collision_pipeline and solver must use the same model")
+        self._initialize(
+            model,
+            collision_pipeline=collision_pipeline,
+            contact_stiffness=contact_stiffness,
+            joint_terms=joint_terms,
+            newton_max_iterations=newton_max_iterations,
+            line_search_max_iterations=line_search_max_iterations,
+            linear_max_iterations=linear_max_iterations,
+            linear_tolerance=linear_tolerance,
+            joint_diagnostic=False,
+        )
+
+    @classmethod
+    def _create_joint_diagnostic(cls, model: Model, *, joint_terms: SolverMonolithic.JointTerms, **options):
+        """Create the internal G1H test entry; not a supported rigid-only solver API."""
+        solver = cls.__new__(cls)
+        solver._initialize(
+            model,
+            collision_pipeline=None,
+            contact_stiffness=1.0,
+            joint_terms=joint_terms,
+            joint_diagnostic=True,
+            **options,
+        )
+        return solver
+
+    def _initialize(
+        self,
+        model,
+        *,
+        collision_pipeline,
+        contact_stiffness,
+        joint_terms,
+        joint_diagnostic,
+        newton_max_iterations=10,
+        line_search_max_iterations=8,
+        linear_max_iterations=200,
+        linear_tolerance=1.0e-4,
+    ):
+        self._joint_diagnostic = joint_diagnostic
+        if not joint_diagnostic:
+            if not isinstance(collision_pipeline, MonolithicCollisionPipeline):
+                raise ValueError("Monolithic requires a MonolithicCollisionPipeline")
+            if collision_pipeline.model is not model:
+                raise ValueError("collision_pipeline and solver must use the same model")
         for name, value in (("contact_stiffness", contact_stiffness), ("linear_tolerance", linear_tolerance)):
             if (
                 not math.isfinite(value)
@@ -727,12 +862,13 @@ class SolverMonolithic(SolverBase):
         ):
             if isinstance(value, bool) or not isinstance(value, (int, np.integer)) or value <= 0:
                 raise ValueError(f"{name} must be a positive integer")
-        self._layout = _build_layout(model)
-        validate_tet_scope(
-            model,
-            dynamic_particle_ids=self._layout.dynamic_particle_ids.numpy(),
-            particle_to_dynamic=self._layout.particle_to_dynamic.numpy(),
-        )
+        self._layout = _build_layout(model, joint_diagnostic=joint_diagnostic)
+        if not joint_diagnostic:
+            validate_tet_scope(
+                model,
+                dynamic_particle_ids=self._layout.dynamic_particle_ids.numpy(),
+                particle_to_dynamic=self._layout.particle_to_dynamic.numpy(),
+            )
         if joint_terms is not None and not isinstance(joint_terms, self.JointTerms):
             raise ValueError("joint_terms must be SolverMonolithic.JointTerms or None")
         self._joint_terms = (
@@ -753,7 +889,7 @@ class SolverMonolithic(SolverBase):
             collision_pipeline=collision_pipeline,
             collision_frequency_type=dict.fromkeys(self.CollisionSlot, self.CollisionFrequencyType.NONE),
         )
-        self._trial_contacts = collision_pipeline.contacts()
+        self._trial_contacts = collision_pipeline.contacts() if not joint_diagnostic else None
         self._transaction = _StepTransaction(model, self._layout)
         self.contact_stiffness = contact_stiffness
         self.newton_max_iterations = newton_max_iterations
@@ -764,11 +900,11 @@ class SolverMonolithic(SolverBase):
         layout = self._layout
         nq, nx, size = layout.q_dof_count, layout.dynamic_particle_count, layout.scalar_dof_count
         pattern = build_tet_triplet_pattern(
-            model.tet_indices.numpy(),
+            model.tet_indices.numpy() if model.tet_count else np.empty((0, 4), dtype=np.int32),
             layout.particle_to_dynamic.numpy(),
             x_dof_start=nq,
         )
-        contact_capacity = collision_pipeline.soft_contact_max
+        contact_capacity = collision_pipeline.soft_contact_max if not joint_diagnostic else 0
         self._linear = MonolithicLinearWorkspace(
             MonolithicLinearLayout(nq, nx),
             MonolithicLinearCapacities(
@@ -787,16 +923,24 @@ class SolverMonolithic(SolverBase):
             internal_rows=pattern.ax_rows,
             internal_columns=pattern.ax_columns,
         )
-        self._tet_workspace = create_tet_assembly_workspace(pattern, tet_count=model.tet_count, device=model.device)
+        self._tet_workspace = (
+            create_tet_assembly_workspace(pattern, tet_count=model.tet_count, device=model.device)
+            if not joint_diagnostic
+            else None
+        )
         self._tet_triplet_count = len(pattern.global_rows)
-        self._contact = MonolithicContactWorkspace(
-            model,
-            collision_pipeline,
-            self._linear,
-            contact_stiffness=contact_stiffness,
+        self._contact = (
+            None
+            if joint_diagnostic
+            else MonolithicContactWorkspace(
+                model,
+                collision_pipeline,
+                self._linear,
+                contact_stiffness=contact_stiffness,
+            )
         )
         self._final_evaluation_state = model.state()
-        self._particle_residual = wp.zeros(nx, dtype=wp.vec3, device=model.device)
+        self._particle_residual = wp.zeros(nx, dtype=wp.vec3, device=model.device) if not joint_diagnostic else None
         self._dynamic_diagonal = wp.zeros(size, dtype=float, device=model.device)
         self._residual_ref = wp.zeros(size, dtype=float, device=model.device)
         self._metric_vector = wp.zeros(size, dtype=float, device=model.device)
@@ -831,14 +975,17 @@ class SolverMonolithic(SolverBase):
         with an unconverged status. If contact publication also fails on the
         rollback state, restore the input, invalidate forces and raise RuntimeError.
         """
+        if self._joint_diagnostic and contacts is not None:
+            raise ValueError("Joint diagnostic does not accept contacts")
         self._resolve_step_contacts(contacts)
         _validate_dt(dt)
         _validate_state(self.model, state_in)
         _validate_state(self.model, state_out)
         _validate_dirichlet(self.model, self._layout, state_in)
         pipeline = self.collision_pipeline
-        pipeline.validate_contacts(self.contacts)
-        pipeline.validate_contacts(self._trial_contacts)
+        if pipeline is not None:
+            pipeline.validate_contacts(self.contacts)
+            pipeline.validate_contacts(self._trial_contacts)
         control = self._default_control if control is None else control
         self._articulation.validate_candidate(
             self.model,
@@ -853,7 +1000,8 @@ class SolverMonolithic(SolverBase):
         self._transaction.begin(state_in, state_out, control, dt)
         if self._joint_terms is not None:
             self._joint_terms.final_generation = -1
-        self._contact.invalidate_final_force()
+        if self._contact is not None:
+            self._contact.invalidate_final_force()
         self._assembly_sequence = 0
         self._metrics = {
             "nonlinear_iterations": 0,
@@ -885,7 +1033,8 @@ class SolverMonolithic(SolverBase):
             # A programming/configuration exception must not leave a reusable
             # solver in an open transaction or retain a partially published state.
             state_out.assign(self._transaction._original)
-            self._contact.invalidate_final_force()
+            if self._contact is not None:
+                self._contact.invalidate_final_force()
             if self._joint_terms is not None:
                 self._joint_terms.final_generation = -1
             self._transaction._finished = True
@@ -893,6 +1042,8 @@ class SolverMonolithic(SolverBase):
 
     def update_contacts(self, contacts: Contacts, state: State | None = None) -> None:
         """Idempotently publish cached forces for the last returned state."""
+        if self._joint_diagnostic:
+            raise ValueError("Joint diagnostic has no contact publication")
         if contacts is not self.contacts:
             raise ValueError("update_contacts requires solver.contacts")
         generation = self._contact.final_force_generation
@@ -1028,12 +1179,13 @@ class SolverMonolithic(SolverBase):
 
     def _evaluate_current(self, candidate: _Candidate, dt: float) -> _TrialResult:
         self._actor_residual(candidate)
-        self._collide(candidate.state, self._trial_contacts)
+        if not self._joint_diagnostic:
+            self._collide(candidate.state, self._trial_contacts)
         self._assembly_sequence += 1
         generation = MonolithicLinearGeneration(
             self._transaction.step_generation,
             self._metrics["nonlinear_iterations"],
-            int(self._trial_contacts.contact_generation.numpy()[0]),
+            int(self._trial_contacts.contact_generation.numpy()[0]) if not self._joint_diagnostic else 0,
             self._assembly_sequence,
         )
         self._generation = generation
@@ -1064,34 +1216,36 @@ class SolverMonolithic(SolverBase):
                 [self._joint_terms.tangent, assembly.aq_actor_dense, triplets.values, nq],
                 device=model.device,
             )
-        assemble_tet_residual_tangent(
-            model,
-            **self._tet_arguments(candidate, dt),
-            scatter=TetScatterBuffers(
-                assembly.ax_internal_triplets.values,
-                triplets.values[nq * nq : nq * nq + self._tet_triplet_count]
-                if self._tet_triplet_count
-                else self._metric_slices[2],
-            ),
-        )
-        min_det = self._check_tet()
-        wp.launch(
-            _copy_particle_residual,
-            self._layout.dynamic_particle_count,
-            [self._particle_residual, nq, candidate.residual],
-            device=model.device,
-        )
-        assemble_current_contacts(
-            model,
-            candidate.state,
-            self._trial_contacts,
-            self.collision_pipeline,
-            self._articulation,
-            self._contact,
-            assembly,
-            candidate.residual,
-            generation=generation,
-        )
+        min_det = math.nan
+        if not self._joint_diagnostic:
+            assemble_tet_residual_tangent(
+                model,
+                **self._tet_arguments(candidate, dt),
+                scatter=TetScatterBuffers(
+                    assembly.ax_internal_triplets.values,
+                    triplets.values[nq * nq : nq * nq + self._tet_triplet_count]
+                    if self._tet_triplet_count
+                    else self._metric_slices[2],
+                ),
+            )
+            min_det = self._check_tet()
+            wp.launch(
+                _copy_particle_residual,
+                self._layout.dynamic_particle_count,
+                [self._particle_residual, nq, candidate.residual],
+                device=model.device,
+            )
+            assemble_current_contacts(
+                model,
+                candidate.state,
+                self._trial_contacts,
+                self.collision_pipeline,
+                self._articulation,
+                self._contact,
+                assembly,
+                candidate.residual,
+                generation=generation,
+            )
         result = self._linear.finalize_assembly(generation=generation)
         self._metrics["matrix_assembly_count"] += 1
         self._metrics.update(
@@ -1117,11 +1271,16 @@ class SolverMonolithic(SolverBase):
             self._linear.build_scaling(self._dynamic_diagonal, epsilon_d=self._config.epsilon_d, generation=generation)
         )
         return _TrialResult(
-            0, *self._rms(candidate.residual), min_det, self._contact._diagnostics(0)["max_penetration"]
+            0,
+            *self._rms(candidate.residual),
+            min_det,
+            self._contact._diagnostics(0)["max_penetration"] if self._contact is not None else math.nan,
         )
 
     def _evaluate_trial(self, candidate: _Candidate, dt: float) -> _TrialResult:
         self._actor_residual(candidate)
+        if self._joint_diagnostic:
+            return _TrialResult(0, *self._rms(candidate.residual), math.nan, math.nan)
         self._collide(candidate.state, self._trial_contacts)
         evaluate_tet_residual(self.model, **self._tet_arguments(candidate, dt))
         min_det = self._check_tet()
@@ -1316,26 +1475,27 @@ class SolverMonolithic(SolverBase):
         # FK refresh must not overwrite the original body caches on rollback.
         self._final_evaluation_state.assign(state)
         eval_articulation_passive_candidate(self.model, self._final_evaluation_state, self._articulation)
-        self._collide(state, self.contacts)
-        self._final_residual.zero_()
-        self._contact_status.zero_()
-        evaluate_final_contacts(
-            self.model,
-            state,
-            self.contacts,
-            self.collision_pipeline,
-            self._articulation,
-            self._contact,
-            self._final_residual,
-            self._contact_status,
-            step_generation=self._transaction.step_generation,
-            returned_state_role=role,
-        )
-        self._check_contact()
-        if self.contacts.force is not None:
-            self._contact._publish_final_forces(
-                state, self.contacts, step_generation=self._transaction.step_generation, returned_state_role=role
+        if not self._joint_diagnostic:
+            self._collide(state, self.contacts)
+            self._final_residual.zero_()
+            self._contact_status.zero_()
+            evaluate_final_contacts(
+                self.model,
+                state,
+                self.contacts,
+                self.collision_pipeline,
+                self._articulation,
+                self._contact,
+                self._final_residual,
+                self._contact_status,
+                step_generation=self._transaction.step_generation,
+                returned_state_role=role,
             )
+            self._check_contact()
+            if self.contacts.force is not None:
+                self._contact._publish_final_forces(
+                    state, self.contacts, step_generation=self._transaction.step_generation, returned_state_role=role
+                )
 
         if self._joint_terms is not None:
             self._evaluate_joint_terms(state, self._transaction.accepted._dt)
@@ -1358,8 +1518,9 @@ class SolverMonolithic(SolverBase):
                 self._publish_final(state_out, status)
             except _StepFailure as second_error:
                 publication_error = second_error
-                self._contact.invalidate_final_force()
-        diagnostics = self._contact._diagnostics(2) if publication_error is None else {}
+                if self._contact is not None:
+                    self._contact.invalidate_final_force()
+        diagnostics = self._contact._diagnostics(2) if publication_error is None and self._contact is not None else {}
         joint_diagnostics = {}
         terms = self._joint_terms
         if publication_error is None and terms is not None and terms.final_generation == transaction.step_generation:
@@ -1374,6 +1535,11 @@ class SolverMonolithic(SolverBase):
                 "joint_limit_damping_power": tuple(float(x) for x in power[:, 1]),
                 "joint_friction_power": tuple(float(x) for x in power[:, 2]),
             }
+        if self._joint_diagnostic:
+            # Empty blocks are not measured or certified; report N/A as NaN.
+            for key in tuple(self._metrics):
+                if key.startswith(("merit_x", "raw_residual_x")) or key.endswith("_x"):
+                    self._metrics[key] = math.nan
         transaction.last_stats = self.Stats(
             status=status,
             failure_reason=reason,
@@ -1381,9 +1547,11 @@ class SolverMonolithic(SolverBase):
             rolled_back=not commit,
             step_generation=transaction.step_generation,
             accepted_generation=transaction.accepted.generation,
-            soft_contact_pair_count=self.collision_pipeline.soft_contact_pair_count,
+            soft_contact_pair_count=self.collision_pipeline.soft_contact_pair_count
+            if not self._joint_diagnostic
+            else 0,
             published_contact_generation=int(self.contacts.contact_generation.numpy()[0])
-            if publication_error is None
+            if publication_error is None and not self._joint_diagnostic
             else -1,
             active_sample_count=diagnostics.get("active_sample_count", 0),
             max_penetration=diagnostics.get("max_penetration", math.nan),

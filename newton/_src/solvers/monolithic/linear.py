@@ -636,12 +636,13 @@ def _monolithic_preconditioner_matvec(workspace, x, y, z, alpha, beta) -> None:
     wp.launch(
         _apply_q_preconditioner, 1, [workspace._q_cholesky, x, workspace._preconditioned], device=workspace.device
     )
-    wp.launch(
-        _apply_x_preconditioner,
-        workspace.layout.dynamic_particle_count,
-        [workspace._x_cholesky, workspace.layout.q_dof_count, x, workspace._preconditioned],
-        device=workspace.device,
-    )
+    if workspace.layout.dynamic_particle_count:
+        wp.launch(
+            _apply_x_preconditioner,
+            workspace.layout.dynamic_particle_count,
+            [workspace._x_cholesky, workspace.layout.q_dof_count, x, workspace._preconditioned],
+            device=workspace.device,
+        )
     wp.launch(_combine_vectors, x.size, [workspace._preconditioned, y, z, alpha, beta], device=workspace.device)
 
 
@@ -1134,12 +1135,13 @@ class MonolithicLinearWorkspace:
         if status == MonolithicLinearStatus.SUCCESS:
             # Finite local terms can overflow during owner or duplicate reductions.
             for matrix in (self.k_global_scalar_bsr, self.ax_internal_bsr3):
-                wp.launch(
-                    _validate_bsr_finite,
-                    matrix.nrow,
-                    [matrix.offsets, matrix.values, self._global.status],
-                    device=self.device,
-                )
+                if matrix.nrow:
+                    wp.launch(
+                        _validate_bsr_finite,
+                        matrix.nrow,
+                        [matrix.offsets, matrix.values, self._global.status],
+                        device=self.device,
+                    )
             wp.launch(
                 _validate_aq_finite,
                 self.aq_actor_dense.shape,
@@ -1240,33 +1242,35 @@ class MonolithicLinearWorkspace:
             device=self.device,
         )
         matrix = self.ax_internal_bsr3
-        wp.launch(
-            _assemble_monolithic_x_preconditioner,
-            matrix.nrow,
-            [
-                matrix.offsets,
-                matrix.columns,
-                matrix.values,
-                self._factors,
-                self.layout.q_dof_count,
-                self.scale,
-                self._lambda,
-                self._x_preconditioner,
-            ],
-            device=self.device,
-        )
+        if matrix.nrow:
+            wp.launch(
+                _assemble_monolithic_x_preconditioner,
+                matrix.nrow,
+                [
+                    matrix.offsets,
+                    matrix.columns,
+                    matrix.values,
+                    self._factors,
+                    self.layout.q_dof_count,
+                    self.scale,
+                    self._lambda,
+                    self._x_preconditioner,
+                ],
+                device=self.device,
+            )
         wp.launch(
             _factor_monolithic_q_cholesky,
             1,
             [self._q_preconditioner, self._q_cholesky, pivot_tolerance, self._status],
             device=self.device,
         )
-        wp.launch(
-            _factor_monolithic_x_cholesky,
-            matrix.nrow,
-            [self._x_preconditioner, self._x_cholesky, pivot_tolerance, self._status],
-            device=self.device,
-        )
+        if matrix.nrow:
+            wp.launch(
+                _factor_monolithic_x_cholesky,
+                matrix.nrow,
+                [self._x_preconditioner, self._x_cholesky, pivot_tolerance, self._status],
+                device=self.device,
+            )
         status = self._read_status()
         self._factor_valid = status == MonolithicLinearStatus.SUCCESS
         self.factor_last_status = status
