@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 The Newton Developers
 # SPDX-License-Identifier: Apache-2.0
 
-"""P1 tet exact residual and projected Gauss-Newton tangent.
+"""P1 tet exact residual and material-specific projected tangent.
 
 The constitutive mapping is the Kim stable Neo-Hookean variant in SuperDex
 54ae749a, ``mochi_core/materials/batched_kim_neo_hookean.h``: standard Lamé
@@ -9,9 +9,12 @@ parameters become ``mu`` and ``lambda + mu``. This is the variant without the
 Smith logarithmic term. Its energy is shifted to zero at the rest state.
 The production tangent drops the cofactor geometric derivative; it is not the
 exact residual derivative or a spectral projection of the raw Hessian.
+Smith instead uses log(I_C+1) and spectral projection of the full nodal Hessian.
 """
 
 import enum
+import hashlib
+import json
 from dataclasses import dataclass
 
 import numpy as np
@@ -21,6 +24,7 @@ from ...geometry import ParticleFlags
 from ...sim.model import Model
 
 mat99 = wp.types.matrix(shape=(9, 9), dtype=wp.float32)
+mat1212 = wp.types.matrix(shape=(12, 12), dtype=wp.float32)
 
 
 class TetEvaluationStatus(enum.IntEnum):
@@ -29,6 +33,7 @@ class TetEvaluationStatus(enum.IntEnum):
     NONFINITE = 2
     INVALID_FIXED_PARTICLE = 3
     INVALID_SCATTER = 4
+    PSD_PROJECTION_FAILURE = 5
 
 
 @dataclass(frozen=True, slots=True)
@@ -46,6 +51,82 @@ class TetAssemblyWorkspace:
     tet_energy: wp.array[float]
     min_det_f: wp.array[float]
     failure_flags: wp.array[int]
+    physics: object = None
+
+
+class TetPhysicsWorkspace:
+    """Construction snapshots for P1 material/mass; no candidate host readback."""
+
+    def __init__(self, model, *, material_model, mass_mode, density=None):
+        if material_model not in ("kim_stable_no_log", "smith_log_stabilized") or mass_mode not in (
+            "lumped",
+            "consistent",
+        ):
+            raise ValueError("Unknown tet material/mass mode")
+        self.model, self.material_model, self.mass_mode = model, material_model, mass_mode
+        names = ("tet_indices", "tet_poses", "tet_materials", "particle_mass", "particle_inv_mass", "particle_world")
+        self.sources = {name: getattr(model, name) for name in names}
+        host = {name: value.numpy().copy() for name, value in self.sources.items()}
+        materials = host["tet_materials"]
+        if material_model == "smith_log_stabilized":
+            mapped = np.column_stack(
+                (
+                    materials[:, 0].astype(float) * 4 / 3,
+                    materials[:, 1].astype(float) + materials[:, 0].astype(float) * 5 / 6,
+                )
+            )
+            if not np.isfinite(mapped).all() or np.any(mapped[:, 1] <= 0) or np.any(mapped > np.finfo(np.float32).max):
+                raise ValueError("Smith mapped parameters must be finite with lambda_hat > 0")
+        self.materials = wp.clone(model.tet_materials)
+        self.poses = wp.clone(model.tet_poses)
+        self.mass = wp.clone(model.particle_mass)
+        coefficients = np.zeros(model.tet_count, dtype=np.float32)
+        row_mass = host["particle_mass"].copy()
+        diagonal = row_mass.copy()
+        self.density = None
+        if mass_mode == "consistent":
+            if not isinstance(density, wp.array) or (density.shape, density.dtype, density.device) != (
+                (model.tet_count,),
+                wp.float32,
+                model.device,
+            ):
+                raise ValueError("consistent mass requires same-device float32 per-tet density")
+            rho = density.numpy()
+            if not np.isfinite(rho).all() or np.any(rho <= 0):
+                raise ValueError("tet density must be finite and positive")
+            volume = 1 / (6 * np.linalg.det(host["tet_poses"].astype(np.float64)))
+            coefficients = (rho.astype(float) * volume / 20).astype(np.float32)
+            if not np.isfinite(coefficients).all() or np.any(coefficients <= 0):
+                raise ValueError("consistent element mass must be positive finite float32")
+            row_mass = np.zeros(model.particle_count, dtype=np.float64)
+            diagonal = np.zeros_like(row_mass)
+            for ids, coefficient in zip(host["tet_indices"], coefficients, strict=True):
+                np.add.at(row_mass, ids, 5 * float(coefficient))
+                np.add.at(diagonal, ids, 2 * float(coefficient))
+            dynamic = host["particle_inv_mass"] > 0
+            check = dynamic | (host["particle_mass"] > 0)
+            if not np.allclose(host["particle_mass"][check], row_mass[check], rtol=2e-5, atol=0):
+                raise ValueError("Builder mass disagrees with explicit density row sums")
+            if not np.isfinite(row_mass).all() or np.any(row_mass > np.finfo(np.float32).max):
+                raise ValueError("consistent row mass overflows float32")
+            self.density = wp.clone(density)
+            host["density"] = rho
+        elif density is not None:
+            raise ValueError("tet_rest_density requires consistent mass")
+        self.coefficients = wp.array(coefficients, dtype=float, device=model.device)
+        self.row_mass = wp.array(row_mass, dtype=float, device=model.device)
+        self.dynamic_mass_diagonal = wp.array(diagonal, dtype=float, device=model.device)
+        digest = hashlib.sha256(json.dumps([material_model, mass_mode]).encode())
+        for name, values in sorted(host.items()):
+            digest.update(name.encode())
+            digest.update(str((values.shape, values.dtype.str)).encode())
+            digest.update(values.tobytes())
+        self.identity = digest.hexdigest()
+
+    def validate_identity(self):
+        for name, source in self.sources.items():
+            if getattr(self.model, name) is not source:
+                raise ValueError(f"Tet source array replaced: {name}; rebuild solver")
 
 
 @dataclass(frozen=True, slots=True)
@@ -159,7 +240,7 @@ def build_tet_triplet_pattern(
 
 
 def create_tet_assembly_workspace(
-    pattern: TetTripletPattern, *, tet_count: int, device: wp.DeviceLike
+    pattern: TetTripletPattern, *, tet_count: int, device: wp.DeviceLike, physics=None
 ) -> TetAssemblyWorkspace:
     """Upload the fixed slot map and allocate reusable evaluation diagnostics."""
     if pattern.elastic_block_slots.shape != (tet_count, 16):
@@ -169,6 +250,7 @@ def create_tet_assembly_workspace(
         wp.zeros(tet_count, dtype=float, device=device),
         wp.zeros(1, dtype=float, device=device),
         wp.zeros(1, dtype=int, device=device),
+        physics,
     )
 
 
@@ -222,6 +304,101 @@ def _evaluate_stable_neo_hookean(F: wp.mat33, rest_volume: float, mu_lame: float
     )
     stress = rest_volume * (mu_lame * F + (lambda_nh * j_minus_one - mu_lame) * cofactor)
     return energy, stress, projected
+
+
+@wp.func
+def _evaluate_smith(F: wp.mat33, rest_volume: float, mu: float, lam: float):
+    mu_hat = (4.0 / 3.0) * mu
+    lam_hat = lam + (5.0 / 6.0) * mu
+    ic = wp.ddot(F, F)
+    d = wp.determinant(F) - 1.0
+    c = _compute_cofactor(F)
+    dc = _compute_cofactor_derivative(F)
+    s = lam_hat * d - mu
+    a = mu_hat * (1.0 - 1.0 / (ic + 1.0))
+    # Rest-shifted energy avoids subtracting the large alpha-dependent constant.
+    energy = rest_volume * (0.5 * mu_hat * (ic - 3.0 - wp.log((ic + 1.0) / 4.0)) + 0.5 * lam_hat * d * d - mu * d)
+    stress = rest_volume * (a * F + s * c)
+    raw = mat99(0.0)
+    for i in range(9):
+        for j in range(9):
+            raw[i, j] = rest_volume * (
+                2.0 * mu_hat / ((ic + 1.0) * (ic + 1.0)) * F[i % 3, i // 3] * F[j % 3, j // 3]
+                + lam_hat * c[i % 3, i // 3] * c[j % 3, j // 3]
+                + s * dc[i, j]
+            )
+        raw[i, i] += rest_volume * a
+    return energy, stress, raw
+
+
+@wp.func
+def _project_element_psd(raw: mat1212):
+    # Cyclic Jacobi on the full nodal Hessian, before fixed-node elimination.
+    h = raw
+    vectors = wp.identity(n=12, dtype=float)
+    for _sweep in range(20):
+        largest = float(0.0)
+        scale = float(0.0)
+        for i in range(12):
+            scale = wp.max(scale, wp.abs(h[i, i]))
+            for j in range(i + 1, 12):
+                largest = wp.max(largest, wp.abs(h[i, j]))
+        if largest <= 1.0e-7 * wp.max(scale, 1.0e-20):
+            break
+        for p in range(11):
+            for q in range(p + 1, 12):
+                off = h[p, q]
+                if wp.abs(off) <= 1.0e-8 * wp.max(scale, 1.0e-20):
+                    continue
+                theta = 0.5 * wp.atan2(2.0 * off, h[q, q] - h[p, p])
+                c, s = wp.cos(theta), wp.sin(theta)
+                hp, hq = h[p, p], h[q, q]
+                h[p, p] = c * c * hp - 2.0 * c * s * off + s * s * hq
+                h[q, q] = s * s * hp + 2.0 * c * s * off + c * c * hq
+                h[p, q] = 0.0
+                h[q, p] = 0.0
+                for k in range(12):
+                    if k != p and k != q:
+                        a, b = h[k, p], h[k, q]
+                        h[k, p] = c * a - s * b
+                        h[p, k] = h[k, p]
+                        h[k, q] = s * a + c * b
+                        h[q, k] = h[k, q]
+                    a, b = vectors[k, p], vectors[k, q]
+                    vectors[k, p] = c * a - s * b
+                    vectors[k, q] = s * a + c * b
+    result = mat1212(0.0)
+    for i in range(12):
+        for j in range(i, 12):
+            value = float(0.0)
+            for k in range(12):
+                value += vectors[i, k] * wp.max(h[k, k], 0.0) * vectors[j, k]
+            result[i, j] = value
+            result[j, i] = value
+    remaining = float(0.0)
+    scale = float(0.0)
+    for i in range(12):
+        scale = wp.max(scale, wp.abs(h[i, i]))
+        for j in range(i + 1, 12):
+            remaining = wp.max(remaining, wp.abs(h[i, j]))
+    return result, remaining <= 1.0e-6 * wp.max(scale, 1.0e-20)
+
+
+@wp.func
+def _nodal_hessian(raw: mat99, pose: wp.mat33):
+    h = mat1212(0.0)
+    for a in range(4):
+        ga = _shape_gradient(pose, a)
+        for b in range(4):
+            gb = _shape_gradient(pose, b)
+            for row in range(3):
+                for col in range(3):
+                    value = float(0.0)
+                    for i in range(3):
+                        for j in range(3):
+                            value += ga[i] * raw[3 * i + row, 3 * j + col] * gb[j]
+                    h[3 * a + row, 3 * b + col] = value
+    return 0.5 * (h + wp.transpose(h))
 
 
 @wp.func
@@ -313,9 +490,52 @@ def _assemble_inertia_tangent(
     )
 
 
+@wp.kernel
+def _initialize_consistent_residual(
+    gravity: wp.array[wp.vec3],
+    worlds: wp.array[int],
+    row_mass: wp.array[float],
+    forces: wp.array[wp.vec3],
+    dynamic_ids: wp.array[int],
+    residual: wp.array[wp.vec3],
+):
+    i = wp.tid()
+    particle = dynamic_ids[i]
+    world = worlds[particle]
+    if world < 0:
+        world = gravity.shape[0] - 1
+    residual[i] = -row_mass[particle] * gravity[world] - forces[particle]
+
+
+@wp.kernel
+def _add_consistent_inertia(
+    dt: float,
+    indices: wp.array2d[int],
+    mapping: wp.array[int],
+    coefficients: wp.array[float],
+    candidate: wp.array[wp.vec3],
+    x_n: wp.array[wp.vec3],
+    v_n: wp.array[wp.vec3],
+    residual: wp.array[wp.vec3],
+):
+    tet, a = wp.tid()
+    i = mapping[indices[tet, a]]
+    if i >= 0:
+        r = wp.vec3(0.0)
+        for b in range(4):
+            j = indices[tet, b]
+            if mapping[j] >= 0:
+                weight = coefficients[tet]
+                if a == b:
+                    weight *= 2.0
+                r += weight * ((candidate[j] - x_n[j]) / (dt * dt) - v_n[j] / dt)
+        wp.atomic_add(residual, i, r)
+
+
 @wp.func
 def _elastic_state(
     tet: int,
+    material_model: int,
     min_det_f_guard: float,
     candidate_particle_q: wp.array[wp.vec3],
     tet_indices: wp.array2d[int],
@@ -349,6 +569,8 @@ def _elastic_state(
     energy, stress, projected = _evaluate_stable_neo_hookean(
         f, rest_volume, tet_materials[tet, 0], tet_materials[tet, 1]
     )
+    if material_model == 1:
+        energy, stress, projected = _evaluate_smith(f, rest_volume, tet_materials[tet, 0], tet_materials[tet, 1])
     if not wp.isfinite(energy):
         wp.atomic_max(failure_flags, 0, 2)
         valid = False
@@ -366,6 +588,7 @@ def _elastic_state(
 
 @wp.kernel
 def _evaluate_elastic_residual(
+    material_model: int,
     min_det_f_guard: float,
     candidate_particle_q: wp.array[wp.vec3],
     tet_indices: wp.array2d[int],
@@ -380,6 +603,7 @@ def _evaluate_elastic_residual(
     tet = wp.tid()
     valid, stress, _projected = _elastic_state(
         tet,
+        material_model,
         min_det_f_guard,
         candidate_particle_q,
         tet_indices,
@@ -398,6 +622,10 @@ def _evaluate_elastic_residual(
 
 @wp.kernel
 def _assemble_elastic_residual_tangent(
+    material_model: int,
+    consistent: int,
+    inv_dt_sq: float,
+    mass_coefficients: wp.array[float],
     min_det_f_guard: float,
     candidate_particle_q: wp.array[wp.vec3],
     tet_indices: wp.array2d[int],
@@ -415,6 +643,7 @@ def _assemble_elastic_residual_tangent(
     tet = wp.tid()
     valid, stress, projected = _elastic_state(
         tet,
+        material_model,
         min_det_f_guard,
         candidate_particle_q,
         tet_indices,
@@ -425,6 +654,12 @@ def _assemble_elastic_residual_tangent(
         failure_flags,
     )
     if valid:
+        nodal = mat1212(0.0)
+        if material_model == 1:
+            nodal, converged = _project_element_psd(_nodal_hessian(projected, tet_poses[tet]))
+            if not converged:
+                wp.atomic_max(failure_flags, 0, 5)
+                return
         for a in range(4):
             ga = _shape_gradient(tet_poses[tet], a)
             index = particle_to_dynamic[tet_indices[tet, a]]
@@ -444,6 +679,15 @@ def _assemble_elastic_residual_tangent(
                             for i in range(3):
                                 for j in range(3):
                                     block[row, col] += ga[i] * projected[3 * i + row, 3 * j + col] * gb[j]
+                    if material_model == 1:
+                        for row in range(3):
+                            for col in range(3):
+                                block[row, col] = nodal[3 * a + row, 3 * b + col]
+                    if consistent == 1:
+                        coefficient = mass_coefficients[tet] * inv_dt_sq
+                        if a == b:
+                            coefficient *= 2.0
+                        block += coefficient * wp.identity(n=3, dtype=float)
                     _scatter_internal_block(slot, block, ax_values, global_values)
                     if a != b:
                         _scatter_internal_block(transpose_slot, wp.transpose(block), ax_values, global_values)
@@ -494,6 +738,8 @@ def _prepare_evaluation(model, args):
     ):
         if array.dtype != dtype or array.shape != shape or array.device != model.device:
             raise ValueError("tet workspace has incompatible dtype, shape or device")
+    if workspace.physics is not None:
+        workspace.physics.validate_identity()
     workspace.failure_flags.zero_()
     workspace.min_det_f.fill_(float("inf"))
     workspace.tet_energy.zero_()
@@ -511,23 +757,54 @@ def _prepare_evaluation(model, args):
         ],
         device=model.device,
     )
-    wp.launch(
-        _evaluate_inertia_residual,
-        args["dynamic_particle_ids"].size,
-        [
-            dt,
-            model.gravity,
-            model.particle_world,
-            args["particle_q_n"],
-            args["particle_qd_n"],
-            args["candidate_particle_q"],
-            model.particle_mass,
-            args["frozen_particle_f"],
-            args["dynamic_particle_ids"],
-            args["residual_x"],
-        ],
-        device=model.device,
-    )
+    physics = workspace.physics
+    if physics is not None and physics.mass_mode == "consistent":
+        wp.launch(
+            _initialize_consistent_residual,
+            args["dynamic_particle_ids"].size,
+            [
+                model.gravity,
+                model.particle_world,
+                physics.row_mass,
+                args["frozen_particle_f"],
+                args["dynamic_particle_ids"],
+                args["residual_x"],
+            ],
+            device=model.device,
+        )
+        wp.launch(
+            _add_consistent_inertia,
+            (model.tet_count, 4),
+            [
+                dt,
+                model.tet_indices,
+                args["particle_to_dynamic"],
+                physics.coefficients,
+                args["candidate_particle_q"],
+                args["particle_q_n"],
+                args["particle_qd_n"],
+                args["residual_x"],
+            ],
+            device=model.device,
+        )
+    else:
+        wp.launch(
+            _evaluate_inertia_residual,
+            args["dynamic_particle_ids"].size,
+            [
+                dt,
+                model.gravity,
+                model.particle_world,
+                args["particle_q_n"],
+                args["particle_qd_n"],
+                args["candidate_particle_q"],
+                physics.mass if physics is not None else model.particle_mass,
+                args["frozen_particle_f"],
+                args["dynamic_particle_ids"],
+                args["residual_x"],
+            ],
+            device=model.device,
+        )
 
 
 def evaluate_tet_residual(
@@ -545,16 +822,21 @@ def evaluate_tet_residual(
     workspace: TetAssemblyWorkspace,
 ) -> None:
     """Evaluate a trial without accessing tangent buffers; inspect failure_flags."""
+    physics = workspace.physics
+    mode = int(physics is not None and physics.material_model == "smith_log_stabilized")
+    poses = physics.poses if physics is not None else model.tet_poses
+    materials = physics.materials if physics is not None else model.tet_materials
     _prepare_evaluation(model, locals())
     wp.launch(
         _evaluate_elastic_residual,
         model.tet_count,
         [
+            mode,
             min_det_f_guard,
             candidate_particle_q,
             model.tet_indices,
-            model.tet_poses,
-            model.tet_materials,
+            poses,
+            materials,
             particle_to_dynamic,
             residual_x,
             workspace.tet_energy,
@@ -581,7 +863,7 @@ def assemble_tet_residual_tangent(
     workspace: TetAssemblyWorkspace,
     scatter: TetScatterBuffers,
 ) -> None:
-    """Write exact residual and the same GN values into owner and global slices."""
+    """Write exact residual and identical projected/inertial owner and global blocks."""
     if (
         scatter.ax_values.dtype != wp.mat33
         or scatter.global_values.dtype != wp.float32
@@ -593,24 +875,40 @@ def assemble_tet_residual_tangent(
         or scatter.ax_values.size < dynamic_particle_ids.size
     ):
         raise ValueError("tet scatter requires matching mat33/scalar slices on the model device")
+    physics = workspace.physics
+    mode = int(physics is not None and physics.material_model == "smith_log_stabilized")
+    poses = physics.poses if physics is not None else model.tet_poses
+    materials = physics.materials if physics is not None else model.tet_materials
     _prepare_evaluation(model, locals())
     scatter.ax_values.zero_()
     scatter.global_values.zero_()
-    wp.launch(
-        _assemble_inertia_tangent,
-        dynamic_particle_ids.size,
-        [1.0 / dt**2, model.particle_mass, dynamic_particle_ids, scatter.ax_values, scatter.global_values],
-        device=model.device,
-    )
+    consistent = int(physics is not None and physics.mass_mode == "consistent")
+    if not consistent:
+        wp.launch(
+            _assemble_inertia_tangent,
+            dynamic_particle_ids.size,
+            [
+                1.0 / dt**2,
+                physics.mass if physics is not None else model.particle_mass,
+                dynamic_particle_ids,
+                scatter.ax_values,
+                scatter.global_values,
+            ],
+            device=model.device,
+        )
     wp.launch(
         _assemble_elastic_residual_tangent,
         model.tet_count,
         [
+            mode,
+            consistent,
+            1.0 / dt**2,
+            physics.coefficients if physics is not None else model.particle_mass,
             min_det_f_guard,
             candidate_particle_q,
             model.tet_indices,
-            model.tet_poses,
-            model.tet_materials,
+            poses,
+            materials,
             particle_to_dynamic,
             workspace.elastic_block_slots,
             residual_x,

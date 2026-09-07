@@ -48,6 +48,7 @@ from .linear import (
 )
 from .tet import (
     TetEvaluationStatus,
+    TetPhysicsWorkspace,
     TetScatterBuffers,
     assemble_tet_residual_tangent,
     build_tet_triplet_pattern,
@@ -614,6 +615,7 @@ class SolverMonolithic(SolverBase):
         CONTACT_OVERFLOW = "contact_overflow"
         NONFINITE = "nonfinite"
         TET_INVERSION = "tet_inversion"
+        TET_PROJECTION_FAILURE = "tet_projection_failure"
         LINEAR_NON_POSITIVE_CURVATURE = "linear_non_positive_curvature"
         LINEAR_PRECONDITIONER_NOT_SPD = "linear_preconditioner_not_spd"
         PRECONDITIONER_FACTORIZATION_FAILED = "preconditioner_factorization_failed"
@@ -625,13 +627,13 @@ class SolverMonolithic(SolverBase):
         NONLINEAR_MAX_ITERATIONS = "nonlinear_max_iterations"
 
     class MaterialModel(str, enum.Enum):
-        """Experimental P1 material names; Smith remains disabled pending G2."""
+        """Experimental solver-wide P1 material selection."""
 
         KIM_STABLE_NO_LOG = "kim_stable_no_log"
         SMITH_LOG_STABILIZED = "smith_log_stabilized"
 
     class MassMode(str, enum.Enum):
-        """Experimental P1 mass names; consistent mass remains disabled pending G2."""
+        """Experimental solver-wide P1 mass discretization."""
 
         LUMPED = "lumped"
         CONSISTENT = "consistent"
@@ -666,6 +668,9 @@ class SolverMonolithic(SolverBase):
         """
 
         status: SolverMonolithic.Status
+        material_model: str | None = None
+        mass_mode: str | None = None
+        tet_config_identity: str | None = None
         failure_reason: str | None = None
         converged: bool = False
         rolled_back: bool = False
@@ -815,9 +820,10 @@ class SolverMonolithic(SolverBase):
             collision_pipeline: Fixed P1Q3 pipeline constructed for this model.
             contact_stiffness: Normal penalty stiffness [N/m^3].
             joint_terms: Optional scalar joint physics. None keeps V0.1 behavior.
-            material_model: Experimental P1 name; currently only Kim is enabled.
-            mass_mode: Experimental P1 name; currently only lumped mass is enabled.
-            tet_rest_density: Reserved per-tet density [kg/m^3]; must currently be None.
+            material_model: Experimental Kim no-log or Smith log-stabilized material.
+            mass_mode: Experimental lumped or consistent P1 mass.
+            tet_rest_density: Same-device float32 per-tet density [kg/m^3], required
+                for consistent mass and copied at construction; otherwise None.
             normal_smoothing_width: Reserved normal smoothing width [m]; must be zero.
             friction_coefficient: Reserved dimensionless contact friction; must be zero.
             tangential_stiffness: Reserved tangential penalty [N/m^3]; must be None.
@@ -858,6 +864,11 @@ class SolverMonolithic(SolverBase):
         )
         return solver
 
+    @property
+    def tet_config_identity(self) -> str | None:
+        """SHA-256 of construction tet configuration; None for the joint diagnostic."""
+        return self._tet_physics.identity if self._tet_physics is not None else None
+
     def _initialize(
         self,
         model,
@@ -895,10 +906,14 @@ class SolverMonolithic(SolverBase):
                 or value > np.finfo(np.float32).max
             ):
                 raise ValueError(f"{name} must be nonnegative finite float32")
-        if material_model != self.MaterialModel.KIM_STABLE_NO_LOG or mass_mode != self.MassMode.LUMPED:
-            raise ValueError("P1 Smith material and consistent mass are not implemented (PR-6A / G2)")
-        if tet_rest_density is not None:
-            raise ValueError("tet_rest_density requires the unimplemented consistent mass mode")
+        if joint_diagnostic and (
+            material_model != self.MaterialModel.KIM_STABLE_NO_LOG
+            or mass_mode != self.MassMode.LUMPED
+            or tet_rest_density is not None
+        ):
+            raise ValueError("Tet options do not apply to the q-only diagnostic")
+        if mass_mode == self.MassMode.LUMPED and tet_rest_density is not None:
+            raise ValueError("tet_rest_density requires consistent mass")
         if normal_smoothing_width != 0 or friction_coefficient != 0 or tangential_stiffness is not None:
             raise ValueError("P1 normal smoothing and contact friction are not implemented (PR-6B / G3-G4)")
         self._config_generation = 0  # Immutable per solver; rebuild instead of reconfiguring.
@@ -931,6 +946,13 @@ class SolverMonolithic(SolverBase):
                 dynamic_particle_ids=self._layout.dynamic_particle_ids.numpy(),
                 particle_to_dynamic=self._layout.particle_to_dynamic.numpy(),
             )
+        self._tet_physics = (
+            TetPhysicsWorkspace(
+                model, material_model=material_model.value, mass_mode=mass_mode.value, density=tet_rest_density
+            )
+            if not joint_diagnostic
+            else None
+        )
         if joint_terms is not None and not isinstance(joint_terms, self.JointTerms):
             raise ValueError("joint_terms must be SolverMonolithic.JointTerms or None")
         self._joint_terms = (
@@ -986,7 +1008,9 @@ class SolverMonolithic(SolverBase):
             internal_columns=pattern.ax_columns,
         )
         self._tet_workspace = (
-            create_tet_assembly_workspace(pattern, tet_count=model.tet_count, device=model.device)
+            create_tet_assembly_workspace(
+                pattern, tet_count=model.tet_count, device=model.device, physics=self._tet_physics
+            )
             if not joint_diagnostic
             else None
         )
@@ -1044,6 +1068,8 @@ class SolverMonolithic(SolverBase):
         _validate_state(self.model, state_in)
         _validate_state(self.model, state_out)
         _validate_dirichlet(self.model, self._layout, state_in)
+        if self._tet_physics is not None:
+            self._tet_physics.validate_identity()
         pipeline = self.collision_pipeline
         if pipeline is not None:
             pipeline.validate_contacts(self.contacts)
@@ -1226,6 +1252,8 @@ class SolverMonolithic(SolverBase):
             raise _StepFailure(self.Status.TET_INVERSION, "Tet determinant guard")
         if code == TetEvaluationStatus.NONFINITE:
             raise _StepFailure(self.Status.NONFINITE, "Nonfinite tet evaluation")
+        if code == TetEvaluationStatus.PSD_PROJECTION_FAILURE:
+            raise _StepFailure(self.Status.TET_PROJECTION_FAILURE, "Element spectral projection did not converge")
         if code != TetEvaluationStatus.SUCCESS:
             raise ValueError(f"Invalid tet evaluation contract: {code.name}")
         return float(self._tet_workspace.min_det_f.numpy()[0])
@@ -1323,7 +1351,7 @@ class SolverMonolithic(SolverBase):
             self._layout.scalar_dof_count,
             [
                 self._articulation.M,
-                model.particle_mass,
+                self._tet_physics.dynamic_mass_diagonal if self._tet_physics is not None else model.particle_mass,
                 self._layout.dynamic_particle_ids,
                 nq,
                 1.0 / dt**2,
@@ -1606,6 +1634,9 @@ class SolverMonolithic(SolverBase):
                     self._metrics[key] = math.nan
         transaction.last_stats = self.Stats(
             status=status,
+            material_model=self._tet_physics.material_model if self._tet_physics is not None else None,
+            mass_mode=self._tet_physics.mass_mode if self._tet_physics is not None else None,
+            tet_config_identity=self._tet_physics.identity if self._tet_physics is not None else None,
             failure_reason=reason,
             converged=status == self.Status.SUCCESS,
             rolled_back=not commit,

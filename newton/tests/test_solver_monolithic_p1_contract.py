@@ -24,10 +24,9 @@ from newton.tests.unittest_utils import add_function_test, get_test_devices
 
 
 class TestP1Contract(unittest.TestCase):
-    def test_pending_modes(self):
+    def test_invalid_or_pending_modes(self):
         """Reject pending physics and malformed values before model allocation."""
         cases = (
-            {"material_model": "smith_log_stabilized"},
             {"material_model": "unknown"},
             {"mass_mode": "consistent"},
             {"mass_mode": "unknown"},

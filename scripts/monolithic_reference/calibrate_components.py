@@ -2182,6 +2182,7 @@ def _tet_nodal_sweep(probe):
             _evaluate_elastic_residual,
             tet_count,
             [
+                0,  # Frozen V0.1 Kim constitutive probe.
                 1e-6,
                 x,
                 model.tet_indices,
