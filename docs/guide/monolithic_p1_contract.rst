@@ -9,7 +9,8 @@ Monolithic P1 contract
 This supplement freezes ``monolithic-p1-contract/v1`` against the implemented
 PR-6C joints and PR-6D hand adapter at base commit
 ``299f43ceab1d6647f12a4c13dab6100893878be1``. It also reserves the interfaces
-for the remaining P1 work. A reserved interface does not enable its physics.
+for the remaining P1 work. PR-6A now enables the material/mass interfaces below;
+contact smoothing/friction/history remain reserved and disabled.
 The original design identifier remains ``monolithic-p1-interface/v1-draft``;
 this supplement does not rewrite that historical design or acceptance evidence.
 
@@ -54,17 +55,16 @@ articulation, zero particles/tets and disabled collision participation.
      - Current validation and future enablement
    * - ``material_model``
      - ``MaterialModel.KIM_STABLE_NO_LOG``
-     - Enum or exact string ``kim_stable_no_log``. The reserved
-       ``smith_log_stabilized`` value raises ``ValueError`` until PR-6A/G2.
+     - Enum or exact string ``kim_stable_no_log`` / ``smith_log_stabilized``.
+       Both material laws are implemented by PR-6A.
    * - ``mass_mode``
      - ``MassMode.LUMPED``
-     - Enum or exact string ``lumped``. Reserved ``consistent`` raises
-       ``ValueError`` until PR-6A/G2.
+     - Enum or exact string ``lumped`` / ``consistent``. Both are implemented.
    * - ``tet_rest_density``
      - ``None``; kg/m³
-     - Non-None rejected now. Consistent mass will require positive finite
-       float32 ``(tet_count,)`` values on the model device, copied privately.
-       Density is authoritative; lumped particle mass is not substituted.
+     - Consistent mass requires positive finite float32 ``(tet_count,)`` values on the model device, copied privately.
+       Density is authoritative; builder row sums must agree. Lumped mode
+       requires None. Parameter snapshots and content identity are immutable.
    * - ``joint_terms``
      - ``None``
      - Implemented opt-in ``JointTerms``; absent/disabled capabilities retain
@@ -304,15 +304,34 @@ Verification ownership and completion
 
 * G0 currently checks reserved-mode rejection, joint input validation,
   generation identity, capacity bounds, stable factor keys and Sharpa fixture
-  input. Runtime material/density/history hashing, history transactions and
-  complete memory budgets remain tied to future PR-6A/B/G0-G4 work.
+  input. Material/density hashing is implemented in PR-6A. History hashing,
+  transactions and complete history-memory budgets remain PR-6B/G0-G4 work.
 * G1 and G1H have separate historical CPU/CUDA acceptance. Their tests remain
   regression requirements for changes to this contract. G1H cannot replace
   G1 saturation/limit/friction component oracles.
-* G2-G4 physics/history, the SDF/soft-ball portion of PR-6D/G5, G6 grasp and
+* PR-6A adds G2 and the :ref:`monolithic-g2h` system fixture. G3/G4 history,
+  the SDF/soft-ball portion of PR-6D/G5, G6 grasp and
   G7 scale/performance are not completed by this contract subcommit.
 
 Portable contract tests live in ``test_solver_monolithic_p1_contract`` and
 ``test_sharpa_trajectory``; CPU/CUDA joint, contact and q-only lifecycle tests
 exercise the corresponding production paths. Future enablement must add its
 own physical acceptance evidence and preserve the existing tolerances.
+
+PR-6A implementation details
+------------------------------------
+
+Smith uses the exact ``log(I_C+1)`` energy/stress/raw derivative. A bounded
+cyclic Jacobi decomposition projects the full symmetric 12x12 nodal element
+Hessian before fixed-node elimination; failure to converge causes hard rollback.
+Kim retains its original Gauss-Newton approximation. Consistent inertia adds
+the full dynamic-dynamic element blocks to the elastic slots, leaving lumped
+inertia slots zero. Gravity uses complete row sums, and ``D_dyn`` uses the
+actual consistent diagonal. Neither solver tolerances nor the detF guard change.
+
+``solver.tet_config_identity`` and ``last_stats.tet_config_identity`` expose
+the SHA-256 of material/mass selection, topology/rest/material/mass/mask inputs
+and explicit density. Stats also identify both selected modes. Replacing source
+arrays is rejected before stepping; editing parameter values does not change
+the snapshots. Rebuild to change modes or density. The q-only diagnostic
+continues to reject tet-specific options.

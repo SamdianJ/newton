@@ -893,6 +893,12 @@ If you run the examples from a source checkout with uv, use
       </a>
       <br><code>python -m newton.examples monolithic_sharpa_close --asset-dir /path/to/left_sharpa_wave --trajectory /path/to/motion.csv</code>
     </td>
+    <td align="center" width="33%">
+      <a href="newton/examples/softbody/example_monolithic_tet_compare.py">
+        <img width="320" src="docs/images/examples/example_monolithic_tet_compare.jpg" alt="G2H material and mass comparison">
+      </a>
+      <br><code>python -m newton.examples monolithic_tet_compare</code>
+    </td>
   </tr>
   <tr>
     <td colspan="3"><h3>Kamino Examples</h3></td>

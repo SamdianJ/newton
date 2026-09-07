@@ -180,11 +180,12 @@ has no self-collision and does not certify soft-ball grasping or mesh contact.
 Current support boundaries
 --------------------------
 
-The material is Kim stable Neo-Hookean without a logarithmic term, with Newton
-lumped particle mass and first-order backward Euler integration. Contact uses
+The default material is Kim stable Neo-Hookean without a logarithmic term,
+with Newton lumped particle mass and first-order backward Euler integration.
+PR-6A also supports Smith log-stabilized material and consistent P1 mass;
+see :ref:`monolithic-p1-contract` and :ref:`monolithic-g2h`. Contact uses
 fixed P1Q3 boundary quadrature and a quadratic hinge. There is no contact friction,
-contact history or grasping support. Smith material and consistent mass belong
-to later development; strict SuperDex matching is deferred until after V0.2.
+contact history or grasping support. Strict SuperDex matching is deferred until after V0.2.
 
 The example's validation applies to the exact geometry, material, timestep and
 loading conditions above. Separate frozen C4 fixtures define additional
