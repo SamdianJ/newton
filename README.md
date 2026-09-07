@@ -904,6 +904,7 @@ If you run the examples from a source checkout with uv, use
         <img width="320" src="docs/images/examples/example_monolithic_tet_response.jpg" alt="Nonlinear material and released vibration comparison">
       </a>
       <br><code>python -m newton.examples monolithic_tet_response --experiment material</code>
+      <br>Modes: <code>material</code>, <code>mass</code>, <code>gravity</code>
     </td>
   </tr>
   <tr>

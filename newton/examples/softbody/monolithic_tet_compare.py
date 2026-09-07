@@ -58,7 +58,7 @@ def load_fraction(time_s):
     return 0.0
 
 
-def build_case(device, *, material, mass, refinement=2, dt=0.02, direction="transverse", load_scale=1.0):
+def build_case(device, *, material, mass, refinement=2, dt=0.02, direction="transverse", load_scale=1.0, density=None):
     """Construct one cantilever and an explicitly uncoupled one-DoF articulation."""
     if refinement not in (1, 2, 3) or type(refinement) is not int or direction not in ("axial", "transverse"):
         raise ValueError("Invalid G2H refinement or load direction")
@@ -66,6 +66,9 @@ def build_case(device, *, material, mass, refinement=2, dt=0.02, direction="tran
         raise ValueError("G2H dt must divide 100 ms")
     if not np.isfinite(load_scale) or not 0 < load_scale <= 1:
         raise ValueError("G2H load scale must be in (0,1]")
+    density = FIXTURE["density"] if density is None else density
+    if not np.isfinite(density) or density <= 0:
+        raise ValueError("Density must be finite and positive")
     b = newton.ModelBuilder(gravity=(0, 0, 0))
     link = b.add_link(mass=1, inertia=wp.diag(wp.vec3(0.01)))
     joint = b.add_joint_revolute(-1, link, limit_ke=0, limit_kd=0)
@@ -82,7 +85,7 @@ def build_case(device, *, material, mass, refinement=2, dt=0.02, direction="tran
         cell_x=FIXTURE["length"] / (3 * refinement),
         cell_y=FIXTURE["width"] / refinement,
         cell_z=FIXTURE["height"] / refinement,
-        density=FIXTURE["density"],
+        density=density,
         k_mu=mu,
         k_lambda=lam,
         k_damp=0,
@@ -95,18 +98,18 @@ def build_case(device, *, material, mass, refinement=2, dt=0.02, direction="tran
     nodal_mass = np.zeros(len(b.particle_q))
     for ids, pose in zip(b.tet_indices, b.tet_poses, strict=True):
         volume = 1 / (6 * np.linalg.det(np.asarray(pose, dtype=float).reshape(3, 3)))
-        np.add.at(nodal_mass, list(ids), FIXTURE["density"] * volume / 4)
+        np.add.at(nodal_mass, list(ids), density * volume / 4)
     for i, x in enumerate(b.particle_q):
         b.particle_mass[i] = float(nodal_mass[i]) if x[0] > 1e-7 else 0.0
     model = b.finalize(device=device)
-    density = wp.full(model.tet_count, FIXTURE["density"], dtype=float, device=device) if mass == "consistent" else None
+    density_array = wp.full(model.tet_count, density, dtype=float, device=device) if mass == "consistent" else None
     solver = SolverMonolithic(
         model,
         collision_pipeline=MonolithicCollisionPipeline(model),
         contact_stiffness=1e5,
         material_model=material,
         mass_mode=mass,
-        tet_rest_density=density,
+        tet_rest_density=density_array,
     )
     state, control = model.state(), model.control()
     newton.eval_fk(model, state.joint_q, state.joint_qd, state)
@@ -124,6 +127,7 @@ def build_case(device, *, material, mass, refinement=2, dt=0.02, direction="tran
     force[:, axis] = weights * FIXTURE[direction + "_force"] * load_scale
     manifest = {
         **FIXTURE,
+        "density": density,
         "material_model": material,
         "mass_mode": mass,
         "direction": direction,
@@ -141,9 +145,10 @@ def build_case(device, *, material, mass, refinement=2, dt=0.02, direction="tran
     return model, solver, state, control, rest, weights, force, manifest
 
 
-def reference_matrices(model, mass_mode):
+def reference_matrices(model, mass_mode, *, density=None):
     """Assemble the small-strain isotropic K and full P1 M in NumPy float64."""
     n = model.particle_count
+    density = FIXTURE["density"] if density is None else density
     stiffness = np.zeros((3 * n, 3 * n))
     mass = np.zeros((n, n))
     for ids, pose32, material in zip(
@@ -158,7 +163,7 @@ def reference_matrices(model, mass_mode):
                 ga, gb = gradients[a], gradients[b]
                 block = volume * (mu * np.dot(ga, gb) * np.eye(3) + mu * np.outer(gb, ga) + lam * np.outer(ga, gb))
                 stiffness[3 * ids[a] : 3 * ids[a] + 3, 3 * ids[b] : 3 * ids[b] + 3] += block
-                mass[ids[a], ids[b]] += FIXTURE["density"] * volume / 20 * (2 if a == b else 1)
+                mass[ids[a], ids[b]] += density * volume / 20 * (2 if a == b else 1)
     if mass_mode == "lumped":
         mass = np.diag(mass.sum(axis=1))
     return stiffness, np.kron(mass, np.eye(3))
