@@ -8,7 +8,7 @@ from __future__ import annotations
 import numpy as np
 import warp as wp
 
-from ...sim import JointType, Model, State, eval_fk, eval_jacobian, eval_mass_matrix
+from ...sim import JointTargetMode, JointType, Model, State, eval_fk, eval_jacobian, eval_mass_matrix
 from ...sim.inverse_dynamics import _compute_coriolis_force, _compute_gravity_force, _InverseDynamicsScratchBuffer
 
 
@@ -91,7 +91,9 @@ class MonolithicArticulationWorkspace:
         "_has_rod_joints",
     )
 
-    def __init__(self, model: Model, *, stream: wp.Stream | None = None) -> None:
+    def __init__(
+        self, model: Model, *, stream: wp.Stream | None = None, joint_terms: MonolithicJointTermsWorkspace | None = None
+    ) -> None:
         if model.articulation_count != 1:
             raise ValueError("Monolithic requires one articulation")
         joint_count, dof_count, body_count = model.joint_count, model.joint_dof_count, model.body_count
@@ -149,6 +151,9 @@ class MonolithicArticulationWorkspace:
             raise ValueError("Monolithic does not support mimic constraints")
         if model.actuators:
             raise ValueError("Monolithic does not support model actuators")
+        allowed = joint_terms.allowed_properties if joint_terms is not None else frozenset()
+        if joint_terms is not None and joint_terms.model is not model:
+            raise ValueError("Joint terms workspace belongs to another model")
         for name in (
             "joint_armature",
             "joint_damping",
@@ -158,7 +163,7 @@ class MonolithicArticulationWorkspace:
             "joint_target_ke",
             "joint_target_kd",
         ):
-            if np.any(getattr(model, name).numpy() != 0.0):
+            if name not in allowed and np.any(getattr(model, name).numpy() != 0.0):
                 raise ValueError(f"Monolithic requires zero {name}")
         mass, inertia = model.body_mass.numpy(), model.body_inertia.numpy()
         if not np.isfinite(mass).all() or np.any(mass < 0.0):
@@ -396,3 +401,323 @@ def scatter_articulation_actor_tangent(
         out_triplet_rows[slot] = global_q_offset + i
         out_triplet_columns[slot] = global_q_offset + j
         out_triplet_values[slot] = value
+
+
+@wp.kernel(enable_backward=False)
+def _validate_joint_term_inputs(
+    q_target: wp.array[float],
+    v_target: wp.array[float],
+    joint_f: wp.array[float],
+    target_map: wp.array[int],
+    driven: wp.array[int],
+    status: wp.array[int],
+):
+    i = wp.tid()
+    if not wp.isfinite(q_target[target_map[i]]) or not wp.isfinite(v_target[i]) or not wp.isfinite(joint_f[i]):
+        wp.atomic_max(status, 0, 1)
+    if driven[i] != 0 and joint_f[i] != 0.0:
+        wp.atomic_max(status, 0, 2)
+
+
+@wp.func
+def _limit_side(d: float, speed: float, ke: float, kd: float, width: float, inv_h: float):
+    activation = float(0.0)
+    derivative = float(0.0)
+    if d >= width:
+        activation = 1.0
+    elif d > 0.0:
+        t = d / width
+        activation = t * t * (3.0 - 2.0 * t)
+        derivative = 6.0 * t * (1.0 - t) / width
+    outward = wp.max(speed, 0.0)
+    elastic = ke * wp.max(d, 0.0)
+    damping = kd * activation * outward
+    tangent = float(0.0)
+    if d > 0.0:
+        tangent = ke + kd * derivative * outward
+    if speed > 0.0:
+        tangent += kd * activation * inv_h
+    return elastic + damping, tangent, 0.5 * ke * wp.max(d, 0.0) * wp.max(d, 0.0), -damping * speed
+
+
+@wp.kernel(enable_backward=False)
+def _evaluate_joint_terms(
+    q: wp.array[float],
+    velocity: wp.array[float],
+    q_target: wp.array[float],
+    v_target: wp.array[float],
+    target_map: wp.array[int],
+    params: wp.array2d[float],
+    inv_h: float,
+    residual: wp.array2d[float],
+    force: wp.array2d[float],
+    tangent: wp.array2d[float],
+    potential: wp.array2d[float],
+    dissipation_power: wp.array2d[float],
+    saturated: wp.array[int],
+    out_status: wp.array[int],
+):
+    i = wp.tid()
+    v = velocity[i]
+    kp, kd, effort = params[i, 0], params[i, 1], params[i, 2]
+    rp, tp, ep = float(0.0), float(0.0), float(0.0)
+    saturated[i] = 0
+    a = kp + kd * inv_h
+    if a > 0.0:
+        raw = kp * (q[i] - q_target[target_map[i]]) + kd * (v - v_target[i])
+        rp = wp.clamp(raw, -effort, effort)
+        if wp.abs(raw) < effort:
+            tp = a
+            ep = 0.5 * raw * raw / a
+        else:
+            saturated[i] = 1
+            ep = effort * (wp.abs(raw) - 0.5 * effort) / a
+        if not wp.isfinite(raw) or not wp.isfinite(a):
+            wp.atomic_max(out_status, 0, 1)
+    ke, limit_kd, width = params[i, 5], params[i, 6], params[i, 7]
+    upper, ku, eu, pu = _limit_side(q[i] - params[i, 4], v, ke, limit_kd, width, inv_h)
+    lower, kl, el, pl = _limit_side(params[i, 3] - q[i], -v, ke, limit_kd, width, inv_h)
+    f, eps = params[i, 8], params[i, 9]
+    rf, tf, ef, pf = float(0.0), float(0.0), float(0.0), float(0.0)
+    if f > 0.0:
+        denom = wp.sqrt(v * v + eps * eps)
+        rf = f * v / denom
+        tf = f * inv_h * (eps / denom) * (eps / denom) / denom
+        ef = f / inv_h * (denom - eps)
+        pf = -rf * v
+    residual[i, 0] = rp
+    residual[i, 1] = upper - lower
+    residual[i, 2] = rf
+    tangent[i, 0] = tp
+    tangent[i, 1] = ku + kl
+    tangent[i, 2] = tf
+    potential[i, 0] = ep
+    potential[i, 1] = eu + el
+    potential[i, 2] = ef
+    dissipation_power[i, 0] = 0.0
+    dissipation_power[i, 1] = pu + pl
+    dissipation_power[i, 2] = pf
+    for term in range(3):
+        force[i, term] = -residual[i, term]
+        if (
+            not wp.isfinite(residual[i, term])
+            or not wp.isfinite(tangent[i, term])
+            or tangent[i, term] < 0.0
+            or not wp.isfinite(potential[i, term])
+            or not wp.isfinite(dissipation_power[i, term])
+        ):
+            wp.atomic_max(out_status, 0, 1)
+    if not wp.isfinite(q[i]) or not wp.isfinite(v):
+        wp.atomic_max(out_status, 0, 1)
+
+
+@wp.kernel(enable_backward=False)
+def add_joint_term_residual(terms: wp.array2d[float], residual: wp.array[float]):
+    i = wp.tid()
+    residual[i] += terms[i, 0] + terms[i, 1] + terms[i, 2]
+
+
+@wp.kernel(enable_backward=False)
+def scatter_joint_term_tangent(
+    terms: wp.array2d[float], aq: wp.array2d[float], triplet_values: wp.array[float], nq: int
+):
+    i = wp.tid()
+    value = terms[i, 0] + terms[i, 1] + terms[i, 2]
+    aq[i, i] += value
+    triplet_values[i * nq + i] += value
+
+
+class MonolithicJointTermsWorkspace:
+    """Frozen scalar joint parameters and allocation-free candidate evaluation.
+
+    Columns of residual/force/tangent/potential are PD, limit, joint friction.
+    Potential contains the PD/friction incremental potentials (up to constants)
+    and only the elastic limit energy. Power contains limit damping and joint
+    friction power; PD power is not included because targets can inject work.
+    Parameters are copied at construction; rebuild after editing model values.
+    """
+
+    def __init__(
+        self,
+        model: Model,
+        *,
+        implicit_pd: bool = False,
+        limits: bool = False,
+        friction: bool = False,
+        limit_width: tuple[float, ...] | None = None,
+        friction_velocity_scale: tuple[float, ...] | None = None,
+    ):
+        for value in (implicit_pd, limits, friction):
+            if type(value) is not bool:
+                raise ValueError("Joint term switches must be bool")
+        _validate_joint_coordinate_layout(model)
+        self.model, self.device, self.count = model, model.device, model.joint_dof_count
+        self.implicit_pd = implicit_pd
+        nq = self.count
+        allowed = set()
+        self._sources = {}
+
+        def read(name):
+            array = getattr(model, name)
+            if array is None or (array.shape, array.dtype, array.device) != ((nq,), wp.float32, model.device):
+                raise ValueError(f"Invalid joint parameter array: {name}")
+            values = array.numpy()
+            if not np.isfinite(values).all():
+                raise ValueError(f"Nonfinite joint parameter: {name}")
+            self._sources[name] = array
+            return values
+
+        def scale(values, enabled, name):
+            if not enabled:
+                if values is not None:
+                    raise ValueError(f"{name} requires its joint term enabled")
+                return np.ones(nq, dtype=np.float32)
+            if values is None:
+                raise ValueError(f"{name} must specify each joint DOF")
+            result = np.asarray(values, dtype=np.float32)
+            if result.shape != (nq,) or not np.isfinite(result).all() or np.any(result <= 0):
+                raise ValueError(f"{name} must be positive finite per-DOF values")
+            return result
+
+        parameters = np.zeros((nq, 10), dtype=np.float32)
+        parameters[:, 7] = scale(limit_width, limits, "limit_width")
+        parameters[:, 9] = scale(friction_velocity_scale, friction, "friction_velocity_scale")
+        driven = np.zeros(nq, dtype=np.int32)
+        if implicit_pd:
+            kp, kd = read("joint_target_ke"), read("joint_target_kd")
+            if np.any(kp < 0) or np.any(kd < 0):
+                raise ValueError("PD gains must be nonnegative")
+            driven = ((kp > 0) | (kd > 0)).astype(np.int32)
+            modes = model.joint_target_mode
+            if modes is None or (modes.shape, modes.dtype, modes.device) != ((nq,), wp.int32, model.device):
+                raise ValueError("Invalid joint_target_mode")
+            mode = modes.numpy()
+            if np.any(mode[driven != 0] != int(JointTargetMode.POSITION_VELOCITY)) or np.any(
+                ~np.isin(
+                    mode[driven == 0], [JointTargetMode.NONE, JointTargetMode.EFFORT, JointTargetMode.POSITION_VELOCITY]
+                )
+            ):
+                raise ValueError("Implicit PD requires POSITION_VELOCITY mode")
+            self._sources["joint_target_mode"] = modes
+            effort, speed = read("joint_effort_limit"), read("joint_velocity_limit")
+            if np.any(effort[driven != 0] <= 0) or np.any(speed[driven != 0] <= 0):
+                raise ValueError("Driven joint effort/velocity limits must be positive")
+            parameters[:, 0], parameters[:, 1], parameters[:, 2] = kp, kd, effort
+            self.velocity_limit = wp.array(speed, dtype=float, device=model.device)
+            allowed.update(("joint_target_ke", "joint_target_kd"))
+        if limits:
+            low, high = read("joint_limit_lower"), read("joint_limit_upper")
+            ke, kd = read("joint_limit_ke"), read("joint_limit_kd")
+            if np.any(low > high) or np.any(ke < 0) or np.any(kd < 0):
+                raise ValueError("Invalid joint limit bounds or gains")
+            parameters[:, 3], parameters[:, 4], parameters[:, 5], parameters[:, 6] = low, high, ke, kd
+            allowed.update(("joint_limit_ke", "joint_limit_kd"))
+        if friction:
+            f = read("joint_friction")
+            if np.any(f < 0):
+                raise ValueError("Joint friction must be nonnegative")
+            parameters[:, 8] = f
+            allowed.add("joint_friction")
+        self.allowed_properties = frozenset(allowed)
+        starts = model.joint_target_q_start
+        if starts is None or (starts.shape, starts.dtype, starts.device) != (
+            (model.joint_count + 1,),
+            wp.int32,
+            model.device,
+        ):
+            raise ValueError("Invalid joint_target_q_start")
+        moving = model.joint_type.numpy() != int(JointType.FIXED)
+        target_ids = starts.numpy()[:-1][moving]
+        if not np.array_equal(starts.numpy(), model.joint_q_start.numpy()):
+            raise ValueError("Invalid scalar joint target layout")
+        self._sources["joint_target_q_start"] = starts
+        self.target_map = wp.array(target_ids, dtype=int, device=model.device)
+        self.params = wp.array(parameters, dtype=float, device=model.device)
+        self.driven = wp.array(driven, dtype=int, device=model.device)
+        self.target_q = wp.zeros(model.joint_coord_count, dtype=float, device=model.device)
+        self.target_qd = wp.zeros(nq, dtype=float, device=model.device)
+        self.residual = wp.zeros((nq, 3), dtype=float, device=model.device)
+        self.force = wp.zeros_like(self.residual)
+        self.tangent = wp.zeros_like(self.residual)
+        self.potential = wp.zeros_like(self.residual)
+        self.dissipation_power = wp.zeros_like(self.residual)
+        self.saturated = wp.zeros(nq, dtype=int, device=model.device)
+        self.status = wp.zeros(1, dtype=int, device=model.device)
+        self.final_force = wp.zeros_like(self.force)
+        self.final_residual = wp.zeros_like(self.residual)
+        self.final_tangent = wp.zeros_like(self.tangent)
+        self.final_power = wp.zeros_like(self.dissipation_power)
+        self.final_saturated = wp.zeros_like(self.saturated)
+        self.final_generation = -1
+
+    def snapshot_targets(self, control) -> None:
+        """Validate before copying inputs; no public/candidate state is mutated."""
+        for name, array in self._sources.items():
+            if getattr(self.model, name) is not array:
+                raise ValueError(f"Stale joint parameter storage: {name}")
+        if not self.implicit_pd:
+            return
+        for name, count in (
+            ("joint_target_q", self.model.joint_coord_count),
+            ("joint_target_qd", self.count),
+            ("joint_f", self.count),
+        ):
+            array = getattr(control, name)
+            if array is None or (array.shape, array.dtype, array.device) != ((count,), wp.float32, self.device):
+                raise ValueError(f"Invalid joint control array: {name}")
+        self.status.zero_()
+        wp.launch(
+            _validate_joint_term_inputs,
+            self.count,
+            [
+                control.joint_target_q,
+                control.joint_target_qd,
+                control.joint_f,
+                self.target_map,
+                self.driven,
+                self.status,
+            ],
+            device=self.device,
+        )
+        code = int(self.status.numpy()[0])
+        if code:
+            raise ValueError("Duplicate driven joint_f" if code == 2 else "Nonfinite joint control")
+        wp.copy(self.target_q, control.joint_target_q)
+        wp.copy(self.target_qd, control.joint_target_qd)
+
+    def evaluate(self, state: State, dt: float) -> None:
+        """Evaluate candidate terms into reusable scratch; caller checks status."""
+        self.status.zero_()
+        wp.launch(
+            _evaluate_joint_terms,
+            self.count,
+            [
+                state.joint_q,
+                state.joint_qd,
+                self.target_q,
+                self.target_qd,
+                self.target_map,
+                self.params,
+                1.0 / dt,
+                self.residual,
+                self.force,
+                self.tangent,
+                self.potential,
+                self.dissipation_power,
+                self.saturated,
+                self.status,
+            ],
+            device=self.device,
+        )
+
+    def publish(self, generation: int) -> None:
+        """Copy only a validated returned state's terms to the final cache."""
+        for dst, src in (
+            (self.final_force, self.force),
+            (self.final_residual, self.residual),
+            (self.final_tangent, self.tangent),
+            (self.final_power, self.dissipation_power),
+            (self.final_saturated, self.saturated),
+        ):
+            wp.copy(dst, src)
+        self.final_generation = generation
