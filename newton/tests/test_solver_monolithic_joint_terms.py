@@ -4,13 +4,16 @@
 """G1 independent scalar oracles for optional monolithic joint physics."""
 
 import unittest
+from contextlib import ExitStack
 from unittest.mock import patch
 
 import numpy as np
 import warp as wp
 
 import newton
+from newton._src.solvers.monolithic import solver_monolithic as monolithic
 from newton._src.solvers.monolithic.articulation import MonolithicArticulationWorkspace, MonolithicJointTermsWorkspace
+from newton.solvers.experimental.monolithic import MonolithicCollisionPipeline, SolverMonolithic
 from newton.tests.monolithic_test_utils import build_tiny_cpu_fixture
 from newton.tests.unittest_utils import add_function_test, get_test_devices
 
@@ -240,6 +243,223 @@ def test_invalid_config_and_control(test, device):
         terms.snapshot_targets(fixture.control)
 
 
+def make_solver(device, **options):
+    fixture, _ = make_terms(device)
+    fixture.model.gravity.zero_()
+    fixture.state.joint_q.zero_()
+    fixture.state.joint_qd.zero_()
+    fixture.state.body_qd.zero_()
+    fixture.control.joint_target_q.assign(np.array([0.005, 0.001], dtype=np.float32))
+    fixture.control.joint_target_qd.zero_()
+    newton.eval_fk(fixture.model, fixture.state.joint_q, fixture.state.joint_qd, fixture.state)
+    solver = SolverMonolithic(
+        fixture.model,
+        collision_pipeline=MonolithicCollisionPipeline(fixture.model),
+        contact_stiffness=1e5,
+        joint_terms=SolverMonolithic.JointTerms(
+            implicit_pd=True, limits=True, friction=True, limit_width=(0.1, 0.05), friction_velocity_scale=(0.07, 0.03)
+        ),
+        **options,
+    )
+    return fixture, solver
+
+
+def check_final(test, fixture, solver, state, dt):
+    terms = solver._joint_terms
+    expected = []
+    for i in range(2):
+        expected.append(
+            oracle(
+                float(state.joint_q.numpy()[i]),
+                float(state.joint_qd.numpy()[i]),
+                float(terms.target_q.numpy()[i]),
+                float(terms.target_qd.numpy()[i]),
+                dt,
+                terms.params.numpy()[i],
+            )[0]
+        )
+    np.testing.assert_allclose(terms.final_force.numpy(), -np.asarray(expected), rtol=1e-5, atol=1e-7)
+    stats = solver.last_stats
+    test.assertEqual(stats.joint_force_generation, stats.step_generation)
+    for i, values in enumerate((stats.joint_pd_force, stats.joint_limit_force, stats.joint_friction_force)):
+        np.testing.assert_array_equal(values, terms.final_force.numpy()[:, i])
+
+
+def test_solver_assembly_and_dense_solve(test, device):
+    fixture, solver = make_solver(device)
+    dt = 0.005
+    current = solver._evaluate_current
+    solve = solver._linear.solve_pcg
+    calls = [0, 0]
+
+    def inspect_current(candidate, h):
+        result = current(candidate, h)
+        dense = solver._linear.densify_for_test(generation=solver._generation)
+        expected = solver._articulation.M.numpy()[0].astype(float) / h**2 + np.diag(
+            solver._joint_terms.tangent.numpy().sum(axis=1)
+        )
+        tol = 5e-5 if device.is_cuda else 1e-5
+        np.testing.assert_allclose(dense.raw_matrix[:2, :2], expected, rtol=tol, atol=1e-6)
+        np.testing.assert_allclose(solver._linear.aq_actor_dense.numpy(), expected, rtol=tol, atol=1e-6)
+        np.testing.assert_array_equal(dense.raw_matrix[:2, 2:], 0)
+        np.testing.assert_array_equal(dense.raw_matrix[2:, :2], 0)
+        test.assertGreater(np.linalg.eigvalsh(dense.scaled_matrix).min(), 0)
+        np.testing.assert_allclose(dense.scaled_matrix, dense.scaled_matrix.T, rtol=1e-4, atol=1e-6)
+        calls[0] += 1
+        return result
+
+    def inspect_solve(rhs, y, **kwargs):
+        dense = solver._linear.densify_for_test(generation=solver._generation)
+        reference = np.linalg.solve(dense.scaled_matrix, rhs.numpy().astype(float))
+        result = solve(rhs, y, **kwargs)
+        if result.status == monolithic.MonolithicLinearStatus.SUCCESS:
+            np.testing.assert_allclose(y.numpy(), reference, rtol=1e-4, atol=1e-7)
+            calls[1] += 1
+        return result
+
+    with (
+        patch.object(solver, "_evaluate_current", side_effect=inspect_current),
+        patch.object(solver._linear, "solve_pcg", side_effect=inspect_solve),
+    ):
+        solver.step(fixture.state, fixture.state_next, fixture.control, None, dt)
+    test.assertEqual(solver.last_stats.status, SolverMonolithic.Status.SUCCESS)
+    test.assertGreater(min(calls), 0)
+    test.assertGreater(np.linalg.norm(fixture.state_next.joint_q.numpy()), 0)
+    check_final(test, fixture, solver, fixture.state_next, dt)
+
+
+def test_trial_transitions_and_input_freeze(test, device):
+    fixture, solver = make_solver(device)
+    original = solver._evaluate_current
+    observed = []
+
+    def inspect(candidate, h):
+        original(candidate, h)
+        owner = solver._linear.aq_actor_dense.numpy().copy()
+        initial = solver._joint_terms.residual.numpy().copy()
+        target = solver._joint_terms.target_q.numpy().copy()
+        fixture.control.joint_target_q.fill_(10)
+        trial = solver._transaction.trial
+        for offset in ([0.44, 0.12], [-0.44, -0.12], [0, 0]):
+            delta = np.zeros(solver._layout.scalar_dof_count, dtype=np.float32)
+            delta[:2] = offset
+            solver._delta.assign(delta)
+            trial.form_trial(candidate, solver._delta, 1.0, h)
+            solver._evaluate_trial(trial, h)
+            np.testing.assert_array_equal(solver._linear.aq_actor_dense.numpy(), owner)
+            np.testing.assert_array_equal(solver._joint_terms.target_q.numpy(), target)
+            observed.append(solver._joint_terms.residual.numpy().copy())
+        np.testing.assert_allclose(observed[-1], initial, rtol=1e-6, atol=1e-7)
+        test.assertTrue(np.all(solver._joint_terms.final_force.numpy() == 0))
+        raise monolithic._StepFailure(SolverMonolithic.Status.NONFINITE, "discard G1 transition probe")
+
+    with (
+        patch.object(solver, "_evaluate_current", side_effect=inspect),
+        test.assertLogs(monolithic.__name__, level="WARNING"),
+    ):
+        solver.step(fixture.state, fixture.state_next, fixture.control, None, 0.005)
+    test.assertTrue(solver.last_stats.rolled_back)
+    test.assertTrue(np.all(observed[0][:, 1] > 0))
+    test.assertTrue(np.all(observed[1][:, 1] < 0))
+    np.testing.assert_array_equal(np.abs(observed[0][:, 0]), [2, 3])
+    check_final(test, fixture, solver, fixture.state_next, 0.005)
+
+
+def test_joint_final_transactions(test, device):
+    for disposition in (
+        "success",
+        "soft_stop",
+        "hard_failure",
+        "final_failure",
+        "permanent_final_failure",
+        "exception",
+    ):
+        fixture, solver = make_solver(device, newton_max_iterations=1 if disposition == "soft_stop" else 10)
+        state = fixture.state
+        original = {
+            name: getattr(state, name).numpy().copy()
+            for name in ("joint_q", "joint_qd", "body_q", "body_qd", "particle_q", "particle_qd")
+        }
+        dt = 0.005
+        with ExitStack() as stack:
+            if disposition == "soft_stop":
+                stack.enter_context(patch.object(solver, "_converged", return_value=False))
+            elif disposition == "hard_failure":
+                stack.enter_context(
+                    patch.object(
+                        solver,
+                        "_iterate",
+                        side_effect=monolithic._StepFailure(SolverMonolithic.Status.NONFINITE, "forced G1 rollback"),
+                    )
+                )
+            elif disposition == "exception":
+                stack.enter_context(patch.object(solver, "_iterate", side_effect=ValueError("forced G1 exception")))
+            elif disposition in ("final_failure", "permanent_final_failure"):
+                publish = solver._joint_terms.publish
+                count = [0]
+
+                def fail_once(generation, count=count, disposition=disposition, publish=publish):
+                    count[0] += 1
+                    if count[0] == 1 or disposition == "permanent_final_failure":
+                        raise monolithic._StepFailure(
+                            SolverMonolithic.Status.NONFINITE, "forced joint publication failure"
+                        )
+                    return publish(generation)
+
+                stack.enter_context(patch.object(solver._joint_terms, "publish", side_effect=fail_once))
+            if disposition not in ("success", "exception"):
+                stack.enter_context(test.assertLogs(monolithic.__name__, level="WARNING"))
+            if disposition in ("exception", "permanent_final_failure"):
+                with test.assertRaises(ValueError if disposition == "exception" else RuntimeError):
+                    solver.step(state, state, fixture.control, None, dt)
+                test.assertEqual(solver._joint_terms.final_generation, -1)
+            else:
+                solver.step(state, state, fixture.control, None, dt)
+                check_final(test, fixture, solver, state, dt)
+        if disposition == "success":
+            test.assertTrue(solver.last_stats.converged)
+        elif disposition == "soft_stop":
+            test.assertEqual(solver.last_stats.status, SolverMonolithic.Status.NONLINEAR_MAX_ITERATIONS)
+            test.assertFalse(solver.last_stats.rolled_back)
+        else:
+            for name, value in original.items():
+                np.testing.assert_array_equal(getattr(state, name).numpy(), value)
+        test.assertTrue(solver._transaction._finished)
+
+
+def test_solver_configuration_and_disabled_parity(test, device):
+    fixture, solver = make_solver(device)
+    original = fixture.state_next.joint_q.numpy().copy()
+    fixture.control.joint_f.fill_(1)
+    with test.assertRaisesRegex(ValueError, "Duplicate"):
+        solver.step(fixture.state, fixture.state_next, fixture.control, None, 0.005)
+    np.testing.assert_array_equal(fixture.state_next.joint_q.numpy(), original)
+    test.assertEqual(solver._transaction.step_generation, 0)
+    fixture.control.joint_f.zero_()
+    fixture.control.joint_target_qd = wp.zeros(1, device=device)
+    with test.assertRaisesRegex(ValueError, "array"):
+        solver.step(fixture.state, fixture.state_next, fixture.control, None, 0.005)
+    # No gain means an undriven DOF still accepts frozen joint_f.
+    fixture.model.joint_target_ke.zero_()
+    fixture.model.joint_target_kd.zero_()
+    terms = MonolithicJointTermsWorkspace(fixture.model, implicit_pd=True)
+    control = fixture.model.control()
+    control.joint_f.fill_(1)
+    terms.snapshot_targets(control)
+    base = build_tiny_cpu_fixture(device=device)
+    base.model.gravity.zero_()
+    pipeline = MonolithicCollisionPipeline(base.model)
+    default = SolverMonolithic(base.model, collision_pipeline=pipeline, contact_stiffness=1e5)
+    disabled = SolverMonolithic(
+        base.model, collision_pipeline=pipeline, contact_stiffness=1e5, joint_terms=SolverMonolithic.JointTerms()
+    )
+    out = base.model.state()
+    default.step(base.state, base.state_next, base.control, None, 0.001)
+    disabled.step(base.state, out, base.control, None, 0.001)
+    for name in ("joint_q", "joint_qd", "body_q", "body_qd", "particle_q", "particle_qd"):
+        np.testing.assert_array_equal(getattr(base.state_next, name).numpy(), getattr(out, name).numpy())
+
+
 class TestMonolithicJointTerms(unittest.TestCase):
     """G1 scalar joint physics on both devices."""
 
@@ -249,6 +469,10 @@ for _test in (
     test_saturation_and_kinks,
     test_frozen_inputs_and_allocation,
     test_invalid_config_and_control,
+    test_solver_assembly_and_dense_solve,
+    test_trial_transitions_and_input_freeze,
+    test_joint_final_transactions,
+    test_solver_configuration_and_disabled_parity,
 ):
     add_function_test(TestMonolithicJointTerms, _test.__name__, _test, devices=get_test_devices())
 

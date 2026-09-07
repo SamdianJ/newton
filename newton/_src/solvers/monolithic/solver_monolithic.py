@@ -18,12 +18,15 @@ from ...sim import Contacts, Control, JointType, Model, State, eval_fk
 from ..solver import SolverBase
 from .articulation import (
     MonolithicArticulationWorkspace,
+    MonolithicJointTermsWorkspace,
     _validate_joint_coordinate_layout,
+    add_joint_term_residual,
     eval_articulation_actor_residual,
     eval_articulation_passive_candidate,
     project_articulation_body_wrenches,
     recover_articulation_candidate_rates,
     scatter_articulation_actor_tangent,
+    scatter_joint_term_tangent,
 )
 from .collision import MonolithicCollisionPipeline
 from .contact import (
@@ -528,6 +531,27 @@ class SolverMonolithic(SolverBase):
         NONLINEAR_MAX_ITERATIONS = "nonlinear_max_iterations"
 
     @dataclass(frozen=True, slots=True)
+    class JointTerms:
+        """Opt in to scalar joint physics; omitted terms retain V0.1 rejection.
+
+        Gains, bounds, friction magnitudes and effort/velocity limits come from
+        Model and are copied at solver construction. Rebuild after changing
+        them. Position/velocity targets come from Control each step. Target
+        trajectory generation and speed limiting remain the caller's job.
+        """
+
+        implicit_pd: bool = False
+        """Use POSITION_VELOCITY targets and saturate the total PD output."""
+        limits: bool = False
+        """Enable lower/upper penalty and outward-only limit damping."""
+        friction: bool = False
+        """Enable regularized Coulomb joint friction."""
+        limit_width: tuple[float, ...] | None = None
+        """Positive activation widths per DOF [rad or m]; required for limits."""
+        friction_velocity_scale: tuple[float, ...] | None = None
+        """Positive smoothing speeds per DOF [rad/s or m/s]; required for friction."""
+
+    @dataclass(frozen=True, slots=True)
     class Stats:
         """Immutable diagnostics; unmeasured numerical fields contain NaN.
 
@@ -640,6 +664,20 @@ class SolverMonolithic(SolverBase):
         contact_moment_imbalance: float = math.nan
         generalized_projection_error: float = math.nan
         contact_sign_error: float = math.nan
+        joint_force_generation: int = -1
+        """Step generation of returned-state joint diagnostics; -1 when absent."""
+        joint_pd_force: tuple[float, ...] | None = None
+        """Actual saturated PD forces [N*m or N] per joint DOF."""
+        joint_limit_force: tuple[float, ...] | None = None
+        """Physical lower/upper limit forces in the returned state."""
+        joint_friction_force: tuple[float, ...] | None = None
+        """Physical joint friction forces in the returned state."""
+        joint_pd_saturated: tuple[bool, ...] | None = None
+        """Whether each returned-state PD output is at its effort bound."""
+        joint_limit_damping_power: tuple[float, ...] | None = None
+        """Limit damping mechanical power [W]; nonpositive."""
+        joint_friction_power: tuple[float, ...] | None = None
+        """Regularized joint friction mechanical power [W]; nonpositive."""
         timings: Mapping[str, float | None] = field(default_factory=lambda: MappingProxyType({}))
         """Measured durations [ms], or None for unmeasured entries."""
 
@@ -652,6 +690,7 @@ class SolverMonolithic(SolverBase):
         *,
         collision_pipeline: MonolithicCollisionPipeline,
         contact_stiffness: float,
+        joint_terms: SolverMonolithic.JointTerms | None = None,
         newton_max_iterations: int = 10,
         line_search_max_iterations: int = 8,
         linear_max_iterations: int = 200,
@@ -663,6 +702,7 @@ class SolverMonolithic(SolverBase):
             model: Model containing one articulation and one connected tet body.
             collision_pipeline: Fixed P1Q3 pipeline constructed for this model.
             contact_stiffness: Normal penalty stiffness [N/m^3].
+            joint_terms: Optional scalar joint physics. None keeps V0.1 behavior.
             newton_max_iterations: Positive nonlinear iteration limit.
             line_search_max_iterations: Positive backtracking iteration limit.
             linear_max_iterations: Positive linear iteration limit.
@@ -693,7 +733,21 @@ class SolverMonolithic(SolverBase):
             dynamic_particle_ids=self._layout.dynamic_particle_ids.numpy(),
             particle_to_dynamic=self._layout.particle_to_dynamic.numpy(),
         )
-        self._articulation = MonolithicArticulationWorkspace(model)
+        if joint_terms is not None and not isinstance(joint_terms, self.JointTerms):
+            raise ValueError("joint_terms must be SolverMonolithic.JointTerms or None")
+        self._joint_terms = (
+            MonolithicJointTermsWorkspace(
+                model,
+                implicit_pd=joint_terms.implicit_pd,
+                limits=joint_terms.limits,
+                friction=joint_terms.friction,
+                limit_width=joint_terms.limit_width,
+                friction_velocity_scale=joint_terms.friction_velocity_scale,
+            )
+            if joint_terms is not None
+            else None
+        )
+        self._articulation = MonolithicArticulationWorkspace(model, joint_terms=self._joint_terms)
         super().__init__(
             model,
             collision_pipeline=collision_pipeline,
@@ -793,8 +847,12 @@ class SolverMonolithic(SolverBase):
             control.joint_f,
             state_in.body_f,
         )
+        if self._joint_terms is not None:
+            self._joint_terms.snapshot_targets(control)
         start = time.perf_counter()
         self._transaction.begin(state_in, state_out, control, dt)
+        if self._joint_terms is not None:
+            self._joint_terms.final_generation = -1
         self._contact.invalidate_final_force()
         self._assembly_sequence = 0
         self._metrics = {
@@ -828,6 +886,8 @@ class SolverMonolithic(SolverBase):
             # solver in an open transaction or retain a partially published state.
             state_out.assign(self._transaction._original)
             self._contact.invalidate_final_force()
+            if self._joint_terms is not None:
+                self._joint_terms.final_generation = -1
             self._transaction._finished = True
             raise
 
@@ -922,6 +982,17 @@ class SolverMonolithic(SolverBase):
             device=model.device,
         )
 
+        if self._joint_terms is not None:
+            self._evaluate_joint_terms(candidate.state, candidate._dt)
+            wp.launch(
+                add_joint_term_residual, nq, [self._joint_terms.residual, candidate.residual], device=model.device
+            )
+
+    def _evaluate_joint_terms(self, state: State, dt: float) -> None:
+        self._joint_terms.evaluate(state, dt)
+        if int(self._joint_terms.status.numpy()[0]):
+            raise _StepFailure(self.Status.NONFINITE, "Nonfinite joint term evaluation")
+
     def _tet_arguments(self, candidate: _Candidate, dt: float) -> dict:
         return {
             "candidate_particle_q": candidate.state.particle_q,
@@ -986,6 +1057,13 @@ class SolverMonolithic(SolverBase):
             ],
             device=model.device,
         )
+        if self._joint_terms is not None:
+            wp.launch(
+                scatter_joint_term_tangent,
+                nq,
+                [self._joint_terms.tangent, assembly.aq_actor_dense, triplets.values, nq],
+                device=model.device,
+            )
         assemble_tet_residual_tangent(
             model,
             **self._tet_arguments(candidate, dt),
@@ -1228,6 +1306,8 @@ class SolverMonolithic(SolverBase):
         raise AssertionError("Unreachable nonlinear loop exit")
 
     def _publish_final(self, state: State, status: SolverMonolithic.Status) -> None:
+        if self._joint_terms is not None:
+            self._joint_terms.final_generation = -1
         roles = {
             self.Status.SUCCESS: _MonolithicReturnedStateRole.STATE_OUT_CONVERGED,
             self.Status.NONLINEAR_MAX_ITERATIONS: _MonolithicReturnedStateRole.STATE_OUT_SOFT_STOP,
@@ -1257,6 +1337,10 @@ class SolverMonolithic(SolverBase):
                 state, self.contacts, step_generation=self._transaction.step_generation, returned_state_role=role
             )
 
+        if self._joint_terms is not None:
+            self._evaluate_joint_terms(state, self._transaction.accepted._dt)
+            self._joint_terms.publish(self._transaction.step_generation)
+
     def _finish_step(self, state_out: State, status: SolverMonolithic.Status, reason: str | None, start: float) -> None:
         transaction = self._transaction
         commit = status in (self.Status.SUCCESS, self.Status.NONLINEAR_MAX_ITERATIONS)
@@ -1276,6 +1360,20 @@ class SolverMonolithic(SolverBase):
                 publication_error = second_error
                 self._contact.invalidate_final_force()
         diagnostics = self._contact._diagnostics(2) if publication_error is None else {}
+        joint_diagnostics = {}
+        terms = self._joint_terms
+        if publication_error is None and terms is not None and terms.final_generation == transaction.step_generation:
+            # One final-state readback, never in the candidate kernel loop.
+            forces, power = terms.final_force.numpy(), terms.final_power.numpy()
+            joint_diagnostics = {
+                "joint_force_generation": terms.final_generation,
+                "joint_pd_force": tuple(float(x) for x in forces[:, 0]),
+                "joint_limit_force": tuple(float(x) for x in forces[:, 1]),
+                "joint_friction_force": tuple(float(x) for x in forces[:, 2]),
+                "joint_pd_saturated": tuple(bool(x) for x in terms.final_saturated.numpy()),
+                "joint_limit_damping_power": tuple(float(x) for x in power[:, 1]),
+                "joint_friction_power": tuple(float(x) for x in power[:, 2]),
+            }
         transaction.last_stats = self.Stats(
             status=status,
             failure_reason=reason,
@@ -1295,6 +1393,7 @@ class SolverMonolithic(SolverBase):
             contact_sign_error=diagnostics.get("contact_sign_error", math.nan),
             timings={"step": 1000.0 * (time.perf_counter() - start)},
             **self._metrics,
+            **joint_diagnostics,
         )
         transaction._finished = True
         if status != self.Status.SUCCESS:

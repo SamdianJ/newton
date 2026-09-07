@@ -83,12 +83,68 @@ a hard failure rolls back the state. Check these fields instead of assuming
 that returning from ``step`` means convergence. Contact force publication
 requires requesting the force attribute before constructing the solver.
 
+Optional implicit joint terms
+-----------------------------
+
+The external-force example above is unchanged. To enable implicit joint PD,
+physical joint limits and regularized joint friction, pass
+``SolverMonolithic.JointTerms`` when constructing the solver:
+
+.. code-block:: python
+
+   # Example widths for two DOFs ordered [revolute, prismatic].
+   terms = SolverMonolithic.JointTerms(
+       implicit_pd=True,
+       limits=True,
+       friction=True,
+       limit_width=(0.02, 0.002),             # rad, m
+       friction_velocity_scale=(0.01, 0.005), # rad/s, m/s
+   )
+   solver = SolverMonolithic(
+       model, collision_pipeline=collision, contact_stiffness=1.0e7,
+       joint_terms=terms,
+   )
+
+Configure Model joint gains, lower/upper bounds, limit gains, nonnegative
+friction magnitudes and positive effort/velocity limits before construction.
+Each driven DOF requires ``JointTargetMode.POSITION_VELOCITY``; either PD gain
+may be zero. Parameters are copied into the solver: rebuild after changing
+Model parameter values. The widths above illustrate units, not calibrated
+settings for arbitrary assets.
+
+Set ``control.joint_target_q`` and ``control.joint_target_qd`` before each
+step, using ``model.joint_target_q_start`` to index position targets. Initialize
+targets explicitly and generate a speed-limited trajectory outside the solver.
+Set ``joint_f=0`` on driven DOFs: supplying both PD and an external drive on
+those DOFs is rejected before the state transaction. Undriven DOFs retain the
+external frozen-force path. Position/velocity targets are copied once per
+physical step; each nonlinear trial recomputes forces at its candidate state.
+
+The effort limit clamps the sum of elastic and damping PD forces. The PD
+position tangent is ``kp + kd/dt`` inside the bound and zero when saturated,
+including the boundary. Limit forces act only outside lower/upper bounds;
+the smoothly activated limit damper only opposes motion further outside.
+Limits are penalties with finite compliance, not post-step coordinate clamps.
+Joint friction uses ``-f*v/sqrt(v*v + v_eps*v_eps)``; it dissipates energy but
+does not implement an exact static-friction lock at zero velocity. Limit and
+friction forces are independent of the PD effort bound.
+
+Returned-state ``last_stats.joint_pd_force``, ``joint_limit_force`` and
+``joint_friction_force`` contain per-DOF physical forces (N*m or N), with
+saturation flags, damping/friction power and ``joint_force_generation``.
+They are recomputed for the state actually returned, including rollback;
+rejected trials do not publish their diagnostics. Without ``joint_terms`` the
+fields remain absent/None and the generation is -1.
+
+The G1 component tests cover CPU and CUDA. They do not certify the Sharpa
+hand-closing action (G1H), a q-only solver, or soft-object grasping.
+
 Current support boundaries
 --------------------------
 
 The material is Kim stable Neo-Hookean without a logarithmic term, with Newton
 lumped particle mass and first-order backward Euler integration. Contact uses
-fixed P1Q3 boundary quadrature and a quadratic hinge. There is no friction,
+fixed P1Q3 boundary quadrature and a quadratic hinge. There is no contact friction,
 contact history or grasping support. Smith material and consistent mass belong
 to later development; strict SuperDex matching is deferred until after V0.2.
 
@@ -100,8 +156,9 @@ between all fixed quadrature samples. The 2 mm narrow-feature failure remains
 outside the measured support envelope.
 
 Supported joints are world-anchored tree joints of type fixed, revolute or
-prismatic, with zero armature, damping, friction, limit gains and actuator
-gains. Moving Dirichlet nodes, loop closures, mimic joints, multiple actors,
+prismatic, with zero armature and independent passive damping. Joint friction,
+limit gains and target gains must also be zero unless their corresponding
+``joint_terms`` capability is explicitly enabled. Moving Dirichlet nodes, loop closures, mimic joints, multiple actors,
 multi-world batching and CUDA graph capture are unsupported. The tetrahedral
 surface must exactly match the derived boundary. Fixed-node input velocities
 must be zero. Finite planes and ellipsoids are rejected; this example uses an
