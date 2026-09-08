@@ -29,7 +29,7 @@ def sdf_build_identity():
     return {"warp_version": wp.__version__, "source_sha256": {name: sha256(root / name) for name in sources}}
 
 
-def build_contact_hand(asset_dir, contact_dir, *, device, parameters, resolution=128):
+def build_contact_hand(asset_dir, contact_dir, *, device, parameters, resolution=128, _mount=None):
     """Load validated collision meshes; keep visual shapes and all fixed links.
 
     CPU imports geometry with collision flags disabled for import-only checks.
@@ -80,7 +80,7 @@ def build_contact_hand(asset_dir, contact_dir, *, device, parameters, resolution
             wp.synchronize_device(device)
         build_times[name] = time.perf_counter() - start
         meshes[name] = mesh
-    builder, hand = build_hand(asset_dir, device=device, parameters=parameters)
+    builder, hand = build_hand(asset_dir, device=device, parameters=parameters, _mount=_mount)
     refs_by_link = {}
     for ref in manifest["references"]:
         refs_by_link.setdefault(ref["link"], []).append(ref)
@@ -88,6 +88,8 @@ def build_contact_hand(asset_dir, contact_dir, *, device, parameters, resolution
     count = 0
     shape_mapping = []
     for body, label in enumerate(builder.body_label):
+        if _mount is not None and body == 0 and label == "monolithic_support":
+            continue
         name = label.rsplit("/", 1)[-1]
         refs = sorted(refs_by_link.get(name, []), key=lambda r: r["ordinal"])
         shapes = [
@@ -124,15 +126,15 @@ def build_contact_hand(asset_dir, contact_dir, *, device, parameters, resolution
         sdf_resolution=resolution,
         sdf_build_or_cache_seconds=build_times,
         cpu_sdf="NOT_REQUIRED",
-        carriage=False,
+        carriage=_mount is not None,
     )
     return builder, hand
 
 
-def load_hand_ball(asset_dir, contact_dir, ball_path, *, device, parameters, position, resolution=128):
+def load_hand_ball(asset_dir, contact_dir, ball_path, *, device, parameters, position, resolution=128, _mount=None):
     """Assemble a free soft sphere and the unchanged 22-DoF hand for diagnostics."""
     builder, manifest = build_contact_hand(
-        asset_dir, contact_dir, device=device, parameters=parameters, resolution=resolution
+        asset_dir, contact_dir, device=device, parameters=parameters, resolution=resolution, _mount=_mount
     )
     mesh = load_ball(ball_path)
     builder.add_soft_mesh(

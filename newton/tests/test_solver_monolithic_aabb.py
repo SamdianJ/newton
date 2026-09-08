@@ -10,6 +10,8 @@ from unittest.mock import patch
 import numpy as np
 import warp as wp
 
+import newton
+from newton._src.geometry.sdf_texture import TextureSDFData, create_texture_sdf_from_primitive
 from newton._src.solvers.monolithic.collision import MonolithicCollisionPipeline
 from newton.examples.softbody import monolithic_contact_friction as friction_fixture
 from newton.tests.test_solver_monolithic_collision import _scene
@@ -141,6 +143,36 @@ def test_texture_bounds(test, device):
         assert_contacts_equal(test, *contacts)
 
 
+def test_extrapolated_zero_surface(test, device):
+    """Enclose a truncated SDF's negative boundary and reject oversized validation grids."""
+    model, state = _scene(device, shape="mesh")
+    descriptor, coarse, fine = create_texture_sdf_from_primitive(
+        newton.GeoType.SPHERE, (0.03, 0.0, 0.0), max_resolution=32, scale_baked=True, device=device
+    )
+    # Deliberately truncate the query domain inside the sphere. Its exterior
+    # extrapolation now has a zero surface outside the descriptor's upper x.
+    upper = descriptor.sdf_box_upper
+    descriptor.sdf_box_upper = wp.vec3(0.0, upper[1], upper[2])
+    model._texture_sdf_data = wp.array([descriptor], dtype=TextureSDFData, device=device)
+    model._texture_sdf_coarse_textures = [coarse]
+    model._texture_sdf_subgrid_textures = [fine]
+    model._shape_sdf_index.assign([0])
+    pipelines = [MonolithicCollisionPipeline(model, _enable_aabb=v) for v in (True, False)]
+    test.assertGreater(pipelines[0]._bounds.local_hi.numpy()[0, 0], 0.01)
+    contacts = [p.contacts() for p in pipelines]
+    for offset in (0.001, 0.01, 0.02, 0.04, 1.0):
+        state.particle_q.assign(
+            np.array([[0, 0, 0], [0.001, 0, 0], [0, 0.001, 0], [0, 0, 0.001]]) + np.array([offset, 0.003, 0.002])
+        )
+        for p, c in zip(pipelines, contacts, strict=True):
+            p.collide(state, c)
+        assert_contacts_equal(test, *contacts)
+    descriptor.inv_sdf_dx = wp.vec3(1e30)
+    model._texture_sdf_data = wp.array([descriptor], dtype=TextureSDFData, device=device)
+    with test.assertRaisesRegex(ValueError, "int32 capacity"):
+        MonolithicCollisionPipeline(model)
+
+
 class TestMonolithicAABB(unittest.TestCase):
     pass
 
@@ -222,6 +254,9 @@ for _device in get_test_devices():
     add_function_test(TestMonolithicAABB, "test_physics_parity", test_physics_parity, devices=[_device])
     if _device.is_cuda:
         add_function_test(TestMonolithicAABB, "test_texture_bounds", test_texture_bounds, devices=[_device])
+        add_function_test(
+            TestMonolithicAABB, "test_extrapolated_zero_surface", test_extrapolated_zero_surface, devices=[_device]
+        )
 
 
 if __name__ == "__main__":

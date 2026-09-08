@@ -3,6 +3,8 @@
 
 """Conservative candidate bounds for the fixed monolithic contact table."""
 
+import math
+
 import numpy as np
 import warp as wp
 
@@ -54,7 +56,6 @@ def _update_faces(
     x: wp.array[wp.vec3],
     lower: wp.array[wp.vec3],
     upper: wp.array[wp.vec3],
-    aggregate: wp.array2d[float],
     status: wp.array[int],
 ):
     face = faces[wp.tid()]
@@ -166,10 +167,12 @@ class _CandidateBounds:
                 index = int(indices[shape])
                 d = descriptors[index]
                 if index not in sdf_bounds:
-                    size = np.maximum(
-                        1, np.ceil((d["sdf_box_upper"] - d["sdf_box_lower"]) * d["inv_sdf_dx"]).astype(np.int64)
-                    )
-                    if np.prod(size, dtype=np.int64) > np.iinfo(np.int32).max:
+                    extent = d["sdf_box_upper"].astype(float) - d["sdf_box_lower"].astype(float)
+                    cells = np.maximum(1, np.ceil(extent * d["inv_sdf_dx"].astype(float)))
+                    if not np.isfinite(cells).all() or np.any(cells > np.iinfo(np.int32).max):
+                        raise ValueError("SDF boundary validation exceeds int32 capacity")
+                    size = tuple(int(v) for v in cells)
+                    if math.prod(size) > np.iinfo(np.int32).max:
                         raise ValueError("SDF boundary validation exceeds int32 capacity")
                     minimum = wp.zeros(1, dtype=float, device=model.device)
                     status = wp.zeros(1, dtype=int, device=model.device)
@@ -191,8 +194,13 @@ class _CandidateBounds:
                 lo[shape], hi[shape] = a * multiplier, b * multiplier
                 continue
             lo[shape], hi[shape] = -half, half
-        self.local_lo = wp.array(np.nextafter(lo.astype(np.float32), -np.inf), dtype=wp.vec3, device=model.device)
-        self.local_hi = wp.array(np.nextafter(hi.astype(np.float32), np.inf), dtype=wp.vec3, device=model.device)
+        with np.errstate(over="ignore"):
+            lo = np.nextafter(lo.astype(np.float32), -np.inf)
+            hi = np.nextafter(hi.astype(np.float32), np.inf)
+        if not np.isfinite(lo).all() or not np.isfinite(hi).all():
+            raise ValueError("Local contact bounds exceed finite float32 range")
+        self.local_lo = wp.array(lo, dtype=wp.vec3, device=model.device)
+        self.local_hi = wp.array(hi, dtype=wp.vec3, device=model.device)
         self.face_lo = wp.empty(model.tri_count, dtype=wp.vec3, device=model.device)
         self.face_hi = wp.empty_like(self.face_lo)
         self.shape_lo = wp.empty(model.shape_count, dtype=wp.vec3, device=model.device)
@@ -212,7 +220,7 @@ class _CandidateBounds:
         wp.launch(
             _update_faces,
             dim=len(self.faces),
-            inputs=[self.faces, m.tri_indices, state.particle_q, self.face_lo, self.face_hi, self.aggregate, status],
+            inputs=[self.faces, m.tri_indices, state.particle_q, self.face_lo, self.face_hi, status],
             device=m.device,
         )
         if len(self.shapes):

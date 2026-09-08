@@ -403,6 +403,7 @@ def _launch_p1q3(model, state, pipeline, contacts):
     contacts.clear(bump_generation=True)
     contacts.soft_contact_tids.fill_(-1)
     pipeline._status.zero_()
+    pipeline._query_counts.zero_()
     wp.launch(
         create_monolithic_p1q3_face_contacts,
         pipeline.soft_contact_pair_count,

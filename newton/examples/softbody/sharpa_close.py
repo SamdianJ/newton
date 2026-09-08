@@ -185,7 +185,7 @@ class ClosureTrajectory:
         return self.q[i] + (time_s - self.time[i]) * self.slopes[i], self.slopes[i].copy()
 
 
-def build_hand(asset_dir, *, device, parameters):
+def build_hand(asset_dir, *, device, parameters, _mount=None):
     """Prepare the base URDF builder with explicit scalar joint properties.
 
     Collision participation is selected by the owning fixture before finalize.
@@ -210,8 +210,45 @@ def build_hand(asset_dir, *, device, parameters):
         meshes[name] = sha256(resolved)
         mesh.set("filename", str(resolved))
     builder = newton.ModelBuilder(gravity=tuple(parameters["gravity"]))
+    import_options = {"floating": False}
+    if _mount is not None:
+        base = builder.add_link(mass=1.0, inertia=wp.diag(wp.vec3(0.01)), label="monolithic_support")
+        fixed = builder.add_joint_fixed(-1, base, label="monolithic_support_fixed")
+        builder.add_articulation([fixed])
+        cfg = _mount["carriage"]
+        axis = builder.JointDofConfig(
+            axis=(0.0, 0.0, 1.0),
+            target_ke=cfg["target_ke"],
+            target_kd=cfg["target_kd"],
+            limit_lower=cfg["lower"],
+            limit_upper=cfg["upper"],
+            limit_ke=cfg["limit_ke"],
+            limit_kd=cfg["limit_kd"],
+            effort_limit=cfg["effort"],
+            velocity_limit=cfg["velocity"],
+            friction=cfg["friction"],
+            armature=0.0,
+            damping=0.0,
+            actuator_mode=newton.JointTargetMode.POSITION_VELOCITY,
+        )
+        import_options = {
+            "parent_body": base,
+            "base_joint": {
+                "joint_type": newton.JointType.PRISMATIC,
+                "linear_axes": [axis],
+                "label": "monolithic_lift",
+            },
+        }
     with wp.ScopedDevice(device):
-        builder.add_urdf(ET.tostring(root, encoding="unicode"), floating=False, enable_self_collisions=False)
+        builder.add_urdf(ET.tostring(root, encoding="unicode"), enable_self_collisions=False, **import_options)
+    if _mount is not None:
+        builder.add_shape_plane(
+            body=base,
+            width=0.0,
+            length=0.0,
+            xform=wp.transform((0, 0, _mount["support_height"]), wp.quat_identity()),
+            cfg=builder.ShapeConfig(margin=0.0),
+        )
     names = []
     for j, label in enumerate(builder.joint_label):
         name = label.rsplit("/", 1)[-1]
@@ -237,6 +274,8 @@ def build_hand(asset_dir, *, device, parameters):
         builder.joint_armature[dof] = 0.0
         builder.joint_damping[dof] = 0.0
     manifest = {"urdf_sha256": sha256(path), "mesh_sha256": meshes, "joint_names": names}
+    if _mount is not None:
+        manifest["mount"] = _mount
     return builder, manifest
 
 
@@ -252,7 +291,8 @@ def finalize_hand(builder, manifest, *, device):
         for i in range(model.body_count)
         if not np.allclose(before[i], after[i], rtol=1e-5, atol=1e-15)
     ]
-    if (model.body_count, model.joint_dof_count, model.shape_count) != (33, 22, 54):
+    expected = (34, 23, 55) if "mount" in manifest else (33, 22, 54)
+    if (model.body_count, model.joint_dof_count, model.shape_count) != expected:
         raise ValueError("Sharpa import lost bodies, joints, or meshes")
     manifest = {
         **manifest,
