@@ -1,0 +1,1 @@
+Add internal Sharpa collision-asset preparation and hash-checked CUDA SDF loading, three deterministic 20 mm soft-ball volume assets, and a coupled contact diagnostic with independent asset validation.

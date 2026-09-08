@@ -185,8 +185,11 @@ class ClosureTrajectory:
         return self.q[i] + (time_s - self.time[i]) * self.slopes[i], self.slopes[i].copy()
 
 
-def load_hand(asset_dir, *, device, parameters):
-    """Load the base URDF with explicit scalar properties and no collision."""
+def build_hand(asset_dir, *, device, parameters):
+    """Prepare the base URDF builder with explicit scalar joint properties.
+
+    Collision participation is selected by the owning fixture before finalize.
+    """
     validate_fixture(parameters)
     asset_dir = Path(asset_dir).resolve()
     path = asset_dir / "left_sharpa_wave.urdf"
@@ -209,9 +212,6 @@ def load_hand(asset_dir, *, device, parameters):
     builder = newton.ModelBuilder(gravity=tuple(parameters["gravity"]))
     with wp.ScopedDevice(device):
         builder.add_urdf(ET.tostring(root, encoding="unicode"), floating=False, enable_self_collisions=False)
-    builder.shape_flags = [
-        int(f) & ~int(ShapeFlags.COLLIDE_SHAPES | ShapeFlags.COLLIDE_PARTICLES) for f in builder.shape_flags
-    ]
     names = []
     for j, label in enumerate(builder.joint_label):
         name = label.rsplit("/", 1)[-1]
@@ -236,6 +236,12 @@ def load_hand(asset_dir, *, device, parameters):
         builder.joint_target_mode[dof] = int(newton.JointTargetMode.POSITION_VELOCITY)
         builder.joint_armature[dof] = 0.0
         builder.joint_damping[dof] = 0.0
+    manifest = {"urdf_sha256": sha256(path), "mesh_sha256": meshes, "joint_names": names}
+    return builder, manifest
+
+
+def finalize_hand(builder, manifest, *, device):
+    """Record importer inertia corrections when finalizing a Sharpa fixture."""
     before = np.asarray(builder.body_inertia, dtype=np.float64).reshape(-1, 3, 3)
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
@@ -249,14 +255,21 @@ def load_hand(asset_dir, *, device, parameters):
     if (model.body_count, model.joint_dof_count, model.shape_count) != (33, 22, 54):
         raise ValueError("Sharpa import lost bodies, joints, or meshes")
     manifest = {
-        "urdf_sha256": sha256(path),
-        "mesh_sha256": meshes,
-        "joint_names": names,
+        **manifest,
         "body_count": model.body_count,
         "shape_count": model.shape_count,
         "mass_kg": float(model.body_mass.numpy().sum()),
         "inertia_corrections": corrections,
         "import_warnings": [str(w.message) for w in caught],
-        "collision_enabled": False,
+        "collision_enabled": any(int(f) & int(ShapeFlags.COLLIDE_PARTICLES) for f in builder.shape_flags),
     }
     return model, manifest
+
+
+def load_hand(asset_dir, *, device, parameters):
+    """Load the base URDF with explicit scalar properties and no collision."""
+    builder, manifest = build_hand(asset_dir, device=device, parameters=parameters)
+    builder.shape_flags = [
+        int(f) & ~int(ShapeFlags.COLLIDE_SHAPES | ShapeFlags.COLLIDE_PARTICLES) for f in builder.shape_flags
+    ]
+    return finalize_hand(builder, manifest, device=device)

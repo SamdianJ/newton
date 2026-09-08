@@ -1,0 +1,25 @@
+{
+  "schema": "sharpa-g5-assets/v1",
+  "scope": "short contact feasibility; G6/G7 NOT_IMPLEMENTED",
+  "parameter_source": "simulation_config",
+  "ball_radius_m": 0.02,
+  "ball_position_m": [0.025, -0.03, 0.19],
+  "initial_ball_velocity_m_s": [-0.02, 0.0, 0.0],
+  "dt": 0.001,
+  "steps": 20,
+  "sdf_resolution": 128,
+  "normal_stiffness": 10000000.0,
+  "tangential_stiffness": 2000000.0,
+  "friction_coefficient": 0.5,
+  "normal_smoothing_width": 0.0001,
+  "particle_radius_m": 0.0002,
+  "detection_gap_m": 0.002,
+  "gates": {
+    "converged_fraction": 1.0,
+    "minimum_peak_active_samples": 1,
+    "minimum_det_f": 0.5,
+    "maximum_convergence_ratio": 1.0,
+    "maximum_penetration_m": 0.0012,
+    "maximum_sdf_probe_error_m": 0.0004
+  }
+}
