@@ -70,3 +70,30 @@ friction can release stored energy: instantaneous friction power need not
 always be negative. Fixed-load work/storage/return audits are separate from
 transport, separation and changing-normal-load energy changes. The q-only
 joint diagnostic reports this field as None.
+
+Frozen comparison result
+------------------------
+
+CPU and CUDA each complete two 2000-step trajectories with 100% normal
+convergence. Both sticking and sliding occur in the friction-on case; after
+lifting the plate, the committed elastic history is zero.
+
+.. list-table:: Peak horizontal displacement of the top surface
+   :header-rows: 1
+
+   * - Device
+     - Friction on
+     - Friction off
+   * - CPU
+     - 7.924495 mm
+     - 0.000116188 mm
+   * - CUDA
+     - 7.924508 mm
+     - 0.000161613 mm
+
+The maximum device difference over the complete horizontal-displacement
+trace is below 1 micrometre against the frozen 50 micrometre gate. The
+acceptance metadata is in
+``scripts/monolithic_reference/fixtures/contact_friction_g3_g4_v1.json``.
+This is an analytic contact/component demonstration, not the remaining
+Sharpa/soft-sphere grasp acceptance or a performance benchmark.

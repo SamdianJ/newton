@@ -1,0 +1,246 @@
+{
+  "schema": "monolithic-pr6b-acceptance/v1",
+  "status": "PASS",
+  "G3": {
+    "cpu": "PASS",
+    "cuda:0": "PASS"
+  },
+  "G4": {
+    "cpu": "PASS",
+    "cuda:0": "PASS"
+  },
+  "base_commit": "49e562449e388ef394fe8704a22d459d6fae1813",
+  "code_commit": "6c36331007908e6437aac61598e74e99a25ddaa2",
+  "physics_commit": "3acfe0004f47461ace1622502cff6f496320f2d3",
+  "prd_sha256": "869037e348e18bd560060542862208bf06600dc4f9240df27e513ad420b02c82",
+  "architecture_sha256": "412816f5f9e580261bb97dfd857f029a7efcd6938dc0c226bc9296dc4eca4b2c",
+  "example_commit": "2abec2a72310322726d44361a96a2261706f1d7c",
+  "fixture": {
+    "schema": "monolithic-contact-friction/v1",
+    "dimensions": [
+      0.08,
+      0.04,
+      0.04
+    ],
+    "cells": [
+      4,
+      2,
+      2
+    ],
+    "density": 1000.0,
+    "young_modulus": 10000.0,
+    "poisson_ratio": 0.3,
+    "gravity": [
+      0,
+      0,
+      0
+    ],
+    "dt": 0.002,
+    "duration": 4.0,
+    "normal_stiffness": 10000000.0,
+    "tangential_stiffness": 2000000.0,
+    "smoothing_width": 0.0001,
+    "friction_coefficient": 0.5,
+    "pd_ke": 10000.0,
+    "pd_kd": 100.0,
+    "effort_limit": 200.0,
+    "target_times": [
+      0.0,
+      0.75,
+      1.5,
+      2.5,
+      3.0,
+      3.75,
+      4.0
+    ],
+    "target_positions": [
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        -0.006
+      ],
+      [
+        0.001,
+        -0.006
+      ],
+      [
+        0.025,
+        -0.006
+      ],
+      [
+        0.025,
+        -0.006
+      ],
+      [
+        0.025,
+        0.008
+      ],
+      [
+        0.025,
+        0.008
+      ]
+    ],
+    "gates": {
+      "converged_fraction": 0.99,
+      "on_displacement_min": 0.005,
+      "off_displacement_max": 0.0001,
+      "stick_samples_min": 100,
+      "slide_samples_min": 100,
+      "min_det_f": 0.5,
+      "residual_max": 0.0001,
+      "device_displacement_max": 5e-05
+    },
+    "source": "Simulation calibration parameters, not measured hardware/material properties"
+  },
+  "comparison": {
+    "cpu": {
+      "passed": true,
+      "gates": {
+        "complete": true,
+        "convergence": true,
+        "deformation": true,
+        "negative_control": true,
+        "stick_and_slide": true,
+        "release": true,
+        "finite": true,
+        "determinant": true,
+        "residual": true,
+        "nonlinear_residual": true
+      },
+      "summaries": [
+        {
+          "steps": 2000,
+          "converged_fraction": 1.0,
+          "peak_displacement_x": 0.00792449526488781,
+          "peak_tangent_force": 2.1158130168914795,
+          "stick_samples": 49684,
+          "slide_samples": 22722,
+          "lost_samples": 52,
+          "final_history_energy": 0.0
+        },
+        {
+          "steps": 2000,
+          "converged_fraction": 1.0,
+          "peak_displacement_x": 1.1618794815149158e-07,
+          "peak_tangent_force": 0.0,
+          "stick_samples": 0,
+          "slide_samples": 0,
+          "lost_samples": 0,
+          "final_history_energy": 0.0
+        }
+      ]
+    },
+    "cuda": {
+      "passed": true,
+      "gates": {
+        "complete": true,
+        "convergence": true,
+        "deformation": true,
+        "negative_control": true,
+        "stick_and_slide": true,
+        "release": true,
+        "finite": true,
+        "determinant": true,
+        "residual": true,
+        "nonlinear_residual": true
+      },
+      "summaries": [
+        {
+          "steps": 2000,
+          "converged_fraction": 1.0,
+          "peak_displacement_x": 0.007924508303403854,
+          "peak_tangent_force": 2.115817070007324,
+          "stick_samples": 49712,
+          "slide_samples": 22694,
+          "lost_samples": 52,
+          "final_history_energy": 0.0
+        },
+        {
+          "steps": 2000,
+          "converged_fraction": 1.0,
+          "peak_displacement_x": 1.6161344262854982e-07,
+          "peak_tangent_force": 0.0,
+          "stick_samples": 0,
+          "slide_samples": 0,
+          "lost_samples": 0,
+          "final_history_energy": 0.0
+        }
+      ]
+    }
+  },
+  "device_parity": {
+    "threshold_displacement_m": 5e-05,
+    "passed": true,
+    "cases": {
+      "friction-on": {
+        "top_displacement_x": 4.591420292854309e-07,
+        "top_displacement_z": 6.798654794692993e-08,
+        "normal_force_sum": 0.00034332275390625,
+        "tangent_force_sum": 0.000652313232421875,
+        "history_elastic_energy": 2.430169843137264e-07,
+        "passed": true
+      },
+      "friction-off": {
+        "top_displacement_x": 2.778013907800414e-07,
+        "top_displacement_z": 8.369485726689163e-08,
+        "normal_force_sum": 0.00018596649169921875,
+        "tangent_force_sum": 0.0,
+        "history_elastic_energy": 0.0,
+        "passed": true
+      }
+    }
+  },
+  "tests": {
+    "monolithic": 331,
+    "adjacent_and_fixture_import": 274,
+    "new_example": 2,
+    "g3_g4_subset": 22,
+    "total_unique": 607
+  },
+  "history_capacity": {
+    "cpu": {
+      "contacts": 240,
+      "factors": 720,
+      "triplets": 94882,
+      "history_payload_bytes": 13440,
+      "contact_workspace_reachable_array_payload_bytes": 73104,
+      "estimated_contact_allocation_bound_bytes": 5673600,
+      "topology_sha256": "4b7cf332979efa9918749554ea7b908e4eb44d8f745180fe1497b7b92838b7ac",
+      "config_sha256": "cb6676ce279f930afb86fdb3e692ecf331c4830810158fd29cc6da1155c2f8ae"
+    },
+    "cuda:0": {
+      "contacts": 240,
+      "factors": 720,
+      "triplets": 94882,
+      "history_payload_bytes": 13440,
+      "contact_workspace_reachable_array_payload_bytes": 73104,
+      "estimated_contact_allocation_bound_bytes": 5673600,
+      "topology_sha256": "4b7cf332979efa9918749554ea7b908e4eb44d8f745180fe1497b7b92838b7ac",
+      "config_sha256": "cb6676ce279f930afb86fdb3e692ecf331c4830810158fd29cc6da1155c2f8ae"
+    }
+  },
+  "rotation_support": {
+    "angular_velocity_rad_s": 1,
+    "dt_s": [
+      0.02,
+      0.01,
+      0.005
+    ],
+    "reset_angle_degrees": 45,
+    "normal_boundary_test_degrees": [
+      44.9,
+      45.1
+    ],
+    "claim": "BE rotation refinement on analytic fixtures; reset threshold is not arbitrary finite-rotation objectivity"
+  },
+  "remaining": [
+    "Sharpa mesh SDF asset integration",
+    "soft sphere volume asset",
+    "AABB optimization",
+    "conditional patch Schur",
+    "V0.2 grasp G5/G6/G7"
+  ]
+}

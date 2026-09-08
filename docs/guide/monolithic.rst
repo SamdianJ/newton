@@ -208,4 +208,3 @@ infinite plane. Volume SDFs have additional provenance and scale restrictions.
 CPU and CUDA correctness are supported. Python orchestration and explicit
 assembly are current implementation limits; this tiny example does not imply
 GPU speedup or a large-scene performance guarantee.
-
