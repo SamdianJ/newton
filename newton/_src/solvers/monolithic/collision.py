@@ -18,6 +18,7 @@ from ...geometry.sdf_texture import TextureSDFData
 from ...geometry.soft_contacts_sdf import _shape_frames, eval_shape_sdf
 from ...geometry.types import GeoType
 from ...sim import Contacts, Model, State
+from .aabb import _CandidateBounds, _overlap, aggregate_overlap
 
 
 def _validate_and_collect_boundary_faces(model: Model) -> tuple[np.ndarray, np.ndarray]:
@@ -180,6 +181,10 @@ def _validate_and_collect_shapes(model: Model, target_bodies: np.ndarray) -> np.
 
 def _build_face_shape_pairs(model: Model, face_indices: np.ndarray, shape_indices: np.ndarray) -> np.ndarray:
     """Build stable face-major pairs after the single participating world gate."""
+    if 3 * len(face_indices) * len(shape_indices) > np.iinfo(np.int32).max:
+        raise MonolithicCollisionPipeline.Error(
+            MonolithicCollisionPipeline.Status.CONTACT_CAPACITY_OVERFLOW, "fixed_pair_int32_capacity"
+        )
     particles = np.unique(model.tet_indices.numpy())
     labels = np.concatenate(
         (model.particle_world.numpy()[particles], model.body_world.numpy(), model.shape_world.numpy()[shape_indices])
@@ -220,12 +225,27 @@ def create_monolithic_p1q3_face_contacts(
     out_body_vel: wp.array[wp.vec3],
     out_normal: wp.array[wp.vec3],
     out_status: wp.array[int],
+    enable_aabb: bool,
+    face_lo: wp.array[wp.vec3],
+    face_hi: wp.array[wp.vec3],
+    shape_lo: wp.array[wp.vec3],
+    shape_hi: wp.array[wp.vec3],
+    aggregate: wp.array2d[float],
+    counters: wp.array[int],
 ):
     pair_id = wp.tid()
     pair = face_pairs[pair_id]
     face, shape = pair[0], pair[1]
     if (shape_flags[shape] & ShapeFlags.COLLIDE_PARTICLES) == 0:
         return
+    if enable_aabb and shape_type[shape] != GeoType.PLANE:
+        if not aggregate_overlap(aggregate):
+            wp.atomic_add(counters, 0, 1)
+            return
+        if not _overlap(face_lo[face], face_hi[face], shape_lo[shape], shape_hi[shape]):
+            wp.atomic_add(counters, 1, 1)
+            return
+    wp.atomic_add(counters, 2, 1)
     ia, ib, ic = tri_indices[face, 0], tri_indices[face, 1], tri_indices[face, 2]
     X_bs, X_ws, X_sw = _shape_frames(shape_body, body_q, shape_transform, shape)
     a = wp.transform_point(X_sw, particle_q[ia])
@@ -246,6 +266,7 @@ def create_monolithic_p1q3_face_contacts(
         bary = wp.vec3(1.0 / 6.0)
         bary[slot] = 2.0 / 3.0
         x = bary[0] * a + bary[1] * b + bary[2] * c
+        wp.atomic_add(counters, 3, 1)
         _lower, phi, grad = eval_shape_sdf(
             shape_type[shape], shape_scale[shape], x, shape_sdf_index[shape], texture_sdf_table
         )
@@ -317,7 +338,21 @@ class MonolithicCollisionPipeline:
             self.subreason = subreason
             super().__init__(f"{status.name}: {subreason}")
 
-    def __init__(self, model: Model, *, soft_contact_gap: float = 0.01):
+    def __init__(
+        self,
+        model: Model,
+        *,
+        soft_contact_gap: float = 0.01,
+        _enable_aabb: bool = True,
+        _sdf_query_error: float = 0.0,
+    ):
+        if not isinstance(_enable_aabb, bool):
+            raise ValueError("_enable_aabb must be bool")
+        if not math.isfinite(_sdf_query_error) or _sdf_query_error < 0 or _sdf_query_error > soft_contact_gap:
+            raise ValueError("Detection gap must cover finite nonnegative SDF query error")
+        self._enable_aabb = _enable_aabb
+        self._sdf_query_error = float(_sdf_query_error)
+        self._bounds_config = (_enable_aabb, self._sdf_query_error)
         if not math.isfinite(soft_contact_gap) or soft_contact_gap < 0.0 or soft_contact_gap > np.finfo(np.float32).max:
             raise self.Error(self.Status.INVALID_SHAPE, "soft_contact_gap_must_be_finite_nonnegative")
         if model.requires_grad:
@@ -342,6 +377,8 @@ class MonolithicCollisionPipeline:
         pairs = _build_face_shape_pairs(model, faces, shapes)
         self._face_pairs = wp.array(pairs, dtype=wp.vec2i, device=model.device)
         self._status = wp.zeros(1, dtype=int, device=model.device)
+        self._bounds = _CandidateBounds(model, faces, shapes)
+        self._query_counts = wp.zeros(4, dtype=int, device=model.device)
         self._token = object()
         self._contact_contracts = WeakKeyDictionary()
         self._requested_attributes = frozenset(model.get_requested_contact_attributes())
@@ -393,6 +430,8 @@ class MonolithicCollisionPipeline:
         return self._r_soft
 
     def _validate_model(self) -> None:
+        if self._bounds_config != (self._enable_aabb, self._sdf_query_error):
+            raise self.Error(self.Status.INVALID_MODEL, "changed_bounds_configuration")
         if self.model.device != self._device or self.model.requires_grad:
             raise self.Error(self.Status.INVALID_MODEL, "changed_device_or_grad")
         if any(getattr(self.model, name) is not value for name, value in self._model_arrays.items()):
@@ -476,6 +515,9 @@ class MonolithicCollisionPipeline:
         contacts.clear(bump_generation=True)
         contacts.soft_contact_tids.fill_(-1)
         self._status.zero_()
+        self._query_counts.zero_()
+        if self._enable_aabb:
+            self._bounds.update(state, self.r_soft + self._soft_contact_gap, self._status)
         if self.soft_contact_pair_count:
             m = self.model
             wp.launch(
@@ -507,6 +549,13 @@ class MonolithicCollisionPipeline:
                     contacts.soft_contact_body_vel,
                     contacts.soft_contact_normal,
                     self._status,
+                    self._enable_aabb,
+                    self._bounds.face_lo,
+                    self._bounds.face_hi,
+                    self._bounds.shape_lo,
+                    self._bounds.shape_hi,
+                    self._bounds.aggregate,
+                    self._query_counts,
                 ],
                 device=m.device,
             )

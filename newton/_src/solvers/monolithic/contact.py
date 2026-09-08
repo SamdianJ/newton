@@ -599,6 +599,7 @@ class MonolithicContactWorkspace:
             self.friction_coefficient,
             self.tangential_stiffness,
             self.transport_cos,
+            pipeline._bounds_config,
         )
         self.config_sha256 = hashlib.sha256((json.dumps(self._configuration) + physics_identity).encode()).hexdigest()
         self._history_arrays = {
@@ -725,6 +726,7 @@ class MonolithicContactWorkspace:
             self.friction_coefficient,
             self.tangential_stiffness,
             self.transport_cos,
+            pipeline._bounds_config,
         ):
             raise ValueError("History configuration is stale; rebuild the solver")
 

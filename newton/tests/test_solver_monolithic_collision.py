@@ -23,6 +23,11 @@ def _scene(device, *, shape="plane", margin=0.0):
     cfg = builder.ShapeConfig(margin=margin)
     if shape == "plane":
         builder.add_shape_plane(body=body, width=0.0, length=0.0, cfg=cfg)
+    elif shape == "mixed":
+        builder.add_shape_plane(body=body, width=0.0, length=0.0, cfg=cfg)
+        builder.add_shape_box(
+            body=body, xform=wp.transform((10.0, 10.0, 10.0), wp.quat_identity()), hx=0.02, hy=0.03, hz=0.01, cfg=cfg
+        )
     elif shape == "sphere":
         builder.add_shape_sphere(body=body, radius=0.03, cfg=cfg)
     elif shape == "box":

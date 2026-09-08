@@ -934,8 +934,8 @@ class SolverMonolithic(SolverBase):
         if not joint_diagnostic:
             if not isinstance(collision_pipeline, MonolithicCollisionPipeline):
                 raise ValueError("Monolithic requires a MonolithicCollisionPipeline")
-            if normal_smoothing_width > collision_pipeline._soft_contact_gap:
-                raise ValueError("Detection gap must cover normal_smoothing_width")
+            if normal_smoothing_width + collision_pipeline._sdf_query_error > collision_pipeline._soft_contact_gap:
+                raise ValueError("Detection gap must cover normal_smoothing_width and SDF query error")
             if collision_pipeline.model is not model:
                 raise ValueError("collision_pipeline and solver must use the same model")
         for name, value in (("contact_stiffness", contact_stiffness), ("linear_tolerance", linear_tolerance)):
