@@ -102,3 +102,21 @@ This runner executes the complete closure for each mesh, then profiles a
 separate 20-step continuous hold tail. The instrumented tail synchronizes
 individual stages; overlapping stage timings must not be added. Formal
 state snapshots remain at the end of the 4.5-second trajectory.
+
+Measured scope of the initial fixture
+-------------------------------------
+
+The medium and fine meshes complete all 4500 steps with normal convergence,
+unchanged anchors and sustained light middle-finger contact. Maximum
+penetration is about 0.175 mm and 0.239 mm respectively. The other fingers
+and palm have zero measured hold contact force; this is not a multiple-finger
+high-load validation. The coarse mesh has detection records but zero force,
+so its sustained-contact gate correctly fails.
+
+Measured hold step p50 is approximately 77 ms (medium) and 156 ms (fine).
+Using mean solver step times and ten substeps per displayed frame gives
+about 1.63 and 0.76 FPS, excluding rendering and output. A separate
+instrumented hold tail attributes about 44/114 ms per step to BSR construction,
+compared with 3/5 ms to PCG. These are observed fixture results, not a final
+G7 performance certificate. The resolution runner returns nonzero when the
+coarse no-load case is included; it preserves all measured results.

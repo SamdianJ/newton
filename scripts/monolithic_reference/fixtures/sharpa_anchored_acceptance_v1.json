@@ -1,0 +1,261 @@
+{
+  "schema": "sharpa-anchored-closure-acceptance/v1",
+  "code_commit": "1df7c6e2c471513ea00fa6f030c02c39d88ed456",
+  "report": "SHARPA_ANCHORED_CLOSE_STABILITY_PERFORMANCE_REPORT.md",
+  "report_sha256": "c24c8ac587f1671891b79a4645bac6055d08001b9044f6459b889c55f143315a",
+  "results": [
+    {
+      "refinement": 1,
+      "setup_seconds": 4.537503891002416,
+      "run_wall_seconds": 121.58624476299883,
+      "summary": {
+        "complete_schedule": true,
+        "accepted_steps": 4500,
+        "failure": null,
+        "pcg_iteration_p95": {
+          "close": 8.0,
+          "hold": 7.0,
+          "lift": null,
+          "hold_high": null
+        },
+        "patch_schur_trigger": false,
+        "converged_fraction": 1.0,
+        "G6": "NOT_VALIDATED",
+        "G7": "NOT_VALIDATED",
+        "hold_contact_fraction": 0.0,
+        "stability_passed": false,
+        "maximum_penetration_m": 0.0,
+        "minimum_det_f": 0.9383642673492432,
+        "fixed_nodes": 5,
+        "dynamic_nodes": 22,
+        "stage_timing": {
+          "prepare": {
+            "step_seconds": [
+              0.03295422100200085,
+              0.03586853699925995
+            ],
+            "collision_seconds": [
+              0.0030367040017154068,
+              0.0036411643002793414
+            ],
+            "pcg_seconds": [
+              0.0034537120009190403,
+              0.004339714001616812
+            ],
+            "other_step_seconds": [
+              0.026463305999641307,
+              0.028608381300728066
+            ]
+          },
+          "close": {
+            "step_seconds": [
+              0.03233474499938893,
+              0.03381005460068991
+            ],
+            "collision_seconds": [
+              0.0030762470014451537,
+              0.0036334191998321328
+            ],
+            "pcg_seconds": [
+              0.0027703769992513116,
+              0.003829369998493348
+            ],
+            "other_step_seconds": [
+              0.026315196992072742,
+              0.027594587907151434
+            ]
+          },
+          "hold": {
+            "step_seconds": [
+              0.015361158999439795,
+              0.033906243199453456
+            ],
+            "collision_seconds": [
+              0.002855615999578731,
+              0.0036271851964556844
+            ],
+            "pcg_seconds": [
+              0.0,
+              0.0036486793997028144
+            ],
+            "other_step_seconds": [
+              0.012678014001721749,
+              0.027413499299291287
+            ]
+          }
+        }
+      },
+      "profile_tail_passed": true
+    },
+    {
+      "refinement": 2,
+      "setup_seconds": 3.678753118001623,
+      "run_wall_seconds": 313.0997760789978,
+      "summary": {
+        "complete_schedule": true,
+        "accepted_steps": 4500,
+        "failure": null,
+        "pcg_iteration_p95": {
+          "close": 12.0,
+          "hold": 12.0,
+          "lift": null,
+          "hold_high": null
+        },
+        "patch_schur_trigger": false,
+        "converged_fraction": 1.0,
+        "G6": "NOT_VALIDATED",
+        "G7": "NOT_VALIDATED",
+        "hold_contact_fraction": 1.0,
+        "stability_passed": true,
+        "maximum_penetration_m": 0.0001748620707076043,
+        "minimum_det_f": 0.7387197613716125,
+        "fixed_nodes": 13,
+        "dynamic_nodes": 112,
+        "stage_timing": {
+          "prepare": {
+            "step_seconds": [
+              0.07965635900109191,
+              0.0900509992006846
+            ],
+            "collision_seconds": [
+              0.004152223998971749,
+              0.005355425898960675
+            ],
+            "pcg_seconds": [
+              0.006033322002622299,
+              0.007326990199362626
+            ],
+            "other_step_seconds": [
+              0.0691868309986603,
+              0.07833257530692209
+            ]
+          },
+          "close": {
+            "step_seconds": [
+              0.07924328499939293,
+              0.08222471960143593
+            ],
+            "collision_seconds": [
+              0.004209640999761177,
+              0.005212194900377652
+            ],
+            "pcg_seconds": [
+              0.005316915998264449,
+              0.006955826598641579
+            ],
+            "other_step_seconds": [
+              0.06934527600606089,
+              0.0725115409011778
+            ]
+          },
+          "hold": {
+            "step_seconds": [
+              0.07704867099891999,
+              0.08931123019792721
+            ],
+            "collision_seconds": [
+              0.003930430000764318,
+              0.005276150202553253
+            ],
+            "pcg_seconds": [
+              0.0036959429999114946,
+              0.007204664700111607
+            ],
+            "other_step_seconds": [
+              0.06748642699312768,
+              0.07793705169424356
+            ]
+          }
+        }
+      },
+      "profile_tail_passed": true
+    },
+    {
+      "refinement": 3,
+      "setup_seconds": 3.8622216660005506,
+      "run_wall_seconds": 671.927048993999,
+      "summary": {
+        "complete_schedule": true,
+        "accepted_steps": 4500,
+        "failure": null,
+        "pcg_iteration_p95": {
+          "close": 20.0,
+          "hold": 17.0,
+          "lift": null,
+          "hold_high": null
+        },
+        "patch_schur_trigger": false,
+        "converged_fraction": 1.0,
+        "G6": "NOT_VALIDATED",
+        "G7": "NOT_VALIDATED",
+        "hold_contact_fraction": 1.0,
+        "stability_passed": true,
+        "maximum_penetration_m": 0.0002385714033152908,
+        "minimum_det_f": 0.5540750622749329,
+        "fixed_nodes": 29,
+        "dynamic_nodes": 314,
+        "stage_timing": {
+          "prepare": {
+            "step_seconds": [
+              0.1700153310011956,
+              0.19958211790144556
+            ],
+            "collision_seconds": [
+              0.0068550439973478206,
+              0.013644301201202323
+            ],
+            "pcg_seconds": [
+              0.010078794999571983,
+              0.013401719799367124
+            ],
+            "other_step_seconds": [
+              0.15165469999919878,
+              0.17924901999467693
+            ]
+          },
+          "close": {
+            "step_seconds": [
+              0.16949356099939905,
+              0.19684812730120027
+            ],
+            "collision_seconds": [
+              0.0071491330018034205,
+              0.0131617491995712
+            ],
+            "pcg_seconds": [
+              0.009138793000602163,
+              0.012433706700176114
+            ],
+            "other_step_seconds": [
+              0.1523626640009752,
+              0.1767755439985194
+            ]
+          },
+          "hold": {
+            "step_seconds": [
+              0.15614907200142625,
+              0.1953749850992608
+            ],
+            "collision_seconds": [
+              0.006635814002947882,
+              0.01267111359775299
+            ],
+            "pcg_seconds": [
+              0.007453490001353202,
+              0.01099220240212162
+            ],
+            "other_step_seconds": [
+              0.14125237999905949,
+              0.17523254479347086
+            ]
+          }
+        }
+      },
+      "profile_tail_passed": true
+    }
+  ],
+  "scope": "local fixed cap; light-contact closure stability and efficiency, not free grasp",
+  "g6": "NOT_VALIDATED",
+  "g7": "NOT_VALIDATED",
+  "related_tests_passed": 41
+}

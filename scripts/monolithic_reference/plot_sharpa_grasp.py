@@ -61,7 +61,12 @@ def main():
     axes[1, 1].plot(t, [r["min_det_f"] for r in rows], label="min(det F)")
     axes[1, 1].plot(t, [r["residual_ratio"] for r in rows], label="Global convergence ratio")
     axes[2, 0].plot(
-        t, [max((c["iterations"] for c in r["pcg_calls"]), default=np.nan) for r in rows], label="Max PCG call"
+        t,
+        [max((c["iterations"] for c in r["pcg_calls"]), default=np.nan) for r in rows],
+        label="Max PCG call",
+        marker=".",
+        markersize=1,
+        linewidth=0.5,
     )
     axes[2, 0].axhline(64, color="tab:red", ls="--", label="Stage p95 budget: 64")
     axes[2, 0].set_ylabel("Iterations")
