@@ -1,0 +1,112 @@
+{
+  "schema": "monolithic-pr7a-acceptance/v1",
+  "base_commit": "14ee85229c7ebad6abb9d44ab801516cda4a8af9",
+  "code_commit": "79a27ca49a4bd365315d1cfb18e9592cfc9ca49f",
+  "prd_sha256": "869037e348e18bd560060542862208bf06600dc4f9240df27e513ad420b02c82",
+  "p1_sha256": "412816f5f9e580261bb97dfd857f029a7efcd6938dc0c226bc9296dc4eca4b2c",
+  "g5_aabb": "PASS",
+  "precalibration": "PASS",
+  "script_execution": "PASS",
+  "observed_grasp": "NOT_ACHIEVED",
+  "g6": "PR7B_PENDING",
+  "g7": "PR7B_PENDING",
+  "v02_final_grasp": "NOT_COMPLETE",
+  "cpu_mesh_sdf": "NOT_REQUIRED",
+  "unique_unittests": 632,
+  "grasp_summary": {
+    "complete_schedule": true,
+    "accepted_steps": 9000,
+    "failure": null,
+    "pcg_iteration_p95": {
+      "close": 12.0,
+      "hold": 13.0,
+      "lift": 11.0,
+      "hold_high": 13.0
+    },
+    "patch_schur_trigger": false,
+    "converged_fraction": 1.0,
+    "G6": "NOT_VALIDATED",
+    "G7": "NOT_VALIDATED",
+    "high_hold_relative_drift_m": 0.06125640621626351,
+    "high_hold_support_absent": false,
+    "lift_com_rise_m": -6.91115728677083e-05,
+    "lift_support_absent": false
+  },
+  "calibration_sha256": "1c535bbc8996032873eb8eb05bbda458ccf4781bbeb5d0c59ce63cdd9527450b",
+  "manifest_sha256": "299052cb0c86cec754eef7c3df4ea2aa178d6b43217d2debc240473fa752853e",
+  "report_name": "PR7A_AABB_INTEGRATION_ACCEPTANCE_REPORT.md",
+  "report_sha256": "6afcc7ff9e6d97b37ddab07f00ae2cccb296a42e09ec8e22d0680910ddbbbcd7",
+  "local_evidence": "agents/integration/artifacts/p1/pr7a/acceptance-index.json",
+  "performance_note": "Final replay has small collision improvement; earlier replay reverses it. End-to-end speedup is not established.",
+  "aabb_performance": [
+    {
+      "refinement": 1,
+      "collision_seconds_p50_p95": [
+        [
+          0.0001643919986236142,
+          0.00018803649982146453
+        ],
+        [
+          0.00017821300025389064,
+          0.00022894754947628827
+        ]
+      ],
+      "step_seconds_p50_p95": [
+        [
+          0.03417440299745067,
+          0.05548949489821098
+        ],
+        [
+          0.03403994899781537,
+          0.054560098600995845
+        ]
+      ]
+    },
+    {
+      "refinement": 2,
+      "collision_seconds_p50_p95": [
+        [
+          0.00017419049981981516,
+          0.0002010096472076839
+        ],
+        [
+          0.00017703050070849713,
+          0.00024378515045100357
+        ]
+      ],
+      "step_seconds_p50_p95": [
+        [
+          0.10869640599776176,
+          0.18353004669879736
+        ],
+        [
+          0.10951669700079947,
+          0.1919724124003551
+        ]
+      ]
+    },
+    {
+      "refinement": 3,
+      "collision_seconds_p50_p95": [
+        [
+          0.00016886549929040484,
+          0.00018814300219673896
+        ],
+        [
+          0.00018045199976768345,
+          0.00033238390060432707
+        ]
+      ],
+      "step_seconds_p50_p95": [
+        [
+          0.21679957900050795,
+          0.3939573654981356
+        ],
+        [
+          0.2159954500020831,
+          0.3958197048006692
+        ]
+      ]
+    }
+  ]
+}

@@ -914,6 +914,14 @@ If you run the examples from a source checkout with uv, use
       </a>
       <br><code>python -m newton.examples monolithic_contact_friction</code>
     </td>
+    <td align="center" width="33%">
+      <a href="newton/examples/softbody/example_monolithic_sharpa_soft_ball.py">
+        <img width="320" src="docs/images/examples/example_monolithic_sharpa_soft_ball.jpg" alt="Exploratory Sharpa hand and soft sphere integration">
+      </a>
+      <br><code>python -m newton.examples monolithic_sharpa_soft_ball</code>
+      <br><a href="docs/guide/monolithic_sharpa_grasp.rst">Required asset arguments and usage</a>
+      <br>Exploratory stages; grasp acceptance remains pending.
+    </td>
   </tr>
   <tr>
     <td colspan="3"><h3>Kamino Examples</h3></td>
