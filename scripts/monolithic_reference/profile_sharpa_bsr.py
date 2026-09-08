@@ -171,14 +171,20 @@ def main():
     matrices = ((ws.k_global_scalar_bsr, ws._global), (ws.ax_internal_bsr3, ws._internal))
     before = [_matrix_digest(m) for m, _ in matrices]
     report["matrices"] = []
+    replay_inputs = []
     for (_matrix, triplets), signature in zip(matrices, before, strict=True):
         nonzero = wp.zeros(1, dtype=int, device=ws.device)
         values = triplets.values.view(dtype=wp.float32).flatten()
         wp.launch(_count_nonzero, values.size, [values, nonzero], device=ws.device)
+        count = int(triplets.count.numpy()[0])
+        arrays = (triplets.rows, triplets.columns, triplets.values)
+        if count < triplets.capacity:
+            arrays = tuple(array[:count] for array in arrays)
+        replay_inputs.append((_matrix, arrays, triplets.count))
         report["matrices"].append(
             {
                 **signature,
-                "triplet_count": int(triplets.count.numpy()[0]),
+                "triplet_count": count,
                 "triplet_capacity": triplets.capacity,
                 "nonzero_input_scalars": int(nonzero.numpy()[0]),
             }
@@ -188,8 +194,8 @@ def main():
     for _ in range(args.samples):
         wp.synchronize_device(ws.device)
         start = time.perf_counter()
-        for matrix, triplets in matrices:
-            sparse.bsr_set_from_triplets(matrix, triplets.rows, triplets.columns, triplets.values, count=triplets.count)
+        for matrix, arrays, count in replay_inputs:
+            sparse.bsr_set_from_triplets(matrix, *arrays, count=count)
         wp.synchronize_device(ws.device)
         report["replay_ms"].append((time.perf_counter() - start) * 1000.0)
     if args.nsys_capture:
@@ -199,12 +205,12 @@ def main():
         wp.cuda_profiler_start(ws.device)
         try:
             for _ in range(args.samples):
-                for label, (matrix, triplets) in zip((b"global_scalar", b"internal_block3"), matrices, strict=True):
+                for label, (matrix, arrays, count) in zip(
+                    (b"global_scalar", b"internal_block3"), replay_inputs, strict=True
+                ):
                     nvtx.nvtxRangePushA(label)
                     try:
-                        sparse.bsr_set_from_triplets(
-                            matrix, triplets.rows, triplets.columns, triplets.values, count=triplets.count
-                        )
+                        sparse.bsr_set_from_triplets(matrix, *arrays, count=count)
                     finally:
                         nvtx.nvtxRangePop()
             wp.synchronize_device(ws.device)

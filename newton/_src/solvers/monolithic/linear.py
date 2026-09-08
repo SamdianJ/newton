@@ -1159,13 +1159,17 @@ class MonolithicLinearWorkspace:
             status = MonolithicLinearStatus(int(self._global.status.numpy()[0]))
         if status == MonolithicLinearStatus.SUCCESS:
             try:
-                for matrix, triplets in [
-                    (self.k_global_scalar_bsr, self._global),
-                    (self.ax_internal_bsr3, self._internal),
-                ]:
-                    sparse.bsr_set_from_triplets(
-                        matrix, triplets.rows, triplets.columns, triplets.values, count=triplets.count
-                    )
+                for (matrix, triplets), count in zip(
+                    [(self.k_global_scalar_bsr, self._global), (self.ax_internal_bsr3, self._internal)],
+                    counts[:2],
+                    strict=True,
+                ):
+                    arrays = (triplets.rows, triplets.columns, triplets.values)
+                    # Warp sorts by array length; device count only masks the tail.
+                    # Keep empty-capacity arrays intact: slicing them is unsupported.
+                    if count < triplets.capacity:
+                        arrays = tuple(array[:count] for array in arrays)
+                    sparse.bsr_set_from_triplets(matrix, *arrays, count=triplets.count)
             except RuntimeError:
                 status = MonolithicLinearStatus.BSR_BUILD_FAILURE
         if status == MonolithicLinearStatus.SUCCESS:
