@@ -23,6 +23,7 @@ Newton Physics
    guide/monolithic_p1_contract
    guide/monolithic_g2h
    guide/monolithic_tet_response
+   guide/monolithic_contact_friction
    Development <guide/development>
    Source Code Guidelines <guide/source_code_guidelines>
    Review Guidelines <guide/review_guidelines>

@@ -908,6 +908,14 @@ If you run the examples from a source checkout with uv, use
     </td>
   </tr>
   <tr>
+    <td align="center" width="33%">
+      <a href="newton/examples/softbody/example_monolithic_contact_friction.py">
+        <img width="320" src="docs/images/examples/example_monolithic_contact_friction.jpg" alt="Monolithic sticking, sliding and release">
+      </a>
+      <br><code>python -m newton.examples monolithic_contact_friction</code>
+    </td>
+  </tr>
+  <tr>
     <td colspan="3"><h3>Kamino Examples</h3></td>
   </tr>
   <tr>

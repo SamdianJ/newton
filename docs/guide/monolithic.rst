@@ -10,7 +10,7 @@ Monolithic Normal Loading
 
    The ``newton.solvers.experimental.monolithic`` module, including
    ``SolverMonolithic`` and ``MonolithicCollisionPipeline``, may change without
-   the normal deprecation period. The current scope is frictionless normal
+   the normal deprecation period. The normal-loading example uses frictionless normal
    contact between one articulated rigid actor and one connected tetrahedral
    soft body in a single world.
 
@@ -184,8 +184,10 @@ The default material is Kim stable Neo-Hookean without a logarithmic term,
 with Newton lumped particle mass and first-order backward Euler integration.
 PR-6A also supports Smith log-stabilized material and consistent P1 mass;
 see :ref:`monolithic-p1-contract` and :ref:`monolithic-g2h`. Contact uses
-fixed P1Q3 boundary quadrature and a quadratic hinge. There is no contact friction,
-contact history or grasping support. Strict SuperDex matching is deferred until after V0.2.
+fixed P1Q3 boundary quadrature, with a quadratic hinge by default. PR-6B adds
+opt-in PolyReLU and elastic contact friction with transactional history; see
+:ref:`monolithic-contact-friction`. Full grasping acceptance remains incomplete.
+Strict SuperDex matching is deferred until after V0.2.
 
 The example's validation applies to the exact geometry, material, timestep and
 loading conditions above. Separate frozen C4 fixtures define additional
@@ -206,3 +208,4 @@ infinite plane. Volume SDFs have additional provenance and scale restrictions.
 CPU and CUDA correctness are supported. Python orchestration and explicit
 assembly are current implementation limits; this tiny example does not imply
 GPU speedup or a large-scene performance guarantee.
+

@@ -10,7 +10,7 @@ This supplement freezes ``monolithic-p1-contract/v1`` against the implemented
 PR-6C joints and PR-6D hand adapter at base commit
 ``299f43ceab1d6647f12a4c13dab6100893878be1``. It also reserves the interfaces
 for the remaining P1 work. PR-6A now enables the material/mass interfaces below;
-contact smoothing/friction/history remain reserved and disabled.
+PR-6B enables contact smoothing, tangential friction and transactional history.
 The original design identifier remains ``monolithic-p1-interface/v1-draft``;
 this supplement does not rewrite that historical design or acceptance evidence.
 
@@ -71,17 +71,17 @@ articulation, zero particles/tets and disabled collision participation.
        the original nonzero Model-attribute rejection rules.
    * - ``normal_smoothing_width``
      - ``0``; m
-     - Nonnegative finite float32; positive values rejected until PR-6B/G3.
+     - Nonnegative finite float32; positive values enable C2 PolyReLU.
        Zero retains the V0.1 quadratic hinge. Canonical V0.2 requires positive
        PolyReLU smoothing and a candidate gap covering its support.
    * - ``friction_coefficient``
      - ``0``; dimensionless
-     - Nonnegative finite float32; positive values rejected until PR-6B/G3-G4.
-       Future coefficient is explicit and global, not shape-material mixing.
+     - Nonnegative finite float32; positive values enable elastic radial-return friction.
+       The coefficient is explicit and global, without shape-material mixing.
    * - ``tangential_stiffness``
      - ``None``; N/m³
-     - Non-None rejected now. Contact friction will require a positive finite
-       value, multiplied by rest-area quadrature weight.
+     - Contact friction requires a positive finite value, multiplied by rest-area
+       quadrature weight. A supplied value must be positive even when mu is zero.
 
 Boolean values are not physical scalars. Unknown modes and pending options
 fail before solver layout/workspace allocation. Both constructor paths share
@@ -102,18 +102,19 @@ Linear assembly identity contains ``step_index``, ``nonlinear_iteration``,
 ``history_epoch``. Factorization/apply/solve must use the sealed assembly's
 identity. Changing either new field makes an old assembly stale. The new fields
 default to zero for existing callers. They are workspace-local counters, not
-portable asset hashes. Current solvers cannot reconfigure and have no history,
-so both counters remain zero. A future history commit must advance the epoch;
-it must not be simulated by incrementing it during current/trial evaluation.
+portable asset hashes. Solvers cannot reconfigure; config generation remains zero. With contact friction
+enabled, history epoch advances once per committed physical step, including
+safe soft stops. Current/trial evaluations leave it unchanged.
 
-Portable future history identity separately contains lowercase SHA-256 strings
+Portable history identity separately contains lowercase SHA-256 strings
 ``topology_sha256`` and ``config_sha256`` plus these two nonnegative integer
 counters. Hash inputs must include the derived boundary/ordered static pairs,
 joint/link mapping, source and derived asset hashes, material/mass/density
 authority, contact parameters and transport settings. Device pointers are
 runtime identity only and cannot stand in for a portable content hash.
-The history identity and buffer types are defined now; hash construction,
-history allocation and transactional publication remain disabled with PR-6B.
+PR-6B allocates fixed-key committed/pending buffers and binds analytic topology,
+contact settings and the solver material/mass/joint configuration. External mesh
+asset manifests remain the responsibility of the later asset integration.
 
 PR-6C joint contract
 ----------------------------
@@ -176,8 +177,7 @@ Contact factor and history contract
 
 Private scalar factor storage keeps ``gq``, ``gx_columns``, ``gx_values`` and
 ``weights`` and now adds ``kind`` and ``candidate_tid`` integer arrays. Closed
-tags are ``NONE=0``, ``NORMAL=1``, ``TANGENT=2``. Current production emits only
-NORMAL; TANGENT is reserved. Only slots below the active factor count are valid.
+tags are ``NONE=0``, ``NORMAL=1``, ``TANGENT=2``. Production emits NORMAL and, when friction is enabled, TANGENT. Only slots below the active factor count are valid.
 Existing Contacts record schema and public attributes are unchanged.
 
 The fixed key is ``candidate_tid = 3*static_pair + quadrature_slot``; the pair
@@ -186,10 +186,10 @@ identifies derived boundary face and rigid shape/link. The validated
 Factors recover this key from the map, never from record order. Reordering
 records together with the map must preserve keyed factors and physical R/K.
 
-The reserved history buffer has ``valid: int32[C]``, ``xi_local: vec3[C]``
+The history buffer has ``valid: int32[C]``, ``xi_local: vec3[C]``
 and ``normal_local: vec3[C]``. ``xi_local`` is elastic tangential displacement
 in metres in the rigid body's local frame; the normal is dimensionless. PR-6B
-must own two buffers and apply this state machine:
+owns two buffers and applies this state machine:
 
 1. At step start, bind committed history to topology/config identity and epoch.
    Committed history is read-only throughout current and rejected/accepted trials.
@@ -204,10 +204,10 @@ must own two buffers and apply this state machine:
    data without advancing it. Idempotent force publication does not advance it.
 
 A new scene, initial condition or friction-off comparison uses a new solver.
-No checkpoint API or multi-trajectory history reuse is provided. Rotation/dt
-support and reset-angle values remain pending G3/G4 calibration; no arbitrary
-finite-rotation objectivity claim is made. Tangential forces on rigid and soft
-sides will use the same soft quadrature point for moment balance. Production
+No checkpoint API or multi-trajectory history reuse is provided. See :ref:`monolithic-contact-friction` for the measured rotation/dt
+support and 45-degree reset rule; no arbitrary finite-rotation objectivity
+claim is made. Tangential forces on both sides use the same soft quadrature
+point for moment balance. Production
 PSD tangents need not equal the full friction residual Jacobian. Future
 normal-patch preconditioning filters NORMAL tags; actor blocks use all factors.
 

@@ -29,16 +29,34 @@ FIXTURE = {
     "pd_ke": 10000.0,
     "pd_kd": 100.0,
     "effort_limit": 200.0,
+    "target_times": [0.0, 0.75, 1.5, 2.5, 3.0, 3.75, 4.0],
+    "target_positions": [
+        [0, 0],
+        [0, -0.006],
+        [0.001, -0.006],
+        [0.025, -0.006],
+        [0.025, -0.006],
+        [0.025, 0.008],
+        [0.025, 0.008],
+    ],
+    "gates": {
+        "converged_fraction": 0.99,
+        "on_displacement_min": 0.005,
+        "off_displacement_max": 0.0001,
+        "stick_samples_min": 100,
+        "slide_samples_min": 100,
+        "min_det_f": 0.5,
+        "residual_max": 1e-4,
+        "device_displacement_max": 0.00005,
+    },
     "source": "Simulation calibration parameters, not measured hardware/material properties",
 }
 
 
 def target(time_s):
     """Return step-end position and velocity for horizontal and vertical drives."""
-    times = np.array([0.0, 0.75, 1.5, 2.5, 3.0, 3.75, 4.0])
-    positions = np.array(
-        [[0, 0], [0, -0.006], [0.001, -0.006], [0.025, -0.006], [0.025, -0.006], [0.025, 0.008], [0.025, 0.008]]
-    )
+    times = np.array(FIXTURE["target_times"])
+    positions = np.array(FIXTURE["target_positions"])
     segment = min(max(np.searchsorted(times, time_s, side="right") - 1, 0), len(times) - 2)
     duration = times[segment + 1] - times[segment]
     u = np.clip((time_s - times[segment]) / duration, 0, 1)
@@ -153,9 +171,12 @@ class FrictionCase:
         row = {
             "time": self.steps * self.dt,
             "converged": stats.converged,
-            "rho": stats.rho,
-            "rho_q": stats.rho_q,
-            "rho_x": stats.rho_x,
+            "rho": stats.rho if np.isfinite(stats.rho) else None,
+            "rho_q": stats.rho_q if np.isfinite(stats.rho_q) else None,
+            "rho_x": stats.rho_x if np.isfinite(stats.rho_x) else None,
+            "convergence_ratio": stats.convergence_ratio,
+            "convergence_ratio_q": stats.convergence_ratio_q,
+            "convergence_ratio_x": stats.convergence_ratio_x,
             "top_displacement_x": float(displacement[self.top, 0].mean()),
             "top_displacement_z": float(displacement[self.top, 2].mean()),
             "q": self.state.joint_q.numpy().tolist(),
@@ -185,21 +206,45 @@ class FrictionCase:
 def validate_comparison(cases):
     """Apply frozen component-demo gates; never retune a failed formal run."""
     summaries = [c.summary() for c in cases]
+    limits = FIXTURE["gates"]
     gates = {
         "complete": all(s["steps"] == round(FIXTURE["duration"] / FIXTURE["dt"]) for s in summaries),
-        "convergence": all(s["converged_fraction"] >= 0.99 for s in summaries),
-        "deformation": summaries[0]["peak_displacement_x"] >= 0.005,
-        "negative_control": summaries[1]["peak_displacement_x"] <= 0.0001 and summaries[1]["peak_tangent_force"] == 0,
-        "stick_and_slide": summaries[0]["stick_samples"] >= 100 and summaries[0]["slide_samples"] >= 100,
+        "convergence": all(s["converged_fraction"] >= limits["converged_fraction"] for s in summaries),
+        "deformation": summaries[0]["peak_displacement_x"] >= limits["on_displacement_min"],
+        "negative_control": summaries[1]["peak_displacement_x"] <= limits["off_displacement_max"]
+        and summaries[1]["peak_tangent_force"] == 0,
+        "stick_and_slide": summaries[0]["stick_samples"] >= limits["stick_samples_min"]
+        and summaries[0]["slide_samples"] >= limits["slide_samples_min"],
         "release": summaries[0]["lost_samples"] > 0 and all(s["final_history_energy"] == 0 for s in summaries),
         "finite": all(
-            all(np.isfinite([r["rho"], r["rho_q"], r["rho_x"], r["min_det_f"], r["top_displacement_x"]]))
+            all(
+                np.isfinite(
+                    [
+                        r["convergence_ratio"],
+                        r["convergence_ratio_q"],
+                        r["convergence_ratio_x"],
+                        r["min_det_f"],
+                        r["top_displacement_x"],
+                        *r["q"],
+                        *r["pd_force"],
+                    ]
+                )
+            )
             for c in cases
             for r in c.records
         ),
-        "determinant": all(r["min_det_f"] > 0.5 for c in cases for r in c.records),
+        "determinant": all(r["min_det_f"] > limits["min_det_f"] for c in cases for r in c.records),
         "residual": all(
-            max(r["rho"], r["rho_q"], r["rho_x"]) <= 1e-4 for c in cases for r in c.records if r["converged"]
+            max(r["rho"], r["rho_q"], r["rho_x"]) <= limits["residual_max"]
+            for c in cases
+            for r in c.records
+            if r["rho"] is not None
+        ),
+        "nonlinear_residual": all(
+            max(r["convergence_ratio"], r["convergence_ratio_q"], r["convergence_ratio_x"]) <= 1
+            for c in cases
+            for r in c.records
+            if r["converged"]
         ),
     }
     return {"passed": all(gates.values()), "gates": gates, "summaries": summaries}

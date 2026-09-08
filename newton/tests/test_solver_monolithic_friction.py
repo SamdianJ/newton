@@ -4,6 +4,7 @@
 """G3 contact mathematics and G4 history transactions."""
 
 import unittest
+from dataclasses import replace
 from unittest.mock import patch
 
 import numpy as np
@@ -20,6 +21,7 @@ from newton._src.solvers.monolithic.contact import (
 from newton._src.solvers.monolithic.linear import (
     MonolithicLinearCapacities,
     MonolithicLinearGeneration,
+    MonolithicLinearStatus,
     MonolithicLinearWorkspace,
     MonolithicPcgWarmStart,
 )
@@ -484,6 +486,23 @@ def test_active_history_rollback(test, device):
     test.assertEqual(result.status, 0)
     expected = np.linalg.solve(oracle.scaled_matrix, rhs.numpy())
     test.assertLess(np.linalg.norm(solution.numpy() - expected) / np.linalg.norm(expected), 1e-4)
+    committed_before = w.committed.xi_local.numpy().copy()
+    solve = linear.solve_pcg
+    calls_retry = []
+
+    def retry_once(*args, **kwargs):
+        np.testing.assert_array_equal(w.committed.xi_local.numpy(), committed_before)
+        result = solve(*args, **kwargs)
+        calls_retry.append(result.status)
+        if len(calls_retry) == 1:
+            return replace(result, status=MonolithicLinearStatus.NON_POSITIVE_CURVATURE)
+        return result
+
+    with patch.object(linear, "solve_pcg", side_effect=retry_once):
+        solver.step(c.state, c.next, c.control, None, c.dt)
+    test.assertFalse(solver.last_stats.rolled_back)
+    test.assertGreaterEqual(solver.last_stats.regularization_retries, 1)
+    c.state, c.next = c.next, c.state
     epoch = w.history_epoch
     old = w.committed.xi_local.numpy().copy()
     valid = w.committed.valid.numpy().copy()
@@ -574,6 +593,40 @@ def test_contact_configuration(test, device):
     test.assertEqual(solver._history_epoch, 0)
 
 
+def test_common_translation_and_capacity(test, device):
+    """Cancel common point velocity and fail bounded factor overflow without history mutation."""
+    scene = _friction_scene(device)
+    model, state, pipeline, linear, articulation, w, contacts = scene
+    _evaluate_scene(scene, mode=1)
+    normal = w._samples[1].numpy()[:, 0].copy()
+    shift = np.array([0.01, 0.02, 0.03], dtype=np.float32)
+    state.particle_q.assign(w._start_x.numpy() + shift)
+    state.body_q.assign([[*shift, 0.0, 0.0, 0.0, 1.0]])
+    state.body_qd.assign([[*(shift / w._dt), 0.0, 0.0, 0.0]])
+    pipeline.collide(state, contacts)
+    out = wp.zeros(linear.layout.scalar_dof_count, dtype=float, device=device)
+    status = wp.zeros(1, dtype=int, device=device)
+    _evaluate(1, model, state, contacts, pipeline, articulation, w, out, status)
+    test.assertEqual(int(status.numpy()[0]), 0)
+    samples = w._samples[1].numpy()
+    test.assertLess(float(samples[:, 1].sum()), 1e-5)
+    np.testing.assert_allclose(samples[:, 0], normal, rtol=1e-5, atol=1e-7)
+    # The kernel must report overflow rather than truncate a sample's tangent factors.
+    state.particle_q.assign(w._start_x)
+    state.body_qd.zero_()
+    generation = MonolithicLinearGeneration(0, 0, int(contacts.contact_generation.numpy()[0]), 0)
+    assembly = linear.begin_assembly(generation)
+    assembly.contact_factors.weights = wp.zeros(1, dtype=float, device=device)
+    # Refresh real kinematics/contact records before the bounded assembly probe.
+    eval_articulation_passive_candidate(model, state, articulation)
+    pipeline.collide(state, contacts)
+    _evaluate(0, model, state, contacts, pipeline, articulation, w, out, assembly.contact_factors.status, assembly)
+    test.assertEqual(
+        int(assembly.contact_factors.status.numpy()[0]), int(MonolithicLinearStatus.CONTACT_FACTOR_OVERFLOW)
+    )
+    np.testing.assert_array_equal(w.committed.valid.numpy(), 0)
+
+
 class TestMonolithicFriction(unittest.TestCase):
     pass
 
@@ -590,6 +643,7 @@ for device in get_test_devices():
         test_record_order_and_config,
         test_active_history_rollback,
         test_contact_configuration,
+        test_common_translation_and_capacity,
     ):
         add_function_test(TestMonolithicFriction, function.__name__, function, devices=[device])
 
