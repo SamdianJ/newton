@@ -1,0 +1,64 @@
+{
+  "schema": "sharpa-r3-bsr-profile/v1",
+  "solver_code_commit": "75e8734abfa9449a31441b75237fc1f66e1842eb",
+  "scope": "continuous anchored r3 hold; assembly attribution, no solver optimization",
+  "metrics": {
+    "baseline_ms_per_finalize": 74.96187316658809,
+    "baseline_ms_per_step": 112.44280974988214,
+    "baseline_finalizes_per_step": 1.5,
+    "detail_finalizes": 30,
+    "detail_ms_per_finalize": 72.53957730026741,
+    "global_scalar_ms_per_finalize": 71.0003378999924,
+    "internal_block3_ms_per_finalize": 0.6056395000390088,
+    "global_native_ms_per_finalize": 64.5253808003569,
+    "gpu_global_radix_fraction": 0.792306794907723,
+    "replay_pair_mean_ms": 77.5924366002073,
+    "replay_pair_p50_ms": 76.46448649938975,
+    "replay_pair_p95_ms": 93.84309900160588,
+    "matrices": [
+      {
+        "rows": 964,
+        "nnz_blocks": 32660,
+        "sha256": "9939700def1ad280310668ce20d94d2ee2be9ed0c9d3b81ee2d504279b44bb5e",
+        "triplet_count": 198565,
+        "triplet_capacity": 97318186,
+        "nonzero_input_scalars": 173486
+      },
+      {
+        "rows": 314,
+        "nnz_blocks": 3594,
+        "sha256": "13ca58765225bd72ec689f6fc5c9688569711ee116df1f43695e0b5a30346ede",
+        "triplet_count": 19126,
+        "triplet_capacity": 19126,
+        "nonzero_input_scalars": 169308
+      }
+    ],
+    "gpu_ms_per_build": {
+      "global_scalar": {
+        "build_sort_keys_and_mask": 4.595825499999999,
+        "radix_sort": 53.993908149999996,
+        "run_length_encode": 3.286341500000001,
+        "write_bsr_topology": 1.07033815,
+        "prefix_scan": 2.3089991999999997,
+        "accumulate_values": 2.5504572000000008,
+        "memset": 0.33953215000000003,
+        "memcpy": 0.0023263999999999997
+      },
+      "internal_block3": {
+        "build_sort_keys_and_mask": 0.005870500000000001,
+        "radix_sort": 0.10986455000000006,
+        "run_length_encode": 0.007556850000000001,
+        "write_bsr_topology": 0.008203249999999999,
+        "prefix_scan": 0.008308850000000005,
+        "accumulate_values": 0.0087872,
+        "memset": 0.015924950000000004,
+        "memcpy": 0.0012816000000000004
+      }
+    }
+  },
+  "replay_bitwise_equal": true,
+  "report_sha256": "083e6aaa29dfd2b35984dbc1fc18f37da37802a232ed33b5b50430530fca6b70",
+  "profile_sha256": "ca61c87d71fad19e0a6e96011a2f05dc3a11e4709c72e73a46f55ebfde050fc7",
+  "nsys_analysis_sha256": "6df44b527528b0a998119915933d197986438a26ea4233ba6c8c22d3b65bc7cb",
+  "provenance_sha256": "28dea8d2e08e2f9022348131731132530b17d441b31ff6c07bb61927a0950e7a"
+}

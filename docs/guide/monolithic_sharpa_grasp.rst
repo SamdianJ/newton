@@ -120,3 +120,48 @@ instrumented hold tail attributes about 44/114 ms per step to BSR construction,
 compared with 3/5 ms to PCG. These are observed fixture results, not a final
 G7 performance certificate. The resolution runner returns nonzero when the
 coarse no-load case is included; it preserves all measured results.
+
+Detailed r3 BSR profiling
+-------------------------
+
+To separate global scalar BSR construction, internal 3x3 BSR construction,
+validation and host readbacks, run:
+
+.. code-block:: bash
+
+   uv run --extra examples scripts/monolithic_reference/profile_sharpa_bsr.py \
+     --asset-dir /path/to/left_sharpa_wave \
+     --contact-dir /path/to/pr6d-assets/hand \
+     --trajectory '/path/to/Ball_catch - Left_hand_motion_rad.csv' \
+     --calibration scripts/monolithic_reference/fixtures/sharpa_contact_calibration_v1.json \
+     --output output/r3-bsr-profile
+
+The default runs all 4500 trajectory steps with continuous friction history,
+then takes 20 baseline and 20 detailed holding steps. Detailed timings insert
+synchronization and report inclusive/exclusive time per call. A step may build
+several matrices; per-build latency is different from per-step cost. The tool
+also replays the final, unchanged triplets and checks bitwise matrix parity.
+``--warmup-steps`` is available for smoke tests; a shortened run does not measure
+the completed closure.
+
+For native CUDA kernel attribution, prefix the command with
+``nsys profile --trace=cuda,nvtx --sample=none --cpuctxsw=none
+--capture-range=cudaProfilerApi --capture-range-end=stop -o output/r3-bsr``
+and append ``--nsys-capture``. This requires Nsight Systems and
+``libnvToolsExt.so.1``. Capture covers only a separate replay of the two BSR
+builders, with NVTX labels ``global_scalar`` and ``internal_block3``. GPU kernels
+must be attributed using their launch correlation IDs, since GPU execution can
+outlive the host NVTX range. Replay does not advance State or history and is
+not a full-step FPS measurement.
+
+On an RTX 5070 Ti Laptop GPU with Warp 1.17.0, after the full 4500-step r3
+closure, detailed finalize time averaged 72.54 ms per call: 71.00 ms in the
+global scalar builder and 0.61 ms in the internal block builder. Baseline
+measurement observed 1.5 finalize calls per step, totaling 112.44 ms per step.
+In a separate unchanged-matrix replay, radix sort took 53.99 GPU ms per global
+build, or 79.2% of its recorded GPU activity. The global input count was
+198,565 triplets, but Warp sorted the full 97,318,186-entry allocated capacity.
+The device count masks the unused tail without shortening the native sort.
+These measurements identify an optimization target; this profiler does not
+change production assembly. The portable result is recorded in
+``scripts/monolithic_reference/fixtures/sharpa_bsr_profile_v1.json``.
