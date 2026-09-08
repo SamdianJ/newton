@@ -1037,7 +1037,12 @@ def evaluate_trial_contacts(
     owner_generation: MonolithicLinearGeneration,
     trial_generation: int,
 ) -> None:
-    if owner_generation != workspace.linear_workspace._generation or trial_generation < 0:
+    if (
+        owner_generation != workspace.linear_workspace._generation
+        or trial_generation < 0
+        or owner_generation.history_epoch != workspace.history_epoch
+        or owner_generation.config_generation != 0
+    ):
         raise ValueError("Trial contact owner generation is stale")
     _evaluate(1, model, state, contacts, pipeline, articulation, workspace, out_residual, out_status)
 

@@ -17,6 +17,7 @@ from newton._src.solvers.monolithic.contact import (
     _evaluate,
     _normal_response,
     _tangent_response,
+    evaluate_trial_contacts,
 )
 from newton._src.solvers.monolithic.linear import (
     MonolithicLinearCapacities,
@@ -110,6 +111,14 @@ def test_radial_return(test, device):
         )
     # Equality chooses the sliding generalized derivative.
     test.assertAlmostEqual(matrices[-1, 0, 0], 0, delta=1e-6)
+    outward_errors = []
+    for step in (2e-3, 1e-3, 5e-4, 2e-4, 1e-4):
+        _, f, _, _ = _probe(device, [0, 0, 0], [[0.2 - step, 0, 0], [0.2, 0, 0], [0.2 + step, 0, 0]])
+        inward = -(f[1, 0] - f[0, 0]) / step
+        outward = -(f[2, 0] - f[1, 0]) / step
+        test.assertAlmostEqual(inward, 3.0, delta=0.005 * 3.0)
+        outward_errors.append(abs(outward))
+    test.assertLess(min(outward_errors), 1e-4)
     for x in xi[1:4]:
         errors = []
         for h in (2e-3, 1e-3, 5e-4, 2e-4, 1e-4):
@@ -591,6 +600,26 @@ def test_contact_configuration(test, device):
         solver.step(fixture.state, fixture.state_next, fixture.control, None, 0.001)
     np.testing.assert_array_equal(fixture.state_next.particle_q.numpy(), initial)
     test.assertEqual(solver._history_epoch, 0)
+    scene = _friction_scene(device)
+    model, state, pipeline, linear, articulation, workspace, contacts = scene
+    generation, _, _ = _evaluate_scene(scene)
+    workspace.history_epoch += 1  # A new committed epoch invalidates an otherwise matching owner.
+    out = wp.zeros(linear.layout.scalar_dof_count, dtype=float, device=device)
+    status = wp.zeros(1, dtype=int, device=device)
+    with test.assertRaisesRegex(ValueError, "stale"):
+        evaluate_trial_contacts(
+            model,
+            state,
+            contacts,
+            pipeline,
+            articulation,
+            workspace,
+            out,
+            status,
+            owner_generation=generation,
+            trial_generation=1,
+        )
+    np.testing.assert_array_equal(out.numpy(), 0)
 
 
 def test_common_translation_and_capacity(test, device):
