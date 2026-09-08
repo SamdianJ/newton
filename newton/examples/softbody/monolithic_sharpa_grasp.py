@@ -162,6 +162,9 @@ class GraspCase:
 
     def __init__(self, args):
         self.anchored = getattr(args, "experiment", "grasp") == "anchored-close"
+        ball_radius = getattr(args, "ball_radius", 0.020)
+        if not np.isfinite(ball_radius) or ball_radius <= 0:
+            raise ValueError("Ball radius must be positive and finite")
         self.fixture = ANCHORED_FIXTURE if self.anchored else FIXTURE
         self.total_steps = round(self.fixture["duration"] / self.fixture["dt"])
         device = wp.get_device(args.device)
@@ -187,6 +190,7 @@ class GraspCase:
             parameters=self.parameters,
             position=self.fixture["ball_position"],
             resolution=128,
+            ball_radius=ball_radius,
             _mount=mount,
         )
         model = self.model
@@ -287,6 +291,7 @@ class GraspCase:
             fixture=self.fixture,
             experiment="anchored-close" if self.anchored else "grasp",
             calibration_sha256=sha256(args.calibration),
+            radius_calibration="BASELINE_20_MM" if ball_radius == 0.020 else "UNVALIDATED_RADIUS_STRESS_TEST",
             trajectory_sha256=sha256(args.trajectory),
             mapping=self.mapping,
             friction_off=args.friction_off,
@@ -384,6 +389,7 @@ class GraspCase:
                 "other_step_seconds": elapsed - self._collision_seconds - sum(c["seconds"] for c in self._pcg_calls),
                 "anchor_unchanged": anchor_unchanged,
                 "active_contacts": count,
+                "force_producing_contacts": int(np.count_nonzero(np.linalg.norm(forces, axis=1) > 0)),
                 "finger_contacts": int(np.count_nonzero(body > (0 if self.anchored else 1))),
                 "finger_force_n": float(sum(np.linalg.norm(f) for f in per_finger.values())),
                 "palm_force": palm.tolist(),
@@ -423,6 +429,8 @@ class GraspCase:
             calls = [c["iterations"] for r in self.records if r["stage"] == stage for c in r["pcg_calls"]]
             pcg[stage] = float(np.percentile(calls, 95)) if calls else None
         summary = {
+            "ball_radius_m": self.manifest["ball_radius_m"],
+            "radius_calibration": self.manifest["radius_calibration"],
             "complete_schedule": self.step_count == self.total_steps and self.failure is None,
             "accepted_steps": self.step_count,
             "failure": self.failure,

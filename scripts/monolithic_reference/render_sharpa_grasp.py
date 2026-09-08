@@ -34,6 +34,7 @@ def main():
         args.asset_dir,
         args.contact_dir,
         args.ball,
+        ball_radius=manifest.get("ball_radius_m", 0.020),
         device="cpu",
         parameters=load_fixture("newton/examples/softbody/sharpa_g1h.json"),
         position=manifest["ball_position_m"],

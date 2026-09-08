@@ -10,17 +10,20 @@ from pathlib import Path
 
 import numpy as np
 
-from newton.examples.softbody.monolithic_soft_ball import generate_ball, validate_ball
+from newton.examples.softbody.monolithic_soft_ball import RADIUS, generate_ball, validate_ball
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--radius", type=float, default=RADIUS, help="Sphere radius in meters; default 0.020")
     args = parser.parse_args()
+    if not np.isfinite(args.radius) or args.radius <= 0:
+        parser.error("Radius must be positive and finite")
     args.output.mkdir(parents=True, exist_ok=True)
     rows = []
     for refinement in (1, 2, 3):
-        mesh = generate_ball(refinement)
+        mesh = generate_ball(refinement, radius=args.radius)
         path = args.output / f"ball_r{refinement}.npz"
         mesh.save(str(path))
         rows.append(
@@ -28,7 +31,7 @@ def main():
                 "file": path.name,
                 "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
                 "refinement": refinement,
-                **validate_ball(mesh.vertices, mesh.tet_indices.reshape(-1, 4)),
+                **validate_ball(mesh.vertices, mesh.tet_indices.reshape(-1, 4), radius=args.radius),
             }
         )
     manifest = {

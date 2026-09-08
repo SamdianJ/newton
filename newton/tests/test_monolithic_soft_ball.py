@@ -17,6 +17,24 @@ from newton.tests.unittest_utils import add_function_test, get_test_devices
 
 
 class TestMonolithicSoftBall(unittest.TestCase):
+    def test_explicit_radius(self):
+        """Load a larger sphere only with its explicit radius and preserve density."""
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "large.npz"
+            mesh = generate_ball(2, radius=0.03)
+            mesh.save(str(path))
+            with self.assertRaisesRegex(ValueError, "radius mismatch"):
+                load_ball(path)
+            loaded = load_ball(path, radius=0.03)
+            large = validate_ball(loaded.vertices, loaded.tet_indices.reshape(-1, 4), radius=0.03)
+            baseline = generate_ball(2)
+            small = validate_ball(baseline.vertices, baseline.tet_indices.reshape(-1, 4))
+            np.testing.assert_array_equal(loaded.tet_indices, baseline.tet_indices)
+            self.assertAlmostEqual(large["mass_kg"] / small["mass_kg"], 1.5**3, places=5)
+            for invalid in (0, -0.03, np.nan, np.inf):
+                with self.assertRaises(ValueError):
+                    load_ball(path, radius=invalid)
+
     def test_resolution(self):
         """Check conforming closed spheres and decreasing geometric volume error."""
         previous = 1.0

@@ -65,6 +65,8 @@ def generate_ball(refinement, *, radius=RADIUS):
 
 def validate_ball(vertices, tets, *, radius=RADIUS):
     """Reject invalid volume topology and return independent rest-quality data."""
+    if not np.isfinite(radius) or radius <= 0:
+        raise ValueError("Ball radius must be positive and finite")
     x = np.asarray(vertices, dtype=np.float64)
     t = np.asarray(tets)
     if x.ndim != 2 or x.shape[1] != 3 or not len(x) or not np.isfinite(x).all():
@@ -134,10 +136,10 @@ def validate_ball(vertices, tets, *, radius=RADIUS):
     }
 
 
-def load_ball(path):
+def load_ball(path, *, radius=RADIUS):
     """Validate the frozen volume before passing it to the Newton loader."""
     with np.load(path, allow_pickle=False) as data:
-        validate_ball(data["vertices"], data["tet_indices"].reshape(-1, 4))
+        validate_ball(data["vertices"], data["tet_indices"].reshape(-1, 4), radius=radius)
         mu = YOUNG_MODULUS / (2 * (1 + POISSON_RATIO))
         lam = YOUNG_MODULUS * POISSON_RATIO / ((1 + POISSON_RATIO) * (1 - 2 * POISSON_RATIO))
         for name, expected in (("density", DENSITY), ("k_mu", mu), ("k_lambda", lam), ("k_damp", 0)):

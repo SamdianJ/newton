@@ -239,3 +239,49 @@ separately, then use those results to freeze performance targets. The later
 multiple-finger grasp fixture requires its own measurements before G6/G7.
 This work is planned; measurements and numerical targets remain pending.
 See ``scripts/monolithic_reference/fixtures/p2_performance_plan_v1.json``.
+
+
+Larger sphere stress cases
+---------------------------
+
+Use the same hand arguments with a separately generated sphere and an explicit
+expected radius. ``--ball-radius`` validates the asset; it does not rescale a
+loaded model or overwrite particle positions. For a 25 mm radius sphere::
+
+   --ball scripts/monolithic_reference/fixtures/soft_ball_25mm/ball_r3.npz --ball-radius 0.025
+
+The 30 mm stress asset is selected with::
+
+   --ball scripts/monolithic_reference/fixtures/soft_ball_30mm/ball_r3.npz --ball-radius 0.030
+
+Both directories contain r1/r2/r3 meshes. Regenerate into a separate output
+directory with ``scripts/monolithic_reference/prepare_soft_ball.py --radius 0.025
+--output output/soft-ball-25mm``. The default 20 mm assets and their acceptance
+records remain available. A radius/asset mismatch is rejected.
+
+The center, control trajectory, density, material, contact stiffness and
+relative anchor-cap rule are unchanged. Larger spheres therefore have more
+mass, a physically larger fixed cap, and coarser surface sampling at the same
+refinement. Mass scales with radius cubed: 25/30 mm have 1.953125/3.375 times
+the corresponding 20 mm mass. These are changed loading cases, not isolated
+solver performance comparisons. Radius changes require new calibration;
+``radius_calibration`` marks them ``UNVALIDATED_RADIUS_STRESS_TEST``.
+
+The 30 mm r3 trial stopped at 2.311 s with a tet determinant guard failure;
+initial overlap already exceeded the inherited 2 mm penetration gate. Keep
+this as a failed stress case, not an accepted timing baseline. Traces include
+``force_producing_contacts`` as well as detection counts and per-finger forces,
+so detection-only candidates cannot masquerade as additional physical loading.
+
+The exploratory 25 mm r3 run completed all 4500 steps with 100% normal
+convergence, maximum penetration about 0.694 mm and minimum detF about 0.431.
+Mean middle-finger hold force was about 0.439 N. It is a stronger loading
+candidate for the P2 studies, but still exercises one loaded finger; the new
+radius has not inherited the 20 mm calibration or a G6/G7 certificate.
+
+A fresh 20 mm r3 control also completed all 4500 steps. During hold, the
+25 mm sphere had 21 force-producing contact samples versus 10 for 20 mm,
+and mean middle-finger force increased from 0.0256 to 0.439 N (about 17 times).
+This establishes increased loading, not additional loaded fingers or a
+calibrated performance target. The iteration sweep and new hotspot profiling
+remain separate P2 work.

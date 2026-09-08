@@ -13,7 +13,7 @@ import warp as wp
 
 import newton
 from newton import ShapeFlags
-from newton.examples.softbody.monolithic_soft_ball import load_ball
+from newton.examples.softbody.monolithic_soft_ball import RADIUS, load_ball
 from newton.examples.softbody.sharpa_close import build_hand, finalize_hand, sha256
 
 
@@ -131,12 +131,14 @@ def build_contact_hand(asset_dir, contact_dir, *, device, parameters, resolution
     return builder, hand
 
 
-def load_hand_ball(asset_dir, contact_dir, ball_path, *, device, parameters, position, resolution=128, _mount=None):
+def load_hand_ball(
+    asset_dir, contact_dir, ball_path, *, device, parameters, position, resolution=128, ball_radius=RADIUS, _mount=None
+):
     """Assemble a free soft sphere and the unchanged 22-DoF hand for diagnostics."""
+    mesh = load_ball(ball_path, radius=ball_radius)
     builder, manifest = build_contact_hand(
         asset_dir, contact_dir, device=device, parameters=parameters, resolution=resolution, _mount=_mount
     )
-    mesh = load_ball(ball_path)
     builder.add_soft_mesh(
         pos=position,
         rot=wp.quat_identity(),
@@ -156,6 +158,7 @@ def load_hand_ball(asset_dir, contact_dir, ball_path, *, device, parameters, pos
         raise ValueError("Soft sphere must have all dynamic nodes")
     manifest.update(
         ball_sha256=sha256(ball_path),
+        ball_radius_m=ball_radius,
         ball_position_m=list(position),
         particle_radius_m=0.0002,
         gravity=parameters["gravity"],

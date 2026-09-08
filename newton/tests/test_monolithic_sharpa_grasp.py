@@ -141,15 +141,16 @@ def test_mount(test, device):
 
 def test_anchor_cap(test, device):
     """Pin the same geometric cap across resolutions, retaining physical mass for diagnostics."""
-    for refinement, count in ((1, 5), (2, 13), (3, 29)):
+    for refinement, count, radius in ((1, 5, 0.020), (2, 13, 0.020), (3, 29, 0.020), (3, 29, 0.025), (3, 29, 0.030)):
         builder = newton.ModelBuilder()
-        ball = Path(__file__).parents[2] / f"scripts/monolithic_reference/fixtures/soft_ball/ball_r{refinement}.npz"
+        folder = "soft_ball" if radius == 0.020 else f"soft_ball_{round(radius * 1000)}mm"
+        ball = Path(__file__).parents[2] / f"scripts/monolithic_reference/fixtures/{folder}/ball_r{refinement}.npz"
         builder.add_soft_mesh(
             pos=ANCHORED_FIXTURE["ball_position"],
             rot=wp.quat_identity(),
             scale=1.0,
             vel=(0, 0, 0),
-            mesh=load_ball(ball),
+            mesh=load_ball(ball, radius=radius),
             add_surface_mesh_edges=False,
         )
         model = builder.finalize(device=device)

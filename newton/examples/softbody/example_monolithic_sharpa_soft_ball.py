@@ -31,6 +31,12 @@ class Example:
         parser.add_argument("--calibration", required=True)
         parser.add_argument("--experiment", choices=("anchored-close", "grasp"), default="anchored-close")
         parser.add_argument("--ball", default="scripts/monolithic_reference/fixtures/soft_ball/ball_r2.npz")
+        parser.add_argument(
+            "--ball-radius",
+            type=float,
+            default=0.020,
+            help="Expected radius of the ball asset in meters; does not rescale it",
+        )
         parser.add_argument("--output", type=Path, default=Path("output/monolithic-sharpa-soft-ball"))
         parser.add_argument("--friction-off", action="store_true")
         parser.add_argument("--disable-aabb", action="store_true", help="Run the internal full-table collision oracle")
