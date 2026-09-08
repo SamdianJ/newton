@@ -155,8 +155,8 @@ def test_contact_trajectory_parity(test, device):
         test.assertEqual(case.solver._history_epoch, 150)
         trajectories.append(trace)
     for old, new in zip(*trajectories, strict=True):
-        # Independent CUDA trajectories have atomic-reduction roundoff. Reuse
-        # the existing G5 trajectory/history tolerances, not a bitwise gate.
+        # Independent CUDA trajectories and nnz-based matvec selection can
+        # change reduction roundoff. Reuse the existing G5 tolerances.
         for before, after in zip(old[:2], new[:2], strict=True):
             error = np.linalg.norm(before.astype(float) - after) / max(np.linalg.norm(before), 1e-12)
             test.assertLessEqual(error, 1e-5 if device.is_cpu else 5e-5)

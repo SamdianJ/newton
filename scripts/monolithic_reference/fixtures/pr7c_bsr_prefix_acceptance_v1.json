@@ -1,0 +1,214 @@
+{
+  "schema": "monolithic-pr7c-bsr-prefix/v1",
+  "implementation_commit": "2c2e343fdfc7be9c3cbae5d4ac169d57e1e66191",
+  "baseline_policy_commit": "9e82436a96c9923bf89f88b8537a86ee1ed289a2",
+  "status": "PASS",
+  "scope": "active-prefix BSR construction; anchored r3 stability and performance, not G6/G7",
+  "metrics": {
+    "finalize_ms_per_call": {
+      "capacity": 72.85501610005365,
+      "prefix": 0.9006438333623615
+    },
+    "finalize_ms_per_step": {
+      "capacity": 109.28252415008046,
+      "prefix": 1.3509657500435424
+    },
+    "replay_groups_ms_mean": {
+      "capacity": [
+        74.44473249997827,
+        74.4319211000402,
+        73.2244533499852,
+        73.7629383000467,
+        73.0394145500668
+      ],
+      "prefix": [
+        0.5712443499987785,
+        0.6155748999844946,
+        0.5386303000022963,
+        0.5761215999882552,
+        0.4477937999809001
+      ]
+    },
+    "stage_timing": {
+      "prepare": {
+        "capacity": {
+          "step_ms_mean": 162.95397527054556,
+          "step_ms_p50": 164.91918800011263,
+          "step_ms_p95": 200.77539280023302,
+          "solver_only_fps_10_substeps": 0.6136702086216322,
+          "pcg_calls": 459,
+          "pcg_iteration_p95": 20.0
+        },
+        "prefix": {
+          "step_ms_mean": 29.22625533467239,
+          "step_ms_p50": 30.36804600014875,
+          "step_ms_p95": 33.08020480008054,
+          "solver_only_fps_10_substeps": 3.421581001564905,
+          "pcg_calls": 459,
+          "pcg_iteration_p95": 20.0
+        },
+        "p50_speedup": 5.430681578897266,
+        "p95_speedup": 6.069351565796358
+      },
+      "close": {
+        "capacity": {
+          "step_ms_mean": 156.07325803502155,
+          "step_ms_p50": 164.1120590002174,
+          "step_ms_p95": 198.0828800002655,
+          "solver_only_fps_10_substeps": 0.6407247548940179,
+          "pcg_calls": 1677,
+          "pcg_iteration_p95": 20.0
+        },
+        "prefix": {
+          "step_ms_mean": 27.61289620810288,
+          "step_ms_p50": 30.081510999934835,
+          "step_ms_p95": 33.24727239992171,
+          "solver_only_fps_10_substeps": 3.6214962474908896,
+          "pcg_calls": 1678,
+          "pcg_iteration_p95": 20.0
+        },
+        "p50_speedup": 5.4555789767532925,
+        "p95_speedup": 5.9578685919730345
+      },
+      "hold": {
+        "capacity": {
+          "step_ms_mean": 128.39927925962547,
+          "step_ms_p50": 146.71552600020732,
+          "step_ms_p95": 192.0571316002679,
+          "solver_only_fps_10_substeps": 0.7788205710859042,
+          "pcg_calls": 1033,
+          "pcg_iteration_p95": 17.0
+        },
+        "prefix": {
+          "step_ms_mean": 22.419500748871002,
+          "step_ms_p50": 30.177750999882846,
+          "step_ms_p95": 32.72073459997955,
+          "solver_only_fps_10_substeps": 4.4604026253812,
+          "pcg_calls": 1034,
+          "pcg_iteration_p95": 17.0
+        },
+        "p50_speedup": 4.861711729306034,
+        "p95_speedup": 5.869584957312906
+      }
+    },
+    "gpu_ms_per_build": {
+      "capacity/global_scalar": {
+        "build_sort_keys_and_mask": 4.250467850000001,
+        "radix_sort": 46.17588720000002,
+        "run_length_encode": 3.427390849999999,
+        "write_bsr_topology": 0.8372779500000002,
+        "prefix_scan": 2.050999,
+        "accumulate_values": 2.3754999999999997,
+        "memset": 0.28831950000000006,
+        "memcpy": 0.0043484000000000005
+      },
+      "capacity/internal_block3": {
+        "build_sort_keys_and_mask": 0.00608705,
+        "radix_sort": 0.11158810000000001,
+        "run_length_encode": 0.007617600000000002,
+        "write_bsr_topology": 0.008085199999999999,
+        "prefix_scan": 0.008304700000000002,
+        "accumulate_values": 0.0087192,
+        "memset": 0.010903050000000008,
+        "memcpy": 0.0011079000000000002
+      },
+      "prefix/global_scalar": {
+        "build_sort_keys_and_mask": 0.0057652499999999995,
+        "radix_sort": 0.09782265000000007,
+        "run_length_encode": 0.00749445,
+        "write_bsr_topology": 0.00783865,
+        "prefix_scan": 0.006665050000000001,
+        "accumulate_values": 0.006945200000000001,
+        "memset": 0.01268325000000003,
+        "memcpy": 0.00069325
+      },
+      "prefix/internal_block3": {
+        "build_sort_keys_and_mask": 0.0029796,
+        "radix_sort": 0.07587425,
+        "run_length_encode": 0.0053042500000000025,
+        "write_bsr_topology": 0.005744349999999999,
+        "prefix_scan": 0.006083900000000002,
+        "accumulate_values": 0.00557005,
+        "memset": 0.011462949999999979,
+        "memcpy": 0.0009126500000000003
+      }
+    },
+    "matrices": [
+      {
+        "rows": 964,
+        "nnz_blocks": 32660,
+        "sha256": "2d1db86173b04602759efe29162ad5dbe752ee2452fcb8ac865e9921efe8f10f",
+        "count": 198565,
+        "capacity": 97318186
+      },
+      {
+        "rows": 314,
+        "nnz_blocks": 3594,
+        "sha256": "0ae32dcaf09a5776b0cd1508a53f0ff97f2285ab255b84a38e49d518690bc96a",
+        "count": 19126,
+        "capacity": 19126
+      }
+    ],
+    "scratch": {
+      "capacity": {
+        "detail_finalizes": 30,
+        "global_allocation_calls": 60,
+        "internal_allocation_calls": 60,
+        "global_int32_pair_bytes": 778545488,
+        "internal_int32_pair_bytes": 153008
+      },
+      "prefix": {
+        "detail_finalizes": 29,
+        "global_allocation_calls": 58,
+        "internal_allocation_calls": 58,
+        "global_int32_pair_bytes": 1588520,
+        "internal_int32_pair_bytes": 153008
+      }
+    },
+    "pool_memory": {
+      "capacity": {
+        "trajectory_mempool_used_bytes": 2124378050,
+        "trajectory_mempool_high_bytes": 4477324725
+      },
+      "production": {
+        "trajectory_mempool_used_bytes": 1347213506,
+        "trajectory_mempool_high_bytes": 1351395765
+      }
+    },
+    "production_full_trajectory_pool_high_bytes": 1352261941,
+    "smaller_cases": {
+      "r1": {
+        "capacity": {
+          "steps": 100,
+          "converged_fraction": 1.0,
+          "replay_bitwise_equal": true,
+          "finalize_ms_per_call": 6.13667310008168
+        },
+        "production": {
+          "steps": 100,
+          "converged_fraction": 1.0,
+          "replay_bitwise_equal": true,
+          "finalize_ms_per_call": 0.6715983999583841
+        }
+      },
+      "r2": {
+        "capacity": {
+          "steps": 100,
+          "converged_fraction": 1.0,
+          "replay_bitwise_equal": true,
+          "finalize_ms_per_call": 26.326717800066035
+        },
+        "production": {
+          "steps": 100,
+          "converged_fraction": 1.0,
+          "replay_bitwise_equal": true,
+          "finalize_ms_per_call": 0.7182480000210489
+        }
+      }
+    }
+  },
+  "report_sha256": "e9656dfc30f01c95a0efdb0a316c99d6165abcd5d1e0baf06e4f99e36cf4afdc",
+  "comparison_sha256": "bd3649b45bb7e876b9bb6c22a48840b2aeed91b9f87033242b234b917426eedf",
+  "provenance_sha256": "98a18d1c1976505e9746872fe6a9f6f1529d86feb22fa1a92a9dc8dbcf77c170",
+  "gate_commands_sha256": "e7cb67c4db30cad701fa170d964ae259bafccc997deffb48080de7b3b8eb30bf"
+}

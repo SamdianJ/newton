@@ -165,3 +165,37 @@ The device count masks the unused tail without shortening the native sort.
 These measurements identify an optimization target; this profiler does not
 change production assembly. The portable result is recorded in
 ``scripts/monolithic_reference/fixtures/sharpa_bsr_profile_v1.json``.
+
+PR-7C active-prefix optimization
+--------------------------------
+
+The production builder now receives continuous views limited to the validated
+triplet count. The views share the preallocated device storage; static contact
+keys, history, workspace capacity and solver tolerances are preserved. Empty
+capacity bypasses slicing. Warp can still allocate temporary builder storage
+and grow BSR output buffers as the active prefix increases; this is not an
+allocation-free sparse backend.
+
+Use ``scripts/monolithic_reference/validate_bsr_prefix.py`` with the same asset,
+contact, trajectory and calibration arguments as the profiler above. Run
+``--builder capacity --output output/r3-capacity`` and
+``--builder production --output output/r3-prefix`` in separate processes. The
+capacity option is an offline oracle; it is not a public solver mode. Each run
+executes 4500 steps, saves committed history every 500 steps, then measures
+continuous holding and five alternating replay groups after warm-up. Replay
+uses identical frozen triplets and requires bitwise matrix parity. Append
+``--nsys-capture`` under the Nsight command above for CUDA attribution, with
+``capacity/global_scalar`` and ``prefix/global_scalar`` NVTX labels.
+
+On the measured r3 fixture, finalize latency decreased from 72.86 to 0.90 ms
+per call. Hold step p50/p95 decreased from 146.72/192.06 to 30.18/32.72 ms;
+mean hold step time corresponds to 0.78 versus 4.46 solver-only FPS with ten
+substeps, excluding rendering. Both complete trajectories converged normally
+on all 4500 steps with unchanged acceptance gates. Independent CUDA trajectories
+are not bitwise identical: maximum ball COM difference was 6.6 micrometers.
+The unchanged full-capacity implementation itself showed 12.8 micrometers
+between independent runs; this observation is not a new tolerance. The fixture
+still exercises light middle-finger contact and does not certify free grasping.
+
+The portable acceptance record is
+``scripts/monolithic_reference/fixtures/pr7c_bsr_prefix_acceptance_v1.json``.
