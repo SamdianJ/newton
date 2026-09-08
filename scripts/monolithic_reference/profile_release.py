@@ -296,7 +296,8 @@ class _StageProfile:
                 return original_launch(kernel, *args, **kwargs)
             return self._timed(stage, original_launch)(kernel, *args, **kwargs)
 
-        self.stack.enter_context(patch.object(wp, "launch", side_effect=launch))
+        # A Mock records every argument and retains temporary sparse-builder arrays.
+        self.stack.enter_context(patch.object(wp, "launch", new=launch))
 
         def collide(state, contacts):
             name = "collision_final" if contacts is solver.contacts else "collision_candidate"

@@ -47,27 +47,33 @@ def main():
         # Keep formal snapshots at 4.5s. This separate continuous tail is instrumented
         # with synchronization, so its overlapping stages are not additive timings.
         tail = {"steps": 0, "failure": None}
-        if summary["complete_schedule"]:
-            with _StageProfile(case.solver, "actor_block") as timer:
-                for _ in range(20):
-                    case.solver.step(case.state, case.state, case.control, None, case.fixture["dt"])
-                    if case.solver.last_stats.rolled_back:
-                        tail["failure"] = case.solver.last_stats.failure_reason
-                        break
-                    tail["steps"] += 1
-            tail["instrumented_stage_timings"] = timer.summary()
-            del timer
-        (out / "profile-tail.json").write_text(json.dumps(tail, indent=2) + "\n")
-        results.append(
-            {
-                "refinement": refinement,
-                "setup_seconds": setup,
-                "run_wall_seconds": wall,
-                "summary": summary,
-                "profile_tail_passed": tail["steps"] == 20,
-            }
-        )
+        record = {
+            "refinement": refinement,
+            "setup_seconds": setup,
+            "run_wall_seconds": wall,
+            "summary": summary,
+            "profile_tail_passed": False,
+        }
+        results.append(record)
         (root / "results.json").write_text(json.dumps(results, indent=2) + "\n")
+        try:
+            if summary["complete_schedule"]:
+                with _StageProfile(case.solver, "actor_block") as timer:
+                    for _ in range(20):
+                        case.solver.step(case.state, case.state, case.control, None, case.fixture["dt"])
+                        if case.solver.last_stats.rolled_back:
+                            tail["failure"] = case.solver.last_stats.failure_reason
+                            break
+                        tail["steps"] += 1
+                tail["instrumented_stage_timings"] = timer.summary()
+                del timer
+        except Exception as error:
+            tail["failure"] = f"{type(error).__name__}: {error}"
+            raise
+        finally:
+            record["profile_tail_passed"] = tail["steps"] == 20 and tail["failure"] is None
+            (out / "profile-tail.json").write_text(json.dumps(tail, indent=2) + "\n")
+            (root / "results.json").write_text(json.dumps(results, indent=2) + "\n")
         del case
         gc.collect()
         wp.synchronize_device(args.device)

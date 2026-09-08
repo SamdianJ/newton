@@ -4,10 +4,12 @@
 """Smoke-test the opt-in monolithic release profiler contracts."""
 
 import copy
+import gc
 import hashlib
 import json
 import tempfile
 import unittest
+import weakref
 from pathlib import Path
 from unittest.mock import patch
 
@@ -86,6 +88,24 @@ def test_profile_enter_cleanup(test, device):
                 test.assertEqual(getattr(owner, name), original, (failure, name))
         finally:
             profile.__exit__(None, None, None)
+
+
+@wp.kernel
+def _touch_profile_scratch(scratch: wp.array[float]):
+    scratch[wp.tid()] = 1.0
+
+
+def test_profile_releases_launch_arguments(test, device):
+    """Profiling must not retain temporary sparse-builder buffers across launches."""
+    _model, _state, _control, solver = build_scene(load_fixture(), device=device)
+    with release_profile._StageProfile(solver, "actor_block"):
+        scratch = wp.zeros(1024, dtype=float, device=device)
+        reference = weakref.ref(scratch)
+        wp.launch(_touch_profile_scratch, dim=1024, inputs=[scratch], device=device)
+        wp.synchronize_device(device)
+        del scratch
+        gc.collect()
+        test.assertIsNone(reference(), "Profiler retained a completed launch's temporary buffer")
 
 
 def test_collision_profile(test, device):
@@ -197,6 +217,13 @@ add_function_test(
     TestReleaseProfileDevices, "test_profile_enter_cleanup", test_profile_enter_cleanup, devices=get_test_devices()
 )
 
+
+add_function_test(
+    TestReleaseProfileDevices,
+    "test_profile_releases_launch_arguments",
+    test_profile_releases_launch_arguments,
+    devices=get_test_devices(),
+)
 
 if __name__ == "__main__":
     unittest.main()
