@@ -2,7 +2,7 @@
 .. SPDX-License-Identifier: CC-BY-4.0
 
 Sharpa contact and soft-ball assets
-==================================
+===================================
 
 .. experimental::
 
