@@ -222,3 +222,20 @@ P2 is planned, with development not started. P1 acceptance does not complete
 the V0.2 Grasp MVP. The stage decision, evidence hashes and deferred items are
 recorded in
 ``scripts/monolithic_reference/fixtures/p1_limited_acceptance_v1.json``.
+
+Before choosing P2 performance targets, measure how the outer nonlinear
+Newton iteration limit affects convergence, actual update counts and step
+time, then profile the current implementation after PR-7C. The proposed
+iteration-limit sweep is 1, 2, 3, 4, 6, 8, 10, 16 and 24, with the current
+default of 10 as the baseline. Residual tolerances, physical parameters,
+line-search policy and inner PCG settings stay fixed. Convergence can stop
+early; the iteration cap is not the number of updates actually executed.
+
+Use continuous r3 anchored-close trajectories and an r2 comparison, keeping
+soft stops and failed runs visible. Repeat full-step timings before adding
+detailed synchronization or Nsight instrumentation. Report current/trial
+evaluation counts, assembly, PCG, retries, memory and host synchronization
+separately, then use those results to freeze performance targets. The later
+multiple-finger grasp fixture requires its own measurements before G6/G7.
+This work is planned; measurements and numerical targets remain pending.
+See ``scripts/monolithic_reference/fixtures/p2_performance_plan_v1.json``.

@@ -1,0 +1,52 @@
+{
+  "schema": "monolithic-p2-performance-plan/v1",
+  "status": "PLANNED_NOT_RUN",
+  "performance_targets": "PENDING_MEASUREMENT",
+  "baseline_code_commit": "bd0d98502a39670a60e3050e5607379ea9ab73f9",
+  "p1_exit_record_commit": "3f9124b8a68f0f3b2b26253b15f20dc9166bc261",
+  "tasks": {
+    "P2-0A": "Outer Newton limit versus convergence/actual work/physical error/time",
+    "P2-0B": "Reprofile current post-PR7C hotspots, host/device synchronization and memory",
+    "P2-0C": "Review measurements and freeze workload-specific performance targets"
+  },
+  "default_newton_limit": 10,
+  "proposed_limit_sweep": [
+    1,
+    2,
+    3,
+    4,
+    6,
+    8,
+    10,
+    16,
+    24
+  ],
+  "workloads": [
+    "r3 anchored-close continuous 4500 steps",
+    "r2 scale comparison",
+    "Later loaded multi-finger grasp measured separately before G6/G7"
+  ],
+  "invariants": [
+    "residual tolerances",
+    "physical parameters and control trajectory",
+    "1ms timestep",
+    "inner PCG settings",
+    "line-search and regularization policies",
+    "state/force/history transaction semantics"
+  ],
+  "existing_pcg_budget": {
+    "p95_iterations_per_actual_call": 64,
+    "hard_limit": 200
+  },
+  "unchanged_p2_tasks": [
+    "P2-1 grasp calibration",
+    "P2-2 original G6",
+    "P2-3 remaining G7",
+    "P2-4 conditional patch Schur",
+    "P2-5 exit"
+  ],
+  "plan": "dev/monothlic/newton_monolithic_solver_p2_plan_zh.md",
+  "plan_sha256": "5c234a031fcb2685614d14a33a28e615cc2e1ff73b588ed12ba1cbc13c1069bf",
+  "plan_snapshot": "agents/integration/artifacts/p2/performance-planning/newton_monolithic_solver_p2_plan_zh.md",
+  "historical_note": "P1 exit and its frozen P2 plan remain unchanged; this is a subsequent P2 planning revision."
+}
