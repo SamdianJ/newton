@@ -71,6 +71,39 @@ class _MonolithicFinalForceGeneration:
     returned_state_role: _MonolithicReturnedStateRole
 
 
+@wp.func
+def _normal_response(u: float, eps: float, stiffness: float):
+    """Return sample energy, normal magnitude and positive GN curvature."""
+    p, dp, ddp = wp.max(u, 0.0), float(0.0), float(0.0)
+    if u > 0.0:
+        dp = 1.0
+    if eps > 0.0 and u > -eps and u < eps:
+        t = (u + eps) / (2.0 * eps)
+        p = eps * (2.0 * t * t * t - t * t * t * t)
+        dp = 3.0 * t * t - 2.0 * t * t * t
+        ddp = 3.0 * t * (1.0 - t) / eps
+    return wp.vec3(0.5 * stiffness * p * p, stiffness * p * dp, stiffness * (dp * dp + p * ddp))
+
+
+@wp.func
+def _tangent_response(xi: wp.vec3, n: wp.vec3, stiffness: float, cap: float):
+    """Return soft force, local Huber potential and PSD Hessian (sliding at equality)."""
+    force, energy, hessian = wp.vec3(), float(0.0), wp.mat33()
+    radius = wp.length(xi)
+    projector = wp.identity(n=3, dtype=float) - wp.outer(n, n)
+    if cap > 0.0 and stiffness > 0.0:
+        if stiffness * radius < cap:
+            force = -stiffness * xi
+            energy = 0.5 * stiffness * radius * radius
+            hessian = stiffness * projector
+        elif radius > 0.0:
+            direction = xi / radius
+            force = -cap * direction
+            energy = cap * radius - cap * cap / (2.0 * stiffness)
+            hessian = (cap / radius) * (projector - wp.outer(direction, direction))
+    return force, energy, hessian
+
+
 @wp.kernel(enable_backward=False)
 def evaluate_monolithic_p1q3_contacts(
     mode: int,
