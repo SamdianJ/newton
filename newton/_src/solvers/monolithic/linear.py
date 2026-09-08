@@ -42,7 +42,7 @@ class MonolithicPcgWarmStart(enum.IntEnum):
 
 
 class MonolithicContactFactorKind(enum.IntEnum):
-    """Private scalar factor tags; tangent emission awaits PR-6B."""
+    """Private scalar factor tags for normal and tangential contributions."""
 
     NONE = 0
     NORMAL = 1
@@ -132,7 +132,7 @@ class MonolithicLinearCapacities:
 
     @classmethod
     def for_p1(cls, layout, *, tet_count, static_pair_count, friction, pcg_max_iterations):
-        """Bound P1 storage without allocating or enabling pending contact physics.
+        """Bound P1 storage arithmetically before allocating contact physics.
 
         Each pair has three history slots and each slot has one normal factor
         plus two tangential factors when friction is enabled. Python integer

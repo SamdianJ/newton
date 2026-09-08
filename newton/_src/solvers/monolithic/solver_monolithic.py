@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import enum
+import hashlib
 import logging
 import math
 import time
@@ -599,7 +600,7 @@ class _Candidate:
 class SolverMonolithic(SolverBase):
     """Solve articulated rigid/tet motion with a common implicit position update.
 
-    This experimental implementation supports normal-only P1Q3 contact and
+    This experimental implementation supports bilateral P1Q3 contact and
     static fixed particles. Numerical defaults are calibrated on the declared
     component and normal-loading fixtures; other asset ranges are not certified.
 
@@ -775,6 +776,8 @@ class SolverMonolithic(SolverBase):
         contact_moment_imbalance: float = math.nan
         generalized_projection_error: float = math.nan
         contact_sign_error: float = math.nan
+        contact_history: Mapping[str, float | int] | None = None
+        """Final per-step contact/history audit; None in the q-only diagnostic."""
         joint_force_generation: int = -1
         """Step generation of returned-state joint diagnostics; -1 when absent."""
         joint_pd_force: tuple[float, ...] | None = None
@@ -824,9 +827,9 @@ class SolverMonolithic(SolverBase):
             mass_mode: Experimental lumped or consistent P1 mass.
             tet_rest_density: Same-device float32 per-tet density [kg/m^3], required
                 for consistent mass and copied at construction; otherwise None.
-            normal_smoothing_width: Reserved normal smoothing width [m]; must be zero.
-            friction_coefficient: Reserved dimensionless contact friction; must be zero.
-            tangential_stiffness: Reserved tangential penalty [N/m^3]; must be None.
+            normal_smoothing_width: Experimental PolyReLU half-width [m]; zero retains quadratic contact.
+            friction_coefficient: Experimental isotropic contact friction coefficient; defaults to zero.
+            tangential_stiffness: Experimental tangential penalty [N/m^3]; required for friction.
             newton_max_iterations: Positive nonlinear iteration limit.
             line_search_max_iterations: Positive backtracking iteration limit.
             linear_max_iterations: Positive linear iteration limit.
@@ -915,13 +918,24 @@ class SolverMonolithic(SolverBase):
         if mass_mode == self.MassMode.LUMPED and tet_rest_density is not None:
             raise ValueError("tet_rest_density requires consistent mass")
         if normal_smoothing_width != 0 or friction_coefficient != 0 or tangential_stiffness is not None:
-            raise ValueError("P1 normal smoothing and contact friction are not implemented (PR-6B / G3-G4)")
+            if joint_diagnostic:
+                raise ValueError("Contact options do not apply to the q-only diagnostic")
+        if friction_coefficient > 0 and (tangential_stiffness is None or tangential_stiffness <= 0):
+            raise ValueError("Contact friction requires positive tangential_stiffness")
+        if tangential_stiffness is not None and (tangential_stiffness <= 0 or np.float32(tangential_stiffness) <= 0):
+            raise ValueError("tangential_stiffness must be positive in float32")
+        if friction_coefficient > 0 and np.float32(friction_coefficient) <= 0:
+            raise ValueError("friction_coefficient must be positive in float32")
+        if normal_smoothing_width > 0 and np.float32(normal_smoothing_width) <= 0:
+            raise ValueError("normal_smoothing_width must be positive in float32")
         self._config_generation = 0  # Immutable per solver; rebuild instead of reconfiguring.
-        self._history_epoch = 0  # No history storage or commits until PR-6B is enabled.
+        self._history_epoch = 0
         self._joint_diagnostic = joint_diagnostic
         if not joint_diagnostic:
             if not isinstance(collision_pipeline, MonolithicCollisionPipeline):
                 raise ValueError("Monolithic requires a MonolithicCollisionPipeline")
+            if normal_smoothing_width > collision_pipeline._soft_contact_gap:
+                raise ValueError("Detection gap must cover normal_smoothing_width")
             if collision_pipeline.model is not model:
                 raise ValueError("collision_pipeline and solver must use the same model")
         for name, value in (("contact_stiffness", contact_stiffness), ("linear_tolerance", linear_tolerance)):
@@ -988,7 +1002,17 @@ class SolverMonolithic(SolverBase):
             layout.particle_to_dynamic.numpy(),
             x_dof_start=nq,
         )
-        contact_capacity = collision_pipeline.soft_contact_max if not joint_diagnostic else 0
+        contact_capacity = (
+            collision_pipeline.soft_contact_max * (3 if friction_coefficient > 0 else 1) if not joint_diagnostic else 0
+        )
+        # Include triplets, BSR build scratch and factors before requesting device storage.
+        self._contact_storage_bound_bytes = contact_capacity * ((nq + 9) ** 2 * 64 + (nq + 32) * 4)
+        if (
+            friction_coefficient > 0
+            and model.device.is_cuda
+            and self._contact_storage_bound_bytes > model.device.free_memory
+        ):
+            raise ValueError("Contact capacity exceeds available device memory")
         self._linear = MonolithicLinearWorkspace(
             MonolithicLinearLayout(nq, nx),
             MonolithicLinearCapacities(
@@ -1023,6 +1047,15 @@ class SolverMonolithic(SolverBase):
                 collision_pipeline,
                 self._linear,
                 contact_stiffness=contact_stiffness,
+                normal_smoothing_width=normal_smoothing_width,
+                friction_coefficient=friction_coefficient,
+                tangential_stiffness=tangential_stiffness,
+                physics_identity=self._tet_physics.identity
+                + (
+                    hashlib.sha256(self._joint_terms.params.numpy().tobytes()).hexdigest()
+                    if self._joint_terms is not None
+                    else ""
+                ),
             )
         )
         self._final_evaluation_state = model.state()
@@ -1074,6 +1107,7 @@ class SolverMonolithic(SolverBase):
         if pipeline is not None:
             pipeline.validate_contacts(self.contacts)
             pipeline.validate_contacts(self._trial_contacts)
+            self._contact.validate_contract(self.model, pipeline, self.contacts)
         control = self._default_control if control is None else control
         self._articulation.validate_candidate(
             self.model,
@@ -1090,6 +1124,7 @@ class SolverMonolithic(SolverBase):
             self._joint_terms.final_generation = -1
         if self._contact is not None:
             self._contact.invalidate_final_force()
+            self._contact.begin_step(self._transaction._original, dt)
         self._assembly_sequence = 0
         self._metrics = {
             "nonlinear_iterations": 0,
@@ -1122,9 +1157,18 @@ class SolverMonolithic(SolverBase):
             # solver in an open transaction or retain a partially published state.
             state_out.assign(self._transaction._original)
             if self._contact is not None:
+                self._contact.discard_history()
+                self._history_epoch = self._contact.history_epoch
                 self._contact.invalidate_final_force()
             if self._joint_terms is not None:
                 self._joint_terms.final_generation = -1
+            if self._contact is not None and self._contact.friction_coefficient > 0:
+                try:
+                    self._publish_final(state_out, self.Status.NONFINITE)
+                except Exception:
+                    self._contact.invalidate_final_force()
+                    if self._joint_terms is not None:
+                        self._joint_terms.final_generation = -1
             self._transaction._finished = True
             raise
 
@@ -1573,7 +1617,7 @@ class SolverMonolithic(SolverBase):
             self._contact_status.zero_()
             evaluate_final_contacts(
                 self.model,
-                state,
+                self._final_evaluation_state,
                 self.contacts,
                 self.collision_pipeline,
                 self._articulation,
@@ -1584,6 +1628,7 @@ class SolverMonolithic(SolverBase):
                 returned_state_role=role,
             )
             self._check_contact()
+            self._contact.bind_returned_state(state)
             if self.contacts.force is not None:
                 self._contact._publish_final_forces(
                     state, self.contacts, step_generation=self._transaction.step_generation, returned_state_role=role
@@ -1606,6 +1651,8 @@ class SolverMonolithic(SolverBase):
         except _StepFailure as error:
             status, reason, commit = error.status, str(error), False
             state_out.assign(transaction._original)
+            if self._contact is not None:
+                self._contact.discard_history()
             try:
                 self._publish_final(state_out, status)
             except _StepFailure as second_error:
@@ -1654,10 +1701,26 @@ class SolverMonolithic(SolverBase):
             contact_moment_imbalance=diagnostics.get("moment_imbalance", math.nan),
             generalized_projection_error=diagnostics.get("generalized_projection_error", math.nan),
             contact_sign_error=diagnostics.get("contact_sign_error", math.nan),
+            contact_history=MappingProxyType(
+                {
+                    **self._contact.history_diagnostics(),
+                    "history_epoch": self._history_epoch + int(commit and self._contact.friction_coefficient > 0),
+                    "history_commit_count": int(commit and self._contact.friction_coefficient > 0),
+                    "history_rollback_count": int(not commit and self._contact.friction_coefficient > 0),
+                }
+            )
+            if self._contact is not None and publication_error is None
+            else None,
             timings={"step": 1000.0 * (time.perf_counter() - start)},
             **self._metrics,
             **joint_diagnostics,
         )
+        if self._contact is not None:
+            if commit:
+                self._contact.commit_history()
+            else:
+                self._contact.discard_history()
+            self._history_epoch = self._contact.history_epoch
         transaction._finished = True
         if status != self.Status.SUCCESS:
             stats = transaction.last_stats
