@@ -4,12 +4,14 @@
 """Compare candidate AABB gates with the original fixed-table contact oracle."""
 
 import unittest
+from functools import partial
 from unittest.mock import patch
 
 import numpy as np
 import warp as wp
 
 from newton._src.solvers.monolithic.collision import MonolithicCollisionPipeline
+from newton.examples.softbody import monolithic_contact_friction as friction_fixture
 from newton.tests.test_solver_monolithic_collision import _scene
 from newton.tests.unittest_utils import add_function_test, get_test_devices
 
@@ -162,6 +164,53 @@ def test_plane_union_and_empty(test, device):
         np.testing.assert_array_equal(empty._query_counts.numpy(), 0)
 
 
+def test_physics_parity(test, device):
+    """Preserve coupled trajectories, physical forces, history and global assembly."""
+    cases = []
+    for enabled in (True, False):
+        with patch.object(
+            friction_fixture, "MonolithicCollisionPipeline", partial(MonolithicCollisionPipeline, _enable_aabb=enabled)
+        ):
+            cases.append(friction_fixture.FrictionCase(device))
+    for _ in range(160):
+        for case in cases:
+            case.step()
+        for name in ("particle_q", "particle_qd", "joint_q", "joint_qd"):
+            a_state = getattr(cases[0].state, name).numpy().astype(float)
+            b_state = getattr(cases[1].state, name).numpy().astype(float)
+            tolerance = 1e-5 if device.is_cpu else 5e-5
+            if name == "particle_qd":
+                # BE differences two float32 positions. AABB-on/on replay exhibits
+                # the same velocity quantization; use its two-position ULP bound.
+                position_scale = np.max(np.abs(cases[0].rest)).astype(np.float32)
+                velocity_ulp = 2 * float(np.spacing(position_scale)) / cases[0].dt
+                np.testing.assert_allclose(a_state, b_state, rtol=tolerance, atol=velocity_ulp)
+            else:
+                error = np.linalg.norm(a_state - b_state) / max(np.linalg.norm(b_state), 1e-12)
+                test.assertLessEqual(error, tolerance, (name, error))
+        test.assertEqual(cases[0].solver.last_stats.status, cases[1].solver.last_stats.status)
+        test.assertEqual(cases[0].solver._history_epoch, cases[1].solver._history_epoch)
+    a, b = (case.solver for case in cases)
+    test.assertGreater(a.last_stats.active_sample_count, 0)
+    np.testing.assert_array_equal(a._contact.committed.valid.numpy(), b._contact.committed.valid.numpy())
+    np.testing.assert_allclose(a._contact.committed.xi_local.numpy(), b._contact.committed.xi_local.numpy(), atol=1e-7)
+    matrices = [s._linear.densify_for_test(generation=s._generation).raw_matrix for s in (a, b)]
+    # Compare ownership blocks with the PRD Frobenius relative-error convention.
+    nq = cases[0].model.joint_dof_count
+    for rows in (slice(0, nq), slice(nq, None)):
+        for cols in (slice(0, nq), slice(nq, None)):
+            left, right = (m[rows, cols] for m in matrices)
+            error = np.linalg.norm(left - right) / max(np.linalg.norm(left), np.linalg.norm(right), 1e-12)
+            test.assertLessEqual(error, 1e-5 if device.is_cpu else 5e-5)
+    for s in (a, b):
+        s.update_contacts(s.contacts, cases[0 if s is a else 1].state)
+    for field in ("normal_force_sum", "tangent_force_sum", "elastic_energy"):
+        if field in a.last_stats.contact_history:
+            np.testing.assert_allclose(
+                a.last_stats.contact_history[field], b.last_stats.contact_history[field], rtol=2e-5, atol=1e-6
+            )
+
+
 for _device in get_test_devices():
     for _test in (
         test_candidate_equivalence,
@@ -170,6 +219,7 @@ for _device in get_test_devices():
         test_plane_union_and_empty,
     ):
         add_function_test(TestMonolithicAABB, _test.__name__, _test, devices=[_device])
+    add_function_test(TestMonolithicAABB, "test_physics_parity", test_physics_parity, devices=[_device])
     if _device.is_cuda:
         add_function_test(TestMonolithicAABB, "test_texture_bounds", test_texture_bounds, devices=[_device])
 

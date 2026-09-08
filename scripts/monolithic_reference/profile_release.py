@@ -432,6 +432,13 @@ def _launch_p1q3(model, state, pipeline, contacts):
             contacts.soft_contact_body_vel,
             contacts.soft_contact_normal,
             pipeline._status,
+            False,  # Preserve this profiler's original narrow-phase-only measurement.
+            pipeline._bounds.face_lo,
+            pipeline._bounds.face_hi,
+            pipeline._bounds.shape_lo,
+            pipeline._bounds.shape_hi,
+            pipeline._bounds.aggregate,
+            pipeline._query_counts,
         ],
         device=model.device,
     )

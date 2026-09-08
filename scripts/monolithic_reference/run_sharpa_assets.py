@@ -28,7 +28,12 @@ def run(args):
     if not model.device.is_cuda:
         raise ValueError("This mesh contact diagnostic requires CUDA; CPU import has a separate test")
     model.request_contact_attributes("force")
-    pipeline = MonolithicCollisionPipeline(model, soft_contact_gap=fixture["detection_gap_m"])
+    pipeline = MonolithicCollisionPipeline(
+        model,
+        soft_contact_gap=fixture["detection_gap_m"],
+        _enable_aabb=not getattr(args, "disable_aabb", False),
+        _sdf_query_error=fixture["gates"]["maximum_sdf_probe_error_m"],
+    )
     configs = [parameters["joints"][n] for n in manifest["joint_names"]]
     solver = SolverMonolithic(
         model,

@@ -35,6 +35,19 @@ def _overlap(a: wp.vec3, b: wp.vec3, c: wp.vec3, d: wp.vec3):
 
 
 @wp.kernel(enable_backward=False)
+def _update_particles(
+    particles: wp.array[int], x: wp.array[wp.vec3], aggregate: wp.array2d[float], status: wp.array[int]
+):
+    position = x[particles[wp.tid()]]
+    if not wp.isfinite(position):
+        wp.atomic_max(status, 0, 11)
+        return
+    for axis in range(3):
+        wp.atomic_min(aggregate, 0, axis, position[axis])
+        wp.atomic_max(aggregate, 1, axis, position[axis])
+
+
+@wp.kernel(enable_backward=False)
 def _update_faces(
     faces: wp.array[int],
     triangles: wp.array2d[int],
@@ -52,9 +65,6 @@ def _update_faces(
     lo, hi = wp.min(a, wp.min(b, c)), wp.max(a, wp.max(b, c))
     lower[face] = lo
     upper[face] = hi
-    for axis in range(3):
-        wp.atomic_min(aggregate, 0, axis, lo[axis])
-        wp.atomic_max(aggregate, 1, axis, hi[axis])
 
 
 @wp.kernel(enable_backward=False)
@@ -124,10 +134,11 @@ def aggregate_overlap(aggregate: wp.array2d[float]):
 class _CandidateBounds:
     """Own immutable local bounds and scratch overwritten on every collision."""
 
-    def __init__(self, model, faces, shapes):
+    def __init__(self, model, faces, shapes, particles):
         self.model = model
         self.faces = wp.array(faces, dtype=int, device=model.device)
         self.shapes = wp.array(shapes, dtype=int, device=model.device)
+        self.particles = wp.array(particles, dtype=int, device=model.device)
         lo = np.zeros((model.shape_count, 3), dtype=np.float64)
         hi = lo.copy()
         types, scales = model.shape_type.numpy(), model.shape_scale.numpy()
@@ -192,6 +203,12 @@ class _CandidateBounds:
         """Refresh scratch without allocations or host reads."""
         m = self.model
         wp.launch(_reset_aggregate, dim=(4, 3), inputs=[self.aggregate], device=m.device)
+        wp.launch(
+            _update_particles,
+            dim=len(self.particles),
+            inputs=[self.particles, state.particle_q, self.aggregate, status],
+            device=m.device,
+        )
         wp.launch(
             _update_faces,
             dim=len(self.faces),

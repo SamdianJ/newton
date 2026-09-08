@@ -377,7 +377,7 @@ class MonolithicCollisionPipeline:
         pairs = _build_face_shape_pairs(model, faces, shapes)
         self._face_pairs = wp.array(pairs, dtype=wp.vec2i, device=model.device)
         self._status = wp.zeros(1, dtype=int, device=model.device)
-        self._bounds = _CandidateBounds(model, faces, shapes)
+        self._bounds = _CandidateBounds(model, faces, shapes, referenced)
         self._query_counts = wp.zeros(4, dtype=int, device=model.device)
         self._token = object()
         self._contact_contracts = WeakKeyDictionary()
