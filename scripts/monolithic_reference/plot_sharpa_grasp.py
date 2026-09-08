@@ -25,20 +25,36 @@ def main():
     manifest = json.loads((args.run / "manifest.json").read_text())
     t = np.array([r["time"] for r in rows])
     fig, axes = plt.subplots(3, 2, figsize=(12, 10), constrained_layout=True)
-    fig.suptitle("Sharpa / soft ball: exploratory integration (G6/G7 not validated)")
+    anchored = manifest.get("experiment") == "anchored-close"
+    fig.suptitle(
+        "Sharpa anchored closure: collision stability"
+        if anchored
+        else "Sharpa / soft ball: exploratory integration (G6/G7 not validated)"
+    )
     axes[0, 0].plot(t, [r["ball_com"][2] * 1000 for r in rows], label="Ball COM")
-    lift_target = manifest["mapping"]["monolithic_lift"][2]
+    lift_target = manifest["mapping"].get("monolithic_lift", (0, 0, None))[2]
     axes[0, 0].plot(
         t,
-        [1000 * (rows[0]["ball_com"][2] + r["q_target"][lift_target]) for r in rows],
+        [
+            1000 * (rows[0]["ball_com"][2] + (r["q_target"][lift_target] if lift_target is not None else 0))
+            for r in rows
+        ],
         ls="--",
-        label="Initial ball height + commanded lift",
+        label="Initial ball height" if anchored else "Initial ball height + commanded lift",
     )
     axes[0, 0].set_ylabel("World height [mm]")
-    axes[0, 1].plot(t, [-r["support_force"][2] for r in rows], label="Support on ball")
+    axes[0, 1].plot(
+        t,
+        [np.linalg.norm(r["palm_force"]) if anchored else -r["support_force"][2] for r in rows],
+        label="Palm on ball" if anchored else "Support on ball",
+    )
     for finger in ("thumb", "index", "middle", "ring", "pinky"):
-        axes[0, 1].plot(t, [-r["finger_forces"][finger][2] for r in rows], label=finger)
-    axes[0, 1].set_ylabel("Vertical force on ball [N]")
+        axes[0, 1].plot(
+            t,
+            [np.linalg.norm(r["finger_forces"][finger]) if anchored else -r["finger_forces"][finger][2] for r in rows],
+            label=finger,
+        )
+    axes[0, 1].set_ylabel("Contact force magnitude [N]" if anchored else "Vertical force on ball [N]")
     axes[1, 0].plot(t, [1000 * r["penetration"] for r in rows], label="Penetration")
     axes[1, 0].plot(t, [1000 * r["deformation_rms"] for r in rows], label="Rigid-fit deformation RMS")
     axes[1, 0].set_ylabel("Distance [mm]")
@@ -52,7 +68,7 @@ def main():
     axes[2, 1].plot(t, [r["history"]["history_elastic_energy"] for r in rows], label="Elastic history")
     axes[2, 1].set_ylabel("Energy [J]")
     for ax in axes.flat:
-        for boundary in (0.5, 2.5, 4.5, 5.5, 6.5, 8.5):
+        for boundary in manifest["fixture"]["stage_ends"][:-1]:
             ax.axvline(boundary, color="gray", alpha=0.25, lw=0.7)
         ax.set_xlabel("Physical time [s]")
         ax.grid(alpha=0.2)
@@ -84,7 +100,8 @@ def main():
         ax.set_ylabel("m" if name == "monolithic_lift" else "rad")
         ax.set_xlabel("s")
         ax.grid(alpha=0.2)
-    axes.flat[-1].axis("off")
+    for ax in list(axes.flat)[len(manifest["mapping"]) :]:
+        ax.axis("off")
     axes.flat[0].legend()
     fig.savefig(args.run / "joint-tracking.png", dpi=130)
     plt.close(fig)

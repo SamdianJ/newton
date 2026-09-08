@@ -916,11 +916,11 @@ If you run the examples from a source checkout with uv, use
     </td>
     <td align="center" width="33%">
       <a href="newton/examples/softbody/example_monolithic_sharpa_soft_ball.py">
-        <img width="320" src="docs/images/examples/example_monolithic_sharpa_soft_ball.jpg" alt="Exploratory Sharpa hand and soft sphere integration">
+        <img width="320" src="docs/images/examples/example_monolithic_sharpa_soft_ball.jpg" alt="Sharpa closure around a locally anchored deformable sphere">
       </a>
       <br><code>python -m newton.examples monolithic_sharpa_soft_ball</code>
       <br><a href="docs/guide/monolithic_sharpa_grasp.rst">Required asset arguments and usage</a>
-      <br>Exploratory stages; grasp acceptance remains pending.
+      <br>Palm-anchored soft sphere: closure stability and efficiency.
     </td>
   </tr>
   <tr>

@@ -10,11 +10,21 @@ import unittest
 from pathlib import Path
 
 import numpy as np
+import warp as wp
 
 import newton
-from newton.examples.softbody.monolithic_sharpa_grasp import FIXTURE, joint_mapping, load_calibration, stage_target
+from newton.examples.softbody.monolithic_sharpa_assets import load_hand_ball
+from newton.examples.softbody.monolithic_sharpa_grasp import (
+    ANCHORED_FIXTURE,
+    FIXTURE,
+    anchor_ball,
+    joint_mapping,
+    load_calibration,
+    stage_target,
+)
+from newton.examples.softbody.monolithic_soft_ball import load_ball
 from newton.examples.softbody.sharpa_close import build_hand, finalize_hand, load_fixture
-from newton.solvers.experimental.monolithic import SolverMonolithic
+from newton.solvers.experimental.monolithic import MonolithicCollisionPipeline, SolverMonolithic
 from newton.tests.unittest_utils import add_function_test, get_test_devices
 
 
@@ -129,11 +139,79 @@ def test_mount(test, device):
         test.assertFalse(solver.last_stats.rolled_back)
 
 
+def test_anchor_cap(test, device):
+    """Pin the same geometric cap across resolutions, retaining physical mass for diagnostics."""
+    for refinement, count in ((1, 5), (2, 13), (3, 29)):
+        builder = newton.ModelBuilder()
+        ball = Path(__file__).parents[2] / f"scripts/monolithic_reference/fixtures/soft_ball/ball_r{refinement}.npz"
+        builder.add_soft_mesh(
+            pos=ANCHORED_FIXTURE["ball_position"],
+            rot=wp.quat_identity(),
+            scale=1.0,
+            vel=(0, 0, 0),
+            mesh=load_ball(ball),
+            add_surface_mesh_edges=False,
+        )
+        model = builder.finalize(device=device)
+        mass = model.particle_mass.numpy().copy()
+        fixed, rest, weights = anchor_ball(model, ANCHORED_FIXTURE["ball_position"])
+        test.assertEqual(int(fixed.sum()), count)
+        np.testing.assert_array_equal(weights, mass)
+        np.testing.assert_array_equal(model.particle_q.numpy(), rest)
+        np.testing.assert_array_equal(model.particle_mass.numpy()[~fixed], mass[~fixed])
+        test.assertTrue(np.all(model.particle_inv_mass.numpy()[fixed] == 0))
+        test.assertTrue(np.all(model.particle_inv_mass.numpy()[~fixed] > 0))
+        with test.assertRaises(ValueError):
+            anchor_ball(model, np.array(ANCHORED_FIXTURE["ball_position"]) + np.array([100, 0, 0]))
+
+
+def test_anchored_step(test, device):
+    """Use the coupled stepper with a fixed cap, including its CPU empty-contact path."""
+    asset, contact = os.environ.get("NEWTON_SHARPA_ASSET_DIR"), os.environ.get("NEWTON_SHARPA_CONTACT_DIR")
+    if not asset or not contact:
+        test.skipTest("Set Sharpa asset/contact paths for coupled anchored checks")
+    parameters = load_fixture(Path(newton.__file__).parent / "examples/softbody/sharpa_g1h.json")
+    ball = Path(__file__).parents[2] / "scripts/monolithic_reference/fixtures/soft_ball/ball_r1.npz"
+    model, manifest = load_hand_ball(
+        asset, contact, ball, device=device, parameters=parameters, position=ANCHORED_FIXTURE["ball_position"]
+    )
+    fixed, rest, _ = anchor_ball(model, ANCHORED_FIXTURE["ball_position"])
+    mapping = joint_mapping(model, manifest["joint_names"], carriage=False)
+    test.assertEqual(len(mapping), 22)
+    test.assertEqual(model.body_count, 33)
+    solver = SolverMonolithic(
+        model,
+        contact_stiffness=1e7,
+        collision_pipeline=MonolithicCollisionPipeline(
+            model, soft_contact_gap=0.002, _sdf_query_error=0.0004 if wp.get_device(device).is_cuda else 0.0
+        ),
+        material_model="smith_log_stabilized",
+        mass_mode="consistent",
+        tet_rest_density=wp.full(model.tet_count, 1000.0, device=device),
+        joint_terms=SolverMonolithic.JointTerms(
+            implicit_pd=True,
+            limits=True,
+            friction=True,
+            limit_width=tuple(parameters["joints"][n]["limit_width"] for n in mapping),
+            friction_velocity_scale=tuple(parameters["joints"][n]["friction_velocity_scale"] for n in mapping),
+        ),
+    )
+    state, control = model.state(), model.control()
+    control.joint_target_q.assign(state.joint_q)
+    for _ in range(3):
+        solver.step(state, state, control, None, 0.001)
+        test.assertTrue(solver.last_stats.converged)
+        np.testing.assert_array_equal(state.particle_q.numpy()[fixed], rest[fixed])
+        np.testing.assert_array_equal(state.particle_qd.numpy()[fixed], 0)
+
+
 class TestGraspMount(unittest.TestCase):
     pass
 
 
 add_function_test(TestGraspMount, "test_mount", test_mount, devices=get_test_devices())
+add_function_test(TestGraspMount, "test_anchor_cap", test_anchor_cap, devices=get_test_devices())
+add_function_test(TestGraspMount, "test_anchored_step", test_anchored_step, devices=get_test_devices())
 
 
 if __name__ == "__main__":

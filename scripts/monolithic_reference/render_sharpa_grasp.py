@@ -37,7 +37,7 @@ def main():
         device="cpu",
         parameters=load_fixture("newton/examples/softbody/sharpa_g1h.json"),
         position=manifest["ball_position_m"],
-        _mount=manifest["mount"],
+        _mount=manifest.get("mount"),
     )
     state = model.state()
     with np.load(args.run / args.state, allow_pickle=False) as data:
@@ -46,7 +46,7 @@ def main():
     newton.eval_fk(model, state.joint_q, state.joint_qd, state)
     viewer = ViewerGL(width=640, height=640, headless=True, enable_cuda_interop=ViewerGL.CudaInterop.NONE)
     viewer.set_model(model)
-    viewer.set_camera(pos=wp.vec3(0.33, -0.4, 0.34), pitch=-20.0, yaw=130.0)
+    viewer.set_camera(pos=wp.vec3(0.28, -0.28, 0.23), pitch=-20.0, yaw=130.0)
     if hasattr(viewer, "hide_loading_splash"):
         viewer.hide_loading_splash()
     for _ in range(3):

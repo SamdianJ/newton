@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 The Newton Developers
 # SPDX-License-Identifier: Apache-2.0
 
-"""Exploratory PR-7A assembly and controls; G6/G7 calibration remains separate."""
+"""Shared Sharpa controls for anchored closure and exploratory grasp integration."""
 
 import hashlib
 import json
@@ -49,6 +49,47 @@ FIXTURE = {
 }
 
 
+ANCHORED_FIXTURE = {
+    **FIXTURE,
+    "schema": "sharpa-anchored-close/v1",
+    "status": "COLLISION_STABILITY_EXPERIMENT",
+    "duration": 4.5,
+    "ball_position": [0.045, -0.005, 0.085],
+    "stage_ends": [0.5, 2.5, 4.5],
+    "anchor_axis": 0,
+    "anchor_cap_fraction": 0.7,
+    "gates": {
+        "penetration_m": 0.002,
+        "min_det_f": 0.1,
+        "converged_fraction": 0.99,
+        "hold_contact_fraction": 0.9,
+        "minimum_finger_force_n": 0.001,
+    },
+}
+
+
+def anchor_ball(model, center):
+    """Pin a palm-facing cap before solver construction; retain all other DoFs."""
+    rest = model.particle_q.numpy()
+    local = rest.astype(float) - np.asarray(center)
+    radius = np.max(np.linalg.norm(local, axis=1))
+    fixed = local[:, ANCHORED_FIXTURE["anchor_axis"]] <= -ANCHORED_FIXTURE["anchor_cap_fraction"] * radius
+    if (
+        np.count_nonzero(fixed) < 3
+        or np.all(fixed)
+        or np.linalg.matrix_rank(local[fixed] - local[fixed].mean(axis=0)) < 2
+    ):
+        raise ValueError("Anchor cap must contain noncollinear nodes and leave dynamic nodes")
+    if np.any(model.particle_qd.numpy()[fixed] != 0):
+        raise ValueError("Anchored nodes must start at rest")
+    weights = model.particle_mass.numpy().copy()
+    mass, inv_mass = weights.copy(), model.particle_inv_mass.numpy()
+    mass[fixed], inv_mass[fixed] = 0, 0
+    model.particle_mass.assign(mass)
+    model.particle_inv_mass.assign(inv_mass)
+    return fixed, rest, weights
+
+
 def stage_target(trajectory, time_s):
     """Sample continuous positions and same-segment velocities at physical step end."""
     if not np.isfinite(time_s) or time_s < 0 or time_s > FIXTURE["duration"] + 1e-12:
@@ -74,13 +115,14 @@ def stage_target(trajectory, time_s):
     return stage, q, rate * v, lift, lift_v
 
 
-def joint_mapping(model, names):
+def joint_mapping(model, names, *, carriage=True):
     """Resolve coordinate, rate and target offsets independently by joint name."""
     labels = [label.rsplit("/", 1)[-1] for label in model.joint_label]
-    if any(labels.count(name) != 1 for name in [*names, "monolithic_lift"]):
+    names = [*names, "monolithic_lift"] if carriage else list(names)
+    if any(labels.count(name) != 1 for name in names):
         raise ValueError("Missing or duplicate hand/carriage joint")
     starts = [getattr(model, name).numpy() for name in ("joint_q_start", "joint_qd_start", "joint_target_q_start")]
-    return {name: tuple(int(start[labels.index(name)]) for start in starts) for name in [*names, "monolithic_lift"]}
+    return {name: tuple(int(start[labels.index(name)]) for start in starts) for name in names}
 
 
 def load_calibration(path):
@@ -119,6 +161,9 @@ class GraspCase:
     """Run all stages through the existing coupled solver and its state transaction."""
 
     def __init__(self, args):
+        self.anchored = getattr(args, "experiment", "grasp") == "anchored-close"
+        self.fixture = ANCHORED_FIXTURE if self.anchored else FIXTURE
+        self.total_steps = round(self.fixture["duration"] / self.fixture["dt"])
         device = wp.get_device(args.device)
         if not device.is_cuda:
             raise ValueError("Sharpa mesh SDF grasp requires CUDA; CPU components have independent tests")
@@ -130,20 +175,34 @@ class GraspCase:
         with np.load(args.ball, allow_pickle=False) as ball:
             # The archive format is checked again by load_hand_ball/load_ball.
             rest_positions = ball["vertices"] if "vertices" in ball else ball["rest_positions"]
-            height = FIXTURE["ball_position"][2] + float(rest_positions[:, 2].min()) - FIXTURE["particle_radius"]
-        mount = {"support_height": height, "carriage": FIXTURE["carriage"]}
+            height = (
+                self.fixture["ball_position"][2] + float(rest_positions[:, 2].min()) - self.fixture["particle_radius"]
+            )
+        mount = None if self.anchored else {"support_height": height, "carriage": self.fixture["carriage"]}
         self.model, self.manifest = load_hand_ball(
             args.asset_dir,
             args.contact_dir,
             args.ball,
             device=device,
             parameters=self.parameters,
-            position=FIXTURE["ball_position"],
+            position=self.fixture["ball_position"],
             resolution=128,
             _mount=mount,
         )
         model = self.model
-        self.mapping = joint_mapping(model, self.manifest["joint_names"])
+        self.fixed = np.zeros(model.particle_count, dtype=bool)
+        self.anchor_rest = model.particle_q.numpy()
+        self.weights = model.particle_mass.numpy().astype(float)
+        if self.anchored:
+            self.fixed, self.anchor_rest, weights = anchor_ball(model, self.fixture["ball_position"])
+            self.weights = weights.astype(float)
+            self.manifest.update(
+                all_ball_nodes_dynamic=False,
+                fixed_particle_ids=np.flatnonzero(self.fixed).tolist(),
+                anchor_frame="world, fixed palm root",
+                anchor_position=self.anchor_rest[self.fixed].tolist(),
+            )
+        self.mapping = joint_mapping(model, self.manifest["joint_names"], carriage=not self.anchored)
         dofs = [self.mapping[n][1] for n in self.manifest["joint_names"]]
         self.trajectory = ClosureTrajectory(
             args.trajectory,
@@ -155,21 +214,21 @@ class GraspCase:
         model.request_contact_attributes("force")
         pipeline = MonolithicCollisionPipeline(
             model,
-            soft_contact_gap=FIXTURE["gap"],
-            _sdf_query_error=FIXTURE["sdf_query_error"],
+            soft_contact_gap=self.fixture["gap"],
+            _sdf_query_error=self.fixture["sdf_query_error"],
             _enable_aabb=not args.disable_aabb,
         )
         width, velocity = np.empty(model.joint_dof_count), np.empty(model.joint_dof_count)
         for name, (_, dof, _) in self.mapping.items():
-            cfg = FIXTURE["carriage"] if name == "monolithic_lift" else self.parameters["joints"][name]
+            cfg = self.fixture["carriage"] if name == "monolithic_lift" else self.parameters["joints"][name]
             width[dof], velocity[dof] = cfg["limit_width"], cfg["friction_velocity_scale"]
         self.solver = SolverMonolithic(
             model,
             collision_pipeline=pipeline,
             contact_stiffness=max(1e7, floor),
-            normal_smoothing_width=FIXTURE["smoothing_width"],
-            friction_coefficient=0.0 if args.friction_off else FIXTURE["mu"],
-            tangential_stiffness=FIXTURE["tangential_stiffness"],
+            normal_smoothing_width=self.fixture["smoothing_width"],
+            friction_coefficient=0.0 if args.friction_off else self.fixture["mu"],
+            tangential_stiffness=self.fixture["tangential_stiffness"],
             material_model="smith_log_stabilized",
             mass_mode="consistent",
             tet_rest_density=wp.full(model.tet_count, 1000.0, device=device),
@@ -191,7 +250,6 @@ class GraspCase:
         self.state.joint_q.assign(initial)
         self.state.joint_qd.zero_()
         newton.eval_fk(model, self.state.joint_q, self.state.joint_qd, self.state)
-        self.weights = model.particle_mass.numpy().astype(float)
         self.shape_bodies = model.shape_body.numpy()
         self.lower = model.joint_limit_lower.numpy()
         self.upper = model.joint_limit_upper.numpy()
@@ -214,8 +272,20 @@ class GraspCase:
             return result
 
         self.solver._linear.solve_pcg = measure_pcg
+        self._collision_seconds = 0.0
+        collide = pipeline.collide
+
+        def measure_collision(*a, **kw):
+            start = time.perf_counter()
+            try:
+                return collide(*a, **kw)
+            finally:
+                self._collision_seconds += time.perf_counter() - start
+
+        pipeline.collide = measure_collision
         self.manifest.update(
-            fixture=FIXTURE,
+            fixture=self.fixture,
+            experiment="anchored-close" if self.anchored else "grasp",
             calibration_sha256=sha256(args.calibration),
             trajectory_sha256=sha256(args.trajectory),
             mapping=self.mapping,
@@ -224,31 +294,37 @@ class GraspCase:
             normal_stiffness=max(1e7, floor),
             pcg_iteration_p95_budget=64,
             force_convention="world force on rigid body; negate for force on the ball",
-            scope="PR-7A exploratory integration; G6/G7 NOT_VALIDATED",
+            scope="Anchored closure stability/efficiency; not a free grasp"
+            if self.anchored
+            else "PR-7A exploratory integration; G6/G7 NOT_VALIDATED",
         )
 
     def set_target(self, time_s):
         """Freeze the complete hand and carriage control for one physical step."""
         stage, q, qd, lift, lift_v = stage_target(self.trajectory, time_s)
+        if self.anchored and time_s > self.fixture["duration"]:
+            raise ValueError("Time outside anchored closure schedule")
         for i, name in enumerate(self.trajectory.names):
             _, dof, target = self.mapping[name]
             self.target_q[target], self.target_v[dof] = q[i], qd[i]
-        _, dof, target = self.mapping["monolithic_lift"]
-        self.target_q[target], self.target_v[dof] = lift, lift_v
+        if not self.anchored:
+            _, dof, target = self.mapping["monolithic_lift"]
+            self.target_q[target], self.target_v[dof] = lift, lift_v
         self.control.joint_target_q.assign(self.target_q)
         self.control.joint_target_qd.assign(self.target_v)
         return stage
 
     def step(self):
         """Advance one accepted step, stopping without clock advancement on rollback."""
-        if self.failure or self.step_count >= 9000:
+        if self.failure or self.step_count >= self.total_steps:
             return
-        time_s = (self.step_count + 1) * FIXTURE["dt"]
+        time_s = (self.step_count + 1) * self.fixture["dt"]
         stage = self.set_target(time_s)
         self._pcg_calls.clear()
+        self._collision_seconds = 0.0
         start = time.perf_counter()
         try:
-            self.solver.step(self.state, self.state, self.control, None, FIXTURE["dt"])
+            self.solver.step(self.state, self.state, self.control, None, self.fixture["dt"])
         except Exception as error:
             self.failure = f"{type(error).__name__}: {error}"
             return
@@ -275,10 +351,16 @@ class GraspCase:
         for name in ("thumb", "index", "middle", "ring", "pinky"):
             mask = [name in self.model.body_label[b] for b in body]
             per_finger[name] = np.sum(forces[np.asarray(mask, dtype=bool)], axis=0).tolist()
-        support = np.sum(forces[body == 0], axis=0)
+        support = np.zeros(3) if self.anchored else np.sum(forces[body == 0], axis=0)
+        palm = np.sum(forces[body == (0 if self.anchored else 1)], axis=0)
         q = self.state.joint_q.numpy()
         qd = self.state.joint_qd.numpy()
-        hand_root = self.state.body_q.numpy()[1, :3]
+        hand_root = self.state.body_q.numpy()[0 if self.anchored else 1, :3]
+        anchor_unchanged = np.array_equal(x[self.fixed], self.anchor_rest[self.fixed]) and not np.any(
+            self.state.particle_qd.numpy()[self.fixed] != 0
+        )
+        if not anchor_unchanged:
+            self.failure = "Fixed anchor state changed"
         tracking = np.zeros_like(qd)
         violation = np.zeros_like(qd)
         for coord, dof, target in self.mapping.values():
@@ -288,7 +370,7 @@ class GraspCase:
             self.snapshots[str(self.step_count)] = {"q": q.copy(), "x": x.copy()}
         self.records.append(
             {
-                "time": self.step_count * FIXTURE["dt"],
+                "time": self.step_count * self.fixture["dt"],
                 "target_time": time_s,
                 "stage": stage,
                 "converged": stats.converged,
@@ -297,6 +379,14 @@ class GraspCase:
                 "reason": stats.failure_reason,
                 "step_seconds": elapsed,
                 "pcg_calls": list(self._pcg_calls),
+                "collision_seconds": self._collision_seconds,
+                "pcg_seconds": sum(c["seconds"] for c in self._pcg_calls),
+                "other_step_seconds": elapsed - self._collision_seconds - sum(c["seconds"] for c in self._pcg_calls),
+                "anchor_unchanged": anchor_unchanged,
+                "active_contacts": count,
+                "finger_contacts": int(np.count_nonzero(body > (0 if self.anchored else 1))),
+                "finger_force_n": float(sum(np.linalg.norm(f) for f in per_finger.values())),
+                "palm_force": palm.tolist(),
                 "q_target": self.target_q.tolist(),
                 "qd_target": self.target_v.tolist(),
                 "q": q.tolist(),
@@ -333,7 +423,7 @@ class GraspCase:
             calls = [c["iterations"] for r in self.records if r["stage"] == stage for c in r["pcg_calls"]]
             pcg[stage] = float(np.percentile(calls, 95)) if calls else None
         summary = {
-            "complete_schedule": self.step_count == 9000 and self.failure is None,
+            "complete_schedule": self.step_count == self.total_steps and self.failure is None,
             "accepted_steps": self.step_count,
             "failure": self.failure,
             "pcg_iteration_p95": pcg,
@@ -351,6 +441,39 @@ class GraspCase:
         if lift:
             summary["lift_com_rise_m"] = lift[-1]["ball_com"][2] - lift[0]["ball_com"][2]
             summary["lift_support_absent"] = all(not r["support_present"] for r in lift)
+        if self.anchored:
+            hold = [r for r in self.records if r["stage"] == "hold"]
+            gates = self.fixture["gates"]
+            summary["hold_contact_fraction"] = (
+                float(np.mean([r["finger_force_n"] >= gates["minimum_finger_force_n"] for r in hold])) if hold else 0.0
+            )
+            summary["stability_passed"] = bool(
+                summary["complete_schedule"]
+                and summary["converged_fraction"] >= gates["converged_fraction"]
+                and summary["hold_contact_fraction"] >= gates["hold_contact_fraction"]
+                and all(
+                    r["anchor_unchanged"]
+                    and r["penetration"] <= gates["penetration_m"]
+                    and r["min_det_f"] >= gates["min_det_f"]
+                    and (
+                        not r["converged"]
+                        or max(r["residual_ratio"], r["q_residual_ratio"], r["x_residual_ratio"]) <= 1
+                    )
+                    for r in self.records
+                )
+            )
+            summary["maximum_penetration_m"] = max((r["penetration"] for r in self.records), default=None)
+            summary["minimum_det_f"] = min((r["min_det_f"] for r in self.records), default=None)
+            summary["fixed_nodes"] = int(np.count_nonzero(self.fixed))
+            summary["dynamic_nodes"] = int(np.count_nonzero(~self.fixed))
+            summary["stage_timing"] = {
+                stage: {
+                    field: np.percentile([r[field] for r in self.records if r["stage"] == stage][1:], [50, 95]).tolist()
+                    for field in ("step_seconds", "collision_seconds", "pcg_seconds", "other_step_seconds")
+                }
+                for stage in ("prepare", "close", "hold")
+                if sum(r["stage"] == stage for r in self.records) > 1
+            }
         for name, value in (("manifest", self.manifest), ("trace", self.records), ("summary", summary)):
             (output / f"{name}.json").write_text(json.dumps(value, indent=2) + "\n")
         np.savez(
