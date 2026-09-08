@@ -199,3 +199,26 @@ still exercises light middle-finger contact and does not certify free grasping.
 
 The portable acceptance record is
 ``scripts/monolithic_reference/fixtures/pr7c_bsr_prefix_acceptance_v1.json``.
+
+P1 exit and P2 continuation
+---------------------------
+
+P1 is accepted as ``PASS_LIMITED_SCOPE``: joint, material, contact/history,
+transaction and asset/AABB gates, plus the measured anchored-close stability
+and BSR performance. The r3 fixture completed 4500 steps on the accepted
+implementation. The r2 full-run evidence predates PR-7C, which adds a 100-step
+r2 check. The coarse r1 fixture has no force-producing contact and remains
+``NOT_EXERCISED`` for sustained loading. The supported hand-contact envelope
+is the measured light middle-finger contact, with the original tolerances.
+
+Original G6 and the remaining G7 requirements move to P2. P2 must calibrate
+the free-ball grasp, validate Close-Hold-Lift-Release and the friction-off
+negative control, then complete multiple-finger loading, resolution, capacity,
+memory and full-step performance measurements. The original PCG p95 budget of
+64 and physical contact-stiffness floor still determine whether normal-only
+patch Schur becomes mandatory. CPU mesh SDF remains ``NOT_REQUIRED``.
+
+P2 is planned, with development not started. P1 acceptance does not complete
+the V0.2 Grasp MVP. The stage decision, evidence hashes and deferred items are
+recorded in
+``scripts/monolithic_reference/fixtures/p1_limited_acceptance_v1.json``.

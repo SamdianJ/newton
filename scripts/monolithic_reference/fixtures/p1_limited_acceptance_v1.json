@@ -1,0 +1,75 @@
+{
+  "schema": "monolithic-p1-limited-acceptance/v1",
+  "code_commit": "bd0d98502a39670a60e3050e5607379ea9ab73f9",
+  "status": "PASS_LIMITED_SCOPE",
+  "decision_date": "2026-09-08",
+  "authorization": "User approved limited P1 exit and transfer of original G6 and remaining G7 to P2.",
+  "scope": "G0-G5 including G1H/G2H; anchored Sharpa soft-ball contact stability and efficiency; PR-7C active-prefix BSR optimization",
+  "gates": {
+    "G0": "PASS",
+    "G1": "PASS",
+    "G1H": "PASS",
+    "G2": "PASS",
+    "G2H": "PASS",
+    "G3": "PASS",
+    "G4": "PASS",
+    "G5": "PASS",
+    "anchored_close": "PASS_LIMITED_SCOPE",
+    "PR7C": "PASS",
+    "G6": "DEFERRED_TO_P2",
+    "G7": "PARTIAL_DEFERRED_TO_P2",
+    "cpu_mesh_sdf": "NOT_REQUIRED"
+  },
+  "supported_envelope": {
+    "r3": "4500-step PR-7C production and capacity runs passed; latest code canonical",
+    "r2": "Prior full 4500-step evidence; PR-7C 100-step short check only",
+    "r1": "NOT_EXERCISED: no force-producing sustained contact",
+    "loading": "Measured light middle-finger contact; locally fixed ball cap",
+    "excluded": [
+      "multiple-finger high loading",
+      "large compression",
+      "free-ball grasp",
+      "continuous source-mesh contact-force accuracy"
+    ]
+  },
+  "unchanged_gates": {
+    "dt_s": 0.001,
+    "maximum_penetration_m": 0.002,
+    "minimum_det_f": 0.1,
+    "minimum_converged_fraction": 0.99,
+    "hold_contact_fraction": 0.9,
+    "hold_force_floor_n": 0.001,
+    "pcg_call_iteration_p95_budget": 64,
+    "pcg_iteration_hard_limit": 200
+  },
+  "validation": {
+    "source": "PR-7C acceptance",
+    "unique_tests_passed": 650,
+    "skipped_final": 0,
+    "g1h_steps_per_device": 4000,
+    "g2h_cases_per_device": 16,
+    "new_numerical_runs_for_this_record": false
+  },
+  "p2": {
+    "status": "PLANNED_NOT_STARTED",
+    "tasks": {
+      "P2-1": "Free-grasp fixture calibration and freeze",
+      "P2-2": "Original G6, including friction-off negative control",
+      "P2-3": "Remaining G7: loaded resolution/capacity/memory/performance",
+      "P2-4": "Normal-only patch Schur if original PCG/stiffness trigger fires",
+      "P2-5": "Final G6/G7 regression, evidence and V0.2 Grasp MVP exit"
+    },
+    "v02_grasp_mvp": "NOT_COMPLETE"
+  },
+  "authority_sha256": {
+    "newton_monolithic_solver_prd_zh.md": "da2107a04d45227ffcb929fbca5b586c677dbcfd56be445e7eb136f479968f77",
+    "newton_monolithic_solver_p1_architecture_zh.md": "04938ec649e7e16b523c2ca0b2d5a14e4020de4f4418e52c9ee851c024d17f17",
+    "newton_monolithic_solver_next_phase_plan_zh.md": "16f6326a54db5f1276d06273b162a4385ca9fbf4f76baf2d1f8715cf8234eb21",
+    "newton_monolithic_solver_p2_plan_zh.md": "2f8a49ae0d0ef97188dca192486232f2943ab795556945b2f60ed8735e90a6a6"
+  },
+  "report": "agents/integration/P1_FINAL_ACCEPTANCE_REPORT.md",
+  "report_sha256": "01e1a999eb2a79c640dba46752c9ee6d0b931246df3c44fb6ea21d431388a9a5",
+  "acceptance_index": "agents/integration/artifacts/p1/exit/acceptance-index.json",
+  "acceptance_index_sha256": "6cae7906a6198f0fe495b7c75e555f0608ad6932d366d5a6fc142de7161f348f",
+  "artifact_location": "Full plans/reports/traces remain in the shared workspace; this portable record and usage guide are committed to the fork."
+}
