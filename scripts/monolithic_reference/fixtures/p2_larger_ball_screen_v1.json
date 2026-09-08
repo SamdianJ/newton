@@ -1,0 +1,325 @@
+{
+  "schema": "monolithic-p2-larger-ball-screen/v1",
+  "code_commit": "3464d8d5c918208486d16c7ba1a6231509594b32",
+  "scope": "Exploratory loading screen; no Newton sweep or new hotspot profiling yet",
+  "candidate": "25mm r3, stronger single-finger loading; new-radius calibration pending",
+  "default_radius_m": 0.02,
+  "results": [
+    {
+      "radius_mm": 20,
+      "summary": {
+        "ball_radius_m": 0.02,
+        "radius_calibration": "BASELINE_20_MM",
+        "complete_schedule": true,
+        "accepted_steps": 4500,
+        "failure": null,
+        "pcg_iteration_p95": {
+          "close": 20.0,
+          "hold": 17.0,
+          "lift": null,
+          "hold_high": null
+        },
+        "patch_schur_trigger": false,
+        "converged_fraction": 1.0,
+        "G6": "NOT_VALIDATED",
+        "G7": "NOT_VALIDATED",
+        "hold_contact_fraction": 1.0,
+        "stability_passed": true,
+        "maximum_penetration_m": 0.00023857675842009485,
+        "minimum_det_f": 0.5540750026702881,
+        "fixed_nodes": 29,
+        "dynamic_nodes": 314,
+        "stage_timing": {
+          "prepare": {
+            "step_seconds": [
+              0.030350840999744833,
+              0.03245682650049275
+            ],
+            "collision_seconds": [
+              0.002636010000060196,
+              0.0030729916019481608
+            ],
+            "pcg_seconds": [
+              0.008016674000828061,
+              0.008802345300318848
+            ],
+            "other_step_seconds": [
+              0.01950537100310612,
+              0.021510947499336908
+            ]
+          },
+          "close": {
+            "step_seconds": [
+              0.029694425000343472,
+              0.03230899599857366
+            ],
+            "collision_seconds": [
+              0.0026534400021773763,
+              0.0031468184000914335
+            ],
+            "pcg_seconds": [
+              0.007353893999606953,
+              0.00881516760073282
+            ],
+            "other_step_seconds": [
+              0.019428444998993655,
+              0.021715311301340988
+            ]
+          },
+          "hold": {
+            "step_seconds": [
+              0.029812320000928594,
+              0.03181754059951345
+            ],
+            "collision_seconds": [
+              0.002670715000931523,
+              0.0031537452992779435
+            ],
+            "pcg_seconds": [
+              0.00656810800137464,
+              0.007568000201354152
+            ],
+            "other_step_seconds": [
+              0.019783556996117113,
+              0.021692454802905558
+            ]
+          }
+        }
+      },
+      "attempted_steps": 4500,
+      "rollback_steps": 0,
+      "mass_kg": 0.03252061811863182,
+      "initial_returned_penetration_m": 0.0,
+      "peak_force_contacts": 10,
+      "hold_force_contacts_mean": 10.0,
+      "hold_finger_force_mean_n": 0.02556573467320888,
+      "per_finger_peak_n": {
+        "thumb": 0.0,
+        "index": 0.0,
+        "middle": 0.02668263855002007,
+        "ring": 0.0,
+        "pinky": 0.0
+      },
+      "per_finger_hold_mean_n": {
+        "thumb": 0.0,
+        "index": 0.0,
+        "middle": 0.02556573467320888,
+        "ring": 0.0,
+        "pinky": 0.0
+      },
+      "peak_deformation_rms_m": 0.0006485040837667298,
+      "manifest_sha256": "330e9e39df2649d2ab609163669ceb113fba00b819e16c52a71014ade69da214",
+      "trace_sha256": "b7fcce9f71771bf0e55c2234cac39582d130b5e18c720120ebbc9f5195df4186",
+      "summary_sha256": "abece1c90649b45d5bd2aae4aa3200c5e71752968018a313e4d2250ac7664423"
+    },
+    {
+      "radius_mm": 25,
+      "summary": {
+        "ball_radius_m": 0.025,
+        "radius_calibration": "UNVALIDATED_RADIUS_STRESS_TEST",
+        "complete_schedule": true,
+        "accepted_steps": 4500,
+        "failure": null,
+        "pcg_iteration_p95": {
+          "close": 17.0,
+          "hold": 17.0,
+          "lift": null,
+          "hold_high": null
+        },
+        "patch_schur_trigger": false,
+        "converged_fraction": 1.0,
+        "G6": "NOT_VALIDATED",
+        "G7": "NOT_VALIDATED",
+        "hold_contact_fraction": 1.0,
+        "stability_passed": true,
+        "maximum_penetration_m": 0.0006938311271369457,
+        "minimum_det_f": 0.4311228096485138,
+        "fixed_nodes": 29,
+        "dynamic_nodes": 314,
+        "stage_timing": {
+          "prepare": {
+            "step_seconds": [
+              0.02947813599894289,
+              0.031143562800207292
+            ],
+            "collision_seconds": [
+              0.0026833629999600817,
+              0.003073380899695621
+            ],
+            "pcg_seconds": [
+              0.007142038999518263,
+              0.007642863599721749
+            ],
+            "other_step_seconds": [
+              0.019612202000644174,
+              0.02134917210023559
+            ]
+          },
+          "close": {
+            "step_seconds": [
+              0.029536863999965135,
+              0.03184981320009683
+            ],
+            "collision_seconds": [
+              0.002718091000133427,
+              0.003126075599902833
+            ],
+            "pcg_seconds": [
+              0.007080295999912778,
+              0.007860853700367442
+            ],
+            "other_step_seconds": [
+              0.01958769900011248,
+              0.021660080600486253
+            ]
+          },
+          "hold": {
+            "step_seconds": [
+              0.031188363000183017,
+              0.032669720599005816
+            ],
+            "collision_seconds": [
+              0.002799058000164223,
+              0.003227214298021863
+            ],
+            "pcg_seconds": [
+              0.0070207130011112895,
+              0.007823239799472503
+            ],
+            "other_step_seconds": [
+              0.021239824998701806,
+              0.022522261499216257
+            ]
+          }
+        }
+      },
+      "attempted_steps": 4500,
+      "rollback_steps": 0,
+      "mass_kg": 0.06351683431389,
+      "initial_returned_penetration_m": 0.0,
+      "peak_force_contacts": 21,
+      "hold_force_contacts_mean": 21.0,
+      "hold_finger_force_mean_n": 0.439149514885716,
+      "per_finger_peak_n": {
+        "thumb": 0.0,
+        "index": 0.0,
+        "middle": 0.4580693513144384,
+        "ring": 0.0,
+        "pinky": 0.0
+      },
+      "per_finger_hold_mean_n": {
+        "thumb": 0.0,
+        "index": 0.0,
+        "middle": 0.439149514885716,
+        "ring": 0.0,
+        "pinky": 0.0
+      },
+      "peak_deformation_rms_m": 0.0010220794645880377,
+      "manifest_sha256": "8d86c4c487507fc2242fd4e49c42af46e2b2e8b202f0836b4a8df2bdcb7e1e05",
+      "trace_sha256": "01b5992d6df71ee2307b50003e5a5a55fea9b87604412a909048fcc9c064f70b",
+      "summary_sha256": "22ad1c5d5ae8f1f60a57a3b257b7b769813d4655c8167eacf5f4dc8aba44c569"
+    },
+    {
+      "radius_mm": 30,
+      "summary": {
+        "ball_radius_m": 0.03,
+        "radius_calibration": "UNVALIDATED_RADIUS_STRESS_TEST",
+        "complete_schedule": false,
+        "accepted_steps": 2311,
+        "failure": "TET_INVERSION: Tet determinant guard",
+        "pcg_iteration_p95": {
+          "close": 15.0,
+          "hold": null,
+          "lift": null,
+          "hold_high": null
+        },
+        "patch_schur_trigger": false,
+        "converged_fraction": 0.9995674740484429,
+        "G6": "NOT_VALIDATED",
+        "G7": "NOT_VALIDATED",
+        "hold_contact_fraction": 0.0,
+        "stability_passed": false,
+        "maximum_penetration_m": 0.0037838127464056015,
+        "minimum_det_f": 0.20058287680149078,
+        "fixed_nodes": 29,
+        "dynamic_nodes": 314,
+        "stage_timing": {
+          "prepare": {
+            "step_seconds": [
+              0.029936740000266582,
+              0.031838317700021435
+            ],
+            "collision_seconds": [
+              0.00269373499941139,
+              0.00309282889811584
+            ],
+            "pcg_seconds": [
+              0.0062174699996830896,
+              0.006833154599371481
+            ],
+            "other_step_seconds": [
+              0.02099348100091447,
+              0.02279693510135985
+            ]
+          },
+          "close": {
+            "step_seconds": [
+              0.030628374001025804,
+              0.033408641000278294
+            ],
+            "collision_seconds": [
+              0.0027489489984873217,
+              0.003140760999485792
+            ],
+            "pcg_seconds": [
+              0.006383724001352675,
+              0.006974498499403126
+            ],
+            "other_step_seconds": [
+              0.02141921399925195,
+              0.024011259000872087
+            ]
+          }
+        }
+      },
+      "attempted_steps": 2312,
+      "rollback_steps": 1,
+      "mass_kg": 0.10975708134397712,
+      "initial_returned_penetration_m": 0.003465516958385706,
+      "peak_force_contacts": 108,
+      "hold_force_contacts_mean": null,
+      "hold_finger_force_mean_n": null,
+      "per_finger_peak_n": {
+        "thumb": 0.11199374734682897,
+        "index": 0.030137162670805007,
+        "middle": 3.002283342444338,
+        "ring": 1.7641328877361877,
+        "pinky": 0.0
+      },
+      "per_finger_hold_mean_n": {
+        "thumb": null,
+        "index": null,
+        "middle": null,
+        "ring": null,
+        "pinky": null
+      },
+      "peak_deformation_rms_m": 0.0014772276807014971,
+      "manifest_sha256": "0a90188347cbfe7c08f71ca7a66f268cc8a7beec7ebc9b40177ba43c4a93ba8c",
+      "trace_sha256": "0992a057f76ef13aee1bcaeb06d821356357837242b0fe75b36125630c830ac5",
+      "summary_sha256": "79dfe27bc93e1105e91051dd34164adc490b3146db7819fd63a46269dbd68cd2"
+    }
+  ],
+  "tests": {
+    "precommit": 40,
+    "postcommit": 40,
+    "skipped": 0
+  },
+  "report": "agents/integration/P2_LARGER_BALL_SCREEN_REPORT.md",
+  "report_sha256": "258f3c3c30c942e5829fe5a29fa29393f39c06c7780db3db4795c447be311f23",
+  "provenance_sha256": "4e883e17c26e00a97a1bc5d5f8d3375164e8f054cd696a5f6d161f41f3759dc4",
+  "p2_plan_sha256": "f63c122811696b11fcb23b086e6bdbe2986fd5934ea348605be13e5874ae3ddd",
+  "commands_sha256": "9f785be74c0b531e456f0cde93d25b033f26a1a569b55270df3702d4d74350eb",
+  "G6": "NOT_VALIDATED",
+  "G7": "NOT_VALIDATED",
+  "performance_targets": "PENDING_MEASUREMENT"
+}
