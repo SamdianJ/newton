@@ -60,7 +60,7 @@ def load_fraction(time_s):
 
 def build_case(device, *, material, mass, refinement=2, dt=0.02, direction="transverse", load_scale=1.0, density=None):
     """Construct one cantilever and an explicitly uncoupled one-DoF articulation."""
-    if refinement not in (1, 2, 3) or type(refinement) is not int or direction not in ("axial", "transverse"):
+    if refinement not in range(1, 9) or type(refinement) is not int or direction not in ("axial", "transverse"):
         raise ValueError("Invalid G2H refinement or load direction")
     if not np.isfinite(dt) or dt <= 0 or abs(round(0.1 / dt) * dt - 0.1) > 1e-12 or dt > 0.1:
         raise ValueError("G2H dt must divide 100 ms")

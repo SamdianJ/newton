@@ -132,3 +132,116 @@ No timestep-convergence or real-material identification claim is made.
 Use ``--device cuda:0`` for the same CUDA fixture. The gravity plot overlays
 all three physical tip histories, their linear static references, nonlinear
 tail means versus tet count, elastic/kinetic energy and volume change.
+
+Extended refinement and computation cost
+----------------------------------------
+
+Select additional meshes with ``--gravity-refinements``. The integers are
+strictly increasing subdivision factors from 1 to 8; each factor r creates
+``15*r^3`` tetrahedra and ``(3*r+1)*(r+1)^2`` nodes. Geometry, material,
+density, gravity, timestep and the near-static checks remain identical.
+The default three-mesh view is retained for interactive responsiveness.
+The r<=8 limit belongs to this demonstration fixture, not to the solver.
+
+.. code-block:: bash
+
+   uv run --extra examples -m newton.examples monolithic_tet_response --experiment gravity --gravity-refinements 2 4 6 8
+
+For quantitative comparison, run each mesh separately without a viewer.
+The following sweep uses factors 1, 2, 3, 4, 6 and 8 (15 through 7680 tets).
+Run CPU and CUDA sequentially, with no other simulation or GPU workload.
+
+.. code-block:: bash
+
+   OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 uv run --extra examples -m scripts.monolithic_reference.run_gravity_resolution --device cpu --output /tmp/gravity-sweep-cpu
+   OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 uv run --extra examples -m scripts.monolithic_reference.run_gravity_resolution --device cuda:0 --output /tmp/gravity-sweep-cuda
+   uv run --extra examples -m scripts.monolithic_reference.plot_gravity_resolution --results /tmp/gravity-sweep-cpu /tmp/gravity-sweep-cuda --output /tmp/gravity-sweep.png
+
+Each mesh first runs a separate 100-step warmup trajectory to exercise loaded
+solver paths. Each of two measured repetitions starts with a fresh solver and
+State and executes the full 36-second trajectory. Construction and the dense
+NumPy static reference solve are timed separately and excluded from stepping
+cost. File writing and rendering are also excluded.
+
+``solver_ms`` is wall time around ``solver.step`` with device synchronization
+at its boundaries, including the solver's own host orchestration and internal
+transfers. ``step_ms`` additionally includes force/gravity input setup and
+physical measurements. ``measurement_ms`` includes State downloads and the
+NumPy energy/geometry diagnostics. In particular, the existing dense reference
+mass multiplication is diagnostic overhead, not a solver kernel. These
+headless timings cannot be substituted for interactive viewer FPS.
+
+Outputs retain per-step timing and physical traces, mean/median/p95 latency,
+nonlinear and PCG iteration counts, setup time, and separate ramp, settling
+and tail statistics. Simulated seconds per wall second use the **mean** step
+cost; a value below one is slower than real time. Plot error bars show the
+range of the two repetition means, not a statistical confidence interval.
+
+Convergence plots compare verified tail means, show successive relative
+changes and use the finest verified mesh only as a finite-resolution
+reference. A failed or unsettled repetition excludes that mesh from the
+comparison and causes a nonzero runner exit; it cannot serve as a reference.
+Decreasing differences indicate a refinement trend, not proof of convergence
+to a continuum solution or a changed physical material modulus. The step
+size is fixed at 20 ms throughout; no temporal error estimate is implied.
+
+The plot also retains complete dynamic runs that fail the near-static gate:
+these tail means are marked with x and bars spanning plus/minus the full
+tail range. They illustrate the observed response but are not accepted
+static solutions. Their timings remain useful for the same complete
+36-second dynamic workload. The cost-versus-refinement panel uses the
+independent linear static reference difference, explicitly labelled; it
+does not turn an unsettled nonlinear response into a verified static error.
+
+Measured refinement trend
+-------------------------
+
+On a Ryzen 9 8945HX / RTX 5070 Ti Laptop with the protocol above, the
+complete two-repeat sweep gave the following mean solver costs (median of
+the two run means). These are physical-step costs, not viewer frame times.
+
+.. list-table:: Six-mesh sweep (2026-09-08)
+   :header-rows: 1
+
+   * - Tets
+     - Linear static tip [mm]
+     - CPU solver [ms/step]
+     - CUDA solver [ms/step]
+   * - 15
+     - 104.818
+     - 5.50
+     - 9.36
+   * - 120
+     - 205.621
+     - 11.48
+     - 14.82
+   * - 405
+     - 265.808
+     - 24.12
+     - 20.29
+   * - 960
+     - 296.427
+     - 48.33
+     - 28.40
+   * - 3240
+     - 324.475
+     - 286.41
+     - 143.80
+   * - 7680
+     - 335.976
+     - 630.22
+     - 184.83
+
+The last two linear static references differ by 3.42%. This supports a
+spatial refinement trend but does not establish a mesh-independent result.
+The nonlinear runs all complete with 100% normal solver convergence;
+near-static checks pass only r1/r2/r3/r4 on CPU and r1/r2/r3 on CUDA.
+At r8, the final two-second tip range is about 21.4 mm on CPU and 23.0 mm on
+CUDA, so nonlinear static convergence has **not** been demonstrated. The
+runner therefore exits nonzero while retaining all measurements.
+
+Mean PCG iterations rise from about 10 to 403 per step. Iteration count
+is an important profiling target, while assembly/residual and other
+solver work also contribute: r8 steps with zero PCG iterations still cost
+about 181 ms on CPU and 7 ms on CUDA. These observations do not provide
+a kernel-level attribution or a solver complexity bound.

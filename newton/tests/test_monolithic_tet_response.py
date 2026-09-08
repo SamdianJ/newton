@@ -19,6 +19,7 @@ from newton.examples.softbody.monolithic_tet_response import (
     vibration_peaks,
 )
 from newton.tests.unittest_utils import add_function_test, get_test_devices
+from scripts.monolithic_reference.run_gravity_resolution import comparison, performance
 
 
 def test_response_fixture(test, device):
@@ -99,6 +100,54 @@ def test_gravity_resolution(test, device):
 
 
 add_function_test(TestTetResponse, "test_gravity_resolution", test_gravity_resolution, devices=get_test_devices())
+
+
+def test_extended_gravity(test, device):
+    """Exercise refined geometry and synchronized timing without changing physical inputs."""
+    case = ResponseCase(device, experiment="gravity", variant=0, refinement=4)
+    test.assertEqual(case.model.tet_count, 960)
+    test.assertEqual(case.model.particle_count, 325)
+    test.assertAlmostEqual(case.total_mass, 1.08, places=6)
+    test.assertEqual(case.label, "r4")
+    timing = case.step(profile=True)
+    test.assertGreater(timing["solver_ms"], 0)
+    test.assertGreaterEqual(timing["step_ms"], timing["solver_ms"] + timing["measurement_ms"])
+    test.assertEqual(timing["linear_iterations"], case.solver.last_stats.linear_iterations)
+    test.assertEqual(case.steps, 1)
+    test.assertEqual(case.records[-1]["time"], 0.02)
+    for refinement in (0, 9, 2.5, True):
+        with test.assertRaises(ValueError):
+            ResponseCase(device, experiment="gravity", variant=0, refinement=refinement)
+
+
+add_function_test(TestTetResponse, "test_extended_gravity", test_extended_gravity, devices=get_test_devices())
+
+
+class TestGravityAnalysis(unittest.TestCase):
+    def test_invalid_run_not_used_as_reference(self):
+        """Exclude failed fine meshes and avoid comparing across a missing mesh result."""
+        rows = [
+            {"refinement": i, "verified": valid, "tip_mean_m": tip}
+            for i, valid, tip in ((1, True, 0.1), (2, False, None), (3, True, 0.2), (4, False, None))
+        ]
+        result = comparison(rows)
+        self.assertFalse(result["all_verified"])
+        self.assertEqual(result["reference_refinement"], 3)
+        self.assertEqual(rows[0]["relative_difference_to_finest"], 0.5)
+        self.assertIsNone(rows[2]["relative_change_from_previous"])
+        self.assertIsNone(rows[3]["relative_difference_to_finest"])
+
+    def test_performance_units(self):
+        """Compute throughput from arithmetic wall time rather than median step latency."""
+        records = [
+            {"solver_ms": t, "step_ms": t + 2, "measurement_ms": 1, "nonlinear_iterations": 1, "linear_iterations": 10}
+            for t in (2, 2, 8)
+        ]
+        stats = performance(records, 0.02)
+        self.assertEqual(stats["solver_ms"]["mean"], 4)
+        self.assertEqual(stats["solver_real_time_factor"], 5)
+        self.assertAlmostEqual(stats["measured_step_real_time_factor"], 20 / 6)
+
 
 if __name__ == "__main__":
     unittest.main()

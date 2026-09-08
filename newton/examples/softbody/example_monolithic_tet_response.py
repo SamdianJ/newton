@@ -17,10 +17,17 @@ class Example:
     def __init__(self, viewer, args):
         self.viewer = viewer
         self.experiment = args.experiment
-        self.cases = [
-            ResponseCase(args.device, experiment=args.experiment, variant=i)
-            for i in range(3 if args.experiment == "gravity" else 2)
-        ]
+        refinements = getattr(args, "gravity_refinements", None)
+        if refinements is not None and (args.experiment != "gravity" or refinements != sorted(set(refinements))):
+            raise ValueError("gravity-refinements requires gravity and strictly increasing refinements")
+        self.cases = (
+            [ResponseCase(args.device, experiment="gravity", variant=0, refinement=r) for r in refinements]
+            if refinements is not None
+            else [
+                ResponseCase(args.device, experiment=args.experiment, variant=i)
+                for i in range(3 if args.experiment == "gravity" else 2)
+            ]
+        )
         self.dt = self.cases[0].dt
         self.duration = self.cases[0].duration
         self.substeps = round((0.12 if args.experiment == "gravity" else 0.04) / self.dt)
@@ -36,6 +43,8 @@ class Example:
         self.viewer.set_camera(pos=wp.vec3(2.8, -2.6, 2.3), pitch=-28, yaw=125)
         if self.experiment == "gravity":
             self.viewer.set_camera(pos=wp.vec3(3.0, -3.0, 2.5), pitch=-28, yaw=125)
+            if len(self.cases) > 3:
+                self.viewer.set_camera(pos=wp.vec3(4.2, -3.5, 4.0), pitch=-28, yaw=125)
         self.buffers = []
         for i, case in enumerate(self.cases):
             faces = case.model.tri_indices.numpy()
@@ -58,6 +67,13 @@ class Example:
     def create_parser():
         parser = newton.examples.create_parser()
         parser.add_argument("--experiment", choices=("material", "mass", "gravity"), default="material")
+        parser.add_argument(
+            "--gravity-refinements",
+            type=int,
+            nargs="+",
+            choices=range(1, 9),
+            help="Increasing gravity mesh refinements; default: 1 2 3",
+        )
         parser.add_argument("--display-scale", type=float, help="Visual deformation multiplier; physics is unchanged")
         parser.add_argument("--output", help="Write physical traces and fixture manifests")
         parser.set_defaults(num_frames=300)
@@ -85,7 +101,16 @@ class Example:
                 device=case.model.device,
             )
             wp.launch(_edges, len(edges), [points, edges, starts, ends], device=case.model.device)
-            color = ((0.2, 0.55, 0.95), (0.95, 0.5, 0.2), (0.2, 0.8, 0.45))[i]
+            color = (
+                (0.2, 0.55, 0.95),
+                (0.95, 0.5, 0.2),
+                (0.2, 0.8, 0.45),
+                (0.75, 0.4, 0.9),
+                (0.9, 0.75, 0.2),
+                (0.2, 0.8, 0.85),
+                (0.9, 0.4, 0.6),
+                (0.65, 0.7, 0.75),
+            )[i]
             self.viewer.log_mesh(case.label, points, faces, color=color)
             self.viewer.log_lines(case.label + " mesh", starts, ends, (0.15, 0.2, 0.25))
             self.viewer.log_lines(case.label + " undeformed", rest_starts, rest_ends, (0.75, 0.75, 0.75))
@@ -101,10 +126,10 @@ class Example:
             }[self.experiment]
         )
         ui.text(f"Deformation display: {self.display_scale:g}x (physics: 1x)")
-        ui.text("Blue: " + self.cases[0].label + " / Orange: " + self.cases[1].label)
+        ui.text("Mesh order: " + " / ".join(c.label for c in self.cases))
         ui.text(f"Time: {self.sim_time:.2f} / {self.duration:g} s")
         if self.experiment == "gravity":
-            ui.text("Green: fine; tip positive downward")
+            ui.text("Tip positive downward")
             ui.text(f"Gravity: {self.cases[0].records[-1]['gravity_m_s2']:.2f} m/s^2")
             ui.text("Same E=10 kPa, density=10 kg/m^3")
         else:
@@ -127,6 +152,8 @@ class Example:
                 ui.text(f"Measured period: {period:.3f} s" if period else "Collecting 3 positive peaks...")
             elif self.experiment == "gravity":
                 ui.text(f"Linear static reference: {1000 * case.linear_static_tip:.2f} mm")
+                if self.sim_time >= self.duration - 1e-10:
+                    ui.text("Tail: settled" if case.summary()["near_static"] else "Tail: not settled at end")
 
     def write_results(self):
         if self.output is None:

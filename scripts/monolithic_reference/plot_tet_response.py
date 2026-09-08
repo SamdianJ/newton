@@ -22,16 +22,27 @@ def main():
     args = parser.parse_args()
     args.output.mkdir(parents=True, exist_ok=True)
     found = False
-    for experiment, labels in (
+    for experiment, default_labels in (
         ("material", ("Kim", "Smith")),
         ("mass", ("lumped", "consistent")),
         ("gravity", ("coarse", "medium", "fine")),
     ):
         if not (args.results / experiment).exists():
             continue
+        labels = default_labels
+        if experiment == "gravity":
+            directories = [p for p in (args.results / experiment).iterdir() if (p / "manifest.json").exists()]
+            labels = [
+                p.name
+                for p in sorted(directories, key=lambda p: json.loads((p / "manifest.json").read_text())["tet_count"])
+            ]
         found = True
         fig, axes = plt.subplots(2, 2, figsize=(11, 7))
-        for label, color in zip(labels, ("#328bd9", "#e67e36", "#32ae78")[: len(labels)], strict=True):
+        for label, color in zip(
+            labels,
+            ("#328bd9", "#e67e36", "#32ae78", "#aa55cc", "#c9a42d", "#29a9bd", "#cc6688", "#778899")[: len(labels)],
+            strict=True,
+        ):
             directory = args.results / experiment / label
             records = [json.loads(line) for line in (directory / "trace.jsonl").read_text().splitlines()]
             summary = json.loads((directory / "summary.json").read_text())

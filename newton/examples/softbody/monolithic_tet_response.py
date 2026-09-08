@@ -5,8 +5,10 @@
 
 import hashlib
 import json
+from time import perf_counter
 
 import numpy as np
+import warp as wp
 
 from newton.examples.softbody.monolithic_tet_compare import build_case, reference_matrices
 
@@ -39,11 +41,15 @@ def vibration_peaks(records):
 class ResponseCase:
     """Advance a separate simulation through the existing coupled solver."""
 
-    def __init__(self, device, *, experiment, variant):
+    def __init__(self, device, *, experiment, variant, refinement=None):
         if experiment not in ("material", "mass", "gravity") or variant not in range(
             3 if experiment == "gravity" else 2
         ):
             raise ValueError("Invalid experiment or comparison variant")
+        if refinement is not None and (
+            experiment != "gravity" or type(refinement) is not int or refinement not in range(1, 9)
+        ):
+            raise ValueError("Explicit refinement requires gravity and an integer in [1,8]")
         self.experiment = experiment
         self.dt = 0.01 if experiment == "mass" else 0.02
         self.duration = 36.0 if experiment == "gravity" else DURATION
@@ -51,12 +57,14 @@ class ResponseCase:
         mass = "lumped" if experiment == "mass" and variant == 0 else "consistent"
         self.label = ("Kim", "Smith")[variant] if experiment == "material" else mass
         if experiment == "gravity":
-            self.label = ("coarse", "medium", "fine")[variant]
+            self.label = ("coarse", "medium", "fine")[variant] if refinement is None else f"r{refinement}"
         self.model, self.solver, self.state, self.control, self.rest, self.weights, _, base = build_case(
             device,
             material=material,
             mass=mass,
-            refinement=variant + 1 if experiment == "gravity" else (2 if experiment == "material" else 1),
+            refinement=(refinement or variant + 1)
+            if experiment == "gravity"
+            else (2 if experiment == "material" else 1),
             direction="axial",
             dt=self.dt,
             density=10.0 if experiment == "gravity" else None,
@@ -152,7 +160,9 @@ class ResponseCase:
             )
         return record
 
-    def step(self):
+    def step(self, *, profile=False):
+        """Advance one step; optionally separate synchronized solver and host measurement time."""
+        start = perf_counter() if profile else 0
         time_s = (self.steps + 1) * self.dt
         force = traction(time_s) if self.experiment == "material" else 0.0
         external = np.zeros_like(self.rest, dtype=np.float32)
@@ -160,12 +170,27 @@ class ResponseCase:
         self.state.particle_f.assign(external)
         if self.experiment == "gravity":
             self.model.set_gravity((0, 0, -gravity_acceleration(time_s)))
+        if profile:
+            wp.synchronize_device(self.model.device)
+            solver_start = perf_counter()
         self.solver.step(self.state, self.state, self.control, None, self.dt)
+        if profile:
+            wp.synchronize_device(self.model.device)
+            solver_end = perf_counter()
         stats = self.solver.last_stats
         if stats.rolled_back:
             raise RuntimeError(f"{self.label} rollback at {time_s}: {stats.failure_reason}")
         self.records.append(self.measure(time_s, force, stats))
         self.steps += 1
+        if profile:
+            end = perf_counter()
+            return {
+                "step_ms": 1000 * (end - start),
+                "solver_ms": 1000 * (solver_end - solver_start),
+                "measurement_ms": 1000 * (end - solver_end),
+                "nonlinear_iterations": stats.nonlinear_iterations,
+                "linear_iterations": stats.linear_iterations,
+            }
 
     def summary(self):
         records = self.records
