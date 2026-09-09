@@ -359,3 +359,18 @@ convergence, true-residual, curvature, finite-value, stagnation and failure
 checks. This is a PCG policy, not a switch for all solver diagnostics or a
 promise of zero synchronization. The modes are **not implemented yet**; see
 ``scripts/monolithic_reference/fixtures/p2_pcg_diagnostics_plan_v1.json``.
+
+Planned CUDA Graph scope and operation inventory
+------------------------------------------------
+
+P2 targets segmented PCG capture and other stable computation segments only
+when measured benefits justify them. Full-step capture remains deferred.
+No monolithic operations are currently integrated into CUDA Graphs. The
+operation inventory is maintained in
+``scripts/monolithic_reference/fixtures/p2_cuda_graph_inventory_v1.json``
+and the workspace table ``agents/integration/P2_CUDA_GRAPH_INVENTORY.md``.
+Each integration must record its commit, graph boundaries, pointer/layout
+and scalar-update requirements, correctness evidence and measured benefit.
+Newton/line-search decisions, dynamic BSR construction, buffer swaps and
+transaction publication initially remain outside graphs. Graph execution
+is independent of PCG diagnostic mode and is planned to default to off.

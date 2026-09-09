@@ -1,0 +1,198 @@
+{
+  "schema": "monolithic-p2-cuda-graph-inventory/v1",
+  "status": "PLANNED_NOT_IMPLEMENTED",
+  "inspected_commit": "f276c3b123fc987b59e4b9c7424e7ec536edcd33",
+  "integrated_operation_count": 0,
+  "operations": [
+    {
+      "id": "pcg_direction",
+      "operation": "PCG：Ap→曲率归约→alpha/状态",
+      "current": "OUTSIDE_GRAPH",
+      "p2_scope": "P2_REQUIRED",
+      "boundary": "固定矩阵/指针；必要状态判断留图外",
+      "source": "newton/_src/solvers/monolithic/linear.py",
+      "implementation_commit": null,
+      "correctness": "NOT_RUN",
+      "performance": "NOT_RUN"
+    },
+    {
+      "id": "pcg_residual",
+      "operation": "PCG：解/递推残差更新→范数归约",
+      "current": "OUTSIDE_GRAPH",
+      "p2_scope": "P2_REQUIRED",
+      "boundary": "保持提前真实残差检查时机；判断留图外",
+      "source": "newton/_src/solvers/monolithic/linear.py",
+      "implementation_commit": null,
+      "correctness": "NOT_RUN",
+      "performance": "NOT_RUN"
+    },
+    {
+      "id": "pcg_precondition",
+      "operation": "PCG：预条件应用→rᵀz/正性检查→方向更新",
+      "current": "OUTSIDE_GRAPH",
+      "p2_scope": "P2_REQUIRED",
+      "boundary": "正性检查与后续方向更新的依赖须保留；必要时拆为两个图段",
+      "source": "newton/_src/solvers/monolithic/linear.py",
+      "implementation_commit": null,
+      "correctness": "NOT_RUN",
+      "performance": "NOT_RUN"
+    },
+    {
+      "id": "pcg_true_residual",
+      "operation": "PCG：真实残差与global/q/x归约",
+      "current": "OUTSIDE_GRAPH",
+      "p2_scope": "P2_REQUIRED",
+      "boundary": "图内只算数值；收敛/stagnation/残差替换分支仍在图外",
+      "source": "newton/_src/solvers/monolithic/linear.py",
+      "implementation_commit": null,
+      "correctness": "NOT_RUN",
+      "performance": "NOT_RUN"
+    },
+    {
+      "id": "articulation",
+      "operation": "FK/Jacobian/质量矩阵的稳定计算段",
+      "current": "OUTSIDE_GRAPH",
+      "p2_scope": "P2_CANDIDATE",
+      "boundary": "先验证自有kernel；收益不足时不增加独立图",
+      "source": "newton/_src/solvers/monolithic/articulation.py",
+      "implementation_commit": null,
+      "correctness": "NOT_RUN",
+      "performance": "NOT_RUN"
+    },
+    {
+      "id": "tet",
+      "operation": "tet residual/tangent及固定尺寸scatter",
+      "current": "OUTSIDE_GRAPH",
+      "p2_scope": "P2_CANDIDATE",
+      "boundary": "固定缓冲/装配token正确；tet状态回读在图外",
+      "source": "newton/_src/solvers/monolithic/tet.py",
+      "implementation_commit": null,
+      "correctness": "NOT_RUN",
+      "performance": "NOT_RUN"
+    },
+    {
+      "id": "contact",
+      "operation": "AABB/接触查询与contact求值设备段",
+      "current": "OUTSIDE_GRAPH",
+      "p2_scope": "P2_CANDIDATE",
+      "boundary": "固定容量launch、device active count；generation及错误判断分离",
+      "source": "newton/_src/solvers/monolithic/collision.py",
+      "implementation_commit": null,
+      "correctness": "NOT_RUN",
+      "performance": "NOT_RUN"
+    },
+    {
+      "id": "bsr_build",
+      "operation": "有效前缀triplets→BSR构建/动态容量",
+      "current": "OUTSIDE_GRAPH",
+      "p2_scope": "OUTSIDE_P2",
+      "boundary": "保留PR-7C按实际count装配；回读/临时存储/容量变化在图外",
+      "source": "newton/_src/solvers/monolithic/linear.py",
+      "implementation_commit": null,
+      "correctness": "NOT_RUN",
+      "performance": "NOT_RUN"
+    },
+    {
+      "id": "newton_control",
+      "operation": "Newton提前退出及line search/regularization控制",
+      "current": "OUTSIDE_GRAPH",
+      "p2_scope": "OUTSIDE_P2",
+      "boundary": "主机根据实际结果分支；不改固定最大迭代",
+      "source": "newton/_src/solvers/monolithic/solver_monolithic.py",
+      "implementation_commit": null,
+      "correctness": "NOT_RUN",
+      "performance": "NOT_RUN"
+    },
+    {
+      "id": "pcg_control",
+      "operation": "PCG终止、stagnation、检查时机与失败决策",
+      "current": "OUTSIDE_GRAPH",
+      "p2_scope": "OUTSIDE_P2",
+      "boundary": "首版仍由主机决定，控制包在图边界回读",
+      "source": "newton/_src/solvers/monolithic/linear.py",
+      "implementation_commit": null,
+      "correctness": "NOT_RUN",
+      "performance": "NOT_RUN"
+    },
+    {
+      "id": "transaction",
+      "operation": "accepted/trial交换、history提交/回滚与epoch",
+      "current": "OUTSIDE_GRAPH",
+      "p2_scope": "OUTSIDE_P2",
+      "boundary": "Python交换不会自动随图重放；保留主机事务边界",
+      "source": "newton/_src/solvers/monolithic/contact.py",
+      "implementation_commit": null,
+      "correctness": "NOT_RUN",
+      "performance": "NOT_RUN"
+    },
+    {
+      "id": "inputs",
+      "operation": "轨迹采样/Control更新、步长及初始输入校验",
+      "current": "OUTSIDE_GRAPH",
+      "p2_scope": "OUTSIDE_P2",
+      "boundary": "在launch前更新稳定地址输入；只在成功提交后推进时间",
+      "source": "newton/_src/solvers/monolithic/solver_monolithic.py",
+      "implementation_commit": null,
+      "correctness": "NOT_RUN",
+      "performance": "NOT_RUN"
+    },
+    {
+      "id": "publication",
+      "operation": "State/force最终发布、Stats与诊断导出",
+      "current": "OUTSIDE_GRAPH",
+      "p2_scope": "OUTSIDE_P2",
+      "boundary": "保留主机发布/错误检查；可选PCG诊断集中回读",
+      "source": "newton/_src/solvers/monolithic/solver_monolithic.py",
+      "implementation_commit": null,
+      "correctness": "NOT_RUN",
+      "performance": "NOT_RUN"
+    },
+    {
+      "id": "setup",
+      "operation": "资产/SDF构建、JIT、workspace分配、capture/失效处理",
+      "current": "OUTSIDE_GRAPH",
+      "p2_scope": "OUTSIDE_P2",
+      "boundary": "预热与图管理在图外，setup与replay时间分开报告",
+      "source": "newton/_src/solvers/monolithic/solver_monolithic.py",
+      "implementation_commit": null,
+      "correctness": "NOT_RUN",
+      "performance": "NOT_RUN"
+    },
+    {
+      "id": "example_io",
+      "operation": "example测量、NumPy/绘图、viewer与文件IO",
+      "current": "OUTSIDE_GRAPH",
+      "p2_scope": "OUTSIDE_P2",
+      "boundary": "不纳入solver图，成本单列",
+      "source": "newton/examples/softbody/monolithic_sharpa_grasp.py",
+      "implementation_commit": null,
+      "correctness": "NOT_RUN",
+      "performance": "NOT_RUN"
+    },
+    {
+      "id": "full_step",
+      "operation": "完整solver.step或整帧多substeps捕获",
+      "current": "OUTSIDE_GRAPH",
+      "p2_scope": "DEFERRED",
+      "boundary": "需要图内控制与事务设计；不是本P2出口要求",
+      "source": "newton/_src/solvers/monolithic/solver_monolithic.py",
+      "implementation_commit": null,
+      "correctness": "NOT_RUN",
+      "performance": "NOT_RUN"
+    }
+  ],
+  "default_graph_enabled": false,
+  "pcg_mode_independent": true,
+  "scope": "Stable beneficial segments and PCG segmented capture; full-step capture deferred",
+  "acceptance": [
+    "CUDA repeated capture/replay and unchanged numerical/exit/transaction semantics",
+    "pointer/layout/scalar updates and graph invalidation",
+    "graph on/off continuous Sharpa/tet cases plus CPU non-graph regressions",
+    "capture/rebuild amortization, memory, sync and full solve/step cost",
+    "at least 5 quiet warmed loaded repeats"
+  ],
+  "inventory_report": "agents/integration/P2_CUDA_GRAPH_INVENTORY.md",
+  "inventory_report_sha256": "f4c05a1adc63ab0a78cb6c6844b2eb4c7ff53c54887c50441176c252c8a7b04b",
+  "plan_snapshot": "agents/integration/artifacts/p2/p2-cuda-graph-planning/newton_monolithic_solver_p2_plan_zh.md",
+  "plan_sha256": "62d5e9100fe2bb61faf5b77aa2a6886134f0f99ee8e3845a84745029f480a24e"
+}
