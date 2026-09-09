@@ -779,6 +779,70 @@ def _pcg_update_direction(z: wp.array[float], p: wp.array[float], beta: wp.array
     p[i] = value
 
 
+@wp.struct
+class _MonolithicPcgPacket:
+    status: int
+    check: int
+    ratios: wp.vec3
+
+
+@wp.kernel
+def _pack_monolithic_pcg_residual(
+    status: wp.array[int], ratios: wp.array[float], packet: wp.array[_MonolithicPcgPacket]
+):
+    value = _MonolithicPcgPacket()
+    value.status = status[0]
+    value.ratios = wp.vec3(ratios[0], ratios[1], ratios[2])
+    packet[0] = value
+
+
+@wp.kernel
+def _cache_monolithic_pcg_denominator(norms: wp.array[float], floor: wp.float64, denominator: wp.array[wp.float64]):
+    denominator[0] = wp.max(wp.float64(norms[3]), floor)
+
+
+@wp.kernel
+def _pack_monolithic_pcg_check(
+    products: wp.array[float],
+    status: wp.array[int],
+    denominator: wp.array[wp.float64],
+    tolerance: wp.float64,
+    scheduled: bool,
+    packet: wp.array[_MonolithicPcgPacket],
+):
+    value = _MonolithicPcgPacket()
+    value.status = status[0]
+    # The old host decision used Python doubles, including the configured floor.
+    threshold = tolerance * denominator[0]
+    value.check = int(scheduled or wp.float64(products[0]) <= threshold * threshold)
+    packet[0] = value
+
+
+@wp.kernel
+def _record_monolithic_pcg_product(products: wp.array[float], summary: wp.array[float], index: int, first: bool):
+    value = products[0]
+    old = summary[index]
+    # Preserve Python min's NaN ordering and the old curvature initialization.
+    if first or (index == 0 and wp.isnan(old)) or value < old:
+        summary[index] = value
+
+
+@wp.kernel
+def _record_monolithic_pcg_norms(norms: wp.array[float], summary: wp.array[float], initial: bool, first: bool):
+    if initial:
+        summary[2] = norms[0]
+    else:
+        for i in range(3):
+            old = float(summary[3 + i])
+            value = float(norms[i])
+            if first:
+                summary[3 + i] = value
+            elif not wp.isfinite(old) or not wp.isfinite(value):
+                summary[3 + i] = wp.nan
+            elif value > old:
+                summary[3 + i] = value
+
+
 @wp.kernel
 def _true_residual_maxima(
     ay: wp.array[float],
@@ -787,6 +851,7 @@ def _true_residual_maxima(
     residual: wp.array[float],
     maxima: wp.array[float],
     status: wp.array[int],
+    compute_rhs: bool,
 ):
     i = wp.tid()
     value = rhs[i] - ay[i]
@@ -799,8 +864,9 @@ def _true_residual_maxima(
         block = 2
     wp.atomic_max(maxima, 0, wp.abs(value))
     wp.atomic_max(maxima, block, wp.abs(value))
-    wp.atomic_max(maxima, 3, wp.abs(rhs[i]))
-    wp.atomic_max(maxima, block + 3, wp.abs(rhs[i]))
+    if compute_rhs:
+        wp.atomic_max(maxima, 3, wp.abs(rhs[i]))
+        wp.atomic_max(maxima, block + 3, wp.abs(rhs[i]))
 
 
 @wp.kernel
@@ -811,6 +877,7 @@ def _true_residual_sums(
     maxima: wp.array[float],
     sums: wp.array[float],
     status: wp.array[int],
+    compute_rhs: bool,
 ):
     i = wp.tid()
     if status[0] != 0:
@@ -826,7 +893,7 @@ def _true_residual_sums(
         if maxima[index] > 0.0:
             value = residual[i] / maxima[index]
             wp.atomic_add(sums, index, value * value)
-        if maxima[index + 3] > 0.0:
+        if compute_rhs and maxima[index + 3] > 0.0:
             value = rhs[i] / maxima[index + 3]
             wp.atomic_add(sums, index + 3, value * value)
 
@@ -886,7 +953,13 @@ class MonolithicLinearWorkspace:
         particle_to_dynamic: wp.array[int],
         *,
         device: wp.DeviceLike,
+        pcg_mode: str = "diagnostic",
     ):
+        if pcg_mode not in ("diagnostic", "production"):
+            raise ValueError("pcg_mode must be diagnostic or production")
+        self._pcg_mode = pcg_mode
+        self._pcg_active = False
+        self._rhs_norms_cached = False
         self.layout = layout
         self.capacities = capacities
         self.device = wp.get_device(device)
@@ -970,12 +1043,17 @@ class MonolithicLinearWorkspace:
         self._true_sums = wp.zeros(6, dtype=float, device=device)
         self._true_maxima = wp.zeros(6, dtype=float, device=device)
         self._true_norms = wp.zeros(6, dtype=float, device=device)
-        self._diagnostic_vector = wp.zeros(n, dtype=float, device=device)
-        self._diagnostic_zero = wp.zeros(n, dtype=float, device=device)
-        self._diagnostic_maxima = wp.zeros(6, dtype=float, device=device)
-        self._diagnostic_sums = wp.zeros(6, dtype=float, device=device)
-        self._diagnostic_norms = wp.zeros(6, dtype=float, device=device)
-        self._diagnostic_status = wp.zeros(1, dtype=int, device=device)
+        self._true_residual_norms = self._true_norms[:3]
+        if self.pcg_mode == "diagnostic":
+            self._diagnostic_vector = wp.zeros(n, dtype=float, device=device)
+            self._diagnostic_zero = wp.zeros(n, dtype=float, device=device)
+            self._diagnostic_maxima = wp.zeros(6, dtype=float, device=device)
+            self._diagnostic_sums = wp.zeros(6, dtype=float, device=device)
+            self._diagnostic_norms = wp.zeros(6, dtype=float, device=device)
+            self._diagnostic_status = wp.zeros(1, dtype=int, device=device)
+            self._diagnostic_summary = wp.zeros(6, dtype=float, device=device)
+        self._pcg_packet = wp.zeros(1, dtype=_MonolithicPcgPacket, device=device)
+        self._rhs_denominator = wp.zeros(1, dtype=wp.float64, device=device)
         self.factor_setup_count = 0
         self.factor_failure_count = 0
         self.factor_last_status = None
@@ -1317,7 +1395,12 @@ class MonolithicLinearWorkspace:
         self.factor_failure_count += int(not self._factor_valid)
         return status
 
-    def _diagnostic_block_norms(self, vector) -> tuple[float, float, float]:
+    @property
+    def pcg_mode(self) -> str:
+        """Return the immutable execution mode selected at construction."""
+        return self._pcg_mode
+
+    def _diagnostic_block_norms(self, vector) -> None:
         """Measure scaled vector norms without altering iterative solver status or scratch."""
         if vector is not self._diagnostic_vector:
             wp.copy(self._diagnostic_vector, vector)
@@ -1335,6 +1418,7 @@ class MonolithicLinearWorkspace:
                 self._diagnostic_vector,
                 self._diagnostic_maxima,
                 self._diagnostic_status,
+                True,
             ],
             device=self.device,
         )
@@ -1348,6 +1432,7 @@ class MonolithicLinearWorkspace:
                 self._diagnostic_maxima,
                 self._diagnostic_sums,
                 self._diagnostic_status,
+                True,
             ],
             device=self.device,
         )
@@ -1357,7 +1442,6 @@ class MonolithicLinearWorkspace:
             [self._diagnostic_maxima, self._diagnostic_sums, self._diagnostic_norms, self._diagnostic_status],
             device=self.device,
         )
-        return tuple(float(value) for value in self._diagnostic_norms.numpy()[:3])
 
     def _products_of(self, a, b):
         self._products.zero_()
@@ -1368,23 +1452,27 @@ class MonolithicLinearWorkspace:
         self.operator.matvec(y, self._ap, self._ap, 1.0, 0.0)
         self._true_sums.zero_()
         self._true_maxima.zero_()
-        self._true_norms.fill_(float("nan"))
+        compute_rhs = not (self._pcg_active and self._rhs_norms_cached)
+        if compute_rhs:
+            self._true_norms.fill_(float("nan"))
+        else:
+            self._true_residual_norms.fill_(float("nan"))
         self._ratios.fill_(float("nan"))
         wp.launch(
             _true_residual_maxima,
             y.size,
-            [self._ap, rhs, self.layout.q_dof_count, self._true_r, self._true_maxima, self._status],
+            [self._ap, rhs, self.layout.q_dof_count, self._true_r, self._true_maxima, self._status, compute_rhs],
             device=self.device,
         )
         wp.launch(
             _true_residual_sums,
             y.size,
-            [self._true_r, rhs, self.layout.q_dof_count, self._true_maxima, self._true_sums, self._status],
+            [self._true_r, rhs, self.layout.q_dof_count, self._true_maxima, self._true_sums, self._status, compute_rhs],
             device=self.device,
         )
         wp.launch(
             _compute_true_residual_norms,
-            6,
+            6 if compute_rhs else 3,
             [self._true_maxima, self._true_sums, self._true_norms, self._status],
             device=self.device,
         )
@@ -1401,7 +1489,23 @@ class MonolithicLinearWorkspace:
             ],
             device=self.device,
         )
-        return tuple(float(value) for value in self._ratios.numpy())
+        if compute_rhs:
+            wp.launch(
+                _cache_monolithic_pcg_denominator,
+                1,
+                [self._true_norms, config.residual_floor_global, self._rhs_denominator],
+                device=self.device,
+            )
+            self._rhs_norms_cached = True
+        wp.launch(
+            _pack_monolithic_pcg_residual,
+            1,
+            [self._status, self._ratios, self._pcg_packet],
+            device=self.device,
+        )
+        packet = self._pcg_packet.numpy()[0]
+        self._pcg_boundary_status = MonolithicLinearStatus(int(packet["status"]))
+        return tuple(float(value) for value in packet["ratios"])
 
     def solve_pcg(
         self,
@@ -1423,8 +1527,16 @@ class MonolithicLinearWorkspace:
         min_p_ap, min_r_z = float("nan"), float("nan")
         applied_warm_start, initial_guess_norm, stagnation_window = None, float("nan"), None
         residual_gap, gap_samples = (float("nan"),) * 3, 0
+        diagnostic = self.pcg_mode == "diagnostic"
+        diagnostic_started = False
 
         def result(status):
+            nonlocal min_p_ap, min_r_z, initial_guess_norm, residual_gap
+            self._pcg_active = False
+            if diagnostic_started:
+                summary = self._diagnostic_summary.numpy()
+                min_p_ap, min_r_z, initial_guess_norm = map(float, summary[:3])
+                residual_gap = tuple(map(float, summary[3:]))
             return MonolithicLinearSolveResult(
                 status,
                 generation,
@@ -1440,22 +1552,31 @@ class MonolithicLinearWorkspace:
                 stagnation_window,
             )
 
+        def record_product(index, first=False):
+            if diagnostic:
+                wp.launch(
+                    _record_monolithic_pcg_product,
+                    1,
+                    [self._products, self._diagnostic_summary, index, first],
+                    device=self.device,
+                )
+
         def record_gap():
-            nonlocal residual_gap, gap_samples
+            nonlocal gap_samples
+            if not diagnostic:
+                return
             wp.launch(
                 _combine_vectors,
                 self._r.size,
                 [self._r, self._true_r, self._diagnostic_vector, 1.0, -1.0],
                 device=self.device,
             )
-            norms = self._diagnostic_block_norms(self._diagnostic_vector)
-            residual_gap = (
-                norms
-                if gap_samples == 0
-                else tuple(
-                    max(old, new) if np.isfinite(old) and np.isfinite(new) else float("nan")
-                    for old, new in zip(residual_gap, norms, strict=True)
-                )
+            self._diagnostic_block_norms(self._diagnostic_vector)
+            wp.launch(
+                _record_monolithic_pcg_norms,
+                1,
+                [self._diagnostic_norms, self._diagnostic_summary, False, gap_samples == 0],
+                device=self.device,
             )
             gap_samples += 1
 
@@ -1480,11 +1601,22 @@ class MonolithicLinearWorkspace:
         if warm_start == MonolithicPcgWarmStart.ZERO:
             y.zero_()
         applied_warm_start = MonolithicPcgWarmStart(warm_start)
-        initial_guess_norm = self._diagnostic_block_norms(y)[0]
+        self._pcg_active = True
+        self._rhs_norms_cached = False
+        if diagnostic:
+            self._diagnostic_summary.fill_(float("nan"))
+            diagnostic_started = True
+            self._diagnostic_block_norms(y)
+            wp.launch(
+                _record_monolithic_pcg_norms,
+                1,
+                [self._diagnostic_norms, self._diagnostic_summary, True, True],
+                device=self.device,
+            )
         stagnation_window = config.stagnation_window
         ratios = self._true_residual(rhs_hat, y, config)
         checks += 1
-        status = self._read_status()
+        status = self._pcg_boundary_status
         if status != MonolithicLinearStatus.SUCCESS:
             return result(status)
         if max(ratios) <= config.linear_tolerance:
@@ -1499,7 +1631,7 @@ class MonolithicLinearWorkspace:
             [self._products, config.preconditioner_positive_tolerance, self._r_z, self._status],
             device=self.device,
         )
-        min_r_z = float(self._products.numpy()[0])
+        record_product(1, first=True)
         status = self._read_status()
         if status != MonolithicLinearStatus.SUCCESS:
             return result(status)
@@ -1523,8 +1655,7 @@ class MonolithicLinearWorkspace:
                 ],
                 device=self.device,
             )
-            curvature = float(self._products.numpy()[0])
-            min_p_ap = curvature if np.isnan(min_p_ap) else min(min_p_ap, curvature)
+            record_product(0)
             status = self._read_status()
             if status != MonolithicLinearStatus.SUCCESS:
                 break
@@ -1536,21 +1667,29 @@ class MonolithicLinearWorkspace:
             )
             iterations = iteration
             self._products_of(self._r, self._r)
-            recursive_sq = float(self._products.numpy()[0])
-            status = self._read_status()
+            wp.launch(
+                _pack_monolithic_pcg_check,
+                1,
+                [
+                    self._products,
+                    self._status,
+                    self._rhs_denominator,
+                    config.linear_tolerance,
+                    iteration % config.true_residual_interval == 0 or iteration == config.maximum_iterations,
+                    self._pcg_packet,
+                ],
+                device=self.device,
+            )
+            packet = self._pcg_packet.numpy()[0]
+            status = MonolithicLinearStatus(int(packet["status"]))
             if status != MonolithicLinearStatus.SUCCESS:
                 break
-            denominator = max(float(self._true_norms.numpy()[3]), config.residual_floor_global)
-            check = (
-                iteration % config.true_residual_interval == 0
-                or iteration == config.maximum_iterations
-                or recursive_sq <= (config.linear_tolerance * denominator) ** 2
-            )
+            check = bool(packet["check"])
             if check:
                 ratios = self._true_residual(rhs_hat, y, config)
                 record_gap()
                 checks += 1
-                status = self._read_status()
+                status = self._pcg_boundary_status
                 if status != MonolithicLinearStatus.SUCCESS:
                     break
                 if max(ratios) <= config.linear_tolerance:
@@ -1578,7 +1717,7 @@ class MonolithicLinearWorkspace:
                 [self._products, config.preconditioner_positive_tolerance, self._r_z, self._status],
                 device=self.device,
             )
-            min_r_z = min(min_r_z, float(self._products.numpy()[0]))
+            record_product(1)
             status = self._read_status()
             if status != MonolithicLinearStatus.SUCCESS:
                 break
@@ -1603,7 +1742,7 @@ class MonolithicLinearWorkspace:
         if iterations:
             record_gap()
         checks += 1
-        if self._read_status() == MonolithicLinearStatus.NONFINITE_ITERATION:
+        if self._pcg_boundary_status == MonolithicLinearStatus.NONFINITE_ITERATION:
             status = MonolithicLinearStatus.NONFINITE_ITERATION
         return result(status)
 
