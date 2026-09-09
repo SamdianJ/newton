@@ -1,0 +1,181 @@
+{
+  "schema": "monolithic-p2-architecture/v1",
+  "status": "DESIGN_FOR_REVIEW",
+  "implementation_status": "NOT_STARTED",
+  "baseline_commit": "87d736b0389566a58631293775693cbef4d25c68",
+  "architecture": "scripts/monolithic_reference/p2_architecture_zh.md",
+  "architecture_sha256": "17aeb449086ecade063500ce123bde22548300d4b22c8b2cf5b1c6e0660c3533",
+  "workspace_architecture": "dev/monothlic/newton_monolithic_solver_p2_architecture_zh.md",
+  "snapshot": "agents/integration/artifacts/p2/p2-architecture-v1/newton_monolithic_solver_p2_architecture_zh.md",
+  "inputs": [
+    {
+      "path": "dev/monothlic/newton_monolithic_solver_prd_zh.md",
+      "sha256": "da2107a04d45227ffcb929fbca5b586c677dbcfd56be445e7eb136f479968f77",
+      "snapshot": "agents/integration/artifacts/p2/p2-architecture-v1/inputs/newton_monolithic_solver_prd_zh.md"
+    },
+    {
+      "path": "dev/monothlic/newton_monolithic_solver_p1_architecture_zh.md",
+      "sha256": "04938ec649e7e16b523c2ca0b2d5a14e4020de4f4418e52c9ee851c024d17f17",
+      "snapshot": "agents/integration/artifacts/p2/p2-architecture-v1/inputs/newton_monolithic_solver_p1_architecture_zh.md"
+    },
+    {
+      "path": "dev/monothlic/newton_monolithic_solver_p2_plan_zh.md",
+      "sha256": "08dc5dc4086cab2628aec201344deb5cb9109600f24073eafdf29112181c0475",
+      "snapshot": "agents/integration/artifacts/p2/p2-architecture-v1/inputs/newton_monolithic_solver_p2_plan_zh.md"
+    },
+    {
+      "path": "agents/integration/P2_0_DIAGNOSTICS_REPORT.md",
+      "sha256": "99bc6c9ef4866b157c6723b9ba74f88411cacc5d42725950539cf40068b4431c",
+      "snapshot": "agents/integration/artifacts/p2/p2-architecture-v1/inputs/P2_0_DIAGNOSTICS_REPORT.md"
+    },
+    {
+      "path": "agents/integration/P2_CUDA_GRAPH_INVENTORY.md",
+      "sha256": "f4c05a1adc63ab0a78cb6c6844b2eb4c7ff53c54887c50441176c252c8a7b04b",
+      "snapshot": "agents/integration/artifacts/p2/p2-architecture-v1/inputs/P2_CUDA_GRAPH_INVENTORY.md"
+    },
+    {
+      "path": "worktrees/monolithic-integration/scripts/monolithic_reference/fixtures/p2_owned_mass_matrix_plan_v1.json",
+      "sha256": "078d882b9d08003ae57f88f742c1ea4b9075e1cb0d2a2c22717cdaed9e27b053",
+      "snapshot": "agents/integration/artifacts/p2/p2-architecture-v1/inputs/p2_owned_mass_matrix_plan_v1.json"
+    },
+    {
+      "path": "worktrees/monolithic-integration/scripts/monolithic_reference/fixtures/p2_pcg_diagnostics_plan_v1.json",
+      "sha256": "032877cd4c97f089a4b24cd5ececa0f9ae85ae2f21c5c64631510420a0540a95",
+      "snapshot": "agents/integration/artifacts/p2/p2-architecture-v1/inputs/p2_pcg_diagnostics_plan_v1.json"
+    },
+    {
+      "path": "worktrees/monolithic-integration/scripts/monolithic_reference/fixtures/p2_cuda_graph_inventory_v1.json",
+      "sha256": "d9de475a927a7fb6353c7855aeb5511c641a4e50de5af7b9d7d4c67afec640cb",
+      "snapshot": "agents/integration/artifacts/p2/p2-architecture-v1/inputs/p2_cuda_graph_inventory_v1.json"
+    },
+    {
+      "path": "worktrees/monolithic-integration/scripts/monolithic_reference/fixtures/p2_preconditioner_study_v1.json",
+      "sha256": "0ba9a90d174c32e31cffbfd2168c1fb276c5222a406d46f4541493b6de32c37a",
+      "snapshot": "agents/integration/artifacts/p2/p2-architecture-v1/inputs/p2_preconditioner_study_v1.json"
+    },
+    {
+      "path": "worktrees/monolithic-integration/scripts/monolithic_reference/fixtures/p2_remaining_compute_plan_v1.json",
+      "sha256": "0cdf8ae45da327971e3dc7a9c3b9a08d45fad62159fbc97e458cf651d07bf454",
+      "snapshot": "agents/integration/artifacts/p2/p2-architecture-v1/inputs/p2_remaining_compute_plan_v1.json"
+    }
+  ],
+  "prs": [
+    {
+      "id": "PR-8A",
+      "state": "NOT_STARTED",
+      "depends_on": [],
+      "dependency_semantics": "Completed development/validation or documented conditional decision; not merely started"
+    },
+    {
+      "id": "PR-8B",
+      "state": "NOT_STARTED",
+      "depends_on": [
+        "PR-8A"
+      ],
+      "dependency_semantics": "Completed development/validation or documented conditional decision; not merely started"
+    },
+    {
+      "id": "PR-8C",
+      "state": "NOT_STARTED",
+      "depends_on": [
+        "PR-8A"
+      ],
+      "dependency_semantics": "Completed development/validation or documented conditional decision; not merely started"
+    },
+    {
+      "id": "PR-8D",
+      "state": "NOT_STARTED",
+      "depends_on": [
+        "PR-8C"
+      ],
+      "dependency_semantics": "Completed development/validation or documented conditional decision; not merely started"
+    },
+    {
+      "id": "PR-8E",
+      "state": "NOT_STARTED",
+      "depends_on": [
+        "PR-8A"
+      ],
+      "dependency_semantics": "Completed development/validation or documented conditional decision; not merely started"
+    },
+    {
+      "id": "PR-8F",
+      "state": "NOT_STARTED",
+      "depends_on": [
+        "PR-8A"
+      ],
+      "dependency_semantics": "Completed development/validation or documented conditional decision; not merely started"
+    },
+    {
+      "id": "PR-8G",
+      "state": "CONDITIONAL_NOT_STARTED",
+      "depends_on": [
+        "PR-8C",
+        "PR-8D",
+        "PR-8E",
+        "PR-8F"
+      ],
+      "dependency_semantics": "Completed development/validation or documented conditional decision; not merely started"
+    },
+    {
+      "id": "PR-8H",
+      "state": "NOT_STARTED",
+      "depends_on": [
+        "PR-8A"
+      ],
+      "dependency_semantics": "Completed development/validation or documented conditional decision; not merely started"
+    },
+    {
+      "id": "PR-8I",
+      "state": "CONDITIONAL_NOT_STARTED",
+      "depends_on": [
+        "PR-8H"
+      ],
+      "dependency_semantics": "Completed development/validation or documented conditional decision; not merely started"
+    },
+    {
+      "id": "PR-8J",
+      "state": "NOT_STARTED",
+      "depends_on": [
+        "PR-8B",
+        "PR-8C",
+        "PR-8D",
+        "PR-8E",
+        "PR-8F",
+        "PR-8G",
+        "PR-8H",
+        "PR-8I"
+      ],
+      "dependency_semantics": "Completed development/validation or documented conditional decision; not merely started"
+    },
+    {
+      "id": "PR-8K",
+      "state": "NOT_STARTED",
+      "depends_on": [
+        "PR-8H",
+        "PR-8I",
+        "PR-8J"
+      ],
+      "dependency_semantics": "Completed development/validation or documented conditional decision; not merely started"
+    },
+    {
+      "id": "PR-8L",
+      "state": "NOT_STARTED",
+      "depends_on": [
+        "PR-8K"
+      ],
+      "dependency_semantics": "Completed development/validation or documented conditional decision; not merely started"
+    }
+  ],
+  "last_performance_optimization_pr": "PR-8J",
+  "final_validation_pr": "PR-8K",
+  "exit_pr": "PR-8L",
+  "open_items": [
+    "OPEN-01",
+    "OPEN-02",
+    "OPEN-03",
+    "OPEN-04",
+    "SCHUR-SPD-01",
+    "OPEN-05"
+  ]
+}

@@ -409,3 +409,18 @@ correctness gates. Prefer parallelism, intermediate reuse and reduced writes;
 retain changes only when complete step/trajectory timings improve reproducibly.
 This work is **planned, not implemented**; a measured no-go may defer it.
 See ``scripts/monolithic_reference/fixtures/p2_remaining_compute_plan_v1.json``.
+
+P2 architecture and PR sequence
+-------------------------------
+
+The review draft in ``scripts/monolithic_reference/p2_architecture_zh.md``
+splits P2 into PR-8A through PR-8L: measurement repair, owned mass matrix,
+PCG diagnostics, segmented graphs, two preconditioner studies, conditional
+integration, free-grasp calibration, conditional patch Schur, remaining
+compute optimization, final G6/G7 validation and exit records. Development,
+verification, dependencies and admission gates are listed separately.
+Remaining Smith/assembly/contact optimization is the last performance batch.
+The multi-patch Schur SPD construction requires a design proof before that
+conditional implementation. No new solver capabilities are delivered by this
+document. Input hashes are in ``fixtures/p2_architecture_v1.json`` relative
+to ``scripts/monolithic_reference``.
