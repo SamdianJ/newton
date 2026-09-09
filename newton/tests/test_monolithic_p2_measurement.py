@@ -21,6 +21,81 @@ from scripts.monolithic_reference.p2_measurement import evidence_index, frame_sa
 
 
 class TestP2Measurement(unittest.TestCase):
+    def test_tet_phase_boundaries(self):
+        for time_s, phase in (
+            (0, "loading"),
+            (2, "loading"),
+            (2.02, "hold"),
+            (33.98, "hold"),
+            (34, "tail"),
+            (36, "tail"),
+        ):
+            self.assertEqual(tet.phase_of(time_s), phase)
+
+    def test_matrix_capture_uses_actual_call_in_window(self):
+        case = SimpleNamespace(
+            steps=0,
+            dt=0.02,
+            manifest={},
+            solver=SimpleNamespace(_linear=SimpleNamespace(solve_pcg=lambda: None)),
+        )
+
+        def step(case):
+            if case.steps + 1 in (50, 154, 1703):
+                case.solver._linear.solve_pcg()
+            case.steps += 1
+            return {"rollback": False, "time": case.steps * case.dt}
+
+        for steps, expected in ((1750, {"loading": 1.0, "hold": 3.08, "tail": 34.06}), (100, {"loading": 1.0})):
+            case.steps = 0
+            with (
+                tempfile.TemporaryDirectory() as directory,
+                patch.object(tet, "ResponseCase", return_value=case),
+                patch.object(tet, "timing_step", side_effect=step),
+                patch.object(tet, "export_candidate", side_effect=lambda *a, **kw: kw["time_s"]),
+            ):
+                saved = tet.matrix_run("cpu", 1, Path(directory), steps=steps)
+                self.assertEqual(saved, expected)
+                sampling = json.loads((Path(directory) / "sampling.json").read_text())
+                self.assertEqual(sampling["windows"]["loading"]["status"], "CAPTURED")
+                self.assertEqual(
+                    sampling["windows"]["tail"]["status"], "CAPTURED" if steps == 1750 else "NOT_REQUESTED"
+                )
+
+    def test_common_frames_excludes_rollback(self):
+        rows = [
+            {
+                "time": t,
+                "stage": "hold",
+                "ball_com": [0, 0, 0],
+                "deformation_rms": 0,
+                "finger_force_n": 1,
+                "penetration": p,
+                "min_det_f": 1,
+                "rollback": failed,
+            }
+            for t, p, failed in ((0.01, 0.001, False), (0.02, 0.1, True))
+        ]
+        result = sharpa.common_frames(rows, 0.01)
+        self.assertEqual([row["time"] for row in result["samples"]], [0.01])
+        self.assertEqual(result["per_step_peaks"]["penetration"], 0.001)
+
+    def test_zero_accepted_time_has_no_per_simulated_rates(self):
+        row = {
+            "stage": "hold",
+            "time": 0.01,
+            "step_seconds": 0.002,
+            "nonlinear_iterations": 1,
+            "linear_iterations": 2,
+            "matrix_assembly_count": 2,
+            "pcg_iterations_sum": 2,
+            "status": "FAILED",
+            "rollback": True,
+        }
+        result = sharpa.work_stats([row], 0.01)
+        self.assertIsNone(result["solver_wall_seconds_per_simulated_second"])
+        self.assertTrue(all(value is None for value in result["per_simulated_second"].values()))
+
     def test_nested_time_accounting(self):
         """Partition enclosing time exactly and retain samples when a child fails."""
         solver = SimpleNamespace(model=SimpleNamespace(device="cpu"), _linear=SimpleNamespace(preconditioner=None))
@@ -156,8 +231,10 @@ class TestP2Measurement(unittest.TestCase):
                 {"iterations": 80, "status": "SUCCESS", "seconds": 0.04},
             ],
         ):
-            row = sharpa.slim_record({"pcg_calls": calls, "finger_forces": {}}, stats, None)
+            legacy = {"collision_seconds": 1, "pcg_seconds": 2, "other_step_seconds": 3}
+            row = sharpa.slim_record({"pcg_calls": calls, "finger_forces": {}, **legacy}, stats, None)
             self.assertEqual(row.get("pcg_calls"), calls)
+            self.assertTrue(set(legacy).isdisjoint(row))
 
     def _window(self, fail):
         device = SimpleNamespace(is_cuda=False)

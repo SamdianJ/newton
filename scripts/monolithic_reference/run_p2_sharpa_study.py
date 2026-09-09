@@ -145,6 +145,8 @@ def args_for(mesh, output):
 
 def slim_record(record, stats, curve):
     slim = {key: value for key, value in record.items() if key not in HEAVY_KEYS}
+    for key in ("collision_seconds", "pcg_seconds", "other_step_seconds"):
+        slim.pop(key, None)
     slim.update(
         nonlinear_iterations=stats.nonlinear_iterations,
         linear_iterations=stats.linear_iterations,
@@ -234,14 +236,17 @@ def work_stats(records, dt):
             "pcg_per_call_iterations": _percentiles([c["iterations"] for r in rows for c in r.get("pcg_calls", [])]),
             "pcg_per_call_ms": _percentiles([1000 * c["seconds"] for r in rows for c in r.get("pcg_calls", [])]),
         }
-    duration = max(sum(not r.get("rollback", False) for r in records) * dt, dt)
+    duration = sum(not r.get("rollback", False) for r in records) * dt
     return {
         "stages": by_stage,
         "per_simulated_second": {
-            "newton_updates": float(sum(r["nonlinear_iterations"] for r in records) / duration),
-            "assemblies": float(sum(r["matrix_assembly_count"] for r in records) / duration),
-            "pcg_iterations": float(sum(r["pcg_iterations_sum"] for r in records) / duration),
-            "wall_seconds": float(sum(r["step_seconds"] for r in records) / duration),
+            name: sum(r[key] for r in records) / duration if duration else None
+            for name, key in (
+                ("newton_updates", "nonlinear_iterations"),
+                ("assemblies", "matrix_assembly_count"),
+                ("pcg_iterations", "pcg_iterations_sum"),
+                ("wall_seconds", "step_seconds"),
+            )
         },
         **throughput(
             sum(r["step_seconds"] for r in records),
@@ -253,6 +258,7 @@ def work_stats(records, dt):
 
 
 def common_frames(records, dt):
+    records = [row for row in records if not row.get("rollback", False)]
     wanted = {round(i * FRAME_DT, 10) for i in range(round(DURATION / FRAME_DT) + 1)}
     frames = []
     for row in records:
@@ -477,7 +483,7 @@ def run_case(job, output, *, nsys_window=None, stage_profile=False):
         "setup_seconds": setup_s,
         "run_wall_seconds": wall,
         "unrecorded_failure_solver_seconds": unrecorded_failure_seconds,
-        "wall_seconds_per_simulated_second": wall / max(case.step_count * h, h),
+        "wall_seconds_per_simulated_second": wall / (case.step_count * h) if case.step_count else None,
         "complete": bool(summary["complete_schedule"]),
         "failure": summary.get("failure"),
         "quality": quality(traces, summary, h),
@@ -504,6 +510,10 @@ def run_case(job, output, *, nsys_window=None, stage_profile=False):
                 round(FRAME_DT / h),
             )
         )
+        if "per_simulated_second" in compact["work"]:
+            compact["work"]["per_simulated_second"]["wall_seconds"] = compact["work"][
+                "solver_wall_seconds_per_simulated_second"
+            ]
     payload = "".join(json.dumps(json_safe(row), sort_keys=True, allow_nan=False) + "\n" for row in traces)
     (output / "trace.jsonl").write_text(payload)
     (output / "trace.jsonl.sha256").write_text(hashlib.sha256(payload.encode()).hexdigest() + "\n")

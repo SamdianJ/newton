@@ -80,9 +80,12 @@ def mempool(device):
 
 
 def phase_of(time_s):
-    for start, end, name in PHASES:
-        if start <= time_s <= end + 1e-12:
-            return name
+    if 0 <= time_s <= 2:
+        return "loading"
+    if 2 < time_s < 34:
+        return "hold"
+    if 34 <= time_s <= 36 + 1e-12:
+        return "tail"
     return "other"
 
 
@@ -440,26 +443,41 @@ def material_replay(device, refinement, candidate, output):
 
 
 def matrix_run(device, refinement, output, *, steps=1750):
-    """Collect first actual PCG calls at loading/hold/tail times on an independent trajectory."""
+    """Collect the first actual PCG call in each bounded window on a fresh trajectory."""
     case = ResponseCase(device, experiment="gravity", variant=0, refinement=refinement)
-    marks = {50: "loading", 150: "hold", 1750: "tail"}
+    windows = {"loading": (50, 100), "hold": (150, 1699), "tail": (1700, 1750)}
+    sampling = {
+        label: {
+            "requested_steps_inclusive": [start, end],
+            "requested_time_s_inclusive": [start * case.dt, end * case.dt],
+            "status": "NOT_REQUESTED" if steps < start else "NO_PCG_IN_WINDOW",
+        }
+        for label, (start, end) in windows.items()
+    }
     saved = {}
     original = case.solver._linear.solve_pcg
 
     def capture(*args, **kwargs):
         step = case.steps + 1
-        if step in marks and marks[step] not in saved:
-            label = marks[step]
-            saved[label] = export_candidate(
-                case.solver, output / f"{label}.npz", time_s=step * case.dt, fixture=case.manifest
-            )
+        for label, (start, end) in windows.items():
+            if start <= step <= end and label not in saved:
+                saved[label] = export_candidate(
+                    case.solver, output / f"{label}.npz", time_s=step * case.dt, fixture=case.manifest
+                )
+                sampling[label].update(status="CAPTURED", step=step, time_s=step * case.dt, pcg_call_in_step=1)
         return original(*args, **kwargs)
 
-    with patch.object(case.solver._linear, "solve_pcg", new=capture):
-        for _ in range(steps):
-            row = timing_step(case)
-            if row["rollback"]:
-                raise RuntimeError(f"Matrix trajectory rollback at {row['time']}")
+    try:
+        with patch.object(case.solver._linear, "solve_pcg", new=capture):
+            for _ in range(steps):
+                row = timing_step(case)
+                if row["rollback"]:
+                    raise RuntimeError(f"Matrix trajectory rollback at {row['time']}")
+    finally:
+        output.mkdir(parents=True, exist_ok=True)
+        (output / "sampling.json").write_text(
+            json.dumps({"completed_steps": case.steps, "windows": sampling}, indent=2) + "\n"
+        )
     return saved
 
 

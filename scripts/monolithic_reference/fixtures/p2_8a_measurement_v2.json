@@ -18,7 +18,8 @@
       "substep_scan": [1, 2, 4, 5, 10, 20, 40]
     },
     "gravity_tet": {
-      "devices": ["cpu", "cuda:0"],
+      "devices": ["cuda:0"],
+      "cpu_scope": "Historical performance reference only per user decision 2026-09-09; correctness regressions retained",
       "refinements": [5, 3, 4, 6],
       "material": "smith_log_stabilized",
       "mass": "consistent",
