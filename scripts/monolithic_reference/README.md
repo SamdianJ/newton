@@ -209,6 +209,11 @@ and record its time; exported inputs own their storage across later solver steps
 The regression command is
 `uv run --extra dev -m unittest newton.tests.test_monolithic_p2_measurement`.
 The old P2-0 files remain historical evidence. New measurements use schema v2
-and cannot restore missing historical source/check logs. Physical timestep
-selection and performance/tail/memory budgets remain pending until calibration
-and review; the runner does not alter solver defaults.
+and cannot restore missing historical source/check logs. The 2026-09-10 scoped
+delivery is recorded in `fixtures/p2_8a_closeout_v1.json`: 30 valid CUDA repeats,
+17 captured matrices, Nsight attribution, eight new Newton checks, and reuse of
+the retained P2-0 timestep exploration. The user accepted closing measurement
+work with existing data; no full sweep was restarted. Physical timestep
+selection remains deferred, and performance/tail/memory acceptance budgets are
+delivered as a reviewable draft. The record does not certify every architecture
+gate or change solver defaults. Tet's PCG p95 budget failures remain visible.

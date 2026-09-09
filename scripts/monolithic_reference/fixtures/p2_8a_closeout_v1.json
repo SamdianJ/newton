@@ -1,0 +1,537 @@
+{
+  "schema": "monolithic-p2-8a-closeout/v1",
+  "date": "2026-09-10",
+  "status": "SCOPED_DELIVERY_COMPLETE_WITH_RETAINED_GAPS",
+  "authorization": "User accepted existing-data closeout after rerun reassessment; isolated reruns allowed only if necessary. No additional simulations required.",
+  "architecture_all_gates_passed": false,
+  "measurement_delivery_complete": true,
+  "budget_status": "DRAFT_FOR_REVIEW_NOT_FROZEN",
+  "evidence_root": "agents/integration/artifacts/p2/pr8a-measurement",
+  "report": {
+    "path": "agents/integration/PR8A_MEASUREMENT_REPORT.md",
+    "sha256": "13c67078b977af9f264a0c9af471cad8bdd5c27c3693dc485b274518a6204438"
+  },
+  "implementation_commits": [
+    "a3bb760daaf037d6f371e1c7f77cc9cf8e314320",
+    "b95d635a9fdd99081f14b980211a904d75ee7c8e",
+    "2eac449e528a0efa62b4d4ab9b117822dfdfec7c"
+  ],
+  "validation": {
+    "related_cpu_cuda_tests": 44,
+    "implementation_precommit": "PASS",
+    "data_check": {
+      "status": "PASS",
+      "run_indexes": 50,
+      "indexed_files": 692,
+      "source_archives": 51,
+      "archived_source_files": 59770,
+      "valid_cuda_repeats": 30,
+      "matrices": 17,
+      "complete_newton_checks": 8,
+      "common_q_qd_frames_each": 450,
+      "per_joint_friction_integral_check": "PASS",
+      "figures": "Three PNGs visually inspected; labels distinguish retained and new measurements",
+      "timestep_selection": "DEFERRED; not certified by this verification"
+    },
+    "new_simulation_runs_at_closeout": 0
+  },
+  "baseline": {
+    "valid_cuda_repeats": 30,
+    "workloads": 6,
+    "repeats_each": 5,
+    "baseline_commit": "a3bb760daaf037d6f371e1c7f77cc9cf8e314320",
+    "normal_convergence_fraction": 1.0,
+    "cpu_performance": "CANCELLED_BY_USER; historical reference only"
+  },
+  "diagnostics": {
+    "cuda_jobs": 9,
+    "matrices": 17,
+    "includes_one_prior_window_duplicate": true,
+    "nsight_correlated_kernels": 10312,
+    "newton_checks_completed": 8
+  },
+  "retained_exploration": {
+    "trajectories": 23,
+    "files_hash_verified": 92,
+    "limits": "Old runtime script not recovered; no full common-time q/qd or contact-history diagnostics. Old PCG p95 remains historical reported evidence."
+  },
+  "default_configuration": "UNCHANGED: Sharpa N=10,h=1ms,S=10; tet h=20ms,S=6",
+  "scope_adjustments": [
+    "CPU performance excluded; correctness retained",
+    "Post-drift scan timing excluded from recommendations; power mode unchanged",
+    "Do not restart partial N24 or six unstarted S jobs; up to eight cross jobs deferred"
+  ],
+  "deferred_requirements": [
+    {
+      "id": "TIME-ERROR",
+      "status": "DEFERRED",
+      "condition": "Before recommending a new timestep: declare tolerances, collect missing q/qd and contact-history observations, verify bounded finer reference and selected r3/r2 candidates"
+    },
+    {
+      "id": "BUDGET-REVIEW",
+      "status": "DRAFT_DELIVERED",
+      "condition": "Before formal performance acceptance: review and freeze workload cost/tail/memory criteria; align device state and measurement protocol"
+    },
+    {
+      "id": "TET-PCG",
+      "status": "BASELINE_FAILS_P95_64",
+      "condition": "Retain p95 64 / hard 200 for subsequent optimization acceptance; no rerunning to discard slow or high-iteration cases"
+    },
+    {
+      "id": "HISTORICAL-PROVENANCE",
+      "status": "NOT_RECORDED",
+      "condition": "Old runtime script and old precommit logs cannot be restored by new runs"
+    },
+    {
+      "id": "PHYSICS-EXIT",
+      "status": "UNCHANGED",
+      "condition": "Near-static issue, free grasp calibration and G6/G7 remain in their original phases"
+    }
+  ],
+  "downstream_use": "Measurement and matrix evidence is available for 8B/8C development and offline studies; formal candidate acceptance still requires matched conditions and finalized budgets.",
+  "budget_rules": {
+    "status": "DRAFT_FOR_REVIEW_NOT_FROZEN",
+    "quality_gates": {
+      "normal_convergence_min": 0.99,
+      "soft_stops_count_as_normal": false,
+      "rollback_or_exception": "STOP; no time advance",
+      "linear_tolerance": 0.0001,
+      "pcg_actual_call_p95_limit": 64,
+      "pcg_hard_iteration_limit": 200,
+      "normal_global_q_x_residual_ratio_max": 1,
+      "internal_det_f_guard": 0.2,
+      "sharpa_acceptance_min_det_f": 0.1,
+      "tet_existing_min_det_f": 0.2,
+      "sharpa_initial_penetration_m": 0.002
+    },
+    "comparison": "Same physical inputs, N/h, PCG tolerances, diagnostic mode and graph mode. Inclusive hierarchy times must not be summed or compared to normal step timing as independent costs.",
+    "workloads": {
+      "sharpa-cuda:0-r2": {
+        "configuration": {
+          "duration_s": 4.5,
+          "dt_s": 0.001,
+          "substeps": 10,
+          "frame_dt_s": 0.01,
+          "newton_max_iterations": 10,
+          "pcg_mode": "existing diagnostic",
+          "cuda_graph": false
+        },
+        "valid_repeats": 5,
+        "observed_solver_wall_per_sim_second": {
+          "count": 5,
+          "p50": 24.573078159820096,
+          "p95": 25.698896856421683,
+          "min": 23.946649284016328,
+          "max": 25.864935325801426
+        },
+        "observed_relative_full_range": 0.07806453995339192,
+        "proposed_total_cost_rule": "At least five quality-passing quiet repeats; candidate maximum solver wall/sim must be below baseline minimum. Rebaseline on changed hardware/software or unstable workload. Also require setup-amortized total cost improvement over the declared horizon.",
+        "proposed_solver_wall_per_sim_second_ceiling_exclusive": 23.946649284016328,
+        "setup_amortization_duration_s": 4.5,
+        "observed_setup_seconds_range": [
+          3.562168714001018,
+          3.817020489997958
+        ],
+        "proposed_tail_rule": "No additional regression beyond the observed baseline maximum p95 for each phase; solve and step evaluated separately.",
+        "memory": {
+          "proposed_sampled_driver_peak_bytes_ceiling": 1080033280,
+          "proposed_process_hwm_bytes_ceiling": 1499160576,
+          "rule": "Conservative no-growth draft against observed maxima; an optimization needing more memory requires an explicit revised budget before acceptance.",
+          "limitations": "Driver process memory sampled each second, not a guaranteed transient peak; HWM includes setup/warmup. Pool allocation and driver usage are separate quantities."
+        },
+        "observed_pcg_per_call_p95_range": {
+          "count": 5,
+          "p50": 10.0,
+          "p95": 10.0,
+          "min": 10.0,
+          "max": 10.0
+        },
+        "inherited_pcg_budget_status": "PASS",
+        "physical_repeat_noise": {
+          "q_max_abs_difference_from_first": 1.5497207641601562e-06,
+          "qd_max_abs_difference_from_first": 0.0005276011652313173,
+          "x_max_abs_difference_from_first": 2.1748244762420654e-05,
+          "v_max_abs_difference_from_first": 0.0010207295417785645
+        },
+        "physical_timestep_error": "PENDING_REFERENCE_STABILITY; keep current h/N, no changed timestep accepted",
+        "phase_p95_ms_draft_ceiling": {
+          "prepare": {
+            "step": 27.860826498545066,
+            "pcg_solve": 5.475461500282108
+          },
+          "close": {
+            "step": 28.478147398709552,
+            "pcg_solve": 5.44265999997151
+          },
+          "hold": {
+            "step": 28.385694497956138,
+            "pcg_solve": 5.216752000524139
+          }
+        }
+      },
+      "sharpa-cuda:0-r3": {
+        "configuration": {
+          "duration_s": 4.5,
+          "dt_s": 0.001,
+          "substeps": 10,
+          "frame_dt_s": 0.01,
+          "newton_max_iterations": 10,
+          "pcg_mode": "existing diagnostic",
+          "cuda_graph": false
+        },
+        "valid_repeats": 5,
+        "observed_solver_wall_per_sim_second": {
+          "count": 5,
+          "p50": 30.460230107735292,
+          "p95": 30.478167894675508,
+          "min": 30.008456840457963,
+          "max": 30.48041487490991
+        },
+        "observed_relative_full_range": 0.01549423733119125,
+        "proposed_total_cost_rule": "At least five quality-passing quiet repeats; candidate maximum solver wall/sim must be below baseline minimum. Rebaseline on changed hardware/software or unstable workload. Also require setup-amortized total cost improvement over the declared horizon.",
+        "proposed_solver_wall_per_sim_second_ceiling_exclusive": 30.008456840457963,
+        "setup_amortization_duration_s": 4.5,
+        "observed_setup_seconds_range": [
+          3.69585248599833,
+          3.970549582001695
+        ],
+        "proposed_tail_rule": "No additional regression beyond the observed baseline maximum p95 for each phase; solve and step evaluated separately.",
+        "memory": {
+          "proposed_sampled_driver_peak_bytes_ceiling": 1751121920,
+          "proposed_process_hwm_bytes_ceiling": 1504346112,
+          "rule": "Conservative no-growth draft against observed maxima; an optimization needing more memory requires an explicit revised budget before acceptance.",
+          "limitations": "Driver process memory sampled each second, not a guaranteed transient peak; HWM includes setup/warmup. Pool allocation and driver usage are separate quantities."
+        },
+        "observed_pcg_per_call_p95_range": {
+          "count": 5,
+          "p50": 17.0,
+          "p95": 17.0,
+          "min": 17.0,
+          "max": 17.0
+        },
+        "inherited_pcg_budget_status": "PASS",
+        "physical_repeat_noise": {
+          "q_max_abs_difference_from_first": 4.0531158447265625e-06,
+          "qd_max_abs_difference_from_first": 0.00042500952258706093,
+          "x_max_abs_difference_from_first": 1.7896294593811035e-05,
+          "v_max_abs_difference_from_first": 0.004999222699552774
+        },
+        "physical_timestep_error": "PENDING_REFERENCE_STABILITY; keep current h/N, no changed timestep accepted",
+        "phase_p95_ms_draft_ceiling": {
+          "prepare": {
+            "step": 33.40533545051585,
+            "pcg_solve": 8.426226500523626
+          },
+          "close": {
+            "step": 34.119167649623705,
+            "pcg_solve": 8.738563748011074
+          },
+          "hold": {
+            "step": 34.585660098127846,
+            "pcg_solve": 8.47155645078601
+          }
+        }
+      },
+      "tet-cuda:0-r3": {
+        "configuration": {
+          "duration_s": 36.0,
+          "dt_s": 0.02,
+          "substeps": 6,
+          "frame_dt_s": 0.12,
+          "newton_max_iterations": 10,
+          "pcg_mode": "existing diagnostic",
+          "cuda_graph": false
+        },
+        "valid_repeats": 5,
+        "observed_solver_wall_per_sim_second": {
+          "count": 5,
+          "p50": 1.2021497818605995,
+          "p95": 1.255516133809417,
+          "min": 1.1784881380556018,
+          "max": 1.268483870387273
+        },
+        "observed_relative_full_range": 0.07486232887917038,
+        "proposed_total_cost_rule": "At least five quality-passing quiet repeats; candidate maximum solver wall/sim must be below baseline minimum. Rebaseline on changed hardware/software or unstable workload. Also require setup-amortized total cost improvement over the declared horizon.",
+        "proposed_solver_wall_per_sim_second_ceiling_exclusive": 1.1784881380556018,
+        "setup_amortization_duration_s": 36.0,
+        "observed_setup_seconds_range": [
+          0.12229136200039648,
+          0.12819048800156452
+        ],
+        "proposed_tail_rule": "No additional regression beyond the observed baseline maximum p95 for each phase; solve and step evaluated separately.",
+        "memory": {
+          "proposed_sampled_driver_peak_bytes_ceiling": 278921216,
+          "proposed_process_hwm_bytes_ceiling": 586383360,
+          "rule": "Conservative no-growth draft against observed maxima; an optimization needing more memory requires an explicit revised budget before acceptance.",
+          "limitations": "Driver process memory sampled each second, not a guaranteed transient peak; HWM includes setup/warmup. Pool allocation and driver usage are separate quantities."
+        },
+        "observed_pcg_per_call_p95_range": {
+          "count": 5,
+          "p50": 117.0,
+          "p95": 117.0,
+          "min": 117.0,
+          "max": 117.0
+        },
+        "inherited_pcg_budget_status": "FAIL",
+        "physical_repeat_noise": {
+          "q_max_abs_difference_from_first": 0.0,
+          "qd_max_abs_difference_from_first": 0.0,
+          "x_max_abs_difference_from_first": 9.864568710327148e-06,
+          "v_max_abs_difference_from_first": 0.0002991408109664917
+        },
+        "physical_timestep_error": "PENDING_REFERENCE_STABILITY; keep current h/N, no changed timestep accepted",
+        "phase_p95_ms_draft_ceiling": {
+          "loading": {
+            "step": 72.62969755229278,
+            "pcg_solve": 58.91389059906942
+          },
+          "hold": {
+            "step": 53.0888088982465,
+            "pcg_solve": 43.540731250686804
+          },
+          "tail": {
+            "step": 53.643857998395106,
+            "pcg_solve": 43.541979501424066
+          }
+        }
+      },
+      "tet-cuda:0-r4": {
+        "configuration": {
+          "duration_s": 36.0,
+          "dt_s": 0.02,
+          "substeps": 6,
+          "frame_dt_s": 0.12,
+          "newton_max_iterations": 10,
+          "pcg_mode": "existing diagnostic",
+          "cuda_graph": false
+        },
+        "valid_repeats": 5,
+        "observed_solver_wall_per_sim_second": {
+          "count": 5,
+          "p50": 1.704860807998254,
+          "p95": 1.7134831737376064,
+          "min": 1.6001025570809968,
+          "max": 1.7136479160255678
+        },
+        "observed_relative_full_range": 0.06660095558058442,
+        "proposed_total_cost_rule": "At least five quality-passing quiet repeats; candidate maximum solver wall/sim must be below baseline minimum. Rebaseline on changed hardware/software or unstable workload. Also require setup-amortized total cost improvement over the declared horizon.",
+        "proposed_solver_wall_per_sim_second_ceiling_exclusive": 1.6001025570809968,
+        "setup_amortization_duration_s": 36.0,
+        "observed_setup_seconds_range": [
+          0.27178157299931627,
+          0.28500990600150544
+        ],
+        "proposed_tail_rule": "No additional regression beyond the observed baseline maximum p95 for each phase; solve and step evaluated separately.",
+        "memory": {
+          "proposed_sampled_driver_peak_bytes_ceiling": 278921216,
+          "proposed_process_hwm_bytes_ceiling": 608174080,
+          "rule": "Conservative no-growth draft against observed maxima; an optimization needing more memory requires an explicit revised budget before acceptance.",
+          "limitations": "Driver process memory sampled each second, not a guaranteed transient peak; HWM includes setup/warmup. Pool allocation and driver usage are separate quantities."
+        },
+        "observed_pcg_per_call_p95_range": {
+          "count": 5,
+          "p50": 173.0999999999999,
+          "p95": 174.35999999999996,
+          "min": 172.0,
+          "max": 174.44999999999993
+        },
+        "inherited_pcg_budget_status": "FAIL",
+        "physical_repeat_noise": {
+          "q_max_abs_difference_from_first": 0.0,
+          "qd_max_abs_difference_from_first": 0.0,
+          "x_max_abs_difference_from_first": 2.2881198674440384e-05,
+          "v_max_abs_difference_from_first": 0.000498257577419281
+        },
+        "physical_timestep_error": "PENDING_REFERENCE_STABILITY; keep current h/N, no changed timestep accepted",
+        "phase_p95_ms_draft_ceiling": {
+          "loading": {
+            "step": 111.97015730285784,
+            "pcg_solve": 102.05774525093148
+          },
+          "hold": {
+            "step": 83.27759519961546,
+            "pcg_solve": 74.75041185152804
+          },
+          "tail": {
+            "step": 84.8105930017482,
+            "pcg_solve": 75.05776724810858
+          }
+        }
+      },
+      "tet-cuda:0-r5": {
+        "configuration": {
+          "duration_s": 36.0,
+          "dt_s": 0.02,
+          "substeps": 6,
+          "frame_dt_s": 0.12,
+          "newton_max_iterations": 10,
+          "pcg_mode": "existing diagnostic",
+          "cuda_graph": false
+        },
+        "valid_repeats": 5,
+        "observed_solver_wall_per_sim_second": {
+          "count": 5,
+          "p50": 4.375701924665918,
+          "p95": 4.716117531129082,
+          "min": 4.2310236488318775,
+          "max": 4.76782936333388
+        },
+        "observed_relative_full_range": 0.12267876645710674,
+        "proposed_total_cost_rule": "At least five quality-passing quiet repeats; candidate maximum solver wall/sim must be below baseline minimum. Rebaseline on changed hardware/software or unstable workload. Also require setup-amortized total cost improvement over the declared horizon.",
+        "proposed_solver_wall_per_sim_second_ceiling_exclusive": 4.2310236488318775,
+        "setup_amortization_duration_s": 36.0,
+        "observed_setup_seconds_range": [
+          0.5407235130005574,
+          0.5493199990014546
+        ],
+        "proposed_tail_rule": "No additional regression beyond the observed baseline maximum p95 for each phase; solve and step evaluated separately.",
+        "memory": {
+          "proposed_sampled_driver_peak_bytes_ceiling": 312475648,
+          "proposed_process_hwm_bytes_ceiling": 675733504,
+          "rule": "Conservative no-growth draft against observed maxima; an optimization needing more memory requires an explicit revised budget before acceptance.",
+          "limitations": "Driver process memory sampled each second, not a guaranteed transient peak; HWM includes setup/warmup. Pool allocation and driver usage are separate quantities."
+        },
+        "observed_pcg_per_call_p95_range": {
+          "count": 5,
+          "p50": 200.0,
+          "p95": 200.0,
+          "min": 200.0,
+          "max": 200.0
+        },
+        "inherited_pcg_budget_status": "FAIL",
+        "physical_repeat_noise": {
+          "q_max_abs_difference_from_first": 0.0,
+          "qd_max_abs_difference_from_first": 0.0,
+          "x_max_abs_difference_from_first": 0.003488415852189064,
+          "v_max_abs_difference_from_first": 0.003010593354701996
+        },
+        "physical_timestep_error": "PENDING_REFERENCE_STABILITY; keep current h/N, no changed timestep accepted",
+        "phase_p95_ms_draft_ceiling": {
+          "loading": {
+            "step": 597.9674178512141,
+            "pcg_solve": 90.8067285985453
+          },
+          "hold": {
+            "step": 273.32114220153017,
+            "pcg_solve": 92.61767459793191
+          },
+          "tail": {
+            "step": 270.5264949981938,
+            "pcg_solve": 94.7739333496429
+          }
+        }
+      },
+      "tet-cuda:0-r6": {
+        "configuration": {
+          "duration_s": 36.0,
+          "dt_s": 0.02,
+          "substeps": 6,
+          "frame_dt_s": 0.12,
+          "newton_max_iterations": 10,
+          "pcg_mode": "existing diagnostic",
+          "cuda_graph": false
+        },
+        "valid_repeats": 5,
+        "observed_solver_wall_per_sim_second": {
+          "count": 5,
+          "p50": 7.916687838358787,
+          "p95": 8.800130861777708,
+          "min": 7.370198500778214,
+          "max": 8.885864417277743
+        },
+        "observed_relative_full_range": 0.19145202481720466,
+        "proposed_total_cost_rule": "At least five quality-passing quiet repeats; candidate maximum solver wall/sim must be below baseline minimum. Rebaseline on changed hardware/software or unstable workload. Also require setup-amortized total cost improvement over the declared horizon.",
+        "proposed_solver_wall_per_sim_second_ceiling_exclusive": 7.370198500778214,
+        "setup_amortization_duration_s": 36.0,
+        "observed_setup_seconds_range": [
+          1.1233027589987614,
+          1.1606099929995253
+        ],
+        "proposed_tail_rule": "No additional regression beyond the observed baseline maximum p95 for each phase; solve and step evaluated separately.",
+        "memory": {
+          "proposed_sampled_driver_peak_bytes_ceiling": 312475648,
+          "proposed_process_hwm_bytes_ceiling": 837435392,
+          "rule": "Conservative no-growth draft against observed maxima; an optimization needing more memory requires an explicit revised budget before acceptance.",
+          "limitations": "Driver process memory sampled each second, not a guaranteed transient peak; HWM includes setup/warmup. Pool allocation and driver usage are separate quantities."
+        },
+        "observed_pcg_per_call_p95_range": {
+          "count": 5,
+          "p50": 200.0,
+          "p95": 200.0,
+          "min": 200.0,
+          "max": 200.0
+        },
+        "inherited_pcg_budget_status": "FAIL",
+        "physical_repeat_noise": {
+          "q_max_abs_difference_from_first": 0.0,
+          "qd_max_abs_difference_from_first": 0.0,
+          "x_max_abs_difference_from_first": 0.00031807273626327515,
+          "v_max_abs_difference_from_first": 0.0019019469618797302
+        },
+        "physical_timestep_error": "PENDING_REFERENCE_STABILITY; keep current h/N, no changed timestep accepted",
+        "phase_p95_ms_draft_ceiling": {
+          "loading": {
+            "step": 1012.6330682474872,
+            "pcg_solve": 98.48828829999547
+          },
+          "hold": {
+            "step": 340.4187304997322,
+            "pcg_solve": 99.6974825990037
+          },
+          "tail": {
+            "step": 334.73538900216226,
+            "pcg_solve": 100.22360419970937
+          }
+        }
+      }
+    }
+  },
+  "artifacts": {
+    "baseline-analysis.json": {
+      "path": "baseline-analysis.json",
+      "sha256": "88b95f29d7a4549264bfc0f8657762ddd68d4335b218f9584fd08c0c25a9ed04"
+    },
+    "budget-draft.json": {
+      "path": "budget-draft.json",
+      "sha256": "c84a14cd694288e5d57cdf3264b7ff04b49c7c92178671f638ecbb46775afec7"
+    },
+    "diagnostic-analysis.json": {
+      "path": "diagnostic-analysis.json",
+      "sha256": "9cb5d53177fec8d7ad495cf2d8ce5a7539853e2b2bc2d98d1ee1a8a43dc0f793"
+    },
+    "nsight-analysis.json": {
+      "path": "nsight-analysis.json",
+      "sha256": "7a413175bece54f684c772f9809f55a90afdf28c2bbbd9a5ecdca5222e317559"
+    },
+    "scan-analysis.json": {
+      "path": "scan-analysis.json",
+      "sha256": "1d153deb0d4d1553823babd27e5434b352b5311c99220cde6a88f1df99c4abb3"
+    },
+    "rerun-reassessment-analysis.json": {
+      "path": "rerun-reassessment-analysis.json",
+      "sha256": "fbc419dff0d9d5f1fa62d25447ba3c1bd2e27d3597f11e92c1bab5a510533e7a"
+    },
+    "rerun-scope-adjustment.json": {
+      "path": "rerun-scope-adjustment.json",
+      "sha256": "6560b730bca7ef3f6c1d250717d06eae7528b8bb20e9c089ba9917ca30a4a728"
+    },
+    "implementation-validation.json": {
+      "path": "implementation-validation.json",
+      "sha256": "25fe06553f674278c8327567d8c5226745264c203392639b630a21d871d991bc"
+    },
+    "historical-cpu-reference.json": {
+      "path": "historical-cpu-reference.json",
+      "sha256": "29cc0c16b778fc37edc7e6a10ba5a82e114a0eb2a689390bec5b40c752b10a69"
+    },
+    "inputs/newton_monolithic_solver_p2_architecture_closeout_2026-09-10_zh.md": {
+      "path": "inputs/newton_monolithic_solver_p2_architecture_closeout_2026-09-10_zh.md",
+      "sha256": "74a1ed5cab3a97cfc849b3875915c258eeea919473210d263df1ca5d03e29fe6"
+    }
+  },
+  "evidence_index": {
+    "path": "agents/integration/artifacts/p2/pr8a-measurement/evidence-index.json",
+    "sha256": "16fc7a5e62afcd3ee97097d57997435c591b5be7712dbe8996deb9ad0d77b879",
+    "files": 841,
+    "excluded": "All evidence-index.json and .sha256 files; portable record outside indexed root avoids a hash cycle"
+  }
+}

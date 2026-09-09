@@ -1,6 +1,7 @@
 {
   "schema": "monolithic-p2-measurement/v2",
-  "status": "IMPLEMENTED_PENDING_FULL_BASELINE",
+  "status": "SCOPED_DELIVERY_COMPLETE_WITH_RETAINED_GAPS",
+  "execution_record": "p2_8a_closeout_v1.json",
   "authority": "p2_architecture_zh.md section 4",
   "minimum_independent_quiet_repeats": 5,
   "warmup": "100 steps on a discarded independent trajectory per process",
@@ -52,11 +53,11 @@
     "failure": "stop without advancing physical time"
   },
   "budgets_requiring_measurement_and_review": {
-    "physical_timestep_error": "PENDING",
-    "performance_gain": "PENDING",
-    "tail_latency_regression": "PENDING",
-    "peak_memory_regression": "PENDING",
-    "setup_amortization_duration": "PENDING"
+    "physical_timestep_error": "DEFERRED_REFERENCE_AND_OBSERVATION_GAPS; current h/N retained",
+    "performance_gain": "DRAFT_DELIVERED_FOR_REVIEW; see execution_record",
+    "tail_latency_regression": "DRAFT_DELIVERED_FOR_REVIEW; see execution_record",
+    "peak_memory_regression": "DRAFT_DELIVERED_FOR_REVIEW; see execution_record",
+    "setup_amortization_duration": "MEASURED; draft horizons 4.5 s Sharpa / 36 s tet"
   },
   "scope": "Measurement only; solver/example defaults unchanged. Free grasp budgets belong to PR-8H."
 }
