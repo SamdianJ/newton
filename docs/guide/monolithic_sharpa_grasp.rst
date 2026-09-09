@@ -394,3 +394,18 @@ PCG diagnostic and graph settings, with at least five quiet warmed repetitions.
 Each candidate receives its own go/no-go decision and device/size scope.
 No default changes or runtime dependencies are introduced by this plan.
 See ``scripts/monolithic_reference/fixtures/p2_preconditioner_study_v1.json``.
+
+Remaining compute optimization priority
+---------------------------------------
+
+Smith material and assembly/contact computation remain the final P2
+performance optimization batch, after mass-matrix, PCG/graph work and the
+local-block/aggregation-AMG go/no-go decisions. Reprofile that resulting
+implementation and complete fixed-candidate measurements before selecting
+changes to stress/Hessian evaluation, element PSD projection, fixed-node and
+triplet writes, duplicate owner/global work, or contact evaluation.
+Keep the Smith response, projection rules, physical formulas and existing
+correctness gates. Prefer parallelism, intermediate reuse and reduced writes;
+retain changes only when complete step/trajectory timings improve reproducibly.
+This work is **planned, not implemented**; a measured no-go may defer it.
+See ``scripts/monolithic_reference/fixtures/p2_remaining_compute_plan_v1.json``.

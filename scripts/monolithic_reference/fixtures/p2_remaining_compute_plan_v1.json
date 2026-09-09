@@ -1,0 +1,44 @@
+{
+  "schema": "monolithic-p2-remaining-compute-plan/v1",
+  "status": "PLANNED_NOT_IMPLEMENTED",
+  "measurement_status": "PENDING_POST_OPTIMIZATION_PROFILE",
+  "priority": "LAST_P2_PERFORMANCE_OPTIMIZATION_BATCH",
+  "baseline_commit": "a39d939b5bb69620e967847c7626030591d4e616",
+  "after": [
+    "solver-owned mass matrix optimization decision",
+    "PCG device diagnostics/production and segmented CUDA Graph work",
+    "multi-node block and aggregation AMG-PCG go/no-go decisions"
+  ],
+  "candidate_scope": [
+    "Smith stress and Hessian",
+    "element PSD projection",
+    "fixed-node elimination and triplet writes",
+    "owner/global duplicate assembly work",
+    "contact geometry, residual and factor evaluation"
+  ],
+  "preferred_changes": [
+    "parallelism",
+    "intermediate reuse",
+    "data writes"
+  ],
+  "invariants": [
+    "Smith physical response and existing PSD projection rules",
+    "mass/contact/friction formulas",
+    "candidate dependence and history transactions",
+    "existing convergence and numerical tolerances"
+  ],
+  "validation": [
+    "fixed-candidate numerical and assembly parity",
+    "independent continuous trajectories including failures and rollback",
+    "CPU/CUDA existing tolerances",
+    "post-optimization baseline with matched execution policy",
+    "at least five quiet warmed repetitions including cache/update/synchronization/memory costs"
+  ],
+  "admission": "Correctness plus repeatable total step/trajectory savings; no benefit means NO_GO/DEFERRED",
+  "unchanged": [
+    "G6/G7 and conditional patch Schur dependencies",
+    "final P2 exit report after required validation"
+  ],
+  "plan_snapshot": "agents/integration/artifacts/p2/p2-remaining-compute-planning/newton_monolithic_solver_p2_plan_zh.md",
+  "plan_sha256": "08dc5dc4086cab2628aec201344deb5cb9109600f24073eafdf29112181c0475"
+}
