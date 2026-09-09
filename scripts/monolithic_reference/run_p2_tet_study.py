@@ -492,7 +492,7 @@ def warmup(device, refinement):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT)
-    parser.add_argument("--devices", nargs="+", default=["cpu", "cuda:0"])
+    parser.add_argument("--devices", nargs="+", default=["cuda:0"])
     parser.add_argument("--refinements", nargs="+", type=int, default=list(REFINEMENTS))
     parser.add_argument("--repeats", type=int, default=REPEATS)
     parser.add_argument("--skip-timing", action="store_true")

@@ -258,6 +258,8 @@ def export_candidate(solver, output, *, time_s, fixture):
     for name in ("gq", "gx_columns", "gx_values", "weights", "kind", "candidate_tid"):
         arrays[f"factor_{name}"] = getattr(factors, name).numpy()[:count]
     arrays["static_face_pairs"] = solver.collision_pipeline._face_pairs.numpy()
+    # CPU numpy() arrays alias live Warp storage; replay must own the captured values.
+    arrays = {name: value.copy() for name, value in arrays.items()}
     metadata = {
         "schema": SCHEMA,
         "scope": "offline matrix/RHS and tet input; not a physical history checkpoint",

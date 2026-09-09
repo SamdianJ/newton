@@ -200,6 +200,12 @@ history checkpoints. Normal timing measures completed solver and PCG calls,
 excluding control/observation work. FPS and real-time factor have separate
 fields; frame percentiles aggregate actual consecutive substeps.
 
+P2 performance measurements target CUDA per the 2026-09-09 scope decision.
+Historical CPU diagnostics remain references; CPU correctness regressions are
+retained. Sharpa common 10 ms samples preserve joint q/qd for timestep comparisons.
+Matrix jobs capture the first actual solve inside each declared bounded window
+and record its time; exported inputs own their storage across later solver steps.
+
 The regression command is
 `uv run --extra dev -m unittest newton.tests.test_monolithic_p2_measurement`.
 The old P2-0 files remain historical evidence. New measurements use schema v2

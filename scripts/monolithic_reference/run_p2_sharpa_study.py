@@ -53,6 +53,7 @@ DT_SWEEP = (
 CURVE_TIMES = (0.1, 1.5, 3.5)
 SNAPSHOT_TIMES = (0.5, 2.5, 4.5)
 STAGE_WINDOWS = {"prepare": (0.05, 0.07), "close": (1.00, 1.02), "hold": (3.50, 3.52)}
+MATRIX_WINDOWS = ((1.0, 1.25), (3.5, 3.75))
 HEAVY_KEYS = (
     "q",
     "qd",
@@ -147,6 +148,11 @@ def slim_record(record, stats, curve):
     slim = {key: value for key, value in record.items() if key not in HEAVY_KEYS}
     for key in ("collision_seconds", "pcg_seconds", "other_step_seconds"):
         slim.pop(key, None)
+    frame = record.get("time", -1) / FRAME_DT
+    if frame >= 0 and abs(frame - round(frame)) < 1e-9:
+        for key in ("q", "qd"):
+            if key in record:
+                slim[key] = record[key]
     slim.update(
         nonlinear_iterations=stats.nonlinear_iterations,
         linear_iterations=stats.linear_iterations,
@@ -274,7 +280,9 @@ def common_frames(records, dt):
                     "finger_force_components": row.get("finger_force_components"),
                     "penetration": row["penetration"],
                     "min_det_f": row["min_det_f"],
-                    "q_norm": None,
+                    "q": row.get("q"),
+                    "qd": row.get("qd"),
+                    "q_norm": float(np.linalg.norm(row["q"])) if "q" in row else None,
                 }
             )
     peaks = {
@@ -333,20 +341,20 @@ def run_case(job, output, *, nsys_window=None, stage_profile=False):
     window_assemblies = 0
     coverage = {}
     nsys_active = False
-    captured = set()
+    captured = {}
     unrecorded_failure_seconds = 0.0
 
     def capture():
         t = (case.step_count + 1) * h
-        for mark in (1.0, 3.5):
-            if abs(t - mark) < 0.5 * h and mark not in captured:
+        for mark, end in MATRIX_WINDOWS:
+            if mark <= t <= end and mark not in captured:
                 export_candidate(
                     case.solver,
                     output / "matrices" / f"candidate-{mark:.1f}.npz",
                     time_s=t,
                     fixture={**case.manifest, "fixture": case.fixture},
                 )
-                captured.add(mark)
+                captured[mark] = t
 
     timing_context = solver_timing(case.solver, before_solve=capture if job.get("capture_matrices") else None)
     measured = timing_context.__enter__()
@@ -471,6 +479,20 @@ def run_case(job, output, *, nsys_window=None, stage_profile=False):
         "schema": SCHEMA,
         "timing_mode": "synchronized_hierarchy" if stage_profile else "step_and_solve_boundaries",
         "matrix_capture": bool(job.get("capture_matrices")),
+        "matrix_sampling": {
+            str(mark): {
+                "requested_window_s": [mark, end],
+                "actual_time_s": captured.get(mark),
+                "status": "CAPTURED"
+                if mark in captured
+                else "NOT_REQUESTED"
+                if DURATION < mark
+                else "NO_PCG_IN_WINDOW",
+            }
+            for mark, end in MATRIX_WINDOWS
+        }
+        if job.get("capture_matrices")
+        else {},
         "control_and_observation_in_solver_timing": False,
         "profiler_coverage": coverage,
         "name": job["name"],

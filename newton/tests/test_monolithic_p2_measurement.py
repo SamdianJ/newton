@@ -232,11 +232,17 @@ class TestP2Measurement(unittest.TestCase):
             ],
         ):
             legacy = {"collision_seconds": 1, "pcg_seconds": 2, "other_step_seconds": 3}
-            row = sharpa.slim_record({"pcg_calls": calls, "finger_forces": {}, **legacy}, stats, None)
+            record = {"pcg_calls": calls, "finger_forces": {}, "time": 0.01, "q": [1], "qd": [2], **legacy}
+            row = sharpa.slim_record(record, stats, None)
             self.assertEqual(row.get("pcg_calls"), calls)
             self.assertTrue(set(legacy).isdisjoint(row))
+            self.assertEqual(row.get("q"), [1])
+            self.assertEqual(row.get("qd"), [2])
+            between = sharpa.slim_record({**record, "time": 0.011}, stats, None)
+            self.assertNotIn("q", between)
+            self.assertNotIn("qd", between)
 
-    def _window(self, fail):
+    def _window(self, fail, capture=False):
         device = SimpleNamespace(is_cuda=False)
 
         def original():
@@ -265,6 +271,8 @@ class TestP2Measurement(unittest.TestCase):
             count = counts[case.step_count]
             for _ in range(count):
                 solver._evaluate_current()
+            if capture and case.step_count == 2:
+                solver._linear.solve_pcg()
             solver.last_stats = SimpleNamespace(matrix_assembly_count=count)
 
         solver.step = solver_step
@@ -326,6 +334,15 @@ class TestP2Measurement(unittest.TestCase):
             patch.object(sharpa, "DURATION", 0.004),
             patch.object(sharpa, "STAGE_WINDOWS", {"hold": (0, 0.004)}),
             patch.object(sharpa, "CURVE_TIMES", (0.002,)),
+            patch.object(sharpa, "MATRIX_WINDOWS", ((0.001, 0.004),), create=True),
+            patch.object(sharpa, "export_candidate", return_value={}) as exported,
+            patch.object(
+                solver._linear,
+                "solve_pcg",
+                return_value=SimpleNamespace(
+                    iterations=1, status=SimpleNamespace(name="SUCCESS"), rho=0, rho_q=0, rho_x=0
+                ),
+            ),
             patch.object(sharpa, "slim_record", side_effect=lambda row, *_: row),
             patch.object(sharpa, "work_stats", return_value={}),
             patch.object(sharpa, "common_frames", return_value={}),
@@ -333,6 +350,7 @@ class TestP2Measurement(unittest.TestCase):
             patch.object(sharpa.wp, "synchronize_device"),
         ):
             job = {"name": "test", "task": "test", "mesh": "r3", "physical_dt_s": 0.001, "newton_max_iterations": 10}
+            job["capture_matrices"] = capture
             if fail:
                 with self.assertRaisesRegex(RuntimeError, "injected"):
                     sharpa.run_case(job, Path(directory), stage_profile=True)
@@ -341,6 +359,12 @@ class TestP2Measurement(unittest.TestCase):
         self.assertTrue(all(p.closed for p in profiles))
         self.assertIs(solver._evaluate_current, original)
         self.assertEqual(sum(p.calls for p in profiles), sum(counts[:2] if fail else counts))
+        if capture:
+            self.assertEqual(exported.call_count, 1)
+            self.assertEqual(exported.call_args.kwargs["time_s"], 0.003)
+
+    def test_sharpa_matrix_waits_for_actual_pcg(self):
+        self._window(False, capture=True)
 
     def test_current_window_coverage(self):
         """Count all current calls across varying Newton work and a curve step."""
@@ -378,9 +402,10 @@ def test_loaded_matrix_export(test, device):
     """Export a real scaled solve with finite SPD algebra and a bound loaded candidate."""
     with tempfile.TemporaryDirectory() as directory:
         output = Path(directory)
-        saved = tet.matrix_run(device, 1, output, steps=50)
+        saved = tet.matrix_run(device, 1, output, steps=51)
         data = saved["loading"]
         metadata = json.loads((output / "loading.json").read_text())
+        test.assertEqual(measurement.array_fingerprint(data), metadata["input_sha256"])
         np.testing.assert_allclose(data["rhs_hat"], -data["S"] * data["R"], rtol=1e-6, atol=1e-7)
         np.testing.assert_allclose(data["S"], data["D"] ** -0.5, rtol=1e-6)
         test.assertAlmostEqual(float(data["gravity"][0, 2]), -4.905, places=5)
