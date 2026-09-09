@@ -346,3 +346,16 @@ under identical inputs and existing numerical tolerances before selecting
 the optimized path. The option is **not implemented yet**, and neither its
 performance benefit nor a change of default has been accepted. The design
 is recorded in ``scripts/monolithic_reference/fixtures/p2_owned_mass_matrix_plan_v1.json``.
+
+Planned PCG diagnostic modes
+----------------------------
+
+P2 proposes ``pcg_mode="diagnostic"`` (default) or ``"production"`` as a
+construction-time choice. Diagnostic mode would accumulate optional metrics
+in preallocated device buffers and export a summary at solve completion.
+Production mode would skip optional metric calculations, writes and readbacks,
+using the existing NaN/None convention for unmeasured fields. Both retain
+convergence, true-residual, curvature, finite-value, stagnation and failure
+checks. This is a PCG policy, not a switch for all solver diagnostics or a
+promise of zero synchronization. The modes are **not implemented yet**; see
+``scripts/monolithic_reference/fixtures/p2_pcg_diagnostics_plan_v1.json``.

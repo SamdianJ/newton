@@ -1,0 +1,52 @@
+{
+  "schema": "monolithic-p2-pcg-diagnostics-plan/v1",
+  "status": "PLANNED_NOT_IMPLEMENTED",
+  "baseline_commit": "90a17864cbb11fe21c56d4174fc4ebb0984ebee1",
+  "option": {
+    "name": "pcg_mode",
+    "values": [
+      "diagnostic",
+      "production"
+    ],
+    "default": "diagnostic",
+    "lifetime": "construction snapshot",
+    "scope": "PCG optional diagnostics only"
+  },
+  "diagnostic": "Preallocated fixed-size device summaries, reset per solve/retry, consolidated readback at solve return",
+  "production": "No optional diagnostic computation, buffer allocation, writes or readback",
+  "optional": [
+    "min_p_ap",
+    "min_r_z",
+    "initial_guess_norm",
+    "recursive_true_residual_gap"
+  ],
+  "mandatory": [
+    "finite/curvature/preconditioner checks",
+    "true residual checks/replacement",
+    "convergence/stagnation/iteration limits",
+    "generation/invalid input/failure and rollback",
+    "status/iterations/final global-q-x residual ratios"
+  ],
+  "missing_values": "Existing NaN/None conventions; never zero or stale results",
+  "synchronization_work": [
+    "retain intermediate diagnostics on device",
+    "reuse fixed RHS norm per solve",
+    "pack required data at each host decision point"
+  ],
+  "not_promised": [
+    "zero host synchronization",
+    "whole-solver diagnostics shutdown",
+    "device-only PCG loop",
+    "runtime mode switching"
+  ],
+  "validation": [
+    "CPU/CUDA reference-vs-device diagnostic equality under existing tolerances",
+    "diagnostic-vs-production mandatory result parity",
+    "failure/early exit/retry/generation no stale metrics",
+    "no optional production diagnostic kernels/allocations/readbacks",
+    "quiet warmed loaded Sharpa and tet per-iteration and whole-step measurements"
+  ],
+  "usd_schema": "Not applicable: runtime solver policy",
+  "plan_snapshot": "agents/integration/artifacts/p2/p2-pcg-diagnostics-planning/newton_monolithic_solver_p2_plan_zh.md",
+  "plan_sha256": "a7cd8bd65d5f4553770e9d589638c5429da9da6e86fa750ea0a11d57e9b83461"
+}
