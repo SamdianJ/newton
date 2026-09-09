@@ -1,0 +1,48 @@
+{
+  "schema": "monolithic-p2-owned-mass-matrix-plan/v1",
+  "status": "PLANNED_NOT_IMPLEMENTED",
+  "baseline_commit": "bf1a41ab9fdca25170a3adf5ec12eb3403d885aa",
+  "ownership": "SolverMonolithic private articulation workspace/kernel",
+  "newton_public_mass_matrix_implementation": "UNCHANGED",
+  "proposed_option": {
+    "name": "use_optimized_articulation_mass_matrix",
+    "type": "bool",
+    "default": false,
+    "false_path": "existing Newton eval_mass_matrix",
+    "true_path": "solver-owned parallel mass matrix kernel",
+    "lifetime": "construction snapshot; new solver to change backend"
+  },
+  "algorithm": "Same candidate-dependent J^T I J; parallelize output matrix elements, preserve per-element accumulation order initially",
+  "scope": [
+    "single-articulation fixed/revolute/prismatic trees",
+    "shared current/trial/final/rollback/q-only path",
+    "preallocated workspace and unchanged physical model"
+  ],
+  "usd_schema": "Not applicable: runtime solver execution policy, not an asset or material property",
+  "validation": [
+    "same-candidate CPU/CUDA matrix/residual/tangent/global parity under existing tolerances",
+    "lifecycle/failure/rollback/in-place and no candidate device allocation",
+    "tiny coupled G1 and hand G1H plus affected monolithic regressions",
+    "25mm r3 and r2 independent continuous trajectories, at least 5 quiet warmed repetitions",
+    "full-path and full-step benefit, not just kernel timing"
+  ],
+  "measurement_baseline": {
+    "newton_max_iterations": 10,
+    "physical_dt_s": 0.001,
+    "substeps": 10
+  },
+  "performance_hypothesis": {
+    "kernel_speedup": [
+      3,
+      5
+    ],
+    "step_time_reduction_fraction": [
+      0.15,
+      0.2
+    ],
+    "status": "UNMEASURED_NOT_SLA"
+  },
+  "default_enablement": "Separate later decision after numerical and performance validation; no automatic fallback or device selection",
+  "plan_snapshot": "agents/integration/artifacts/p2/p2-owned-mass-matrix-planning/newton_monolithic_solver_p2_plan_zh.md",
+  "plan_sha256": "6436a4d128d778a12f21018e18a6866951059533555e6604e1a4d4259c2fabcb"
+}

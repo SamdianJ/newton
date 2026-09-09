@@ -333,3 +333,16 @@ incomplete. The original compact FPS field is a real-time factor; corrected
 units are published separately without replacing measurements. See the
 validation gaps in ``p2_0_diagnostics_v1.json`` and report section 10.
 These findings do not change production defaults or certify P2-0 completion.
+
+Planned solver-owned mass matrix optimization
+---------------------------------------------
+
+P2 proposes ``use_optimized_articulation_mass_matrix=False`` as a
+construction-time experimental solver option. The disabled path retains
+Newton's existing mass matrix implementation; the enabled path would use a
+private monolithic kernel with the same candidate-dependent physical matrix.
+Newton's shared kernel would remain unchanged. Compare independent solvers
+under identical inputs and existing numerical tolerances before selecting
+the optimized path. The option is **not implemented yet**, and neither its
+performance benefit nor a change of default has been accepted. The design
+is recorded in ``scripts/monolithic_reference/fixtures/p2_owned_mass_matrix_plan_v1.json``.
