@@ -1,0 +1,96 @@
+{
+  "schema": "monolithic-p2-timestep-study/v1",
+  "status": "PLANNED_NOT_RUN",
+  "benchmark": "scripts/monolithic_reference/fixtures/p2_benchmark_25mm_v1.json",
+  "benchmark_sha256": "cdbb8a2a43030bfa976904cceaf22793959b2fa0d833487840ef4526e8f56239",
+  "radius_m": 0.025,
+  "primary_mesh": "r3",
+  "resolution_control": "r2",
+  "frame_dt_s": 0.01,
+  "duration_s": 4.5,
+  "output_frames": 450,
+  "definition": "physical_dt = frame_dt / substeps; old fixture.dt is already physical_dt",
+  "baseline": {
+    "substeps": 10,
+    "physical_dt_s": 0.001,
+    "newton_max_iterations": 10
+  },
+  "scan": [
+    {
+      "substeps": 1,
+      "physical_dt_s": 0.01,
+      "physical_steps": 450
+    },
+    {
+      "substeps": 2,
+      "physical_dt_s": 0.005,
+      "physical_steps": 900
+    },
+    {
+      "substeps": 4,
+      "physical_dt_s": 0.0025,
+      "physical_steps": 1800
+    },
+    {
+      "substeps": 5,
+      "physical_dt_s": 0.002,
+      "physical_steps": 2250
+    },
+    {
+      "substeps": 10,
+      "physical_dt_s": 0.001,
+      "physical_steps": 4500
+    },
+    {
+      "substeps": 20,
+      "physical_dt_s": 0.0005,
+      "physical_steps": 9000
+    },
+    {
+      "substeps": 40,
+      "physical_dt_s": 0.00025,
+      "physical_steps": 18000
+    }
+  ],
+  "first_pass_newton_limit": 10,
+  "newton_sweep_at_baseline_h": [
+    1,
+    2,
+    3,
+    4,
+    6,
+    8,
+    10,
+    16,
+    24
+  ],
+  "followup": "Cross-check quality-passing candidate time steps and adjacent finer steps with candidate Newton limits, including r2",
+  "fixed": [
+    "physical coefficients/assets/initial state",
+    "continuous target trajectory",
+    "residual thresholds",
+    "PCG settings",
+    "line-search/regularization policy",
+    "transaction/guard rules"
+  ],
+  "recomputed_for_h": [
+    "BE inertia/scaling",
+    "implicit damping tangent",
+    "velocity recovery",
+    "friction history increment",
+    "step-end target sample"
+  ],
+  "metrics": [
+    "global/q/x convergence ratios",
+    "failure type/time and physical coverage",
+    "Newton/current/trial/assembly/PCG work per simulated second",
+    "common-time physical observable errors and per-step peaks",
+    "physical-step/frame wall time and wall seconds per simulated second"
+  ],
+  "temporal_reference": "Successful finer steps; verify refinement trend, no finest-step-as-truth assumption",
+  "selection": "PENDING_MEASUREMENT; retain convergence, physical and temporal accuracy gates",
+  "runtime_timestep_options": "NOT_IMPLEMENTED by this planning record",
+  "plan_sha256": "dff891088c738f80564d56c35c1eedc3cfc18271678604ab1a34e1de9e3f9f71",
+  "plan_snapshot": "agents/integration/artifacts/p2/timestep-planning/newton_monolithic_solver_p2_plan_zh.md",
+  "supersedes": "1ms invariant applies only to the isolated Newton sweep and historical baseline, not this new physical_dt sweep"
+}

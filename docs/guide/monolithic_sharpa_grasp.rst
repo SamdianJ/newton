@@ -294,3 +294,22 @@ resolution comparison. The 20 mm sphere is retained as a historical control;
 default remains 20 mm, so select the 25 mm asset and radius as shown above.
 The r2 full loading run, new-radius calibration and numerical performance
 targets are still pending. This selection does not complete G6/G7.
+
+The P2 timestep study additionally fixes ``frame_dt = 10 ms`` and varies
+substeps over 1, 2, 4, 5, 10, 20 and 40. The physical solver timestep is
+``physical_dt = frame_dt / substeps``: 10, 5, 2.5, 2, 1, 0.5 and 0.25 ms.
+All runs cover the same 4.5 simulated seconds and 450 output frames, with
+450 times the selected substep count physical steps. The existing fixture's
+``dt`` already denotes the physical timestep; it must not be divided again.
+
+First hold the Newton cap at 10, then cross-check quality-passing time steps
+with candidate Newton caps from the iteration study. Compare common-time
+physical observables, temporal refinement, convergence, failure coverage and
+wall time per simulated second, as well as per-step cost. Sample targets at
+each physical step's end from the same continuous trajectory. Keep physical
+coefficients and solver thresholds unchanged; timestep-dependent inertia,
+damping, scaling and history increments use the actual physical timestep.
+
+See ``scripts/monolithic_reference/fixtures/p2_timestep_study_v1.json`` for
+the planned matrix. This is a study specification; configurable runtime
+timesteps/substeps and the experiments are not implemented by this record.
