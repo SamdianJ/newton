@@ -27,7 +27,7 @@ def load_samples(compact, manifest):
     names = [name for name in compact["manifest"] if name.endswith("sha256")]
     names += ["joint_names", "mapping"]
     for name in names:
-        if manifest.get(name) != compact["manifest"][name]:
+        if json.loads(json.dumps(manifest.get(name))) != compact["manifest"][name]:
             raise ValueError(f"Source asset/configuration mismatch: {name}")
     samples = []
     for time_s in (1.0, 3.5):
@@ -194,7 +194,7 @@ def main():
         workspaces = {
             "reference": case.solver._articulation,
             "owned": articulation.MonolithicArticulationWorkspace(
-                case.model, use_optimized_articulation_mass_matrix=True
+                case.model, joint_terms=case.solver._joint_terms, use_optimized_articulation_mass_matrix=True
             ),
         }
         with wp.ScopedDevice(case.model.device):

@@ -4,12 +4,15 @@
 """Check offline execution-option binding without launching simulation jobs."""
 
 import json
+import sys
 import tempfile
 import unittest
 from enum import Enum
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
+from scripts.monolithic_reference import profile_p2_owned_mass as mass_profile
 from scripts.monolithic_reference import run_p2_8bc as runner
 from scripts.monolithic_reference.profile_p2_owned_mass import load_samples
 
@@ -25,6 +28,43 @@ class FakeSolver:
 
 
 class TestP28BCRunner(unittest.TestCase):
+    def test_mass_replay_accepts_json_mapping_representation(self):
+        """Compare tuple-valued live mappings with their equivalent saved JSON lists."""
+        manifest = {"urdf_sha256": "same", "joint_names": ["hinge"], "mapping": {"hinge": (0, 0)}}
+        samples = [{"time": t, "q": [t], "qd": [0]} for t in (1.0, 3.5)]
+        compact = {"complete": True, "manifest": json.loads(json.dumps(manifest)), "common_time": {"samples": samples}}
+        self.assertEqual(load_samples(compact, manifest), samples)
+        manifest["mapping"]["hinge"] = (0, 1)
+        with self.assertRaisesRegex(ValueError, "mapping"):
+            load_samples(compact, manifest)
+
+    def test_mass_helper_forwards_joint_terms(self):
+        """Pass the original joint policy when constructing the owned comparison workspace."""
+        case = SimpleNamespace(
+            model=SimpleNamespace(device="cuda:0"),
+            manifest={},
+            solver=SimpleNamespace(_articulation=object(), _joint_terms=object()),
+        )
+
+        def construct(model, **kwargs):
+            self.assertIs(model, case.model)
+            self.assertIs(kwargs.get("joint_terms"), case.solver._joint_terms)
+            return object()
+
+        with tempfile.TemporaryDirectory() as directory:
+            source, output = Path(directory) / "compact.json", Path(directory) / "output"
+            source.write_text(json.dumps({"mesh": "r3"}))
+            with (
+                patch.object(sys, "argv", ["profile", "--input", str(source), "--output", str(output)]),
+                patch.object(mass_profile, "snapshot_sources"),
+                patch.object(mass_profile.subprocess, "check_output", return_value="mock device"),
+                patch.object(mass_profile.sharpa, "GraspCase", return_value=case),
+                patch.object(mass_profile, "load_samples", return_value=[]),
+                patch.object(mass_profile.articulation, "MonolithicArticulationWorkspace", side_effect=construct),
+                patch.object(mass_profile.wp, "ScopedDevice"),
+            ):
+                mass_profile.main()
+
     def test_mass_replay_rejects_asset_mismatch(self):
         """Reject a saved pose if the current model uses different assets."""
         manifest = {"urdf_sha256": "old", "joint_names": ["hinge"], "mapping": [0]}
