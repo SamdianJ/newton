@@ -171,3 +171,38 @@ Its negative controls are process-local instrumentation and do not alter the
 production solver configuration. SuperDex is deliberately not executed and is
 not a V0.1 exit gate; its constitutive/mass-model alignment is deferred until
 after V0.2.
+
+## P2 measurement repair (PR-8A)
+
+Run each repeated trajectory in a fresh process and new output directory:
+
+```bash
+OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 uv run --no-sync -m scripts.monolithic_reference.run_p2_8a \
+  --kind sharpa --refinement 3 --output /new/output/sharpa-r3-repeat-01
+OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 uv run --no-sync -m scripts.monolithic_reference.run_p2_8a \
+  --kind tet --device cuda:0 --refinement 5 --output /new/output/tet-r5-repeat-01
+```
+
+Repeat at least five times for each device/mesh in
+`fixtures/p2_8a_measurement_v2.json`. GPU jobs must run serially with other
+benchmarks. The runner saves actual source, dirty diff, dependencies, command,
+device/threads, per-step and per-PCG traces, final states and GPU monitoring.
+Review the monitoring before counting a run as quiet. `--smoke` checks plumbing
+and never qualifies as a full baseline. Setup and 100 warmup steps are separate;
+each measured trajectory starts from a newly constructed initial state.
+
+Use `sharpa-profile`/`tet-profile` for synchronized inclusive/exclusive stage
+attribution, and `sharpa-matrix`/`tet-matrix` for offline solve inputs. These
+instrumented runs are separate from baseline repetitions. Tet matrix jobs also
+replay a fixed loaded candidate in preallocated assembly scratch for Smith/Kim
+and consistent/lumped cost comparisons. Exported matrices are not physical
+history checkpoints. Normal timing measures completed solver and PCG calls,
+excluding control/observation work. FPS and real-time factor have separate
+fields; frame percentiles aggregate actual consecutive substeps.
+
+The regression command is
+`uv run --extra dev -m unittest newton.tests.test_monolithic_p2_measurement`.
+The old P2-0 files remain historical evidence. New measurements use schema v2
+and cannot restore missing historical source/check logs. Physical timestep
+selection and performance/tail/memory budgets remain pending until calibration
+and review; the runner does not alter solver defaults.

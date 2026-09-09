@@ -1,0 +1,61 @@
+{
+  "schema": "monolithic-p2-measurement/v2",
+  "status": "IMPLEMENTED_PENDING_FULL_BASELINE",
+  "authority": "p2_architecture_zh.md section 4",
+  "minimum_independent_quiet_repeats": 5,
+  "warmup": "100 steps on a discarded independent trajectory per process",
+  "workloads": {
+    "anchored_close": {
+      "device": "cuda:0",
+      "radius_m": 0.025,
+      "refinements": [3, 2],
+      "duration_s": 4.5,
+      "newton_max_iterations": 10,
+      "physical_dt_s": 0.001,
+      "substeps": 10,
+      "frame_dt_s": 0.01,
+      "newton_scan": [1, 2, 3, 4, 6, 8, 10, 16, 24],
+      "substep_scan": [1, 2, 4, 5, 10, 20, 40]
+    },
+    "gravity_tet": {
+      "devices": ["cpu", "cuda:0"],
+      "refinements": [5, 3, 4, 6],
+      "material": "smith_log_stabilized",
+      "mass": "consistent",
+      "duration_s": 36.0,
+      "physical_dt_s": 0.02,
+      "substeps": 6,
+      "frame_dt_s": 0.12,
+      "phase_endpoints_s": [0, 2, 34, 36]
+    }
+  },
+  "timing": {
+    "solver": "device-completed solver.step; control update and observation excluded",
+    "pcg": "each actual solve including retry, synchronized at entry and exit",
+    "normal_run": "step/solve boundaries only; hierarchy and matrix capture in separate processes",
+    "fps": "completed output frames / accumulated solver seconds",
+    "rtf": "accepted simulation seconds / accumulated solver seconds",
+    "frame_percentiles": "percentiles of sums over consecutive complete frame groups",
+    "memory": "sampled driver process memory, Linux RSS/HWM, separately labelled Warp pool high",
+    "contamination": "retain failures; foreign compute PIDs or unexplained outliers cannot count as quiet"
+  },
+  "inherited_gates": {
+    "normal_convergence_fraction": 0.99,
+    "pcg_per_call_p95_budget": 64,
+    "pcg_per_call_hard_limit": 200,
+    "linear_tolerance": 0.0001,
+    "internal_det_f_guard": 0.2,
+    "acceptance_min_det_f": 0.1,
+    "initial_penetration_m": 0.002,
+    "soft_stop": "reported separately; not normal convergence",
+    "failure": "stop without advancing physical time"
+  },
+  "budgets_requiring_measurement_and_review": {
+    "physical_timestep_error": "PENDING",
+    "performance_gain": "PENDING",
+    "tail_latency_regression": "PENDING",
+    "peak_memory_regression": "PENDING",
+    "setup_amortization_duration": "PENDING"
+  },
+  "scope": "Measurement only; solver/example defaults unchanged. Free grasp budgets belong to PR-8H."
+}

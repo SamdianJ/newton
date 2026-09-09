@@ -20,11 +20,20 @@ import numpy as np
 import warp as wp
 
 from newton.examples.softbody.monolithic_sharpa_grasp import ANCHORED_FIXTURE, GraspCase
-from scripts.monolithic_reference.profile_release import _StageProfile
+from scripts.monolithic_reference.p2_measurement import (
+    SCHEMA,
+    evidence_index,
+    export_candidate,
+    snapshot_sources,
+    solver_timing,
+    throughput,
+)
+from scripts.monolithic_reference.p2_measurement import P2StageProfile as _StageProfile
+from scripts.monolithic_reference.profile_release import _percentiles
 
 ROOT = Path(__file__).resolve().parents[2]
 WORKSPACE = Path("/home/lightwheel/Desktop/newton/SamiulJ")
-DEFAULT_OUTPUT = WORKSPACE / "agents/integration/artifacts/p2/p2-0"
+DEFAULT_OUTPUT = WORKSPACE / "agents/integration/artifacts/p2/pr8a-measurement"
 ASSET_DIR = WORKSPACE / "assets/left_sharpa_wave"
 CONTACT_DIR = WORKSPACE / "agents/integration/artifacts/p1/pr6d-assets/hand"
 TRAJECTORY = WORKSPACE / "assets/trajectory/Ball_catch - Left_hand_motion_rad.csv"
@@ -157,7 +166,6 @@ def slim_record(record, stats, curve):
         newton_curve=curve,
         finger_force_components=record["finger_forces"],
     )
-    slim.pop("pcg_calls", None)
     slim.pop("finger_forces", None)
     return slim
 
@@ -198,7 +206,7 @@ def work_stats(records, dt):
         rows = [row for row in records if row["stage"] == stage]
         if not rows:
             continue
-        body = rows[1:] if len(rows) > 1 else rows
+        body = rows
 
         def pct(name, body=body):
             values = [row[name] for row in body]
@@ -223,9 +231,10 @@ def work_stats(records, dt):
             "matrix_assembly_count": pct("matrix_assembly_count"),
             "pcg_iterations_sum": pct("pcg_iterations_sum"),
             "limit_hit_fraction": float(np.mean([r["status"] == "NONLINEAR_MAX_ITERATIONS" for r in rows])),
+            "pcg_per_call_iterations": _percentiles([c["iterations"] for r in rows for c in r.get("pcg_calls", [])]),
+            "pcg_per_call_ms": _percentiles([1000 * c["seconds"] for r in rows for c in r.get("pcg_calls", [])]),
         }
-    duration = records[-1]["time"] if records else 0.0
-    duration = max(duration, dt)
+    duration = max(sum(not r.get("rollback", False) for r in records) * dt, dt)
     return {
         "stages": by_stage,
         "per_simulated_second": {
@@ -234,8 +243,12 @@ def work_stats(records, dt):
             "pcg_iterations": float(sum(r["pcg_iterations_sum"] for r in records) / duration),
             "wall_seconds": float(sum(r["step_seconds"] for r in records) / duration),
         },
-        "solver_only_fps_at_frame_dt": FRAME_DT
-        / (sum(r["step_seconds"] for r in records) / max(len(records), 1) * round(FRAME_DT / dt)),
+        **throughput(
+            sum(r["step_seconds"] for r in records),
+            sum(not r.get("rollback", False) for r in records),
+            dt,
+            round(FRAME_DT / dt),
+        ),
     }
 
 
@@ -269,9 +282,11 @@ def common_frames(records, dt):
 
 def run_case(job, output, *, nsys_window=None, stage_profile=False):
     output = Path(output)
-    if (output / "compact.json").exists() and not job.get("overwrite"):
+    if (output / "compact.json").exists():
         existing = json.loads((output / "compact.json").read_text())
-        if existing.get("complete") or existing.get("failure"):
+        if existing.get("schema") != SCHEMA:
+            raise ValueError("Historical measurement schema: use a new output directory")
+        if not job.get("overwrite") and (existing.get("complete") or existing.get("failure")):
             print(f"skip completed {job['name']}", flush=True)
             return existing
     output.mkdir(parents=True, exist_ok=True)
@@ -285,38 +300,61 @@ def run_case(job, output, *, nsys_window=None, stage_profile=False):
     device = case.model.device
     if device.is_cuda and hasattr(wp, "reset_mempool_used_mem_high"):
         wp.reset_mempool_used_mem_high(device)
+    wp.synchronize_device(device)
     setup_s = time.perf_counter() - setup_start
     original_current = case.solver._evaluate_current
     curve_buffer = []
+    want_curve = False
 
     def current_with_curve(*args, **kwargs):
         result = original_current(*args, **kwargs)
-        curve_buffer.append(
-            {
-                "merit": float(result.merit),
-                "merit_q": float(result.merit_q),
-                "merit_x": float(result.merit_x),
-                "min_det_f": float(result.min_det_f),
-            }
-        )
+        if want_curve:
+            curve_buffer.append(
+                {
+                    "merit": float(result.merit),
+                    "merit_q": float(result.merit_q),
+                    "merit_x": float(result.merit_x),
+                    "min_det_f": float(result.min_det_f),
+                }
+            )
         return result
 
+    case.solver._evaluate_current = current_with_curve
     traces = []
     snapshots = {}
     window_profiles = {}
     profiler = None
+    window_assemblies = 0
+    coverage = {}
     nsys_active = False
+    captured = set()
+    unrecorded_failure_seconds = 0.0
+
+    def capture():
+        t = (case.step_count + 1) * h
+        for mark in (1.0, 3.5):
+            if abs(t - mark) < 0.5 * h and mark not in captured:
+                export_candidate(
+                    case.solver,
+                    output / "matrices" / f"candidate-{mark:.1f}.npz",
+                    time_s=t,
+                    fixture={**case.manifest, "fixture": case.fixture},
+                )
+                captured.add(mark)
+
+    timing_context = solver_timing(case.solver, before_solve=capture if job.get("capture_matrices") else None)
+    measured = timing_context.__enter__()
     wall_start = time.perf_counter()
     try:
         while case.step_count < case.total_steps and not case.failure:
             next_t = (case.step_count + 1) * h
             want_curve = any(abs(next_t - t) < 0.5 * h for t in CURVE_TIMES)
-            case.solver._evaluate_current = current_with_curve if want_curve else original_current
             curve_buffer.clear()
             in_stage_window = stage_profile and any(lo < next_t <= hi + 1e-12 for lo, hi in STAGE_WINDOWS.values())
             if stage_profile and in_stage_window and profiler is None:
                 profiler = _StageProfile(case.solver, "actor_block")
                 profiler.__enter__()
+                window_assemblies = 0
             if nsys_window:
                 lo, hi = STAGE_WINDOWS[nsys_window]
                 if not nsys_active and lo < next_t <= hi + 1e-12:
@@ -325,10 +363,16 @@ def run_case(job, output, *, nsys_window=None, stage_profile=False):
                 elif nsys_active and next_t > hi + 1e-12:
                     wp.cuda_profiler_stop(device)
                     nsys_active = False
+            previous_records = len(case.records)
             case.step()
-            if not case.records:
+            if len(case.records) == previous_records:
+                unrecorded_failure_seconds = measured.seconds
                 break
             stats = case.solver.last_stats
+            case.records[-1]["step_seconds"] = measured.seconds
+            case.records[-1]["pcg_calls"] = list(measured.calls)
+            if profiler is not None:
+                window_assemblies += stats.matrix_assembly_count
             slim = slim_record(case.records[-1], stats, list(curve_buffer) if want_curve else None)
             case.records[-1] = slim
             traces.append(slim)
@@ -339,6 +383,12 @@ def run_case(job, output, *, nsys_window=None, stage_profile=False):
                     "qd": case.state.joint_qd.numpy().copy(),
                     "x": case.state.particle_q.numpy().copy(),
                     "v": case.state.particle_qd.numpy().copy(),
+                    "force_linear": case.solver._contact.final_force_linear.numpy().copy(),
+                    "force_moment": case.solver._contact.final_force_moment.numpy().copy(),
+                    "history_valid": case.solver._contact.committed.valid.numpy().copy(),
+                    "history_xi_local": case.solver._contact.committed.xi_local.numpy().copy(),
+                    "history_normal_local": case.solver._contact.committed.normal_local.numpy().copy(),
+                    "history_epoch": np.asarray(case.solver._contact.history_epoch),
                 }
             if case.step_count % 250 == 0 or case.failure:
                 print(
@@ -354,12 +404,21 @@ def run_case(job, output, *, nsys_window=None, stage_profile=False):
                     for name, (lo, hi) in STAGE_WINDOWS.items():
                         if lo < t <= hi + 1e-12:
                             window_profiles[name] = profiler.summary()
+                            calls = window_profiles[name]["current_evaluation_overlapping_total"]["calls"]
+                            coverage[name] = {
+                                "current_calls": calls,
+                                "assembly_count": window_assemblies,
+                                "passed": calls == window_assemblies,
+                            }
+                            if calls != window_assemblies:
+                                raise RuntimeError("Current profiler coverage differs from actual assemblies")
                     profiler = None
+    finally:
         if profiler is not None:
             profiler.__exit__(None, None, None)
         if nsys_active:
             wp.cuda_profiler_stop(device)
-    finally:
+        timing_context.__exit__(None, None, None)
         case.solver._evaluate_current = original_current
     wall = time.perf_counter() - wall_start
     wp.synchronize_device(device)
@@ -368,7 +427,7 @@ def run_case(job, output, *, nsys_window=None, stage_profile=False):
     hold = [row for row in traces if row["stage"] == "hold"]
     pcg_p95 = {}
     for stage in ("close", "hold"):
-        calls = [row["pcg_iterations_max"] for row in traces if row["stage"] == stage]
+        calls = [call["iterations"] for row in traces if row["stage"] == stage for call in row["pcg_calls"]]
         pcg_p95[stage] = float(np.percentile(calls, 95)) if calls else None
     summary = {
         "complete_schedule": case.step_count == case.total_steps and case.failure is None,
@@ -403,6 +462,11 @@ def run_case(job, output, *, nsys_window=None, stage_profile=False):
             )
         )
     compact = {
+        "schema": SCHEMA,
+        "timing_mode": "synchronized_hierarchy" if stage_profile else "step_and_solve_boundaries",
+        "matrix_capture": bool(job.get("capture_matrices")),
+        "control_and_observation_in_solver_timing": False,
+        "profiler_coverage": coverage,
         "name": job["name"],
         "task": job["task"],
         "mesh": job["mesh"],
@@ -412,6 +476,7 @@ def run_case(job, output, *, nsys_window=None, stage_profile=False):
         "newton_max_iterations": newton_limit,
         "setup_seconds": setup_s,
         "run_wall_seconds": wall,
+        "unrecorded_failure_solver_seconds": unrecorded_failure_seconds,
         "wall_seconds_per_simulated_second": wall / max(case.step_count * h, h),
         "complete": bool(summary["complete_schedule"]),
         "failure": summary.get("failure"),
@@ -430,13 +495,29 @@ def run_case(job, output, *, nsys_window=None, stage_profile=False):
         "ball_sha256": sha256(args_for(job["mesh"], output).ball),
         "manifest": {k: v for k, v in case.manifest.items() if k != "fixture"},
     }
+    if unrecorded_failure_seconds:
+        compact["work"].update(
+            throughput(
+                sum(r["step_seconds"] for r in traces) + unrecorded_failure_seconds,
+                case.step_count,
+                h,
+                round(FRAME_DT / h),
+            )
+        )
     payload = "".join(json.dumps(json_safe(row), sort_keys=True, allow_nan=False) + "\n" for row in traces)
     (output / "trace.jsonl").write_text(payload)
     (output / "trace.jsonl.sha256").write_text(hashlib.sha256(payload.encode()).hexdigest() + "\n")
     (output / "summary.json").write_text(json.dumps(json_safe(summary), indent=2, allow_nan=False) + "\n")
     (output / "compact.json").write_text(json.dumps(json_safe(compact), indent=2, allow_nan=False) + "\n")
     if snapshots:
-        np.savez(output / "common_snapshots.npz", **{k.replace(".", "_"): v for k, v in snapshots.items()})
+        np.savez_compressed(
+            output / "common_snapshots.npz",
+            **{
+                f"{t.replace('.', '_')}_{name}": value
+                for t, values in snapshots.items()
+                for name, value in values.items()
+            },
+        )
     np.savez(
         output / "final_state.npz",
         q=case.state.joint_q.numpy(),
@@ -446,8 +527,20 @@ def run_case(job, output, *, nsys_window=None, stage_profile=False):
     )
     del case
     gc.collect()
-    wp.synchronize_device("cuda:0")
+    wp.synchronize_device(device)
     return compact
+
+
+def warmup(mesh, output):
+    """Warm kernels on a disposable trajectory before constructing measured initial states."""
+    case = GraspCase(args_for(mesh, output))
+    for _ in range(100):
+        case.step()
+        if case.failure:
+            raise RuntimeError(f"Warmup failed: {case.failure}")
+    wp.synchronize_device(case.model.device)
+    del case
+    gc.collect()
 
 
 def jobs():
@@ -492,7 +585,7 @@ def jobs():
             "physical_dt_s": 0.001,
         }
     )
-    for i in range(1, 5):
+    for i in range(5):
         rows.append(
             {
                 "name": f"0b-uninstrumented-r3-rep{i + 1:02d}",
@@ -552,6 +645,7 @@ def main():
     parser.add_argument("--include-nsight", action="store_true")
     args = parser.parse_args()
     args.output.mkdir(parents=True, exist_ok=True)
+    snapshot_sources(args.output / "provenance")
     selected = jobs()
     if not args.include_nsight:
         selected = [job for job in selected if job.get("task") != "0b-nsight"]
@@ -577,6 +671,7 @@ def main():
         out = args.output / job["name"]
         print("START", job["name"], flush=True)
         try:
+            warmup(job["mesh"], out)
             compact = run_case(
                 job,
                 out,
@@ -590,6 +685,7 @@ def main():
             print("ERROR", job["name"], error, flush=True)
         (args.output / "index.json").write_text(json.dumps(index, indent=2) + "\n")
     print(json.dumps(index, indent=2), flush=True)
+    evidence_index(args.output)
 
 
 if __name__ == "__main__":
