@@ -217,3 +217,24 @@ work with existing data; no full sweep was restarted. Physical timestep
 selection remains deferred, and performance/tail/memory acceptance budgets are
 delivered as a reviewable draft. The record does not certify every architecture
 gate or change solver defaults. Tet's PCG p95 budget failures remain visible.
+
+## P2 mass and PCG execution comparisons (PR-8B/8C)
+
+Use the same physical configuration and measurement protocol for each variant:
+
+```bash
+uv run --no-sync -m scripts.monolithic_reference.run_p2_8bc \
+  --kind sharpa --refinement 3 --mass-matrix owned --pcg-mode production \
+  --output /new/output/sharpa-r3-owned-production-01
+```
+
+The CUDA runner supports `reference`/`owned` mass and
+`diagnostic`/`production` PCG modes, with Sharpa r2/r3 or tet r3/r4/r5/r6.
+It records requested and actual immutable constructor options for both warmup
+and measurement in `execution-options.json`, in addition to the PR-8A evidence.
+The adapter changes construction only and restores the binding on exceptions.
+Use a fresh process/output per repeat and schedule GPU work serially. A smoke
+run validates execution only. Performance comparisons require matched device
+state, complete trajectories and repeated measurements; historical clocks and
+unfrozen budgets cannot establish formal acceptance. The defaults remain
+reference mass and diagnostic PCG, with unchanged physical parameters.

@@ -177,6 +177,31 @@ Outputs include the asset/parameter manifest, step trace and per-joint summary.
 A rollback stops the trajectory without advancing simulated time. This action
 has no self-collision and does not certify soft-ball grasping or mesh contact.
 
+Experimental execution policies
+--------------------------------
+
+``SolverMonolithic`` accepts two construction-time execution options:
+``use_optimized_articulation_mass_matrix=False`` and
+``pcg_mode=SolverMonolithic.PCGMode.DIAGNOSTIC``. The mass option requires a
+Python bool; True selects the solver's private parallel mass evaluation while
+sharing its Jacobian and inertia buffers. It applies to current and trial
+candidates and returned-state evaluation, rather than freezing mass for a step.
+The public Newton mass evaluation remains the default reference path.
+
+``pcg_mode`` accepts ``"diagnostic"`` or ``"production"`` and the corresponding
+members of ``SolverMonolithic.PCGMode``. Production omits optional PCG summaries:
+``last_stats.min_p_ap``, ``min_r_z``, ``initial_guess_norm`` and the three
+``recursive_true_residual_gap`` fields contain NaN. It preserves curvature,
+preconditioner positivity, nonfinite checks, true global/q/x residual checks,
+stagnation and residual replacement, iteration counts and failure handling.
+Joint/contact final forces and other mandatory statistics remain available.
+
+Both options are read-only after construction; create a new solver to choose
+different policies. They describe runtime execution, not material or asset
+properties, and intentionally have no USD schema. Neither option changes N/h,
+physical tolerances, contact history, or the supported model envelope. CPU and
+CUDA correctness are tested; performance is workload- and device-dependent.
+
 Current support boundaries
 --------------------------
 
