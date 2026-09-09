@@ -1,7 +1,7 @@
 {
   "schema": "monolithic-p2-performance-plan/v1",
-  "status": "PLANNED_NOT_RUN",
-  "performance_targets": "PENDING_MEASUREMENT",
+  "status": "P2-0_DIAGNOSTICS_COMPLETE",
+  "performance_targets": "PENDING_USER_REVIEW",
   "baseline_code_commit": "bd0d98502a39670a60e3050e5607379ea9ab73f9",
   "p1_exit_record_commit": "3f9124b8a68f0f3b2b26253b15f20dc9166bc261",
   "tasks": {
@@ -46,7 +46,8 @@
     "P2-5 exit"
   ],
   "plan": "dev/monothlic/newton_monolithic_solver_p2_plan_zh.md",
-  "plan_sha256": "5c234a031fcb2685614d14a33a28e615cc2e1ff73b588ed12ba1cbc13c1069bf",
-  "plan_snapshot": "agents/integration/artifacts/p2/performance-planning/newton_monolithic_solver_p2_plan_zh.md",
-  "historical_note": "P1 exit and its frozen P2 plan remain unchanged; this is a subsequent P2 planning revision."
+  "plan_sha256": "9fb8c9688e04a067bcd52d8e741ecad9f98fd7a93c1d391064615f0c542d7f3d",
+  "plan_snapshot": "agents/integration/artifacts/p2/p2-0/newton_monolithic_solver_p2_plan_zh.md",
+  "diagnostics": "scripts/monolithic_reference/fixtures/p2_0_diagnostics_v1.json",
+  "historical_note": "P1 exit and its frozen P2 plan remain unchanged; this record now points at the executed P2-0 diagnostics."
 }

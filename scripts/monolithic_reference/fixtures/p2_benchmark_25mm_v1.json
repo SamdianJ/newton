@@ -19,7 +19,7 @@
         "--ball-radius",
         "0.025"
       ],
-      "complete_loading_validation": "4500-step screening PASS; repeat studies pending"
+      "complete_loading_validation": "P2-0A 4500-step PASS; max penetration 0.694 mm, min detF 0.431"
     },
     "r2": {
       "role": "resolution_control",
@@ -35,7 +35,7 @@
         "--ball-radius",
         "0.025"
       ],
-      "complete_loading_validation": "PENDING"
+      "complete_loading_validation": "P2-0A 4500-step PASS; max penetration 0.881 mm, min detF 0.666"
     }
   },
   "dt_s": 0.001,
@@ -73,13 +73,11 @@
     "30mm": "failed_stress_case_only"
   },
   "pending": [
-    "25mm r2 full loading validation",
     "new-radius contact calibration applicability",
-    "Newton iteration/convergence sweep",
-    "repeated post-PR7C hotspot profiling",
-    "numerical performance target freeze",
+    "numerical performance target freeze (PENDING_USER_REVIEW)",
     "G6 and remaining G7"
   ],
+  "p2_0_diagnostics": "scripts/monolithic_reference/fixtures/p2_0_diagnostics_v1.json",
   "p2_plan_sha256": "dc900f025613e99e7da5d2b74d955bed102a27ca32a96b6b208a32e224b59b2e",
   "p2_plan_snapshot": "agents/integration/artifacts/p2/benchmark-selection/newton_monolithic_solver_p2_plan_zh.md",
   "usage": "Pass the listed CLI arguments to the existing example; this record is not a new runtime configuration loader."

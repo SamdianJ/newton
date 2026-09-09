@@ -218,8 +218,8 @@ memory and full-step performance measurements. The original PCG p95 budget of
 64 and physical contact-stiffness floor still determine whether normal-only
 patch Schur becomes mandatory. CPU mesh SDF remains ``NOT_REQUIRED``.
 
-P2 is planned, with development not started. P1 acceptance does not complete
-the V0.2 Grasp MVP. The stage decision, evidence hashes and deferred items are
+P2 continues after P2-0. P1 acceptance does not complete the V0.2 Grasp
+MVP. The P1 stage decision, evidence hashes and deferred items are
 recorded in
 ``scripts/monolithic_reference/fixtures/p1_limited_acceptance_v1.json``.
 
@@ -237,8 +237,15 @@ detailed synchronization or Nsight instrumentation. Report current/trial
 evaluation counts, assembly, PCG, retries, memory and host synchronization
 separately, then use those results to freeze performance targets. The later
 multiple-finger grasp fixture requires its own measurements before G6/G7.
-This work is planned; measurements and numerical targets remain pending.
 See ``scripts/monolithic_reference/fixtures/p2_performance_plan_v1.json``.
+
+P2-0 diagnostics on 2026-09-09 measured the 25 mm r3/r2 anchored-close
+workload at commit ``2b4b421c`` without changing the solver. Production
+defaults remain 10 Newton iterations and a 1 ms physical step. Absolute FPS
+targets stay pending user review of the temporal error. See
+``scripts/monolithic_reference/fixtures/p2_0_diagnostics_v1.json`` and the
+workspace report ``agents/integration/P2_0_DIAGNOSTICS_REPORT.md``.
+
 
 
 Larger sphere stress cases
@@ -283,8 +290,8 @@ A fresh 20 mm r3 control also completed all 4500 steps. During hold, the
 25 mm sphere had 21 force-producing contact samples versus 10 for 20 mm,
 and mean middle-finger force increased from 0.0256 to 0.439 N (about 17 times).
 This establishes increased loading, not additional loaded fingers or a
-calibrated performance target. The iteration sweep and new hotspot profiling
-remain separate P2 work.
+calibrated performance target. The iteration sweep and new hotspot
+profiling were executed in P2-0; see the diagnostic record.
 
 P2 selects the 25 mm radius sphere as its benchmark: r3 is the primary
 Newton-convergence and profiling workload, with r2 at the same radius as the
@@ -292,8 +299,10 @@ resolution comparison. The 20 mm sphere is retained as a historical control;
 30 mm remains a failed stress case. Explicit asset arguments are recorded in
 ``scripts/monolithic_reference/fixtures/p2_benchmark_25mm_v1.json``. The example
 default remains 20 mm, so select the 25 mm asset and radius as shown above.
-The r2 full loading run, new-radius calibration and numerical performance
-targets are still pending. This selection does not complete G6/G7.
+The r2 full loading run completed 4500 steps in the P2-0A study (maximum
+penetration about 0.881 mm, minimum detF about 0.666). New-radius calibration
+and numerical performance targets are still pending user review. This
+selection does not complete G6/G7.
 
 The P2 timestep study additionally fixes ``frame_dt = 10 ms`` and varies
 substeps over 1, 2, 4, 5, 10, 20 and 40. The physical solver timestep is
@@ -311,5 +320,7 @@ coefficients and solver thresholds unchanged; timestep-dependent inertia,
 damping, scaling and history increments use the actual physical timestep.
 
 See ``scripts/monolithic_reference/fixtures/p2_timestep_study_v1.json`` for
-the planned matrix. This is a study specification; configurable runtime
-timesteps/substeps and the experiments are not implemented by this record.
+the matrix and the diagnostic outcome. Configurable runtime
+timesteps/substeps are not implemented by the production example; the
+study used independent fixtures. Coarse steps S=1 and S=2 pass stability
+but exceed the PCG p95 budget of 64.

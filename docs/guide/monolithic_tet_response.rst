@@ -246,23 +246,15 @@ solver work also contribute: r8 steps with zero PCG iterations still cost
 about 181 ms on CPU and 7 ms on CUDA. These observations do not provide
 a kernel-level attribution or a solver complexity bound.
 
-P2 deformable profiling study (planned)
+P2 deformable profiling study
 --------------------------------------
 
-The independent P2-0B-T study targets ``--experiment gravity
---gravity-refinements 5``: one Smith/consistent beam with 1875 tets,
-576 nodes and 36 fixed nodes. Each displayed frame advances six 20 ms
-physical steps. Viewer FPS therefore includes six solves plus per-step
-State downloads and NumPy diagnostics, as well as rendering. Low FPS alone
-does not identify material evaluation as the bottleneck.
-
-The study will measure r5 with r3/r4/r6 controls on explicitly selected CPU
-and CUDA devices. It separates local material evaluation, tet/mass assembly,
-BSR construction, preconditioning and PCG from host measurements and viewer
-work, recording iteration counts and the original physical quality checks.
-Identical-candidate material comparisons and full-trajectory timings serve
-different purposes. Historical high-resolution near-static failures remain
-open. The protocol and source hashes are recorded in
-``scripts/monolithic_reference/fixtures/p2_deformable_profile_plan_v1.json``.
-This is a planned study, not a new profiling result or performance target;
-example and solver behaviour are unchanged.
+The independent P2-0B-T study ran ``--experiment gravity
+--gravity-refinements 5`` on CPU and CUDA: 1875 tets, 576 nodes and 36
+fixed nodes, with r3/r4/r6 controls. Each displayed frame advances six
+20 ms physical steps. Loading-phase PCG iteration count dominates the
+cost; prefix BSR is not the r5 bottleneck. r5/r6 remain not near-static.
+The original quality checks were not relaxed. Records are in
+``scripts/monolithic_reference/fixtures/p2_deformable_profile_plan_v1.json``
+and ``agents/integration/P2_0_DIAGNOSTICS_REPORT.md``. Example and solver
+defaults are unchanged.

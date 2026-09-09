@@ -1,8 +1,9 @@
 {
   "schema": "monolithic-p2-timestep-study/v1",
-  "status": "PLANNED_NOT_RUN",
+  "status": "EXECUTED_2026-09-09",
+  "diagnostics_report": "agents/integration/P2_0_DIAGNOSTICS_REPORT.md",
   "benchmark": "scripts/monolithic_reference/fixtures/p2_benchmark_25mm_v1.json",
-  "benchmark_sha256": "cdbb8a2a43030bfa976904cceaf22793959b2fa0d833487840ef4526e8f56239",
+  "benchmark_sha256": "e07c9b73f43735ae96de7f9857201177f67213d0022f314e8796697fab404c09",
   "radius_m": 0.025,
   "primary_mesh": "r3",
   "resolution_control": "r2",
@@ -88,9 +89,9 @@
     "physical-step/frame wall time and wall seconds per simulated second"
   ],
   "temporal_reference": "Successful finer steps; verify refinement trend, no finest-step-as-truth assumption",
-  "selection": "PENDING_MEASUREMENT; retain convergence, physical and temporal accuracy gates",
-  "runtime_timestep_options": "NOT_IMPLEMENTED by this planning record",
-  "plan_sha256": "dff891088c738f80564d56c35c1eedc3cfc18271678604ab1a34e1de9e3f9f71",
-  "plan_snapshot": "agents/integration/artifacts/p2/timestep-planning/newton_monolithic_solver_p2_plan_zh.md",
+  "selection": "PENDING_USER_REVIEW; production remains N=10 h=1ms; candidate S=4 and N>=2 if ~1mm COM versus 1ms is accepted; S=1/S=2 trigger PCG p95>64",
+  "runtime_timestep_options": "NOT_IMPLEMENTED by the production example; study used independent fixtures",
+  "plan_sha256": "9fb8c9688e04a067bcd52d8e741ecad9f98fd7a93c1d391064615f0c542d7f3d",
+  "plan_snapshot": "agents/integration/artifacts/p2/p2-0/newton_monolithic_solver_p2_plan_zh.md",
   "supersedes": "1ms invariant applies only to the isolated Newton sweep and historical baseline, not this new physical_dt sweep"
 }

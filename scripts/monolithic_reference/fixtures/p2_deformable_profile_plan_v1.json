@@ -1,8 +1,8 @@
 {
   "schema": "monolithic-p2-deformable-profile-study/v1",
   "task": "P2-0B-T",
-  "status": "PLANNED_NOT_RUN",
-  "code_baseline": "dc412439bc269119c8cf5a16b06f73b5681b19f4",
+  "status": "EXECUTED_2026-09-09",
+  "code_baseline": "2b4b421c7fa1309652a8a3bde08184b6a88fe10d",
   "reported_command": "uv run --extra examples -m newton.examples monolithic_tet_response --experiment gravity --gravity-refinements 5",
   "baseline": {
     "experiment": "gravity",
@@ -65,14 +65,15 @@
     "raw traces, profiler overhead, code/fixture/environment hashes"
   ],
   "historical_near_static_issue": "OPEN; performance profiling does not close static convergence failures",
-  "performance_targets": "PENDING_MEASUREMENT; feed P2-0C separately from Sharpa",
-  "runtime_changes": "NONE; study specification only",
+  "performance_targets": "PENDING_USER_REVIEW; Sharpa and tet recorded separately; production defaults unchanged",
+  "runtime_changes": "NONE to solver/example production defaults; diagnostic runners only",
+  "timing_repeats_caveat": "collected timing-* artifacts omitted the gravity ramp; loaded cost is diagnostic/staged",
   "sources_sha256": {
     "newton/examples/softbody/example_monolithic_tet_response.py": "f337a7c2262cd57cf6d97c63ce56cd3e4c512ecddc95c8b0ac83a7ddff37a536",
     "newton/examples/softbody/monolithic_tet_response.py": "de9dc3894fb6efc120c93ea53268ff540a6696efbfd73b476048bbcf4364539d",
     "newton/examples/softbody/monolithic_tet_compare.py": "1fb5da26d082986959430a585788fb84a5500d930bfa9a75eb15172a7351011b",
     "scripts/monolithic_reference/run_gravity_resolution.py": "ee33c3acc0e48ae4d6c9d2a0ae9ef8b3af08ddbe62fa13103185cf586d8b2502"
   },
-  "plan_sha256": "c527a1936330b6a73640e13aecc92d5f15ac8f8ed492ee73265f629e9ec42baa",
-  "plan_snapshot": "agents/integration/artifacts/p2/deformable-profiling-planning/newton_monolithic_solver_p2_plan_zh.md"
+  "plan_sha256": "9fb8c9688e04a067bcd52d8e741ecad9f98fd7a93c1d391064615f0c542d7f3d",
+  "plan_snapshot": "agents/integration/artifacts/p2/p2-0/newton_monolithic_solver_p2_plan_zh.md"
 }

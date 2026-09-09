@@ -1,0 +1,32 @@
+{
+  "schema": "monolithic-p2-0-diagnostics/v1",
+  "status": "DIAGNOSTICS_COMPLETE",
+  "p2_0c": "PENDING_USER_REVIEW",
+  "date": "2026-09-09",
+  "code_commit": "2b4b421c7fa1309652a8a3bde08184b6a88fe10d",
+  "solver_sources_modified": false,
+  "production_defaults_unchanged": {
+    "newton_max_iterations": 10,
+    "physical_dt_s": 0.001,
+    "substeps": 10,
+    "frame_dt_s": 0.01,
+    "pcg_p95_budget": 64,
+    "pcg_hard_limit": 200
+  },
+  "tasks": {
+    "P2-0A": "EXECUTED",
+    "P2-0B": "EXECUTED",
+    "P2-0B-T": "EXECUTED",
+    "P2-0C": "PENDING_USER_REVIEW"
+  },
+  "device": "NVIDIA GeForce RTX 5070 Ti Laptop GPU, Warp 1.17.0",
+  "report": "agents/integration/P2_0_DIAGNOSTICS_REPORT.md",
+  "report_sha256": "5f737521b1c915f8aeaefcd4528b8c6ee5ba2da4d52bcba86c12386eda0a9b57",
+  "artifact_root": "agents/integration/artifacts/p2/p2-0",
+  "recommendations": "agents/integration/artifacts/p2/p2-0/p2-0c-recommendations.json",
+  "g6_g7": "NOT_CLAIMED",
+  "v02_grasp_mvp": "NOT_COMPLETE",
+  "plan_sha256": "9fb8c9688e04a067bcd52d8e741ecad9f98fd7a93c1d391064615f0c542d7f3d",
+  "plan_snapshot": "agents/integration/artifacts/p2/p2-0/newton_monolithic_solver_p2_plan_zh.md",
+  "artifact_location": "Full traces/Nsight/compacts remain in the shared workspace; this portable record, guides and diagnostic runners are committed to the fork."
+}
