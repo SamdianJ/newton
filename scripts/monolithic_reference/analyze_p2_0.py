@@ -31,7 +31,9 @@ def load_compacts(root: Path, kind: str):
 def newton_table(rows):
     table = []
     for row in rows:
-        if row.get("task") not in {"0a-newton", "0a-newton-control", "0a-repeat"} and not str(row.get("name", "")).startswith("0a-newton"):
+        if row.get("task") not in {"0a-newton", "0a-newton-control", "0a-repeat"} and not str(
+            row.get("name", "")
+        ).startswith("0a-newton"):
             continue
         q = row.get("quality", {})
         work = row.get("work", {}).get("per_simulated_second", {})
@@ -45,13 +47,19 @@ def newton_table(rows):
                 "normal_convergence_fraction": q.get("normal_convergence_fraction"),
                 "soft_stop_count": q.get("soft_stop_count"),
                 "failure": q.get("failure") or row.get("failure"),
-                "max_penetration_mm": None if q.get("maximum_penetration_m") is None else 1000 * q["maximum_penetration_m"],
+                "max_penetration_mm": None
+                if q.get("maximum_penetration_m") is None
+                else 1000 * q["maximum_penetration_m"],
                 "min_det_f": q.get("minimum_det_f"),
                 "wall_s_per_sim_s": row.get("wall_seconds_per_simulated_second"),
                 "newton_updates_per_sim_s": work.get("newton_updates"),
                 "assemblies_per_sim_s": work.get("assemblies"),
                 "pcg_iters_per_sim_s": work.get("pcg_iterations"),
-                "hold_nl_p50": row.get("work", {}).get("stages", {}).get("hold", {}).get("nonlinear_iterations", {}).get("p50"),
+                "hold_nl_p50": row.get("work", {})
+                .get("stages", {})
+                .get("hold", {})
+                .get("nonlinear_iterations", {})
+                .get("p50"),
                 "hold_step_ms_p50": row.get("work", {}).get("stages", {}).get("hold", {}).get("step_ms", {}).get("p50"),
             }
         )
@@ -80,7 +88,9 @@ def dt_table(rows):
                 "normal_convergence_fraction": q.get("normal_convergence_fraction"),
                 "physical_coverage_s": q.get("physical_coverage_s"),
                 "failure": q.get("failure") or row.get("failure"),
-                "max_penetration_mm": None if q.get("maximum_penetration_m") is None else 1000 * q["maximum_penetration_m"],
+                "max_penetration_mm": None
+                if q.get("maximum_penetration_m") is None
+                else 1000 * q["maximum_penetration_m"],
                 "min_det_f": q.get("minimum_det_f"),
                 "wall_s_per_sim_s": row.get("wall_seconds_per_simulated_second"),
                 "hold_step_ms_p50": row.get("work", {}).get("stages", {}).get("hold", {}).get("step_ms", {}).get("p50"),
@@ -92,7 +102,9 @@ def dt_table(rows):
 
 
 def baseline_repeats(rows):
-    selected = [r for r in rows if str(r.get("name", "")).startswith("0b-uninstrumented") or r.get("name") == "0a-newton-r3-n10"]
+    selected = [
+        r for r in rows if str(r.get("name", "")).startswith("0b-uninstrumented") or r.get("name") == "0a-newton-r3-n10"
+    ]
     by_mesh = {}
     for row in selected:
         mesh = row.get("mesh")
@@ -139,8 +151,12 @@ def tet_summary(rows):
                 if row.get("overall")
                 else None,
                 "frame_6sub_p50": ((row.get("frame_solver_ms_6substeps") or {}).get("hold") or {}).get("p50"),
-                "nl_p50": (row.get("overall") or {}).get("nonlinear_iterations", {}).get("p50") if row.get("overall") else None,
-                "lin_p50": (row.get("overall") or {}).get("linear_iterations", {}).get("p50") if row.get("overall") else None,
+                "nl_p50": (row.get("overall") or {}).get("nonlinear_iterations", {}).get("p50")
+                if row.get("overall")
+                else None,
+                "lin_p50": (row.get("overall") or {}).get("linear_iterations", {}).get("p50")
+                if row.get("overall")
+                else None,
                 "path": row.get("_path"),
             }
         )
@@ -160,8 +176,12 @@ def recommend(newton, dt_rows, baselines, tet):
     ]
     rec = {
         "status": "PENDING_USER_REVIEW",
-        "sharpa_newton_limits_that_met_inherited_gates": sorted({r["newton_max_iterations"] for r in passing_n if r.get("newton_max_iterations") is not None}),
-        "sharpa_substeps_that_met_inherited_gates": sorted({r["substeps"] for r in passing_h if r.get("substeps") is not None}),
+        "sharpa_newton_limits_that_met_inherited_gates": sorted(
+            {r["newton_max_iterations"] for r in passing_n if r.get("newton_max_iterations") is not None}
+        ),
+        "sharpa_substeps_that_met_inherited_gates": sorted(
+            {r["substeps"] for r in passing_h if r.get("substeps") is not None}
+        ),
         "notes": [
             "Production defaults remain N=10 and h=1 ms until the user accepts a temporal bound.",
             "N=1 meets the 99% gate at 1 ms but has 29 soft stops and fails the gate at S=4/5.",
@@ -227,7 +247,9 @@ def main():
         "baseline_repeats": baseline_repeats(sharpa),
         "tet": tet_summary(tet),
     }
-    report["recommendation"] = recommend(report["newton"], report["timestep"], report["baseline_repeats"], report["tet"])
+    report["recommendation"] = recommend(
+        report["newton"], report["timestep"], report["baseline_repeats"], report["tet"]
+    )
     out = args.root / "summary.json"
     payload = json.dumps(report, indent=2, default=str) + "\n"
     out.write_text(payload)
@@ -237,7 +259,12 @@ def main():
     index_payload = json.dumps({"files": index, "count": len(index)}, indent=2) + "\n"
     index_path.write_text(index_payload)
     (args.root / "evidence-index.sha256").write_text(hashlib.sha256(index_payload.encode()).hexdigest() + "\n")
-    print(json.dumps({"wrote": str(out), "sharpa_runs": len(sharpa), "tet_runs": len(tet), "evidence_files": len(index)}, indent=2))
+    print(
+        json.dumps(
+            {"wrote": str(out), "sharpa_runs": len(sharpa), "tet_runs": len(tet), "evidence_files": len(index)},
+            indent=2,
+        )
+    )
 
 
 if __name__ == "__main__":

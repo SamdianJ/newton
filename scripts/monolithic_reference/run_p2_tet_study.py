@@ -21,8 +21,9 @@ import warp as wp
 
 import newton._src.solvers.monolithic.solver_monolithic as solver_module
 from newton._src.solvers.monolithic.tet import assemble_tet_residual_tangent
+from newton.examples.softbody.monolithic_tet_compare import build_case
 from newton.examples.softbody.monolithic_tet_response import ResponseCase, gravity_acceleration
-from scripts.monolithic_reference.profile_release import _StageProfile, _percentiles
+from scripts.monolithic_reference.profile_release import _percentiles, _StageProfile
 
 ROOT = Path(__file__).resolve().parents[2]
 WORKSPACE = Path("/home/lightwheel/Desktop/newton/SamiulJ")
@@ -140,10 +141,7 @@ def diagnostic_run(device, refinement, output):
         "manifest": case.manifest,
         "wall_seconds": wall,
         "wall_seconds_per_simulated_second": wall / max(case.steps * case.dt, case.dt),
-        "by_phase": {
-            name: summarize_rows([row for row in records if row["phase"] == name])
-            for _, _, name in PHASES
-        },
+        "by_phase": {name: summarize_rows([row for row in records if row["phase"] == name]) for _, _, name in PHASES},
         "overall": summarize_rows(records),
         "mempool": mempool(case.model.device),
         "environment": environment(device),
@@ -216,9 +214,7 @@ def timing_run(device, refinement, output):
                 "p50": 6 * float(np.percentile([r["solver_ms"] for r in rows], 50)),
                 "p95": 6 * float(np.percentile([r["solver_ms"] for r in rows], 95)),
             }
-            for name, rows in (
-                (label, [r for r in samples if r["phase"] == label]) for _, _, label in PHASES
-            )
+            for name, rows in ((label, [r for r in samples if r["phase"] == label]) for _, _, label in PHASES)
         },
         "by_phase": {name: summarize_rows([r for r in samples if r["phase"] == name]) for _, _, name in PHASES},
         "overall": summarize_rows(samples),
@@ -249,12 +245,12 @@ def staged_window(device, refinement, output):
             tet_ms = []
             original = assemble_tet_residual_tangent
 
-            def timed_tet(*args, **kwargs):
+            def timed_tet(*args, _original=original, _tet_ms=tet_ms, **kwargs):
                 wp.synchronize_device(case.model.device)
                 start = time.perf_counter()
-                result = original(*args, **kwargs)
+                result = _original(*args, **kwargs)
                 wp.synchronize_device(case.model.device)
-                tet_ms.append(1000 * (time.perf_counter() - start))
+                _tet_ms.append(1000 * (time.perf_counter() - start))
                 return result
 
             with patch.object(solver_module, "assemble_tet_residual_tangent", side_effect=timed_tet):
@@ -280,8 +276,6 @@ def staged_window(device, refinement, output):
 
 
 def material_replay(device, refinement, candidate_x, output):
-    from newton.examples.softbody.monolithic_tet_compare import build_case
-
     rows = []
     for material, mass in (
         ("smith_log_stabilized", "consistent"),
@@ -301,12 +295,12 @@ def material_replay(device, refinement, candidate_x, output):
         original = assemble_tet_residual_tangent
         samples = []
 
-        def timed(*args, _model=model, _original=original, **kwargs):
+        def timed(*args, _model=model, _original=original, _samples=samples, **kwargs):
             wp.synchronize_device(_model.device)
             start = time.perf_counter()
             result = _original(*args, **kwargs)
             wp.synchronize_device(_model.device)
-            samples.append(1000 * (time.perf_counter() - start))
+            _samples.append(1000 * (time.perf_counter() - start))
             return result
 
         step_ms = None
@@ -386,7 +380,7 @@ def main():
             index.append({"name": f"{tag}-diagnostic", "failure": compact.get("failure")})
             if not args.skip_timing:
                 for repeat in range(args.repeats):
-                    out = args.output / tag / f"timing-{repeat+1:02d}"
+                    out = args.output / tag / f"timing-{repeat + 1:02d}"
                     if (out / "compact.json").exists():
                         print("skip", out.name, flush=True)
                         continue
@@ -395,10 +389,14 @@ def main():
             staged_dir = args.output / tag / "staged"
             if not (staged_dir / "staged.json").exists():
                 print("STAGED", tag, flush=True)
-                windows, x = staged_window(device, refinement, staged_dir)
+                _windows, x = staged_window(device, refinement, staged_dir)
                 if candidate_x is None:
                     candidate_x = x
-            if refinement == PRIMARY and candidate_x is not None and not (args.output / tag / "material_replay.json").exists():
+            if (
+                refinement == PRIMARY
+                and candidate_x is not None
+                and not (args.output / tag / "material_replay.json").exists()
+            ):
                 print("MATERIAL", tag, flush=True)
                 material_replay(device, refinement, candidate_x, args.output / tag)
             (args.output / "index.json").write_text(json.dumps(index, indent=2) + "\n")

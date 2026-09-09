@@ -165,7 +165,6 @@ def slim_record(record, stats, curve):
 def quality(records, summary, dt):
     gates = ANCHORED_FIXTURE["gates"]
     accepted = [row for row in records if not row["rollback"]]
-    hold = [row for row in accepted if row["stage"] == "hold"]
     soft = sum(row["status"] == "NONLINEAR_MAX_ITERATIONS" for row in accepted)
     hard = int(bool(summary.get("failure")))
     return {
@@ -201,13 +200,20 @@ def work_stats(records, dt):
             continue
         body = rows[1:] if len(rows) > 1 else rows
 
-        def pct(name):
+        def pct(name, body=body):
             values = [row[name] for row in body]
-            return {"p50": float(np.percentile(values, 50)), "p95": float(np.percentile(values, 95)), "mean": float(np.mean(values)), "max": float(np.max(values))}
+            return {
+                "p50": float(np.percentile(values, 50)),
+                "p95": float(np.percentile(values, 95)),
+                "mean": float(np.mean(values)),
+                "max": float(np.max(values)),
+            }
 
         by_stage[stage] = {
             "count": len(rows),
-            "step_ms": pct("step_seconds") if False else {
+            "step_ms": pct("step_seconds")
+            if False
+            else {
                 "p50": 1000 * float(np.percentile([r["step_seconds"] for r in body], 50)),
                 "p95": 1000 * float(np.percentile([r["step_seconds"] for r in body], 95)),
                 "mean": 1000 * float(np.mean([r["step_seconds"] for r in body])),
@@ -228,7 +234,8 @@ def work_stats(records, dt):
             "pcg_iterations": float(sum(r["pcg_iterations_sum"] for r in records) / duration),
             "wall_seconds": float(sum(r["step_seconds"] for r in records) / duration),
         },
-        "solver_only_fps_at_frame_dt": FRAME_DT / (sum(r["step_seconds"] for r in records) / max(len(records), 1) * round(FRAME_DT / dt)),
+        "solver_only_fps_at_frame_dt": FRAME_DT
+        / (sum(r["step_seconds"] for r in records) / max(len(records), 1) * round(FRAME_DT / dt)),
     }
 
 
@@ -368,7 +375,9 @@ def run_case(job, output, *, nsys_window=None, stage_profile=False):
         "accepted_steps": case.step_count,
         "failure": case.failure,
         "converged_fraction": float(np.mean([row["converged"] for row in traces])) if traces else 0.0,
-        "hold_contact_fraction": float(np.mean([row["finger_force_n"] >= gates["minimum_finger_force_n"] for row in hold]))
+        "hold_contact_fraction": float(
+            np.mean([row["finger_force_n"] >= gates["minimum_finger_force_n"] for row in hold])
+        )
         if hold
         else 0.0,
         "maximum_penetration_m": max((row["penetration"] for row in traces), default=None),
@@ -486,7 +495,7 @@ def jobs():
     for i in range(1, 5):
         rows.append(
             {
-                "name": f"0b-uninstrumented-r3-rep{i+1:02d}",
+                "name": f"0b-uninstrumented-r3-rep{i + 1:02d}",
                 "task": "0b-baseline",
                 "mesh": "r3",
                 "newton_max_iterations": 10,
@@ -496,7 +505,7 @@ def jobs():
     for i in range(5):
         rows.append(
             {
-                "name": f"0b-uninstrumented-r2-rep{i+1:02d}",
+                "name": f"0b-uninstrumented-r2-rep{i + 1:02d}",
                 "task": "0b-baseline",
                 "mesh": "r2",
                 "newton_max_iterations": 10,
@@ -563,8 +572,8 @@ def main():
         )
         + "\n"
     )
-    for job in selected:
-        job = {**job, "overwrite": args.overwrite}
+    for spec in selected:
+        job = {**spec, "overwrite": args.overwrite}
         out = args.output / job["name"]
         print("START", job["name"], flush=True)
         try:
