@@ -285,3 +285,12 @@ and mean middle-finger force increased from 0.0256 to 0.439 N (about 17 times).
 This establishes increased loading, not additional loaded fingers or a
 calibrated performance target. The iteration sweep and new hotspot profiling
 remain separate P2 work.
+
+P2 selects the 25 mm radius sphere as its benchmark: r3 is the primary
+Newton-convergence and profiling workload, with r2 at the same radius as the
+resolution comparison. The 20 mm sphere is retained as a historical control;
+30 mm remains a failed stress case. Explicit asset arguments are recorded in
+``scripts/monolithic_reference/fixtures/p2_benchmark_25mm_v1.json``. The example
+default remains 20 mm, so select the 25 mm asset and radius as shown above.
+The r2 full loading run, new-radius calibration and numerical performance
+targets are still pending. This selection does not complete G6/G7.

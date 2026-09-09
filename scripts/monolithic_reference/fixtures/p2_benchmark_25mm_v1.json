@@ -1,0 +1,86 @@
+{
+  "schema": "monolithic-p2-benchmark/v1",
+  "selection": "USER_SELECTED",
+  "date": "2026-09-09",
+  "radius_m": 0.025,
+  "experiment": "anchored-close",
+  "assets": {
+    "r3": {
+      "role": "primary",
+      "path": "scripts/monolithic_reference/fixtures/soft_ball_25mm/ball_r3.npz",
+      "sha256": "cd7ff1160de175c81b1137a786c30f73042044dd904fb670bd5642a08c9896f4",
+      "radius_m": 0.025,
+      "node_count": 343,
+      "tet_count": 1296,
+      "boundary_count": 432,
+      "cli_args": [
+        "--ball",
+        "scripts/monolithic_reference/fixtures/soft_ball_25mm/ball_r3.npz",
+        "--ball-radius",
+        "0.025"
+      ],
+      "complete_loading_validation": "4500-step screening PASS; repeat studies pending"
+    },
+    "r2": {
+      "role": "resolution_control",
+      "path": "scripts/monolithic_reference/fixtures/soft_ball_25mm/ball_r2.npz",
+      "sha256": "a8cb1627da104315a50db82610c1fdbb4cd1bad452ba8ec22614f35a38d6c588",
+      "radius_m": 0.025,
+      "node_count": 125,
+      "tet_count": 384,
+      "boundary_count": 192,
+      "cli_args": [
+        "--ball",
+        "scripts/monolithic_reference/fixtures/soft_ball_25mm/ball_r2.npz",
+        "--ball-radius",
+        "0.025"
+      ],
+      "complete_loading_validation": "PENDING"
+    }
+  },
+  "dt_s": 0.001,
+  "duration_s": 4.5,
+  "expected_steps": 4500,
+  "substeps_per_display_frame": 10,
+  "default_newton_max_iterations": 10,
+  "newton_limit_sweep": [
+    1,
+    2,
+    3,
+    4,
+    6,
+    8,
+    10,
+    16,
+    24
+  ],
+  "unchanged_constraints": {
+    "det_f_internal_guard": 0.2,
+    "det_f_acceptance_min": 0.1,
+    "max_penetration_m": 0.002,
+    "pcg_p95_budget": 64,
+    "pcg_hard_limit": 200,
+    "residual_tolerances": "unchanged"
+  },
+  "baseline_run_manifest": "agents/integration/artifacts/p2/larger-ball/r3-25mm/manifest.json",
+  "baseline_run_manifest_sha256": "8d86c4c487507fc2242fd4e49c42af46e2b2e8b202f0836b4a8df2bdcb7e1e05",
+  "baseline_run_summary_sha256": "22ad1c5d5ae8f1f60a57a3b257b7b769813d4655c8167eacf5f4dc8aba44c569",
+  "ball_asset_manifest_sha256": "8dc139736a23573772231832422efa7435e5013b39c0ae59e7a28b29d2ea825b",
+  "screening_code_commit": "3464d8d5c918208486d16c7ba1a6231509594b32",
+  "screening_record_commit": "068a9348660a68b633160f94b410db64684c925b",
+  "other_radii": {
+    "20mm": "historical_control_only",
+    "30mm": "failed_stress_case_only"
+  },
+  "pending": [
+    "25mm r2 full loading validation",
+    "new-radius contact calibration applicability",
+    "Newton iteration/convergence sweep",
+    "repeated post-PR7C hotspot profiling",
+    "numerical performance target freeze",
+    "G6 and remaining G7"
+  ],
+  "p2_plan_sha256": "dc900f025613e99e7da5d2b74d955bed102a27ca32a96b6b208a32e224b59b2e",
+  "p2_plan_snapshot": "agents/integration/artifacts/p2/benchmark-selection/newton_monolithic_solver_p2_plan_zh.md",
+  "usage": "Pass the listed CLI arguments to the existing example; this record is not a new runtime configuration loader."
+}
