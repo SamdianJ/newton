@@ -89,9 +89,11 @@
     "physical-step/frame wall time and wall seconds per simulated second"
   ],
   "temporal_reference": "Successful finer steps; verify refinement trend, no finest-step-as-truth assumption",
-  "selection": "PENDING_USER_REVIEW; production remains N=10 h=1ms; candidate S=4 and N>=2 if ~1mm COM versus 1ms is accepted; S=1/S=2 trigger PCG p95>64",
+  "selection": "PENDING_USER_REVIEW; tested S=4 at N=2 and N=10, not all N>=2; quoted 1.061mm COM difference belongs to N=10/S=4",
   "runtime_timestep_options": "NOT_IMPLEMENTED by the production example; study used independent fixtures",
   "plan_sha256": "9fb8c9688e04a067bcd52d8e741ecad9f98fd7a93c1d391064615f0c542d7f3d",
   "plan_snapshot": "agents/integration/artifacts/p2/p2-0/newton_monolithic_solver_p2_plan_zh.md",
-  "supersedes": "1ms invariant applies only to the isolated Newton sweep and historical baseline, not this new physical_dt sweep"
+  "supersedes": "1ms invariant applies only to the isolated Newton sweep and historical baseline, not this new physical_dt sweep",
+  "measurement_status": "DIAGNOSTIC_FINDINGS_WITH_VALIDATION_GAPS",
+  "record_correction": "agents/integration/artifacts/p2/p2-0/record-correction.json"
 }

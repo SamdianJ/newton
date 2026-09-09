@@ -1,6 +1,6 @@
 {
   "schema": "monolithic-p2-0-diagnostics/v1",
-  "status": "DIAGNOSTICS_COMPLETE",
+  "status": "DIAGNOSTIC_FINDINGS_WITH_VALIDATION_GAPS",
   "p2_0c": "PENDING_USER_REVIEW",
   "date": "2026-09-09",
   "code_commit": "2b4b421c7fa1309652a8a3bde08184b6a88fe10d",
@@ -14,19 +14,33 @@
     "pcg_hard_limit": 200
   },
   "tasks": {
-    "P2-0A": "EXECUTED",
-    "P2-0B": "EXECUTED",
-    "P2-0B-T": "EXECUTED",
+    "P2-0A": "EXECUTED_WITH_VALIDATION_GAPS",
+    "P2-0B": "PARTIAL_MEASUREMENT",
+    "P2-0B-T": "PARTIAL_MEASUREMENT",
     "P2-0C": "PENDING_USER_REVIEW"
   },
   "device": "NVIDIA GeForce RTX 5070 Ti Laptop GPU, Warp 1.17.0",
   "report": "agents/integration/P2_0_DIAGNOSTICS_REPORT.md",
-  "report_sha256": "5f737521b1c915f8aeaefcd4528b8c6ee5ba2da4d52bcba86c12386eda0a9b57",
+  "report_sha256": "99bc6c9ef4866b157c6723b9ba74f88411cacc5d42725950539cf40068b4431c",
   "artifact_root": "agents/integration/artifacts/p2/p2-0",
   "recommendations": "agents/integration/artifacts/p2/p2-0/p2-0c-recommendations.json",
   "g6_g7": "NOT_CLAIMED",
   "v02_grasp_mvp": "NOT_COMPLETE",
-  "plan_sha256": "9fb8c9688e04a067bcd52d8e741ecad9f98fd7a93c1d391064615f0c542d7f3d",
-  "plan_snapshot": "agents/integration/artifacts/p2/p2-0/newton_monolithic_solver_p2_plan_zh.md",
-  "artifact_location": "Full traces/Nsight/compacts remain in the shared workspace; this portable record, guides and diagnostic runners are committed to the fork."
+  "plan_sha256": "d848e9397794d4d2e4d92dbcdc6518840e3a5e59dfddeedab8219676f3b525a4",
+  "plan_snapshot": "agents/integration/artifacts/p2/p2-0/newton_monolithic_solver_p2_plan_record_correction_zh.md",
+  "artifact_location": "Full traces/Nsight/compacts remain in the shared workspace; this portable record, guides and diagnostic runners are committed to the fork.",
+  "delivery_commit": "8eac6dfbe89ef97bac4151c7ccd9e9ccbe8601ad",
+  "record_correction": "agents/integration/artifacts/p2/p2-0/record-correction.json",
+  "validation_gaps": {
+    "current_profile": "PARTIAL: _evaluate_current reassignment bypasses profiler after first window step; Hold current has 2 samples, not complete-window coverage",
+    "material_replay": "EXPLORATORY_ONLY: same initial positions followed by 8 evolving solver steps; not fixed-candidate material replay",
+    "fps_field": "MISLABELED: original solver_only_fps_at_frame_dt is a real-time factor; divide by frame_dt_s for FPS; original compacts retained",
+    "quiet_repeats": "PENDING: Sharpa r3 has 4 quiet repeats; contention samples are a separate population",
+    "tet_loaded_repeats": "PENDING: original timing-* omitted gravity; fixed runner not rerun for loaded repetitions",
+    "runtime_source": "UNAVAILABLE: pre-fix runtime script snapshot/hash not retained; 8eac6dfb hashes identify delivered scripts only",
+    "historical_checks": "NOT_RECORDED: original pre-commit/runner/post-commit validation logs not located; present checks cannot certify historical execution",
+    "temporal_selection": "PARTIAL: N=2/S=4 and N=10/S=4 passed; not all N>=2 tested; 1.061mm COM comparison belongs to N=10/S=4"
+  },
+  "evidence_index_sha256": "0355e47779b7ecb36b3fbab976f29f602b4aa0e765de607ea2b4e39e86fba720",
+  "index_scope": "All files in artifact_root except evidence-index.json and its own digest"
 }

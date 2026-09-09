@@ -185,12 +185,14 @@ def recommend(newton, dt_rows, baselines, tet):
         "notes": [
             "Production defaults remain N=10 and h=1 ms until the user accepts a temporal bound.",
             "N=1 meets the 99% gate at 1 ms but has 29 soft stops and fails the gate at S=4/5.",
-            "N=2 is the first cap with ~100% SUCCESS at 1 ms and the only tested cap that passed S=4.",
+            "N=2 and N=10 passed S=4; the other caps above N=2 were not cross-validated at S=4.",
             "S=1 and S=2 pass stability but PCG p95 exceeds 64, which would trigger patch Schur.",
-            "S=4 at N>=2 is the cheapest quality-passing coarse step that stays under the PCG budget.",
+            "S=4 is a coarse-step candidate within the PCG budget; quiet repeated timing remains incomplete.",
             "Finest measured h=0.25 ms is not a converged continuum reference versus 1 ms.",
             "Single-finger 25 mm anchored-close is not a multi-finger grasp target.",
             "Tet gravity targets are recorded separately from Sharpa; PCG iterations dominate r5.",
+            "Current profiling covers only the first window step; material samples use evolving candidates.",
+            "Original tet timing repeats omitted gravity; original compact FPS fields are real-time factors.",
         ],
     }
     rec["sharpa_newton_candidate"] = 2
@@ -201,35 +203,22 @@ def recommend(newton, dt_rows, baselines, tet):
     return rec
 
 
-HASH_NAMES = {
-    "compact.json",
-    "summary.json",
-    "protocol.json",
-    "staged.json",
-    "material_replay.json",
-    "index.json",
-    "cross-index.json",
-    "temporal_vs_n10.json",
-    "kern_cuda_gpu_kern_sum.csv",
-    "nsight.nsys-rep",
-    "timing_rest_state_note.json",
-    "p2-0c-recommendations.json",
-    "provenance.json",
-}
-
-
 def hash_file(path: Path):
-    digest = hashlib.sha256(path.read_bytes()).hexdigest()
-    return {"path": str(path), "sha256": digest, "bytes": path.stat().st_size}
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return {"path": str(path), "sha256": digest.hexdigest(), "bytes": path.stat().st_size}
 
 
 def evidence_index(root: Path):
+    """Hash all evidence except the index and its own digest."""
     rows = []
+    outputs = {root / "evidence-index.json", root / "evidence-index.sha256"}
     for path in sorted(root.rglob("*")):
-        if not path.is_file():
+        if not path.is_file() or path in outputs:
             continue
-        if path.name in HASH_NAMES or path.name.endswith(".sha256"):
-            rows.append(hash_file(path))
+        rows.append(hash_file(path))
     return rows
 
 

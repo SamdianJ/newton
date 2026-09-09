@@ -49,5 +49,7 @@
   "plan_sha256": "9fb8c9688e04a067bcd52d8e741ecad9f98fd7a93c1d391064615f0c542d7f3d",
   "plan_snapshot": "agents/integration/artifacts/p2/p2-0/newton_monolithic_solver_p2_plan_zh.md",
   "diagnostics": "scripts/monolithic_reference/fixtures/p2_0_diagnostics_v1.json",
-  "historical_note": "P1 exit and its frozen P2 plan remain unchanged; this record now points at the executed P2-0 diagnostics."
+  "historical_note": "P1 exit and its frozen P2 plan remain unchanged; this record now points at the executed P2-0 diagnostics.",
+  "measurement_status": "DIAGNOSTIC_FINDINGS_WITH_VALIDATION_GAPS",
+  "record_correction": "agents/integration/artifacts/p2/p2-0/record-correction.json"
 }

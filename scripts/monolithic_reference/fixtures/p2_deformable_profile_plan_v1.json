@@ -75,5 +75,7 @@
     "scripts/monolithic_reference/run_gravity_resolution.py": "ee33c3acc0e48ae4d6c9d2a0ae9ef8b3af08ddbe62fa13103185cf586d8b2502"
   },
   "plan_sha256": "9fb8c9688e04a067bcd52d8e741ecad9f98fd7a93c1d391064615f0c542d7f3d",
-  "plan_snapshot": "agents/integration/artifacts/p2/p2-0/newton_monolithic_solver_p2_plan_zh.md"
+  "plan_snapshot": "agents/integration/artifacts/p2/p2-0/newton_monolithic_solver_p2_plan_zh.md",
+  "measurement_status": "DIAGNOSTIC_FINDINGS_WITH_VALIDATION_GAPS",
+  "record_correction": "agents/integration/artifacts/p2/p2-0/record-correction.json"
 }

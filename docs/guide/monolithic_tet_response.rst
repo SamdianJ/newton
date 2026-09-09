@@ -258,3 +258,12 @@ The original quality checks were not relaxed. Records are in
 ``scripts/monolithic_reference/fixtures/p2_deformable_profile_plan_v1.json``
 and ``agents/integration/P2_0_DIAGNOSTICS_REPORT.md``. Example and solver
 defaults are unchanged.
+
+The P2-0 record audit identifies incomplete measurement coverage. Sharpa
+current timings cover only the first step of each profiling window; material
+comparisons evolve from common initial positions instead of replaying fixed
+candidates. Quiet Sharpa repetitions and loaded tet timing repetitions remain
+incomplete. The original compact FPS field is a real-time factor; corrected
+units are published separately without replacing measurements. See the
+validation gaps in ``p2_0_diagnostics_v1.json`` and report section 10.
+These findings do not change production defaults or certify P2-0 completion.

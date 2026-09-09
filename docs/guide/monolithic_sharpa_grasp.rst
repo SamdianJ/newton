@@ -324,3 +324,12 @@ the matrix and the diagnostic outcome. Configurable runtime
 timesteps/substeps are not implemented by the production example; the
 study used independent fixtures. Coarse steps S=1 and S=2 pass stability
 but exceed the PCG p95 budget of 64.
+
+The P2-0 record audit identifies incomplete measurement coverage. Sharpa
+current timings cover only the first step of each profiling window; material
+comparisons evolve from common initial positions instead of replaying fixed
+candidates. Quiet Sharpa repetitions and loaded tet timing repetitions remain
+incomplete. The original compact FPS field is a real-time factor; corrected
+units are published separately without replacing measurements. See the
+validation gaps in ``p2_0_diagnostics_v1.json`` and report section 10.
+These findings do not change production defaults or certify P2-0 completion.
