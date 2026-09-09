@@ -1,0 +1,97 @@
+{
+  "schema": "monolithic-p2-preconditioner-study/v1",
+  "status": "PLANNED_NOT_IMPLEMENTED",
+  "performance_status": "PERFORMANCE_NOT_MEASURED",
+  "baseline_commit": "0dd4d5fabb766f913c856cb1897dae3b2e598db9",
+  "candidates": [
+    {
+      "name": "multi_node_local_blocks",
+      "initial_nodes_per_block": [
+        4,
+        8
+      ],
+      "partition": "nonoverlapping adjacent dynamic nodes; cover every node",
+      "matrix": "principal blocks of the current scaled regularized production matrix",
+      "overlap": "follow-up only if justified; preserve SPD"
+    },
+    {
+      "name": "aggregation_amg_pcg",
+      "initial_variant": "elasticity-aware smoothed aggregation on soft A_xx",
+      "near_nullspace": "translation/rotation candidates with fixed-node elimination and scaling",
+      "reuse": "measure hierarchy/interpolation reuse separately from numerical coarse-operator and smoother updates"
+    }
+  ],
+  "baseline": "existing dense q plus per-node 3x3 x preconditioner",
+  "invariants": [
+    "same full global operator including q-x coupling",
+    "fixed linear SPD preconditioner within each PCG solve",
+    "existing true-residual, physics, failure and transaction gates",
+    "existing PCG 64/200 budgets",
+    "unchanged production default; no automatic backend selection"
+  ],
+  "workloads": {
+    "primary": "loaded tet gravity r5",
+    "tet_controls": [
+      "r3",
+      "r4",
+      "r6"
+    ],
+    "contact_controls": "Sharpa 25mm r3/r2",
+    "devices": [
+      "cpu",
+      "cuda"
+    ]
+  },
+  "experiments": [
+    "frozen real candidate matrices and RHS with high-precision solution/true-residual oracle",
+    "experimental independent-solver continuous trajectories including setup/rebuild amortization",
+    "quality-passing physical_dt cross-check with matched settings"
+  ],
+  "accounting": [
+    "partition/aggregation setup",
+    "format conversion and transfers",
+    "factorization/coarse numerical updates",
+    "preconditioner application",
+    "complete PCG including checks and retries",
+    "complete step and fixed-duration trajectory",
+    "peak memory and rebuild frequency"
+  ],
+  "measurement": {
+    "quiet_warmed_repeats_minimum": 5,
+    "phases": [
+      "loading",
+      "hold"
+    ],
+    "statistics": [
+      "per-call PCG iterations including retries",
+      "solve/step p50/p95",
+      "wall time per simulated second",
+      "one-time setup and actual amortization",
+      "measurement spread"
+    ],
+    "controls": "same physics, N/h, diagnostics and graph policy; compare against optimized PCG baseline too"
+  },
+  "admission": {
+    "requires": [
+      "existing correctness gates pass",
+      "repeatable total solve and step/trajectory time savings beyond measurement noise",
+      "acceptable tail latency and memory under budgets frozen before formal validation"
+    ],
+    "numeric_targets": "PENDING_MEASUREMENT",
+    "iteration_reduction_alone_sufficient": false,
+    "decision_per_candidate": "GO/NO_GO with device/size scope; no savings means NOT_ADMITTED"
+  },
+  "deferred_decisions": [
+    "runtime backend/API/default",
+    "external runtime dependency and license review",
+    "graph capture support; setup/rebuild initially outside graphs"
+  ],
+  "not_claimed": [
+    "implemented preconditioners",
+    "measured speedup",
+    "replacement of conditional contact patch Schur",
+    "resolution of near-static issue or G6/G7"
+  ],
+  "plan_snapshot": "agents/integration/artifacts/p2/p2-preconditioner-planning/newton_monolithic_solver_p2_plan_zh.md",
+  "plan_sha256": "269869eaebbea5e39bd1d2ec30047e9ca76356607356566b9d9355d1b5113656"
+}

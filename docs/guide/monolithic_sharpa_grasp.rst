@@ -374,3 +374,23 @@ and scalar-update requirements, correctness evidence and measured benefit.
 Newton/line-search decisions, dynamic BSR construction, buffer swaps and
 transaction publication initially remain outside graphs. Graph execution
 is independent of PCG diagnostic mode and is planned to default to off.
+
+Planned soft-body preconditioner experiments
+-------------------------------------------
+
+P2 will compare adjacent multi-node local blocks and elasticity-aware
+aggregation AMG-PCG against the existing per-node 3x3 preconditioner.
+Both are **planned, not implemented**. Start with frozen loaded tet matrices,
+then test independent continuous trajectories, including Sharpa contact controls.
+Keep the dense q preconditioner, full coupled operator, physical parameters,
+true-residual thresholds and transaction checks. Each PCG solve requires a
+fixed linear SPD preconditioner.
+
+Formal integration requires repeatable total solve and step/trajectory time
+savings beyond measurement noise, with acceptable memory and tail latency.
+Include setup, format conversion, numerical updates, application and actual
+rebuild amortization; fewer iterations alone do not qualify. Compare matched
+PCG diagnostic and graph settings, with at least five quiet warmed repetitions.
+Each candidate receives its own go/no-go decision and device/size scope.
+No default changes or runtime dependencies are introduced by this plan.
+See ``scripts/monolithic_reference/fixtures/p2_preconditioner_study_v1.json``.
