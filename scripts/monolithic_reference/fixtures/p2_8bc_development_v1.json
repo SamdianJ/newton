@@ -1,0 +1,62 @@
+{
+  "schema": "monolithic-p2-8bc-development/v1",
+  "date": "2026-09-10",
+  "status": "DEVELOPMENT_VALIDATED_FULL_PERFORMANCE_DEFERRED_TO_USER_NIGHT_RUN",
+  "implementation_head": "86c5d569e7904c91489234fa32973ee189aa2203",
+  "development_gate": {
+    "status": "DEVELOPMENT_GATE_PASS_NIGHT_EXECUTION_DEFERRED_BY_USER",
+    "tests": 92,
+    "test_seconds": 69.953,
+    "job_seconds": 72.69228982925415,
+    "tested_code_sha256": {
+      "scripts/monolithic_reference/validate_p2.py": "e82d6c1ac2427e19e77b3bbf476724f4ce47c14dc60e49b7b28acc0c259994c1",
+      "newton/tests/test_monolithic_validation_workflow.py": "a2c21809f8d92c1b4fac69a9da8acc2df0589f1ff7528ded955071ee4554b3bc"
+    },
+    "cuda_test_names": 38,
+    "cpu_test_names": 38,
+    "resume_skip": "PASS: validation/development-resume.log",
+    "night_plan": {
+      "regression_modules": 36,
+      "full_trajectories": 50,
+      "new_night_execution": "NOT_RUN_BY_USER_REQUEST"
+    },
+    "night_screen_existing_data": {
+      "runs": 15,
+      "status": "PASS",
+      "pcg64_failures_retained": 3
+    },
+    "retained_long_batch": {
+      "complete_trajectories": 15,
+      "remaining_original_trajectories": 35,
+      "status": "DEFERRED_TO_USER_NIGHT_RUN"
+    },
+    "figures": "trajectory-costs.png visually inspected; zero-based cost axes, mixed-clock evidence marked, all observed repetitions retained"
+  },
+  "defaults": {
+    "use_optimized_articulation_mass_matrix": false,
+    "pcg_mode": "diagnostic",
+    "timestep_and_newton_defaults": "UNCHANGED"
+  },
+  "evidence_root": "agents/integration/artifacts/p2/pr8b-8c",
+  "evidence_index_sha256": "6b6085ea8046f1f79a9f90bd271e877137b94881c2d7ca2cdf3c57b974b03f36",
+  "indexed_files": 445,
+  "reports": {
+    "PR8B_OWNED_MASS_REPORT.md": {
+      "path": "agents/integration/PR8B_OWNED_MASS_REPORT.md",
+      "sha256": "ecbc70d559033faa640e499593d811d1db215ca362662abc55d8c462c53132f5"
+    },
+    "PR8C_PCG_MODES_REPORT.md": {
+      "path": "agents/integration/PR8C_PCG_MODES_REPORT.md",
+      "sha256": "19705a43b798649bf0920583cef4e63a3437940f69d452ab490133eaa427332f"
+    }
+  },
+  "retained_gaps": [
+    "Five matched complete repeats and full performance admission deferred to user-run night validation",
+    "Three-mode CUDA/Nsight wait decomposition not executed",
+    "8A budget freeze and timestep accuracy remain pending",
+    "Tet PCG p95 200 still fails 64; hard limit remains 200",
+    "Near-static, G6/G7 and final P2 exit unchanged"
+  ],
+  "night_entrypoint": "uv run --no-sync -m scripts.monolithic_reference.validate_p2 --suite night --output <outside-checkout>",
+  "policy": "No automatic long trajectory reruns during development; no CPU performance reruns or system power changes; no further subagents used after user requested single-agent work"
+}

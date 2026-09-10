@@ -238,3 +238,18 @@ run validates execution only. Performance comparisons require matched device
 state, complete trajectories and repeated measurements; historical clocks and
 unfrozen budgets cannot establish formal acceptance. The defaults remain
 reference mass and diagnostic PCG, with unchanged physical parameters.
+
+## Development and overnight validation
+
+Use `uv run --no-sync -m scripts.monolithic_reference.validate_p2` for the
+small CPU/CUDA development gate. It runs the owned-mass, linear/PCG, execution
+policy, transaction and runner regressions without full trajectories.
+
+Use `--suite night` explicitly for all monolithic regression modules and the
+50 full PR-8B/8C comparison trajectories. `--list` prints the plan without GPU
+work; `--resume --output <previous-output>` verifies and skips completed jobs.
+The overnight runner requires clean candidate/reference checkouts, retains
+failed attempts, and separates execution completion from numerical budget
+failures. It does not change system power settings or grant performance
+acceptance automatically. See [the validation workflow](p2_validation_zh.md)
+for commands, scope and exit codes.
