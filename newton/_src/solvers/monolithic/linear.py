@@ -1452,7 +1452,8 @@ class MonolithicLinearWorkspace:
         self.operator.matvec(y, self._ap, self._ap, 1.0, 0.0)
         self._true_sums.zero_()
         self._true_maxima.zero_()
-        compute_rhs = not (self._pcg_active and self._rhs_norms_cached)
+        # Always recompute RHS norms for numerical consistency (fix tet r5 regression)
+        compute_rhs = True
         if compute_rhs:
             self._true_norms.fill_(float("nan"))
         else:
