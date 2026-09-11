@@ -639,12 +639,6 @@ class SolverMonolithic(SolverBase):
         LUMPED = "lumped"
         CONSISTENT = "consistent"
 
-    class PCGMode(str, enum.Enum):
-        """Experimental PCG observation policy, fixed at construction."""
-
-        DIAGNOSTIC = "diagnostic"
-        PRODUCTION = "production"
-
     @dataclass(frozen=True, slots=True)
     class JointTerms:
         """Opt in to scalar joint physics; omitted terms retain V0.1 rejection.
@@ -821,8 +815,6 @@ class SolverMonolithic(SolverBase):
         line_search_max_iterations: int = 8,
         linear_max_iterations: int = 200,
         linear_tolerance: float = 1.0e-4,
-        use_optimized_articulation_mass_matrix: bool = False,
-        pcg_mode: SolverMonolithic.PCGMode | str = PCGMode.DIAGNOSTIC,
     ) -> None:
         """Validate the model and allocate solver-owned candidate/contact buffers.
 
@@ -842,10 +834,6 @@ class SolverMonolithic(SolverBase):
             line_search_max_iterations: Positive backtracking iteration limit.
             linear_max_iterations: Positive linear iteration limit.
             linear_tolerance: Positive relative linear residual tolerance.
-            use_optimized_articulation_mass_matrix: Experimental private parallel
-                articulation mass evaluation; fixed at construction, defaults to False.
-            pcg_mode: Experimental diagnostic or production observation policy.
-                Production retains mandatory numerical checks and final force publication.
         """
         self._initialize(
             model,
@@ -862,8 +850,6 @@ class SolverMonolithic(SolverBase):
             line_search_max_iterations=line_search_max_iterations,
             linear_max_iterations=linear_max_iterations,
             linear_tolerance=linear_tolerance,
-            use_optimized_articulation_mass_matrix=use_optimized_articulation_mass_matrix,
-            pcg_mode=pcg_mode,
             joint_diagnostic=False,
         )
 
@@ -886,16 +872,6 @@ class SolverMonolithic(SolverBase):
         """SHA-256 of construction tet configuration; None for the joint diagnostic."""
         return self._tet_physics.identity if self._tet_physics is not None else None
 
-    @property
-    def use_optimized_articulation_mass_matrix(self) -> bool:
-        """Return the immutable experimental articulation execution policy."""
-        return self._use_optimized_articulation_mass_matrix
-
-    @property
-    def pcg_mode(self) -> SolverMonolithic.PCGMode:
-        """Return the immutable experimental PCG observation policy."""
-        return self._pcg_mode
-
     def _initialize(
         self,
         model,
@@ -914,14 +890,8 @@ class SolverMonolithic(SolverBase):
         line_search_max_iterations=8,
         linear_max_iterations=200,
         linear_tolerance=1.0e-4,
-        use_optimized_articulation_mass_matrix=False,
-        pcg_mode=PCGMode.DIAGNOSTIC,
     ):
         # Freeze names now; accepting an option must never silently run different physics.
-        if type(use_optimized_articulation_mass_matrix) is not bool:
-            raise ValueError("use_optimized_articulation_mass_matrix must be a bool")
-        self._use_optimized_articulation_mass_matrix = use_optimized_articulation_mass_matrix
-        self._pcg_mode = self.PCGMode(pcg_mode)
         material_model = self.MaterialModel(material_model)
         mass_mode = self.MassMode(mass_mode)
         for name, value in (
@@ -1011,11 +981,7 @@ class SolverMonolithic(SolverBase):
             if joint_terms is not None
             else None
         )
-        self._articulation = MonolithicArticulationWorkspace(
-            model,
-            joint_terms=self._joint_terms,
-            use_optimized_articulation_mass_matrix=self.use_optimized_articulation_mass_matrix,
-        )
+        self._articulation = MonolithicArticulationWorkspace(model, joint_terms=self._joint_terms)
         super().__init__(
             model,
             collision_pipeline=collision_pipeline,
@@ -1058,7 +1024,6 @@ class SolverMonolithic(SolverBase):
             ),
             layout.particle_to_dynamic,
             device=model.device,
-            pcg_mode=self.pcg_mode.value,
         )
         self._linear._set_fixed_triplet_pattern(
             global_rows=np.concatenate((np.repeat(np.arange(nq), nq), pattern.global_rows)).astype(np.int32),

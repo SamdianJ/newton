@@ -9,36 +9,7 @@ import numpy as np
 import warp as wp
 
 from ...sim import JointTargetMode, JointType, Model, State, eval_fk, eval_jacobian, eval_mass_matrix
-from ...sim.articulation import compute_body_spatial_inertia
 from ...sim.inverse_dynamics import _compute_coriolis_force, _compute_gravity_force, _InverseDynamicsScratchBuffer
-
-
-@wp.kernel
-def _eval_owned_mass_matrix(
-    articulation_start: wp.array[int],
-    articulation_end: wp.array[int],
-    joint_child: wp.array[int],
-    joint_qd_start: wp.array[int],
-    body_I_s: wp.array[wp.spatial_matrix],
-    J: wp.array3d[float],
-    M: wp.array3d[float],
-):
-    dof_i, dof_j = wp.tid()
-    joint_start = articulation_start[0]
-    joint_end = articulation_end[0]
-    dof_count = joint_qd_start[joint_end] - joint_qd_start[joint_start]
-    value = float(0.0)
-    if dof_i < dof_count and dof_j < dof_count:
-        for link_idx in range(joint_end - joint_start):
-            I_s = body_I_s[joint_child[joint_start + link_idx]]
-            row_start = link_idx * 6
-            # Retain the reference's per-link partial sums and k/l ordering.
-            sum_val = float(0.0)
-            for k in range(6):
-                for l in range(6):
-                    sum_val += J[0, row_start + k, dof_i] * I_s[k, l] * J[0, row_start + l, dof_j]
-            value += sum_val
-    M[0, dof_i, dof_j] = value
 
 
 def _validate_joint_coordinate_layout(model: Model) -> np.ndarray:
@@ -121,16 +92,8 @@ class MonolithicArticulationWorkspace:
     )
 
     def __init__(
-        self,
-        model: Model,
-        *,
-        stream: wp.Stream | None = None,
-        joint_terms: MonolithicJointTermsWorkspace | None = None,
-        use_optimized_articulation_mass_matrix: bool = False,
+        self, model: Model, *, stream: wp.Stream | None = None, joint_terms: MonolithicJointTermsWorkspace | None = None
     ) -> None:
-        if type(use_optimized_articulation_mass_matrix) is not bool:
-            raise TypeError("use_optimized_articulation_mass_matrix must be a bool")
-        self._use_optimized_articulation_mass_matrix = use_optimized_articulation_mass_matrix
         if model.articulation_count != 1:
             raise ValueError("Monolithic requires one articulation")
         joint_count, dof_count, body_count = model.joint_count, model.joint_dof_count, model.body_count
@@ -269,11 +232,6 @@ class MonolithicArticulationWorkspace:
             ):
                 raise ValueError("Articulation inertia must be positive definite on every free DOF")
 
-    @property
-    def use_optimized_articulation_mass_matrix(self) -> bool:
-        """Return the mass dispatch fixed at workspace construction."""
-        return self._use_optimized_articulation_mass_matrix
-
     def _validate_state(self, model: Model, state: State) -> None:
         if model is not self.model or model.device != self.device or model.actuators:
             raise ValueError("Articulation workspace is stale")
@@ -317,31 +275,7 @@ def _eval_passive_dynamics(model: Model, state: State, workspace: MonolithicArti
     scratch = workspace.scratch
     eval_fk(model, state.joint_q, state.joint_qd, state)
     eval_jacobian(model, state, J=scratch.J, joint_S_s=scratch.joint_S_s)
-    if workspace.use_optimized_articulation_mass_matrix:
-        wp.launch(
-            compute_body_spatial_inertia,
-            model.body_count,
-            inputs=[model.body_inertia, model.body_mass, state.body_q, scratch.body_I_s],
-            device=model.device,
-        )
-        wp.launch(
-            _eval_owned_mass_matrix,
-            (workspace.M.shape[1], workspace.M.shape[2]),
-            inputs=[
-                model.articulation_start,
-                model.articulation_end,
-                model.joint_child,
-                model.joint_qd_start,
-                scratch.body_I_s,
-                scratch.J,
-                workspace.M,
-            ],
-            device=model.device,
-        )
-    else:
-        eval_mass_matrix(
-            model, state, H=workspace.M, J=scratch.J, body_I_s=scratch.body_I_s, joint_S_s=scratch.joint_S_s
-        )
+    eval_mass_matrix(model, state, H=workspace.M, J=scratch.J, body_I_s=scratch.body_I_s, joint_S_s=scratch.joint_S_s)
     _compute_gravity_force(model, state, workspace.g, scratch)
     _compute_coriolis_force(model, state, workspace.C, scratch)
 
