@@ -1405,7 +1405,7 @@ class MonolithicLinearWorkspace:
         """Return the immutable execution mode selected at construction."""
         return self._pcg_mode
 
-    def _diagnostic_block_norms(self, vector) -> tuple[float, float, float]:
+    def _diagnostic_block_norms(self, vector) -> None:
         """Measure scaled vector norms without altering iterative solver status or scratch."""
         if vector is not self._diagnostic_vector:
             wp.copy(self._diagnostic_vector, vector)
@@ -1447,7 +1447,50 @@ class MonolithicLinearWorkspace:
             [self._diagnostic_maxima, self._diagnostic_sums, self._diagnostic_norms, self._diagnostic_status],
             device=self.device,
         )
-        return tuple(float(value) for value in self._diagnostic_norms.numpy()[:3])
+
+    def _compute_gap_norm_for_restart(self, gap_vector) -> float:
+        """Compute global norm of gap vector for smart PCG restart."""
+        if gap_vector is not self._diagnostic_vector:
+            wp.copy(self._diagnostic_vector, gap_vector)
+        self._diagnostic_status.zero_()
+        self._diagnostic_maxima.zero_()
+        self._diagnostic_sums.zero_()
+        self._diagnostic_norms.fill_(float("nan"))
+        wp.launch(
+            _true_residual_maxima,
+            gap_vector.size,
+            [
+                self._diagnostic_zero,
+                self._diagnostic_vector,
+                self.layout.q_dof_count,
+                self._diagnostic_vector,
+                self._diagnostic_maxima,
+                self._diagnostic_status,
+                True,
+            ],
+            device=self.device,
+        )
+        wp.launch(
+            _true_residual_sums,
+            gap_vector.size,
+            [
+                self._diagnostic_vector,
+                self._diagnostic_vector,
+                self.layout.q_dof_count,
+                self._diagnostic_maxima,
+                self._diagnostic_sums,
+                self._diagnostic_status,
+                True,
+            ],
+            device=self.device,
+        )
+        wp.launch(
+            _compute_true_residual_norms,
+            6,
+            [self._diagnostic_maxima, self._diagnostic_sums, self._diagnostic_norms, self._diagnostic_status],
+            device=self.device,
+        )
+        return float(self._diagnostic_norms.numpy()[0])
 
     def _products_of(self, a, b):
         self._products.zero_()
@@ -1719,9 +1762,9 @@ class MonolithicLinearWorkspace:
                     [self._r, self._true_r, self._diagnostic_vector, 1.0, -1.0],
                     device=self.device,
                 )
-                gap_norms = self._diagnostic_block_norms(self._diagnostic_vector)
+                gap_norm_global = self._compute_gap_norm_for_restart(self._diagnostic_vector)
                 true_norms_global = float(self._true_norms.numpy()[0])
-                residual_drift = gap_norms[0] / max(true_norms_global, config.residual_floor_global)
+                residual_drift = gap_norm_global / max(true_norms_global, config.residual_floor_global)
 
                 should_replace = residual_drift >= config.residual_replacement_threshold
                 if should_replace:
