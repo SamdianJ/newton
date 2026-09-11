@@ -19,10 +19,7 @@ import numpy as np
 
 REPO = Path(__file__).resolve().parents[2]
 DEV_MODULES = (
-    "test_monolithic_owned_mass_matrix",
     "test_solver_monolithic_linear",
-    "test_monolithic_pcg_modes",
-    "test_monolithic_execution_options",
     "test_monolithic_p2_8bc_runner",
     "test_monolithic_validation_workflow",
 )

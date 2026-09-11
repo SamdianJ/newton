@@ -19,7 +19,7 @@ class TestMonolithicValidationWorkflow(unittest.TestCase):
         jobs = workflow.build_jobs("dev", Path("/candidate"), Path("/baseline"))
         self.assertEqual(len(jobs), 1)
         self.assertEqual(jobs[0]["kind"], "tests")
-        self.assertIn("newton.tests.test_monolithic_execution_options", jobs[0]["arguments"])
+        self.assertIn("newton.tests.test_solver_monolithic_linear", jobs[0]["arguments"])
         self.assertNotIn("scripts.monolithic_reference.run_p2_8bc", jobs[0]["arguments"])
 
     def test_night_scope(self):
