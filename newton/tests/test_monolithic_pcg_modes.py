@@ -170,7 +170,9 @@ def test_mode_work_audit(test, device):
                 test.assertEqual(sum(array is workspace._diagnostic_summary for array in reads), 1)
                 test.assertFalse(any(array is workspace._diagnostic_norms for array in reads))
             cache_calls = [kernel for kernel in kernels if kernel is linear._cache_monolithic_pcg_denominator]
-            test.assertEqual(len(cache_calls), 1)
+            # After fix for tet r5 regression: always recompute RHS norms, so cache is called
+            # on every true residual check (not just the first), ensuring numerical consistency
+            test.assertEqual(len(cache_calls), result.true_residual_checks)
             test.assertGreater(result.true_residual_checks, 1)
 
 
