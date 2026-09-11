@@ -1,0 +1,1228 @@
+{
+  "urdf_sha256": "4cf9fcf07a4545b538995c6c17aaf1a5768e61541b11b1cc385026da3626bad8",
+  "mesh_sha256": {
+    "package://left_sharpa_wave/meshes/left_hand_C_MC_visual.STL": "41301682f7da6d9b9f16d2c9248169a8d257c3c816d4ae8df0258187d06fa54b",
+    "package://left_sharpa_wave/meshes/left_hand_C_MC.STL": "01e17ed8392d99e76d1c00a849749610c3f7715f18ea12b107ba56eba3541fee",
+    "package://left_sharpa_wave/meshes/left_thumb_CMC_VL.STL": "9c862ce10c4958ef967ed46fed837fafb20dd2c84a23ef9ee4f793576ef1fb93",
+    "package://left_sharpa_wave/meshes/left_thumb_MC_visual.STL": "da4fb47f6126ca3b653689aea6d958e08dde7d0c232a3043773e18f447aa121a",
+    "package://left_sharpa_wave/meshes/left_thumb_MC.STL": "3f15b81f22feec350ae2f60a7c69ca36028bd580d6cf4722d4f759d401ea02f9",
+    "package://left_sharpa_wave/meshes/left_thumb_MCP_VL_visual.STL": "47f990c04f09174666773687f9e4e1b4031dd150481c1d26719bbba874ae0709",
+    "package://left_sharpa_wave/meshes/left_thumb_PP_visual.STL": "7f4a561b611af82e27bb5c8d6838d574e71e2ede42d25edf1f57c2b54ebde072",
+    "package://left_sharpa_wave/meshes/left_thumb_PP.STL": "2847673ad531a6d1fe3d12b3433d080358727def9acade9f0319c18579676b13",
+    "package://left_sharpa_wave/meshes/DP_Visual_HB1_TH.STL": "16584576da037618d311cee65a7a459adeae36ae854d0c974c225ceb3c0f145a",
+    "package://left_sharpa_wave/meshes/DP_HB1_TH.STL": "df2dcfc770ecf81e893a65d28994ff608556156f4e9a0b447086ab6de485cd75",
+    "package://left_sharpa_wave/meshes/elastomer_HB1_TH.STL": "437f363ca7a40b6e9b9152ebb81db249c51de71565cdb44b7df6e2cdf0da3312",
+    "package://left_sharpa_wave/meshes/left_MCP_VL_visual.STL": "0e8b15c4d8426a26cb222b8c1592f5e913c079aebdc0abaecda273b7d8ed0f3a",
+    "package://left_sharpa_wave/meshes/MCP_VL.STL": "587e34505de3b4f5b7131e6554e0ab92a18a3c28d250ea46eaf728c4539bf77d",
+    "package://left_sharpa_wave/meshes/left_PP_visual.STL": "881e6eeeaecbf0a8bd6b11fa7f41a5aa139900635fe82b765586460c9a9c1580",
+    "package://left_sharpa_wave/meshes/left_PP.STL": "6e4434712a5c668dbeda169e727629e95d4a9492fca431126543109451e2484f",
+    "package://left_sharpa_wave/meshes/left_MP_visual.STL": "0e9ac7a8208ab2478cdff8ae40036b93e040a05f89ae0c43ece83a62fdf15293",
+    "package://left_sharpa_wave/meshes/left_MP.STL": "1f0a96877af9ec35f20941ae696e9e22cedc6e341703657b0c6d0ebc982897a9",
+    "package://left_sharpa_wave/meshes/DP_visual_HB1_4F.STL": "5123fd1776cfc82895f9f0b6ba4098522baaad9ebaaa3110ff1246775cfbd737",
+    "package://left_sharpa_wave/meshes/DP_HB1_4F.STL": "b28a529aadb4a084912f3697b117ba43fd13c6f3136e48166b5dd1616d9f3eef",
+    "package://left_sharpa_wave/meshes/elastomer_HB1_4F.STL": "88b214c5c614b4b5f0c7cf195a90825b41e20745b1b65442854b371ff065e858",
+    "package://left_sharpa_wave/meshes/left_pinky_MC_visual.STL": "d49c63f5adeca6b1f6e329d7e541b09fdc48259d88aec3ff4c5ac371648cb881",
+    "package://left_sharpa_wave/meshes/left_pinky_MC.STL": "f7a7192ae246a6b88f9096332216013c8f6be507ee0dc9bfd4444518453b0c13"
+  },
+  "joint_names": [
+    "left_thumb_CMC_FE",
+    "left_thumb_CMC_AA",
+    "left_thumb_MCP_FE",
+    "left_thumb_MCP_AA",
+    "left_thumb_IP",
+    "left_index_MCP_FE",
+    "left_index_MCP_AA",
+    "left_index_PIP",
+    "left_index_DIP",
+    "left_middle_MCP_FE",
+    "left_middle_MCP_AA",
+    "left_middle_PIP",
+    "left_middle_DIP",
+    "left_ring_MCP_FE",
+    "left_ring_MCP_AA",
+    "left_ring_PIP",
+    "left_ring_DIP",
+    "left_pinky_CMC",
+    "left_pinky_MCP_FE",
+    "left_pinky_MCP_AA",
+    "left_pinky_PIP",
+    "left_pinky_DIP"
+  ],
+  "contact_manifest_sha256": "d82fc4be76992b0b0fae90754b63b8f817de0b0b430cc4bba2e152fbea308c3c",
+  "collision_mapping": [
+    {
+      "link": "left_hand_C_MC",
+      "ordinal": 0,
+      "source": "meshes/left_hand_C_MC.STL",
+      "shape": 1,
+      "body": 0,
+      "transform": [
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ]
+    },
+    {
+      "link": "left_thumb_MC",
+      "ordinal": 0,
+      "source": "meshes/left_thumb_MC.STL",
+      "shape": 4,
+      "body": 2,
+      "transform": [
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ]
+    },
+    {
+      "link": "left_thumb_PP",
+      "ordinal": 0,
+      "source": "meshes/left_thumb_PP.STL",
+      "shape": 7,
+      "body": 4,
+      "transform": [
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ]
+    },
+    {
+      "link": "left_thumb_DP",
+      "ordinal": 0,
+      "source": "meshes/DP_HB1_TH.STL",
+      "shape": 9,
+      "body": 5,
+      "transform": [
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ]
+    },
+    {
+      "link": "left_thumb_elastomer",
+      "ordinal": 0,
+      "source": "meshes/elastomer_HB1_TH.STL",
+      "shape": 11,
+      "body": 6,
+      "transform": [
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ]
+    },
+    {
+      "link": "left_index_MCP_VL",
+      "ordinal": 0,
+      "source": "meshes/MCP_VL.STL",
+      "shape": 13,
+      "body": 8,
+      "transform": [
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ]
+    },
+    {
+      "link": "left_index_PP",
+      "ordinal": 0,
+      "source": "meshes/left_PP.STL",
+      "shape": 15,
+      "body": 9,
+      "transform": [
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ]
+    },
+    {
+      "link": "left_index_MP",
+      "ordinal": 0,
+      "source": "meshes/left_MP.STL",
+      "shape": 17,
+      "body": 10,
+      "transform": [
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ]
+    },
+    {
+      "link": "left_index_DP",
+      "ordinal": 0,
+      "source": "meshes/DP_HB1_4F.STL",
+      "shape": 19,
+      "body": 11,
+      "transform": [
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ]
+    },
+    {
+      "link": "left_index_elastomer",
+      "ordinal": 0,
+      "source": "meshes/elastomer_HB1_4F.STL",
+      "shape": 21,
+      "body": 12,
+      "transform": [
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ]
+    },
+    {
+      "link": "left_middle_MCP_VL",
+      "ordinal": 0,
+      "source": "meshes/MCP_VL.STL",
+      "shape": 23,
+      "body": 14,
+      "transform": [
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ]
+    },
+    {
+      "link": "left_middle_PP",
+      "ordinal": 0,
+      "source": "meshes/left_PP.STL",
+      "shape": 25,
+      "body": 15,
+      "transform": [
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ]
+    },
+    {
+      "link": "left_middle_MP",
+      "ordinal": 0,
+      "source": "meshes/left_MP.STL",
+      "shape": 27,
+      "body": 16,
+      "transform": [
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ]
+    },
+    {
+      "link": "left_middle_DP",
+      "ordinal": 0,
+      "source": "meshes/DP_HB1_4F.STL",
+      "shape": 29,
+      "body": 17,
+      "transform": [
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ]
+    },
+    {
+      "link": "left_middle_elastomer",
+      "ordinal": 0,
+      "source": "meshes/elastomer_HB1_4F.STL",
+      "shape": 31,
+      "body": 18,
+      "transform": [
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ]
+    },
+    {
+      "link": "left_ring_MCP_VL",
+      "ordinal": 0,
+      "source": "meshes/MCP_VL.STL",
+      "shape": 33,
+      "body": 20,
+      "transform": [
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ]
+    },
+    {
+      "link": "left_ring_PP",
+      "ordinal": 0,
+      "source": "meshes/left_PP.STL",
+      "shape": 35,
+      "body": 21,
+      "transform": [
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ]
+    },
+    {
+      "link": "left_ring_MP",
+      "ordinal": 0,
+      "source": "meshes/left_MP.STL",
+      "shape": 37,
+      "body": 22,
+      "transform": [
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ]
+    },
+    {
+      "link": "left_ring_DP",
+      "ordinal": 0,
+      "source": "meshes/DP_HB1_4F.STL",
+      "shape": 39,
+      "body": 23,
+      "transform": [
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ]
+    },
+    {
+      "link": "left_ring_elastomer",
+      "ordinal": 0,
+      "source": "meshes/elastomer_HB1_4F.STL",
+      "shape": 41,
+      "body": 24,
+      "transform": [
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ]
+    },
+    {
+      "link": "left_pinky_MC",
+      "ordinal": 0,
+      "source": "meshes/left_pinky_MC.STL",
+      "shape": 43,
+      "body": 26,
+      "transform": [
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ]
+    },
+    {
+      "link": "left_pinky_MCP_VL",
+      "ordinal": 0,
+      "source": "meshes/MCP_VL.STL",
+      "shape": 45,
+      "body": 27,
+      "transform": [
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ]
+    },
+    {
+      "link": "left_pinky_PP",
+      "ordinal": 0,
+      "source": "meshes/left_PP.STL",
+      "shape": 47,
+      "body": 28,
+      "transform": [
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ]
+    },
+    {
+      "link": "left_pinky_MP",
+      "ordinal": 0,
+      "source": "meshes/left_MP.STL",
+      "shape": 49,
+      "body": 29,
+      "transform": [
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ]
+    },
+    {
+      "link": "left_pinky_DP",
+      "ordinal": 0,
+      "source": "meshes/DP_HB1_4F.STL",
+      "shape": 51,
+      "body": 30,
+      "transform": [
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ]
+    },
+    {
+      "link": "left_pinky_elastomer",
+      "ordinal": 0,
+      "source": "meshes/elastomer_HB1_4F.STL",
+      "shape": 53,
+      "body": 31,
+      "transform": [
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ]
+    }
+  ],
+  "sdf_resolution": 128,
+  "sdf_build_or_cache_seconds": {
+    "meshes/DP_HB1_4F.STL": 0.023418311000568792,
+    "meshes/DP_HB1_TH.STL": 0.01711787599924719,
+    "meshes/MCP_VL.STL": 0.011885513002198422,
+    "meshes/elastomer_HB1_4F.STL": 0.01304775099924882,
+    "meshes/elastomer_HB1_TH.STL": 0.0169587149975996,
+    "meshes/left_MP.STL": 0.5309259550012939,
+    "meshes/left_PP.STL": 0.009527575999527471,
+    "meshes/left_hand_C_MC.STL": 0.016163581000000704,
+    "meshes/left_pinky_MC.STL": 0.008588843997131335,
+    "meshes/left_thumb_MC.STL": 2.0858489130005182,
+    "meshes/left_thumb_PP.STL": 0.010774061000120128
+  },
+  "cpu_sdf": "NOT_REQUIRED",
+  "carriage": false,
+  "body_count": 33,
+  "shape_count": 54,
+  "mass_kg": 1.245265007019043,
+  "inertia_corrections": [
+    {
+      "link": "left_sharpa_wave/left_thumb_elastomer",
+      "before": [
+        [
+          1.000000013351432e-10,
+          0.0,
+          0.0
+        ],
+        [
+          0.0,
+          1.000000013351432e-10,
+          0.0
+        ],
+        [
+          0.0,
+          0.0,
+          1.000000013351432e-10
+        ]
+      ],
+      "after": [
+        [
+          1.0001000418924377e-06,
+          0.0,
+          0.0
+        ],
+        [
+          0.0,
+          1.0001000418924377e-06,
+          0.0
+        ],
+        [
+          0.0,
+          0.0,
+          1.0001000418924377e-06
+        ]
+      ]
+    },
+    {
+      "link": "left_sharpa_wave/left_thumb_fingertip",
+      "before": [
+        [
+          1.9999999920083944e-12,
+          0.0,
+          0.0
+        ],
+        [
+          0.0,
+          1.9999999920083944e-12,
+          0.0
+        ],
+        [
+          0.0,
+          0.0,
+          1.9999999920083944e-12
+        ]
+      ],
+      "after": [
+        [
+          1.0001000418924377e-06,
+          0.0,
+          0.0
+        ],
+        [
+          0.0,
+          1.0001000418924377e-06,
+          0.0
+        ],
+        [
+          0.0,
+          0.0,
+          1.0001000418924377e-06
+        ]
+      ]
+    },
+    {
+      "link": "left_sharpa_wave/left_index_elastomer",
+      "before": [
+        [
+          1.000000013351432e-10,
+          0.0,
+          0.0
+        ],
+        [
+          0.0,
+          1.000000013351432e-10,
+          0.0
+        ],
+        [
+          0.0,
+          0.0,
+          1.000000013351432e-10
+        ]
+      ],
+      "after": [
+        [
+          1.0001000418924377e-06,
+          0.0,
+          0.0
+        ],
+        [
+          0.0,
+          1.0001000418924377e-06,
+          0.0
+        ],
+        [
+          0.0,
+          0.0,
+          1.0001000418924377e-06
+        ]
+      ]
+    },
+    {
+      "link": "left_sharpa_wave/left_index_fingertip",
+      "before": [
+        [
+          1.9999999920083944e-12,
+          0.0,
+          0.0
+        ],
+        [
+          0.0,
+          1.9999999920083944e-12,
+          0.0
+        ],
+        [
+          0.0,
+          0.0,
+          1.9999999920083944e-12
+        ]
+      ],
+      "after": [
+        [
+          1.0001000418924377e-06,
+          0.0,
+          0.0
+        ],
+        [
+          0.0,
+          1.0001000418924377e-06,
+          0.0
+        ],
+        [
+          0.0,
+          0.0,
+          1.0001000418924377e-06
+        ]
+      ]
+    },
+    {
+      "link": "left_sharpa_wave/left_middle_elastomer",
+      "before": [
+        [
+          1.000000013351432e-10,
+          0.0,
+          0.0
+        ],
+        [
+          0.0,
+          1.000000013351432e-10,
+          0.0
+        ],
+        [
+          0.0,
+          0.0,
+          1.000000013351432e-10
+        ]
+      ],
+      "after": [
+        [
+          1.0001000418924377e-06,
+          0.0,
+          0.0
+        ],
+        [
+          0.0,
+          1.0001000418924377e-06,
+          0.0
+        ],
+        [
+          0.0,
+          0.0,
+          1.0001000418924377e-06
+        ]
+      ]
+    },
+    {
+      "link": "left_sharpa_wave/left_middle_fingertip",
+      "before": [
+        [
+          1.9999999920083944e-12,
+          0.0,
+          0.0
+        ],
+        [
+          0.0,
+          1.9999999920083944e-12,
+          0.0
+        ],
+        [
+          0.0,
+          0.0,
+          1.9999999920083944e-12
+        ]
+      ],
+      "after": [
+        [
+          1.0001000418924377e-06,
+          0.0,
+          0.0
+        ],
+        [
+          0.0,
+          1.0001000418924377e-06,
+          0.0
+        ],
+        [
+          0.0,
+          0.0,
+          1.0001000418924377e-06
+        ]
+      ]
+    },
+    {
+      "link": "left_sharpa_wave/left_ring_elastomer",
+      "before": [
+        [
+          1.000000013351432e-10,
+          0.0,
+          0.0
+        ],
+        [
+          0.0,
+          1.000000013351432e-10,
+          0.0
+        ],
+        [
+          0.0,
+          0.0,
+          1.000000013351432e-10
+        ]
+      ],
+      "after": [
+        [
+          1.0001000418924377e-06,
+          0.0,
+          0.0
+        ],
+        [
+          0.0,
+          1.0001000418924377e-06,
+          0.0
+        ],
+        [
+          0.0,
+          0.0,
+          1.0001000418924377e-06
+        ]
+      ]
+    },
+    {
+      "link": "left_sharpa_wave/left_ring_fingertip",
+      "before": [
+        [
+          1.9999999920083944e-12,
+          0.0,
+          0.0
+        ],
+        [
+          0.0,
+          1.9999999920083944e-12,
+          0.0
+        ],
+        [
+          0.0,
+          0.0,
+          1.9999999920083944e-12
+        ]
+      ],
+      "after": [
+        [
+          1.0001000418924377e-06,
+          0.0,
+          0.0
+        ],
+        [
+          0.0,
+          1.0001000418924377e-06,
+          0.0
+        ],
+        [
+          0.0,
+          0.0,
+          1.0001000418924377e-06
+        ]
+      ]
+    },
+    {
+      "link": "left_sharpa_wave/left_pinky_elastomer",
+      "before": [
+        [
+          1.000000013351432e-10,
+          0.0,
+          0.0
+        ],
+        [
+          0.0,
+          1.000000013351432e-10,
+          0.0
+        ],
+        [
+          0.0,
+          0.0,
+          1.000000013351432e-10
+        ]
+      ],
+      "after": [
+        [
+          1.0001000418924377e-06,
+          0.0,
+          0.0
+        ],
+        [
+          0.0,
+          1.0001000418924377e-06,
+          0.0
+        ],
+        [
+          0.0,
+          0.0,
+          1.0001000418924377e-06
+        ]
+      ]
+    },
+    {
+      "link": "left_sharpa_wave/left_pinky_fingertip",
+      "before": [
+        [
+          1.9999999920083944e-12,
+          0.0,
+          0.0
+        ],
+        [
+          0.0,
+          1.9999999920083944e-12,
+          0.0
+        ],
+        [
+          0.0,
+          0.0,
+          1.9999999920083944e-12
+        ]
+      ],
+      "after": [
+        [
+          1.0001000418924377e-06,
+          0.0,
+          0.0
+        ],
+        [
+          0.0,
+          1.0001000418924377e-06,
+          0.0
+        ],
+        [
+          0.0,
+          0.0,
+          1.0001000418924377e-06
+        ]
+      ]
+    }
+  ],
+  "import_warnings": [
+    "Inertia validation corrected 10 bodies. Set validate_inertia_detailed=True for detailed per-body warnings."
+  ],
+  "collision_enabled": true,
+  "ball_sha256": "cd7ff1160de175c81b1137a786c30f73042044dd904fb670bd5642a08c9896f4",
+  "ball_radius_m": 0.025,
+  "ball_position_m": [
+    0.045,
+    -0.005,
+    0.085
+  ],
+  "particle_radius_m": 0.0002,
+  "gravity": [
+    0,
+    0,
+    -9.81
+  ],
+  "all_ball_nodes_dynamic": false,
+  "fixed_particle_ids": [
+    3,
+    8,
+    9,
+    10,
+    11,
+    12,
+    15,
+    16,
+    17,
+    18,
+    19,
+    21,
+    22,
+    23,
+    24,
+    25,
+    26,
+    27,
+    29,
+    30,
+    31,
+    32,
+    33,
+    36,
+    37,
+    38,
+    39,
+    40,
+    45
+  ],
+  "anchor_frame": "world, fixed palm root",
+  "anchor_position": [
+    [
+      0.027322331443428993,
+      -0.022677671164274216,
+      0.08500000089406967
+    ],
+    [
+      0.025292782112956047,
+      -0.015877166762948036,
+      0.0741228312253952
+    ],
+    [
+      0.02351333200931549,
+      -0.016564810648560524,
+      0.07956141978502274
+    ],
+    [
+      0.02295207418501377,
+      -0.016785113140940666,
+      0.08500000089406967
+    ],
+    [
+      0.02351333200931549,
+      -0.016564810648560524,
+      0.09043858200311661
+    ],
+    [
+      0.025292782112956047,
+      -0.015877166762948036,
+      0.09587717056274414
+    ],
+    [
+      0.02351333200931549,
+      -0.010438583791255951,
+      0.07343518733978271
+    ],
+    [
+      0.021375278010964394,
+      -0.010782405734062195,
+      0.07921759784221649
+    ],
+    [
+      0.020704368129372597,
+      -0.010892556980252266,
+      0.08500000089406967
+    ],
+    [
+      0.021375278010964394,
+      -0.010782405734062195,
+      0.09078240394592285
+    ],
+    [
+      0.02351333200931549,
+      -0.010438583791255951,
+      0.09656481444835663
+    ],
+    [
+      0.027322331443428993,
+      -0.004999999888241291,
+      0.06732232868671417
+    ],
+    [
+      0.02295207418501377,
+      -0.004999999888241291,
+      0.07321488857269287
+    ],
+    [
+      0.020704368129372597,
+      -0.004999999888241291,
+      0.07910744100809097
+    ],
+    [
+      0.020000001415610313,
+      -0.004999999888241291,
+      0.08500000089406967
+    ],
+    [
+      0.020704368129372597,
+      -0.004999999888241291,
+      0.09089256078004837
+    ],
+    [
+      0.02295207418501377,
+      -0.004999999888241291,
+      0.09678511321544647
+    ],
+    [
+      0.027322331443428993,
+      -0.004999999888241291,
+      0.10267767310142517
+    ],
+    [
+      0.02351333200931549,
+      0.00043858354911208153,
+      0.07343518733978271
+    ],
+    [
+      0.021375278010964394,
+      0.0007824054919183254,
+      0.07921759784221649
+    ],
+    [
+      0.020704368129372597,
+      0.0008925567381083965,
+      0.08500000089406967
+    ],
+    [
+      0.021375278010964394,
+      0.0007824054919183254,
+      0.09078240394592285
+    ],
+    [
+      0.02351333200931549,
+      0.00043858354911208153,
+      0.09656481444835663
+    ],
+    [
+      0.025292782112956047,
+      0.005877166986465454,
+      0.0741228312253952
+    ],
+    [
+      0.02351333200931549,
+      0.006564810872077942,
+      0.07956141978502274
+    ],
+    [
+      0.02295207418501377,
+      0.006785113364458084,
+      0.08500000089406967
+    ],
+    [
+      0.02351333200931549,
+      0.006564810872077942,
+      0.09043858200311661
+    ],
+    [
+      0.025292782112956047,
+      0.005877166986465454,
+      0.09587717056274414
+    ],
+    [
+      0.027322331443428993,
+      0.012677670456469059,
+      0.08500000089406967
+    ]
+  ],
+  "fixture": {
+    "schema": "sharpa-anchored-close/v1",
+    "status": "COLLISION_STABILITY_EXPERIMENT",
+    "dt": 0.001,
+    "frame_dt": 0.01,
+    "duration": 4.5,
+    "ball_position": [
+      0.045,
+      -0.005,
+      0.085
+    ],
+    "particle_radius": 0.0002,
+    "sdf_query_error": 0.0004,
+    "sdf_resolution": 128,
+    "gap": 0.002,
+    "mu": 0.5,
+    "tangential_stiffness": 2000000.0,
+    "smoothing_width": 0.0001,
+    "lift_height": 0.05,
+    "stage_ends": [
+      0.5,
+      2.5,
+      4.5
+    ],
+    "carriage": {
+      "target_ke": 10000.0,
+      "target_kd": 250.0,
+      "limit_ke": 100000.0,
+      "limit_kd": 250.0,
+      "lower": -0.01,
+      "upper": 0.07,
+      "effort": 100.0,
+      "velocity": 0.1,
+      "friction": 0.1,
+      "limit_width": 0.001,
+      "friction_velocity_scale": 0.001
+    },
+    "parameter_source": "simulation integration defaults, not hardware identification or a frozen grasp gate",
+    "anchor_axis": 0,
+    "anchor_cap_fraction": 0.7,
+    "gates": {
+      "penetration_m": 0.002,
+      "min_det_f": 0.1,
+      "converged_fraction": 0.99,
+      "hold_contact_fraction": 0.9,
+      "minimum_finger_force_n": 0.001
+    }
+  },
+  "experiment": "anchored-close",
+  "calibration_sha256": "1c535bbc8996032873eb8eb05bbda458ccf4781bbeb5d0c59ce63cdd9527450b",
+  "radius_calibration": "UNVALIDATED_RADIUS_STRESS_TEST",
+  "trajectory_sha256": "b9018705cdb04563beac026f53c19f61a1993a97481253c9fdf1501cdb4c8429",
+  "mapping": {
+    "left_thumb_CMC_FE": [
+      0,
+      0,
+      0
+    ],
+    "left_thumb_CMC_AA": [
+      1,
+      1,
+      1
+    ],
+    "left_thumb_MCP_FE": [
+      2,
+      2,
+      2
+    ],
+    "left_thumb_MCP_AA": [
+      3,
+      3,
+      3
+    ],
+    "left_thumb_IP": [
+      4,
+      4,
+      4
+    ],
+    "left_index_MCP_FE": [
+      5,
+      5,
+      5
+    ],
+    "left_index_MCP_AA": [
+      6,
+      6,
+      6
+    ],
+    "left_index_PIP": [
+      7,
+      7,
+      7
+    ],
+    "left_index_DIP": [
+      8,
+      8,
+      8
+    ],
+    "left_middle_MCP_FE": [
+      9,
+      9,
+      9
+    ],
+    "left_middle_MCP_AA": [
+      10,
+      10,
+      10
+    ],
+    "left_middle_PIP": [
+      11,
+      11,
+      11
+    ],
+    "left_middle_DIP": [
+      12,
+      12,
+      12
+    ],
+    "left_ring_MCP_FE": [
+      13,
+      13,
+      13
+    ],
+    "left_ring_MCP_AA": [
+      14,
+      14,
+      14
+    ],
+    "left_ring_PIP": [
+      15,
+      15,
+      15
+    ],
+    "left_ring_DIP": [
+      16,
+      16,
+      16
+    ],
+    "left_pinky_CMC": [
+      17,
+      17,
+      17
+    ],
+    "left_pinky_MCP_FE": [
+      18,
+      18,
+      18
+    ],
+    "left_pinky_MCP_AA": [
+      19,
+      19,
+      19
+    ],
+    "left_pinky_PIP": [
+      20,
+      20,
+      20
+    ],
+    "left_pinky_DIP": [
+      21,
+      21,
+      21
+    ]
+  },
+  "friction_off": false,
+  "aabb": true,
+  "normal_stiffness": 10000000.0,
+  "pcg_iteration_p95_budget": 64,
+  "force_convention": "world force on rigid body; negate for force on the ball",
+  "scope": "Anchored closure stability/efficiency; not a free grasp"
+}

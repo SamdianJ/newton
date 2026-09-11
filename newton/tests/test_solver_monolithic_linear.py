@@ -591,7 +591,8 @@ def test_pcg_dense_and_allocations(test, device):
     test.assertGreater(np.linalg.eigvalsh(oracle.scaled_matrix).min(), 0)
     rhs_np = np.linspace(-1, 2, 11).astype(np.float32)
     rhs, y = wp.array(rhs_np, device=device), wp.zeros(11, dtype=float, device=device)
-    config = _pcg_config(linear_tolerance=1e-5, true_residual_interval=3)
+    # Use threshold=0.0 to ensure replacements occur for this test
+    config = _pcg_config(linear_tolerance=1e-5, true_residual_interval=3, residual_replacement_threshold=0.0)
 
     def solve():
         return workspace.solve_pcg(rhs, y, generation=generation, warm_start=MonolithicPcgWarmStart.ZERO, config=config)
@@ -728,12 +729,13 @@ def test_pcg_true_block_gate_and_replacement(test, device):
     test.assertEqual(result.status, MonolithicLinearStatus.MAX_ITERATIONS, result)
     test.assertLess(result.rho, 1e-4)
     test.assertGreater(result.rho_q, 0.01)
+    # Use threshold=0.0 to ensure replacements occur for this test
     result = workspace.solve_pcg(
         rhs,
         y,
         generation=generation,
         warm_start=MonolithicPcgWarmStart.ZERO,
-        config=_pcg_config(true_residual_interval=1),
+        config=_pcg_config(true_residual_interval=1, residual_replacement_threshold=0.0),
     )
     test.assertEqual(result.status, MonolithicLinearStatus.SUCCESS, result)
     test.assertGreater(result.residual_replacements, 0)

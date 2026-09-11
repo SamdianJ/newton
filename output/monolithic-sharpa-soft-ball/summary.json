@@ -1,0 +1,79 @@
+{
+  "ball_radius_m": 0.025,
+  "radius_calibration": "UNVALIDATED_RADIUS_STRESS_TEST",
+  "complete_schedule": true,
+  "accepted_steps": 4500,
+  "failure": null,
+  "pcg_iteration_p95": {
+    "close": 17.0,
+    "hold": 16.0,
+    "lift": null,
+    "hold_high": null
+  },
+  "patch_schur_trigger": false,
+  "converged_fraction": 1.0,
+  "G6": "NOT_VALIDATED",
+  "G7": "NOT_VALIDATED",
+  "hold_contact_fraction": 1.0,
+  "stability_passed": true,
+  "maximum_penetration_m": 0.0006939591257832944,
+  "minimum_det_f": 0.4311237931251526,
+  "fixed_nodes": 29,
+  "dynamic_nodes": 314,
+  "stage_timing": {
+    "prepare": {
+      "step_seconds": [
+        0.02943706899895915,
+        0.03353649229829898
+      ],
+      "collision_seconds": [
+        0.0026784820001921616,
+        0.003304871400541742
+      ],
+      "pcg_seconds": [
+        0.006926400998054305,
+        0.008375717999660992
+      ],
+      "other_step_seconds": [
+        0.01963172799514723,
+        0.022804674496728693
+      ]
+    },
+    "close": {
+      "step_seconds": [
+        0.028924109999934444,
+        0.0318644355989818
+      ],
+      "collision_seconds": [
+        0.002635964996443363,
+        0.0030086367980402427
+      ],
+      "pcg_seconds": [
+        0.006785465000575641,
+        0.0079348621002282
+      ],
+      "other_step_seconds": [
+        0.019306995996885234,
+        0.021707281801718634
+      ]
+    },
+    "hold": {
+      "step_seconds": [
+        0.03143834200091078,
+        0.034509398998488906
+      ],
+      "collision_seconds": [
+        0.002798384997731773,
+        0.003235184509321698
+      ],
+      "pcg_seconds": [
+        0.006903637000505114,
+        0.007987234201209503
+      ],
+      "other_step_seconds": [
+        0.021683584003767464,
+        0.023879138798292843
+      ]
+    }
+  }
+}
