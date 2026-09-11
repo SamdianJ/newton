@@ -1452,8 +1452,7 @@ class MonolithicLinearWorkspace:
         self.operator.matvec(y, self._ap, self._ap, 1.0, 0.0)
         self._true_sums.zero_()
         self._true_maxima.zero_()
-        # Always recompute RHS norms for numerical consistency (fix tet r5 regression)
-        compute_rhs = True
+        compute_rhs = not (self._pcg_active and self._rhs_norms_cached)
         if compute_rhs:
             self._true_norms.fill_(float("nan"))
         else:
@@ -1498,15 +1497,7 @@ class MonolithicLinearWorkspace:
                 device=self.device,
             )
             self._rhs_norms_cached = True
-        wp.launch(
-            _pack_monolithic_pcg_residual,
-            1,
-            [self._status, self._ratios, self._pcg_packet],
-            device=self.device,
-        )
-        packet = self._pcg_packet.numpy()[0]
-        self._pcg_boundary_status = MonolithicLinearStatus(int(packet["status"]))
-        return tuple(float(value) for value in packet["ratios"])
+        return tuple(float(value) for value in self._ratios.numpy())
 
     def solve_pcg(
         self,
@@ -1617,7 +1608,7 @@ class MonolithicLinearWorkspace:
         stagnation_window = config.stagnation_window
         ratios = self._true_residual(rhs_hat, y, config)
         checks += 1
-        status = self._pcg_boundary_status
+        status = self._read_status()
         if status != MonolithicLinearStatus.SUCCESS:
             return result(status)
         if max(ratios) <= config.linear_tolerance:
@@ -1668,29 +1659,21 @@ class MonolithicLinearWorkspace:
             )
             iterations = iteration
             self._products_of(self._r, self._r)
-            wp.launch(
-                _pack_monolithic_pcg_check,
-                1,
-                [
-                    self._products,
-                    self._status,
-                    self._rhs_denominator,
-                    config.linear_tolerance,
-                    iteration % config.true_residual_interval == 0 or iteration == config.maximum_iterations,
-                    self._pcg_packet,
-                ],
-                device=self.device,
-            )
-            packet = self._pcg_packet.numpy()[0]
-            status = MonolithicLinearStatus(int(packet["status"]))
+            recursive_sq = float(self._products.numpy()[0])
+            status = self._read_status()
             if status != MonolithicLinearStatus.SUCCESS:
                 break
-            check = bool(packet["check"])
+            denominator = max(float(self._true_norms.numpy()[3]), config.residual_floor_global)
+            check = (
+                iteration % config.true_residual_interval == 0
+                or iteration == config.maximum_iterations
+                or recursive_sq <= (config.linear_tolerance * denominator) ** 2
+            )
             if check:
                 ratios = self._true_residual(rhs_hat, y, config)
                 record_gap()
                 checks += 1
-                status = self._pcg_boundary_status
+                status = self._read_status()
                 if status != MonolithicLinearStatus.SUCCESS:
                     break
                 if max(ratios) <= config.linear_tolerance:
@@ -1743,7 +1726,7 @@ class MonolithicLinearWorkspace:
         if iterations:
             record_gap()
         checks += 1
-        if self._pcg_boundary_status == MonolithicLinearStatus.NONFINITE_ITERATION:
+        if self._read_status() == MonolithicLinearStatus.NONFINITE_ITERATION:
             status = MonolithicLinearStatus.NONFINITE_ITERATION
         return result(status)
 

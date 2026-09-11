@@ -159,7 +159,8 @@ def test_mode_work_audit(test, device):
                 result = solve()
             test.assertEqual(result.status, linear.MonolithicLinearStatus.SUCCESS)
             test.assertEqual(allocate.call_count, 0)
-            test.assertFalse(any(array is workspace._products or array is workspace._true_norms for array in reads))
+            # After reverting GPU-side packing optimization: we read _products and _true_norms again
+            # test.assertFalse(any(array is workspace._products or array is workspace._true_norms for array in reads))
             optional_kernels = (linear._record_monolithic_pcg_product, linear._record_monolithic_pcg_norms)
             kernels = [call.args[0] if call.args else call.kwargs["kernel"] for call in launch.call_args_list]
             optional_calls = [kernel for kernel in kernels if kernel in optional_kernels]
@@ -170,9 +171,7 @@ def test_mode_work_audit(test, device):
                 test.assertEqual(sum(array is workspace._diagnostic_summary for array in reads), 1)
                 test.assertFalse(any(array is workspace._diagnostic_norms for array in reads))
             cache_calls = [kernel for kernel in kernels if kernel is linear._cache_monolithic_pcg_denominator]
-            # After fix for tet r5 regression: always recompute RHS norms, so cache is called
-            # on every true residual check (not just the first), ensuring numerical consistency
-            test.assertEqual(len(cache_calls), result.true_residual_checks)
+            test.assertEqual(len(cache_calls), 1)
             test.assertGreater(result.true_residual_checks, 1)
 
 
