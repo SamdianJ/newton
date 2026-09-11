@@ -1404,7 +1404,7 @@ class MonolithicLinearWorkspace:
         """Return the immutable execution mode selected at construction."""
         return self._pcg_mode
 
-    def _diagnostic_block_norms(self, vector) -> None:
+    def _diagnostic_block_norms(self, vector) -> tuple[float, float, float]:
         """Measure scaled vector norms without altering iterative solver status or scratch."""
         if vector is not self._diagnostic_vector:
             wp.copy(self._diagnostic_vector, vector)
@@ -1446,6 +1446,7 @@ class MonolithicLinearWorkspace:
             [self._diagnostic_maxima, self._diagnostic_sums, self._diagnostic_norms, self._diagnostic_status],
             device=self.device,
         )
+        return tuple(float(value) for value in self._diagnostic_norms.numpy()[:3])
 
     def _products_of(self, a, b):
         self._products.zero_()
