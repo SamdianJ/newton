@@ -1048,13 +1048,14 @@ class MonolithicLinearWorkspace:
         self._true_maxima = wp.zeros(6, dtype=float, device=device)
         self._true_norms = wp.zeros(6, dtype=float, device=device)
         self._true_residual_norms = self._true_norms[:3]
+        # Diagnostic variables needed for smart PCG restart in both modes
+        self._diagnostic_vector = wp.zeros(n, dtype=float, device=device)
+        self._diagnostic_zero = wp.zeros(n, dtype=float, device=device)
+        self._diagnostic_maxima = wp.zeros(6, dtype=float, device=device)
+        self._diagnostic_sums = wp.zeros(6, dtype=float, device=device)
+        self._diagnostic_norms = wp.zeros(6, dtype=float, device=device)
+        self._diagnostic_status = wp.zeros(1, dtype=int, device=device)
         if self.pcg_mode == "diagnostic":
-            self._diagnostic_vector = wp.zeros(n, dtype=float, device=device)
-            self._diagnostic_zero = wp.zeros(n, dtype=float, device=device)
-            self._diagnostic_maxima = wp.zeros(6, dtype=float, device=device)
-            self._diagnostic_sums = wp.zeros(6, dtype=float, device=device)
-            self._diagnostic_norms = wp.zeros(6, dtype=float, device=device)
-            self._diagnostic_status = wp.zeros(1, dtype=int, device=device)
             self._diagnostic_summary = wp.zeros(6, dtype=float, device=device)
         self._pcg_packet = wp.zeros(1, dtype=_MonolithicPcgPacket, device=device)
         self._rhs_denominator = wp.zeros(1, dtype=wp.float64, device=device)
