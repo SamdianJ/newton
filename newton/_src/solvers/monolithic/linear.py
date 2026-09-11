@@ -1048,14 +1048,13 @@ class MonolithicLinearWorkspace:
         self._true_maxima = wp.zeros(6, dtype=float, device=device)
         self._true_norms = wp.zeros(6, dtype=float, device=device)
         self._true_residual_norms = self._true_norms[:3]
-        # Diagnostic variables needed for smart PCG restart in both modes
-        self._diagnostic_vector = wp.zeros(n, dtype=float, device=device)
-        self._diagnostic_zero = wp.zeros(n, dtype=float, device=device)
-        self._diagnostic_maxima = wp.zeros(6, dtype=float, device=device)
-        self._diagnostic_sums = wp.zeros(6, dtype=float, device=device)
-        self._diagnostic_norms = wp.zeros(6, dtype=float, device=device)
-        self._diagnostic_status = wp.zeros(1, dtype=int, device=device)
         if self.pcg_mode == "diagnostic":
+            self._diagnostic_vector = wp.zeros(n, dtype=float, device=device)
+            self._diagnostic_zero = wp.zeros(n, dtype=float, device=device)
+            self._diagnostic_maxima = wp.zeros(6, dtype=float, device=device)
+            self._diagnostic_sums = wp.zeros(6, dtype=float, device=device)
+            self._diagnostic_norms = wp.zeros(6, dtype=float, device=device)
+            self._diagnostic_status = wp.zeros(1, dtype=int, device=device)
             self._diagnostic_summary = wp.zeros(6, dtype=float, device=device)
         self._pcg_packet = wp.zeros(1, dtype=_MonolithicPcgPacket, device=device)
         self._rhs_denominator = wp.zeros(1, dtype=wp.float64, device=device)
@@ -1756,17 +1755,22 @@ class MonolithicLinearWorkspace:
 
                 # Compute residual drift: eta = ||r_true - r_rec|| / max(||r_true||, epsilon)
                 # Only replace recursive residual if drift is significant
-                wp.launch(
-                    _combine_vectors,
-                    self._r.size,
-                    [self._r, self._true_r, self._diagnostic_vector, 1.0, -1.0],
-                    device=self.device,
-                )
-                gap_norm_global = self._compute_gap_norm_for_restart(self._diagnostic_vector)
-                true_norms_global = float(self._true_norms.numpy()[0])
-                residual_drift = gap_norm_global / max(true_norms_global, config.residual_floor_global)
+                # In production mode, always replace for simplicity
+                if self.pcg_mode == "diagnostic" and hasattr(self, "_diagnostic_vector"):
+                    wp.launch(
+                        _combine_vectors,
+                        self._r.size,
+                        [self._r, self._true_r, self._diagnostic_vector, 1.0, -1.0],
+                        device=self.device,
+                    )
+                    gap_norm_global = self._compute_gap_norm_for_restart(self._diagnostic_vector)
+                    true_norms_global = float(self._true_norms.numpy()[0])
+                    residual_drift = gap_norm_global / max(true_norms_global, config.residual_floor_global)
+                    should_replace = residual_drift >= config.residual_replacement_threshold
+                else:
+                    # Production mode: always replace to avoid drift accumulation
+                    should_replace = True
 
-                should_replace = residual_drift >= config.residual_replacement_threshold
                 if should_replace:
                     wp.copy(self._r, self._true_r)
                     replacements += 1
