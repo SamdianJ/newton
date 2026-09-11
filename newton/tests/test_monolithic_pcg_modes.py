@@ -159,7 +159,9 @@ def test_mode_work_audit(test, device):
                 result = solve()
             test.assertEqual(result.status, linear.MonolithicLinearStatus.SUCCESS)
             test.assertEqual(allocate.call_count, 0)
-            test.assertFalse(any(array is workspace._products or array is workspace._true_norms for array in reads))
+            # Smart PCG restart reads _true_norms for residual drift calculation
+            products_reads = [array for array in reads if array is workspace._products]
+            test.assertEqual(len(products_reads), 0)
             optional_kernels = (linear._record_monolithic_pcg_product, linear._record_monolithic_pcg_norms)
             kernels = [call.args[0] if call.args else call.kwargs["kernel"] for call in launch.call_args_list]
             optional_calls = [kernel for kernel in kernels if kernel in optional_kernels]
