@@ -1755,8 +1755,9 @@ class MonolithicLinearWorkspace:
 
                 # Compute residual drift: eta = ||r_true - r_rec|| / max(||r_true||, epsilon)
                 # Only replace recursive residual if drift is significant
-                # In production mode, always replace for simplicity
-                if self.pcg_mode == "diagnostic" and hasattr(self, "_diagnostic_vector"):
+                # Both modes use the same replacement logic for numerical consistency
+                if hasattr(self, "_diagnostic_vector"):
+                    # Diagnostic mode: compute drift precisely
                     wp.launch(
                         _combine_vectors,
                         self._r.size,
@@ -1768,7 +1769,7 @@ class MonolithicLinearWorkspace:
                     residual_drift = gap_norm_global / max(true_norms_global, config.residual_floor_global)
                     should_replace = residual_drift >= config.residual_replacement_threshold
                 else:
-                    # Production mode: always replace to avoid drift accumulation
+                    # Production mode: always replace for safety without diagnostic overhead
                     should_replace = True
 
                 if should_replace:
