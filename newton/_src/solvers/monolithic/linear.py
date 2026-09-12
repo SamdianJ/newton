@@ -1775,8 +1775,8 @@ class MonolithicLinearWorkspace:
                     # Compute drift for each block: global, articulation, deformable
                     drifts = [
                         gap_norms[0] / max(true_norms[0], config.residual_floor_global),
-                        gap_norms[1] / max(true_norms[1], config.residual_floor_articulation),
-                        gap_norms[2] / max(true_norms[2], config.residual_floor_deformable),
+                        gap_norms[1] / max(true_norms[1], config.residual_floor_q),
+                        gap_norms[2] / max(true_norms[2], config.residual_floor_x),
                     ]
 
                     # Replace if ANY block drifts too much (max over all blocks)
