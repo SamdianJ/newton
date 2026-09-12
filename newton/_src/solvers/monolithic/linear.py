@@ -1448,8 +1448,11 @@ class MonolithicLinearWorkspace:
             device=self.device,
         )
 
-    def _compute_gap_norm_for_restart(self, gap_vector) -> float:
-        """Compute global norm of gap vector for smart PCG restart."""
+    def _compute_gap_norms_for_restart(self, gap_vector) -> tuple:
+        """Compute block norms of gap vector for smart PCG restart.
+
+        Returns (global, articulation, deformable) norms to check drift per block.
+        """
         if gap_vector is not self._diagnostic_vector:
             wp.copy(self._diagnostic_vector, gap_vector)
         self._diagnostic_status.zero_()
@@ -1490,7 +1493,8 @@ class MonolithicLinearWorkspace:
             [self._diagnostic_maxima, self._diagnostic_sums, self._diagnostic_norms, self._diagnostic_status],
             device=self.device,
         )
-        return float(self._diagnostic_norms.numpy()[0])
+        norms = self._diagnostic_norms.numpy()
+        return float(norms[0]), float(norms[1]), float(norms[2])
 
     def _products_of(self, a, b):
         self._products.zero_()
@@ -1755,20 +1759,29 @@ class MonolithicLinearWorkspace:
                     break
 
                 # Compute residual drift: eta = ||r_true - r_rec|| / max(||r_true||, epsilon)
-                # Only replace recursive residual if drift is significant
-                # Both modes use the same replacement logic for numerical consistency
+                # Check drift separately for global, articulation, and deformable blocks
+                # Replace if ANY block exceeds threshold (prevents articulation drift being masked by deformable)
                 if hasattr(self, "_diagnostic_vector"):
-                    # Diagnostic mode: compute drift precisely
+                    # Diagnostic mode: compute drift precisely per block
                     wp.launch(
                         _combine_vectors,
                         self._r.size,
                         [self._r, self._true_r, self._diagnostic_vector, 1.0, -1.0],
                         device=self.device,
                     )
-                    gap_norm_global = self._compute_gap_norm_for_restart(self._diagnostic_vector)
-                    true_norms_global = float(self._true_norms.numpy()[0])
-                    residual_drift = gap_norm_global / max(true_norms_global, config.residual_floor_global)
-                    should_replace = residual_drift >= config.residual_replacement_threshold
+                    gap_norms = self._compute_gap_norms_for_restart(self._diagnostic_vector)
+                    true_norms = self._true_norms.numpy()
+
+                    # Compute drift for each block: global, articulation, deformable
+                    drifts = [
+                        gap_norms[0] / max(true_norms[0], config.residual_floor_global),
+                        gap_norms[1] / max(true_norms[1], config.residual_floor_articulation),
+                        gap_norms[2] / max(true_norms[2], config.residual_floor_deformable),
+                    ]
+
+                    # Replace if ANY block drifts too much (max over all blocks)
+                    max_drift = max(drifts)
+                    should_replace = max_drift >= config.residual_replacement_threshold
                 else:
                     # Production mode: always replace for safety without diagnostic overhead
                     should_replace = True
