@@ -62,10 +62,11 @@ class MonolithicPcgConfig:
     preconditioner_positive_tolerance: float
     stagnation_window: int
     stagnation_minimum_reduction: float
-    residual_replacement_threshold: float = 0.1
+    residual_replacement_threshold: float = 0.02
     """Relative gap threshold for replacing recursive residual with true residual.
     Only replace when ||r_true - r_rec|| / max(||r_true||, ε) > threshold.
-    Default 0.1 (smart replacement, 80% fewer PCG iterations). Set to 0.0 for always-replace."""
+    Default 0.02 (replace when drift > 2%, balances efficiency and robustness).
+    Set to 0.0 for always-replace (most robust but slower). Set to 0.1 for aggressive smart replacement."""
 
     def __post_init__(self):
         if any(
