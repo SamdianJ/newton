@@ -62,11 +62,12 @@ class MonolithicPcgConfig:
     preconditioner_positive_tolerance: float
     stagnation_window: int
     stagnation_minimum_reduction: float
-    residual_replacement_threshold: float = 0.02
+    residual_replacement_threshold: float = 0.1
     """Relative gap threshold for replacing recursive residual with true residual.
-    Only replace when ||r_true - r_rec|| / max(||r_true||, ε) > threshold.
-    Default 0.02 (replace when drift > 2%, balances efficiency and robustness).
-    Set to 0.0 for always-replace (most robust but slower). Set to 0.1 for aggressive smart replacement."""
+    Replace when max(eta_global, eta_q, eta_x) > threshold, where each eta is
+    ||gap||_block / max(||r_true||_block, floor_block). Checking per-block drift
+    prevents articulation drift from being masked by larger deformable residuals.
+    Default 0.1 (replace when any block drifts > 10%). Set to 0.0 for always-replace."""
 
     def __post_init__(self):
         if any(
