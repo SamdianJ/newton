@@ -5,6 +5,7 @@
 
 import json
 import signal
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -23,19 +24,43 @@ class TestMonolithicValidationWorkflow(unittest.TestCase):
         self.assertNotIn("scripts.monolithic_reference.run_p2_8bc", jobs[0]["arguments"])
 
     def test_night_scope(self):
-        """Schedule only the current diagnostic and owned implementations."""
+        """Schedule only current policies with explicit graph variants and balanced repeats."""
         repo = Path(__file__).resolve().parents[2]
         jobs = workflow.build_jobs("night", repo)
         self.assertEqual(len({j["name"] for j in jobs}), len(jobs))
         self.assertTrue(all(j["cwd"] == str(repo) for j in jobs))
         for job in jobs[1:]:
-            self.assertNotIn("production", job["arguments"])
+            self.assertNotIn("baseline", job["name"])
             self.assertNotIn("--smoke", job["arguments"])
+
+        names = {job["name"] for job in jobs}
+        for repeat in range(1, 6):
+            for mode in ("diagnostic", "production", "production-graph"):
+                self.assertIn(f"tet-r5-{mode}-rep{repeat:02d}", names)
+        for job in jobs[1:]:
+            self.assertEqual("--use-cuda-graph" in job["arguments"], "-graph-" in job["name"])
 
     def test_reject_old_policy(self):
         """Reject an old saved plan even when its evidence is intact."""
         with self.assertRaises(ValueError):
             workflow.validate_resume({"signature": {"policy": workflow.WORKFLOW_POLICY}, "completed": {}}, {})
+
+    def test_old_resume_starts_no_subprocess(self):
+        """Reject a historical plan before running git, probes or child jobs."""
+
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / "progress.json").write_text(json.dumps({"signature": {}, "completed": {}}))
+            with (
+                patch.object(sys, "argv", ["validate", "--resume", "--output", tmp]),
+                patch.object(workflow.subprocess, "check_output") as read,
+                patch.object(workflow.subprocess, "run") as run,
+                patch.object(workflow.subprocess, "Popen") as start,
+            ):
+                with self.assertRaises(SystemExit):
+                    workflow.main()
+                read.assert_not_called()
+                run.assert_not_called()
+                start.assert_not_called()
 
     def test_resume_source_and_log_integrity(self):
         """Reject stale source and modified successful logs before skipping work."""

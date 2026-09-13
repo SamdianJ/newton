@@ -13,6 +13,7 @@ from unittest.mock import patch
 import numpy as np
 import warp as wp
 
+from newton._src.solvers.monolithic.linear import MonolithicLinearSolveResult, MonolithicLinearStatus
 from newton.tests.unittest_utils import add_function_test, get_test_devices
 from scripts.monolithic_reference import p2_measurement as measurement
 from scripts.monolithic_reference import run_p2_sharpa_study as sharpa
@@ -21,6 +22,36 @@ from scripts.monolithic_reference.p2_measurement import evidence_index, frame_sa
 
 
 class TestP2Measurement(unittest.TestCase):
+    def test_fixed_pcg_record_keeps_work_and_checkpoint(self):
+        """Keep scheduled tail costs and stale checkpoint values in the trace schema."""
+        result = MonolithicLinearSolveResult(
+            MonolithicLinearStatus.NONFINITE_ITERATION,
+            None,
+            7,
+            1,
+            0,
+            float("nan"),
+            float("nan"),
+            float("nan"),
+            float("nan"),
+            float("nan"),
+            pcg_policy="masked_smart_restart_v1",
+            scheduled_slots=200,
+            last_checked_slot=0,
+            failure_slot=8,
+            checkpoint_ratios=(1, 1, 1),
+            prepare_seconds=0.01,
+            capture_seconds=0.02,
+            graph_rebuilt=True,
+        )
+        record = measurement.pcg_call_record(result, 0.1, use_cuda_graph=True)
+        self.assertEqual((record["iterations"], record["scheduled_slots"], record["last_checked_slot"]), (7, 200, 0))
+        self.assertEqual(record["checkpoint_ratios"], (1, 1, 1))
+        self.assertFalse(record["residual_current"])
+        self.assertFalse(record["output_valid"])
+        self.assertTrue(record["graph_rebuilt"])
+        self.assertEqual(record["capture_seconds"], 0.02)
+
     def test_tet_phase_boundaries(self):
         for time_s, phase in (
             (0, "loading"),
@@ -251,6 +282,7 @@ class TestP2Measurement(unittest.TestCase):
         solver = SimpleNamespace(
             _evaluate_current=original,
             model=SimpleNamespace(device=device),
+            use_cuda_graph=False,
             _linear=SimpleNamespace(solve_pcg=lambda: None),
         )
         array = SimpleNamespace(numpy=lambda: np.zeros((1, 3)))
@@ -339,9 +371,7 @@ class TestP2Measurement(unittest.TestCase):
             patch.object(
                 solver._linear,
                 "solve_pcg",
-                return_value=SimpleNamespace(
-                    iterations=1, status=SimpleNamespace(name="SUCCESS"), rho=0, rho_q=0, rho_x=0
-                ),
+                return_value=MonolithicLinearSolveResult(MonolithicLinearStatus.SUCCESS, None, 1, 1, 0, 0, 0, 0, 0, 0),
             ),
             patch.object(sharpa, "slim_record", side_effect=lambda row, *_: row),
             patch.object(sharpa, "work_stats", return_value={}),

@@ -66,10 +66,10 @@ class MonolithicPcgConfig:
     stagnation_minimum_reduction: float
     residual_replacement_threshold: float = 0.1
     """Relative gap threshold for replacing recursive residual with true residual.
-    Replace when max(eta_global, eta_q, eta_x) > threshold, where each eta is
+    Replace when max(eta_global, eta_q, eta_x) >= threshold, where each eta is
     ||gap||_block / max(||r_true||_block, floor_block). Checking per-block drift
     prevents articulation drift from being masked by larger deformable residuals.
-    Default 0.1 (replace when any block drifts > 10%). Set to 0.0 for always-replace."""
+    Default 0.1 (replace when any block drifts >= 10%). Set to 0.0 for always-replace."""
 
     def __post_init__(self):
         if any(
@@ -83,6 +83,7 @@ class MonolithicPcgConfig:
             self.curvature_relative_tolerance,
             self.preconditioner_positive_tolerance,
             self.stagnation_minimum_reduction,
+            self.residual_replacement_threshold,
         )
         if (
             any(
@@ -186,6 +187,18 @@ class MonolithicLinearSolveResult:
     """Maximum scaled L2 recursive-minus-true gap in global/q/x slices before replacement."""
     stagnation_window: int | None = None
     """Configured stagnation window in true-residual checks; None before a solve starts."""
+
+    pcg_policy: str = "dynamic_smart_restart_v1"
+    scheduled_slots: int = 0
+    converged_at_slot: int = -1
+    last_checked_slot: int = -1
+    failure_slot: int = -1
+    residual_current: bool = False
+    output_valid: bool = False
+    checkpoint_ratios: tuple[float, float, float] = (float("nan"),) * 3
+    prepare_seconds: float = 0.0
+    capture_seconds: float = 0.0
+    graph_rebuilt: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -962,11 +975,15 @@ class MonolithicLinearWorkspace:
         *,
         device: wp.DeviceLike,
         pcg_mode: str = "diagnostic",
+        use_cuda_graph: bool = False,
     ):
         if pcg_mode not in ("diagnostic", "production"):
             raise ValueError("pcg_mode must be diagnostic or production")
-        if pcg_mode != "diagnostic":
-            raise ValueError("production is unavailable during 8C2 cleanup")
+        if type(use_cuda_graph) is not bool or (
+            use_cuda_graph and (pcg_mode != "production" or not wp.get_device(device).is_cuda)
+        ):
+            raise ValueError("use_cuda_graph requires CUDA production PCG and a bool")
+        self.use_cuda_graph = use_cuda_graph
         self._pcg_mode = pcg_mode
         self._pcg_active = False
         self._rhs_norms_cached = False
@@ -1592,6 +1609,7 @@ class MonolithicLinearWorkspace:
         generation: MonolithicLinearGeneration,
         warm_start: MonolithicPcgWarmStart,
         config: MonolithicPcgConfig,
+        delta: wp.array[float] | None = None,
     ) -> MonolithicLinearSolveResult:
         """Solve Khat*y=rhs_hat using the current operator and actor preconditioner.
 
@@ -1599,6 +1617,23 @@ class MonolithicLinearWorkspace:
         unchanged K/D/S. Lambda may change, but requires refactorization first.
         Every solve recomputes its initial true residual, including warm starts.
         """
+        if self.pcg_mode == "production":
+            from .pcg_production import solve_pcg_production  # noqa: PLC0415 - backend imports linear result types
+
+            return solve_pcg_production(
+                self,
+                rhs_hat,
+                y,
+                generation=generation,
+                warm_start=warm_start,
+                config=config,
+                delta=delta,
+                use_graph=self.use_cuda_graph,
+            )
+        return self._solve_pcg_diagnostic(rhs_hat, y, generation=generation, warm_start=warm_start, config=config)
+
+    def _solve_pcg_diagnostic(self, rhs_hat, y, *, generation, warm_start, config):
+        """Run dynamic diagnostic scheduling with independent smart restart scratch."""
         iterations, checks, replacements = 0, 0, 0
         ratios = (float("nan"),) * 3
         min_p_ap, min_r_z = float("nan"), float("nan")

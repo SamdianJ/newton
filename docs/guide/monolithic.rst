@@ -180,7 +180,7 @@ has no self-collision and does not certify soft-ball grasping or mesh contact.
 Experimental execution policies
 --------------------------------
 
-``SolverMonolithic`` accepts two construction-time execution options:
+``SolverMonolithic`` accepts construction-time execution options:
 ``use_optimized_articulation_mass_matrix=False`` and
 ``pcg_mode=SolverMonolithic.PCGMode.DIAGNOSTIC``. The mass option requires a
 Python bool; True selects the solver's private parallel mass evaluation while
@@ -188,14 +188,31 @@ sharing its Jacobian and inertia buffers. It applies to current and trial
 candidates and returned-state evaluation, rather than freezing mass for a step.
 The public Newton mass evaluation remains the default reference path.
 
-During PR-8C2 cleanup only ``pcg_mode="diagnostic"`` is available. Requests
-for production fail at construction. Diagnostic smart restart uses algorithm
-scratch independently of optional summaries. The old production implementation
-has been removed; the replacement must pass its own correctness and capture gates.
+``pcg_mode="production"`` selects the private fixed-slot masked PCG backend.
+It checks the true global/q/x residual initially, every ten slots, and at the
+budget end. Accepted solutions freeze; remaining scheduled kernels honor a
+device mask. Both modes use the same block-gap smart restart policy, independent
+of optional diagnostic summaries. Production omits stagnation, near-zero
+curvature heuristics and unscheduled residual checks; iteration counts can
+differ from dynamic diagnostic scheduling. Unmeasured summaries remain NaN.
 
-Both options are read-only after construction; create a new solver to choose
+``use_cuda_graph=False`` is an experimental, immutable, runtime-only option.
+True requires CUDA and production mode; it captures the entire fixed PCG chain.
+Generation, binding or stream changes invalidate reuse. Cross-generation graph
+caching and performance admission remain PR-8D work. Newton, line search, retries,
+assembly and state/history transactions remain outside the graph.
+
+Production publishes a direction only after successful true-residual acceptance
+and finite recovery. ``linear_iterations`` counts effective updates while
+``linear_scheduled_slots`` includes the fixed tail across calls and retries.
+The most recent policy, check, acceptance and failure slots are exposed in Stats.
+Performance is not certified by capture correctness; defaults and physical
+parameters remain unchanged. See ``scripts/monolithic_reference/p2_validation_zh.md``
+for current development and manually invoked overnight validation.
+
+These options are read-only after construction; create a new solver to choose
 different policies. They describe runtime execution, not material or asset
-properties, and intentionally have no USD schema. Neither option changes N/h,
+properties, and intentionally have no USD schema. No execution option changes N/h,
 physical tolerances, contact history, or the supported model envelope. CPU and
 CUDA correctness are tested; performance is workload- and device-dependent.
 

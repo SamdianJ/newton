@@ -686,6 +686,18 @@ class SolverMonolithic(SolverBase):
         nonlinear_iterations: int = 0
         line_search_iterations: int = 0
         linear_iterations: int = 0
+        linear_scheduled_slots: int = 0
+        """Sum of fixed production slots across actual calls, including retries."""
+        pcg_policy: str | None = None
+        """Most recent linear solve's numerical scheduling and restart policy."""
+        linear_converged_at_slot: int = -1
+        """Most recent production solve's acceptance slot, or -1."""
+        linear_last_checked_slot: int = -1
+        """Most recent production solve's last valid true-residual checkpoint."""
+        linear_failure_slot: int = -1
+        """Most recent production solve's first numerical failure slot, or -1."""
+        linear_output_valid: bool = False
+        """Whether the most recent production solve published a finite direction."""
         regularization_retries: int = 0
         matrix_assembly_count: int = 0
         matrix_nnz: int = 0
@@ -823,6 +835,7 @@ class SolverMonolithic(SolverBase):
         linear_tolerance: float = 1.0e-4,
         use_optimized_articulation_mass_matrix: bool = False,
         pcg_mode: SolverMonolithic.PCGMode | str = PCGMode.DIAGNOSTIC,
+        use_cuda_graph: bool = False,
     ) -> None:
         """Validate the model and allocate solver-owned candidate/contact buffers.
 
@@ -844,7 +857,8 @@ class SolverMonolithic(SolverBase):
             linear_tolerance: Positive relative linear residual tolerance.
             use_optimized_articulation_mass_matrix: Experimental private parallel
                 articulation mass evaluation; fixed at construction, defaults to False.
-            pcg_mode: Experimental PCG execution policy; production unavailable during 8C2 cleanup.
+            pcg_mode: Experimental dynamic diagnostic or fixed masked production PCG policy.
+            use_cuda_graph: Capture the production PCG chain on CUDA; default False.
                 Production retains mandatory numerical checks and final force publication.
         """
         self._initialize(
@@ -864,6 +878,7 @@ class SolverMonolithic(SolverBase):
             linear_tolerance=linear_tolerance,
             use_optimized_articulation_mass_matrix=use_optimized_articulation_mass_matrix,
             pcg_mode=pcg_mode,
+            use_cuda_graph=use_cuda_graph,
             joint_diagnostic=False,
         )
 
@@ -892,6 +907,11 @@ class SolverMonolithic(SolverBase):
         return self._use_optimized_articulation_mass_matrix
 
     @property
+    def use_cuda_graph(self) -> bool:
+        """Return the immutable experimental production-PCG capture option."""
+        return self._use_cuda_graph
+
+    @property
     def pcg_mode(self) -> SolverMonolithic.PCGMode:
         """Return the immutable experimental PCG observation policy."""
         return self._pcg_mode
@@ -916,14 +936,18 @@ class SolverMonolithic(SolverBase):
         linear_tolerance=1.0e-4,
         use_optimized_articulation_mass_matrix=False,
         pcg_mode=PCGMode.DIAGNOSTIC,
+        use_cuda_graph=False,
     ):
         # Freeze names now; accepting an option must never silently run different physics.
         if type(use_optimized_articulation_mass_matrix) is not bool:
             raise ValueError("use_optimized_articulation_mass_matrix must be a bool")
         self._use_optimized_articulation_mass_matrix = use_optimized_articulation_mass_matrix
         self._pcg_mode = self.PCGMode(pcg_mode)
-        if self._pcg_mode != self.PCGMode.DIAGNOSTIC:
-            raise ValueError("production is unavailable during 8C2 cleanup")
+        if type(use_cuda_graph) is not bool or (use_cuda_graph and self._pcg_mode != self.PCGMode.PRODUCTION):
+            raise ValueError("use_cuda_graph requires production PCG and a bool")
+        if use_cuda_graph and not model.device.is_cuda:
+            raise ValueError("use_cuda_graph requires a CUDA device")
+        self._use_cuda_graph = use_cuda_graph
         material_model = self.MaterialModel(material_model)
         mass_mode = self.MassMode(mass_mode)
         for name, value in (
@@ -1061,6 +1085,7 @@ class SolverMonolithic(SolverBase):
             layout.particle_to_dynamic,
             device=model.device,
             pcg_mode=self.pcg_mode.value,
+            use_cuda_graph=self.use_cuda_graph,
         )
         self._linear._set_fixed_triplet_pattern(
             global_rows=np.concatenate((np.repeat(np.arange(nq), nq), pattern.global_rows)).astype(np.int32),
@@ -1167,6 +1192,7 @@ class SolverMonolithic(SolverBase):
             "nonlinear_iterations": 0,
             "line_search_iterations": 0,
             "linear_iterations": 0,
+            "linear_scheduled_slots": 0,
             "regularization_retries": 0,
             "matrix_assembly_count": 0,
             "true_residual_recomputations": 0,
@@ -1583,8 +1609,17 @@ class SolverMonolithic(SolverBase):
                         generation=self._generation,
                         warm_start=MonolithicPcgWarmStart.ZERO,
                         config=pcg_config,
+                        delta=self._delta,
                     )
                     self._metrics["linear_iterations"] += result.iterations
+                    self._metrics["linear_scheduled_slots"] += result.scheduled_slots
+                    self._metrics.update(
+                        pcg_policy=result.pcg_policy,
+                        linear_converged_at_slot=result.converged_at_slot,
+                        linear_last_checked_slot=result.last_checked_slot,
+                        linear_failure_slot=result.failure_slot,
+                        linear_output_valid=result.output_valid,
+                    )
                     self._metrics["true_residual_recomputations"] += result.true_residual_checks
                     self._metrics["residual_replacements"] += result.residual_replacements
                     self._metrics.update(
@@ -1602,7 +1637,13 @@ class SolverMonolithic(SolverBase):
                         linear_scale_generation=result.generation.assembly_sequence,
                     )
                     self._require_linear(result.status)
-                    self._require_linear(self._linear.recover_delta(self._y, self._delta, generation=self._generation))
+                    if self.pcg_mode == self.PCGMode.PRODUCTION:
+                        if not result.output_valid:
+                            raise _StepFailure(self.Status.NONFINITE, "PCG returned an invalid direction")
+                    else:
+                        self._require_linear(
+                            self._linear.recover_delta(self._y, self._delta, generation=self._generation)
+                        )
                 except _StepFailure as error:
                     last_reason = str(error)
                     continue

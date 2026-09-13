@@ -24,7 +24,33 @@ import warp as wp
 from scripts.monolithic_reference.profile_release import _percentiles, _StageProfile, solver_module
 
 ROOT = Path(__file__).resolve().parents[2]
-SCHEMA = "monolithic-p2-measurement/v2"
+SCHEMA = "monolithic-p2-measurement/v3"
+
+
+def pcg_call_record(result, seconds, *, use_cuda_graph):
+    """Record actual work and fixed scheduling separately, including failed retries."""
+    return {
+        "iterations": result.iterations,
+        "status": result.status.name,
+        "seconds": seconds,
+        "rho": result.rho,
+        "rho_q": result.rho_q,
+        "rho_x": result.rho_x,
+        "pcg_policy": result.pcg_policy,
+        "scheduled_slots": result.scheduled_slots,
+        "converged_at_slot": result.converged_at_slot,
+        "last_checked_slot": result.last_checked_slot,
+        "failure_slot": result.failure_slot,
+        "residual_current": result.residual_current,
+        "output_valid": result.output_valid,
+        "true_residual_checks": result.true_residual_checks,
+        "residual_replacements": result.residual_replacements,
+        "checkpoint_ratios": result.checkpoint_ratios,
+        "use_cuda_graph": use_cuda_graph,
+        "prepare_seconds": result.prepare_seconds,
+        "capture_seconds": result.capture_seconds,
+        "graph_rebuilt": result.graph_rebuilt,
+    }
 
 
 @contextmanager
@@ -40,16 +66,7 @@ def solver_timing(solver, *, before_solve=None):
         start = time.perf_counter()
         result = solve(*args, **kwargs)
         wp.synchronize_device(solver.model.device)
-        record.calls.append(
-            {
-                "iterations": result.iterations,
-                "status": result.status.name,
-                "seconds": time.perf_counter() - start,
-                "rho": result.rho,
-                "rho_q": result.rho_q,
-                "rho_x": result.rho_x,
-            }
-        )
+        record.calls.append(pcg_call_record(result, time.perf_counter() - start, use_cuda_graph=solver.use_cuda_graph))
         return result
 
     def timed_step(*args, **kwargs):

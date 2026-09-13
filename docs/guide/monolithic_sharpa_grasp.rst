@@ -350,16 +350,20 @@ is recorded in ``scripts/monolithic_reference/fixtures/p2_owned_mass_matrix_plan
 Planned PCG diagnostic modes
 ----------------------------
 
-PR-8C2 replaces the previous production policy with a fixed masked PCG chain.
-During cleanup production requests are rejected; diagnostic smart restart and
-owned mass remain available. Historical v1 fixtures describe the old plan only.
+PR-8C2 implements fixed masked production PCG alongside dynamic diagnostic
+smart restart. Both use shared block-gap decisions. Production omits optional
+summaries and uses fixed true-residual checkpoints. Its complete PCG chain
+supports explicit CUDA graph capture; defaults remain diagnostic and graph off.
+Current contracts and validation commands are in
+``scripts/monolithic_reference/p2_validation_zh.md``. Historical v1 fixtures
+are not the current production algorithm or evidence of performance admission.
 
 Planned CUDA Graph scope and operation inventory
 ------------------------------------------------
 
-P2 targets segmented PCG capture and other stable computation segments only
-when measured benefits justify them. Full-step capture remains deferred.
-No monolithic operations are currently integrated into CUDA Graphs. The
+PR-8C2 captures the complete production PCG chain. Other stable computation
+segments and longer-lived cache reuse remain PR-8D work, subject to measured
+benefits. Full-step capture remains deferred. The
 operation inventory is maintained in
 ``scripts/monolithic_reference/fixtures/p2_cuda_graph_inventory_v1.json``
 and the workspace table ``agents/integration/P2_CUDA_GRAPH_INVENTORY.md``.

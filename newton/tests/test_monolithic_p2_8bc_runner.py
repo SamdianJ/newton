@@ -12,6 +12,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+from newton._src.solvers.monolithic.linear import MonolithicLinearWorkspace
+from newton.tests import test_solver_monolithic_step as stepping
 from scripts.monolithic_reference import profile_p2_owned_mass as mass_profile
 from scripts.monolithic_reference import run_p2_8bc as runner
 from scripts.monolithic_reference.profile_p2_owned_mass import load_samples
@@ -24,6 +26,7 @@ class FakeSolver:
     def __init__(self, **kwargs):
         self.use_optimized_articulation_mass_matrix = kwargs["use_optimized_articulation_mass_matrix"]
         self.pcg_mode = self.PCGMode(kwargs["pcg_mode"])
+        self.use_cuda_graph = kwargs["use_cuda_graph"]
 
 
 class TestP28BCRunner(unittest.TestCase):
@@ -122,6 +125,33 @@ class TestP28BCRunner(unittest.TestCase):
             record = json.loads((output / "execution-options.json").read_text())
             self.assertEqual(record["constructions"], [])
             self.assertIn("ValueError", record["failure"])
+
+    def test_production_binds_actual_backend(self):
+        """Drive the actual solver and new backend through the measurement runner binding."""
+
+        for graph in (False, True):
+            with tempfile.TemporaryDirectory() as directory:
+                output = Path(directory) / "job"
+
+                def run(output=output):
+                    output.mkdir()
+                    for _ in range(2):
+                        fixture, solver = stepping._free_scene("cuda:0", gravity=(0, 0, -9.81))
+                        with patch.object(
+                            MonolithicLinearWorkspace, "_solve_pcg_diagnostic", side_effect=AssertionError("fallback")
+                        ):
+                            solver.step(fixture.state, fixture.state_next, fixture.control, None, 0.001)
+                        self.assertEqual(solver.last_stats.pcg_policy, "masked_smart_restart_v1")
+                        self.assertTrue(solver.last_stats.linear_output_valid)
+
+                arguments = ["--output", str(output), "--kind", "tet", "--pcg-mode", "production"]
+                if graph:
+                    arguments.append("--use-cuda-graph")
+                with patch.object(runner.run_p2_8a, "main", run):
+                    runner.main(arguments)
+                record = json.loads((output / "execution-options.json").read_text())
+                self.assertEqual(record["constructions"], [record["requested"]] * 2)
+                self.assertEqual(record["pcg_policy"], "masked_smart_restart_v1")
 
     def test_existing_evidence_is_untouched(self):
         """Reject output reuse before changing any existing evidence."""

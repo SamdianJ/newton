@@ -31,10 +31,13 @@ def main(argv=None):
     parser.add_argument("--device", choices=("cuda:0",), default="cuda:0")
     parser.add_argument("--refinement", type=int, default=3)
     parser.add_argument("--mass-matrix", choices=("reference", "owned"), default="reference")
-    parser.add_argument("--pcg-mode", choices=("diagnostic",), default="diagnostic")
+    parser.add_argument("--pcg-mode", choices=("diagnostic", "production"), default="diagnostic")
+    parser.add_argument("--use-cuda-graph", action="store_true")
     parser.add_argument("--smoke", action="store_true")
     launch_argv = list(sys.argv[1:] if argv is None else argv)
     args = parser.parse_args(launch_argv)
+    if args.use_cuda_graph and args.pcg_mode != "production":
+        parser.error("--use-cuda-graph requires --pcg-mode production")
     if args.output.exists():
         raise FileExistsError(f"Use a new output directory: {args.output}")
     refinements = (2, 3) if args.kind.startswith("sharpa") else (3, 4, 5, 6)
@@ -44,13 +47,15 @@ def main(argv=None):
     options = {
         "use_optimized_articulation_mass_matrix": args.mass_matrix == "owned",
         "pcg_mode": args.pcg_mode,
+        "use_cuda_graph": args.use_cuda_graph,
     }
     record = {
-        "task": "PR-8B/PR-8C",
+        "task": "PR-8C2",
+        "pcg_policy": "masked_smart_restart_v1" if args.pcg_mode == "production" else "dynamic_smart_restart_v1",
         "launch_argv": launch_argv,
         "requested": options,
         "constructions": [],
-        "binding": "Diagnostic/owned only during 8C2 cleanup; old production is removed.",
+        "binding": "Current diagnostic smart or new masked production only; no historical solver fallback.",
         "timing_scope": "SMOKE_CORRECTNESS_ONLY" if args.smoke else "REQUIRES_MATCHED_DEVICE_STATE_REVIEW",
         "failure": None,
     }
@@ -70,6 +75,7 @@ def main(argv=None):
         actual = {
             "use_optimized_articulation_mass_matrix": self.use_optimized_articulation_mass_matrix,
             "pcg_mode": self.pcg_mode.value,
+            "use_cuda_graph": self.use_cuda_graph,
         }
         if actual != options:
             raise RuntimeError(f"Constructor options were not bound: {actual}")

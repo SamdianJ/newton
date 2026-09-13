@@ -19,10 +19,12 @@ import numpy as np
 
 REPO = Path(__file__).resolve().parents[2]
 DEV_MODULES = (
+    "test_monolithic_p2_measurement",
     "test_monolithic_owned_mass_matrix",
     "test_solver_monolithic_linear",
     "test_monolithic_pcg_restart",
-    "test_monolithic_production_cleanup",
+    "test_monolithic_pcg_production",
+    "test_monolithic_pcg_production_graph",
     "test_monolithic_execution_options",
     "test_monolithic_p2_8bc_runner",
     "test_monolithic_validation_workflow",
@@ -39,7 +41,7 @@ def write_json(path, value):
     temporary.replace(path)
 
 
-WORKFLOW_POLICY = "p2-8c2-cleanup-v1"
+WORKFLOW_POLICY = "p2-8c2-masked-smart-v1"
 
 
 def build_jobs(suite, repo):
@@ -61,27 +63,34 @@ def build_jobs(suite, repo):
 
     for kind, meshes in (("sharpa", (3, 2)), ("tet", (5, 3, 4, 6))):
         for mesh in meshes:
-            for repeat in range(1, 6 if mesh in (2, 3, 5) else 2):
-                for variant in ("diagnostic", "owned") if kind == "sharpa" else ("diagnostic",):
+            repeats = 5 if kind == "sharpa" or mesh == 5 else 1
+            variants = ("diagnostic", "production", "production-graph")
+            if kind == "sharpa":
+                variants += ("owned", "owned-production", "owned-production-graph")
+            for repeat in range(1, repeats + 1):
+                for variant in variants if repeat % 2 else reversed(variants):
+                    arguments = [
+                        "-m",
+                        "scripts.monolithic_reference.run_p2_8bc",
+                        "--kind",
+                        kind,
+                        "--refinement",
+                        str(mesh),
+                        "--device",
+                        "cuda:0",
+                        "--mass-matrix",
+                        "owned" if variant.startswith("owned") else "reference",
+                        "--pcg-mode",
+                        "production" if "production" in variant else "diagnostic",
+                    ]
+                    if variant.endswith("graph"):
+                        arguments.append("--use-cuda-graph")
                     jobs.append(
                         {
                             "name": f"{kind}-r{mesh}-{variant}-rep{repeat:02d}",
                             "kind": kind,
                             "cwd": str(repo),
-                            "arguments": [
-                                "-m",
-                                "scripts.monolithic_reference.run_p2_8bc",
-                                "--kind",
-                                kind,
-                                "--refinement",
-                                str(mesh),
-                                "--device",
-                                "cuda:0",
-                                "--mass-matrix",
-                                "owned" if variant == "owned" else "reference",
-                                "--pcg-mode",
-                                "diagnostic",
-                            ],
+                            "arguments": arguments,
                         }
                     )
     return jobs
@@ -316,6 +325,10 @@ def main():
     root = (args.output or Path("/tmp") / f"monolithic-p2-{args.suite}-{datetime.now():%Y%m%d-%H%M%S}").resolve()
     if root.is_relative_to(REPO):
         parser.error("Keep evidence outside the source checkout")
+    if args.resume:
+        saved = json.loads((root / "progress.json").read_text())
+        if saved.get("signature", {}).get("policy") != WORKFLOW_POLICY:
+            parser.error("Historical validation policy cannot be resumed by masked PCG")
     root.mkdir(parents=True, exist_ok=True)
     with (root / "validation.lock").open("a") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)

@@ -28,6 +28,7 @@ from scripts.monolithic_reference.p2_measurement import (
     evidence_index,
     export_candidate,
     frame_samples,
+    pcg_call_record,
     snapshot_sources,
     throughput,
 )
@@ -224,14 +225,7 @@ def timing_run(device, refinement, output, *, steps=None):
         result = original_solve(*args, **kwargs)
         wp.synchronize_device(case.model.device)
         pcg_calls.append(
-            {
-                "iterations": result.iterations,
-                "status": result.status.name,
-                "seconds": time.perf_counter() - start,
-                "rho": result.rho,
-                "rho_q": result.rho_q,
-                "rho_x": result.rho_x,
-            }
+            pcg_call_record(result, time.perf_counter() - start, use_cuda_graph=case.solver.use_cuda_graph)
         )
         return result
 
