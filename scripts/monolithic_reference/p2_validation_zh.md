@@ -50,6 +50,18 @@ uv run --no-sync -m scripts.monolithic_reference.validate_p2 \
 | tet r5 | diagnostic、production、production graph | 各 5 次 |
 | tet r3/r4/r6 | diagnostic、production、production graph | 各 1 次 |
 
+nightly 默认无人值守：单个测试组或仿真任务以非零状态退出后，保留日志/输出并继续后续独立任务；单项结果文件缺失或格式错误同样记录为任务失败。不会在同一轮自动反复重试。源码冻结检查失败、CUDA 启动预检失败、主机进程启动/I/O 异常和用户中断仍立即停止。
+
+全部任务尝试结束后，`summary.md` 汇总成功任务、未达标指标、失败原因及日志链接，`progress.json` 的 `failed_jobs` 列出未解决的任务失败：
+
+| 退出码 | 最终状态 | 含义 |
+|---|---|---|
+| 0 | COMPLETED | 所有任务正常结束且现有筛查通过；正式性能仍需评审 |
+| 1 | COMPLETED_WITH_FAILURES | 存在任务退出失败或结果无法读取；其他独立任务已继续执行 |
+| 2 | COMPLETED_WITH_OPEN_GATES | 无任务执行失败，但仍有数值或 PCG 预算未通过 |
+
+任务失败和指标未达标同时发生时返回 1，两类问题都保留在汇总中。
+
 所有作业使用同一个干净的当前源码工作树；不传 `--baseline-repo`，不执行旧 checkout。旧 51 作业协议不再适用。
 
 同一源码/依赖/策略恢复：
@@ -60,7 +72,9 @@ uv run --no-sync -m scripts.monolithic_reference.validate_p2 \
 ```
 
 源码、依赖、policy 或计划改变时必须使用新输出目录。旧 policy 在任何子进程之前拒绝；日志/索引/原始证据哈希也会校验。
-中断、失败、旧日志和未完成输出保留；`--resume` 不把旧求解器结果计作新策略通过。
+中断、失败、旧日志和未完成输出保留；`--resume` 跳过已完成且证据校验通过的任务，只重试失败/未执行任务。重试前归档该任务旧输出，追加新日志；恢复成功后不再计为未解决失败，历史失败记录继续保留。已完成但指标未达标的任务不会自动重跑，也不会因其他任务恢复成功而变为通过。
+
+工作流标识为 `p2-8c2-masked-smart-v2-unattended`（数值 PCG policy 不变）；先前版本的运行不能直接 resume，请使用新输出目录。源码修复或依赖变更后也必须使用新目录，不能混合版本续跑。
 
 单项/短冒烟示例：
 

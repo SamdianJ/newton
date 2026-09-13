@@ -41,7 +41,7 @@ def write_json(path, value):
     temporary.replace(path)
 
 
-WORKFLOW_POLICY = "p2-8c2-masked-smart-v1"
+WORKFLOW_POLICY = "p2-8c2-masked-smart-v2-unattended"
 
 
 def build_jobs(suite, repo):
@@ -201,7 +201,7 @@ def run_jobs(root, jobs, state, *, clean):
         "PYTHONUNBUFFERED": "1",
     }
     progress = root / "progress.json"
-    for job in jobs:
+    for position, job in enumerate(jobs, 1):
         name = job["name"]
         if name in state["completed"]:
             print(f"SKIP {name}: verified completed evidence", flush=True)
@@ -221,7 +221,7 @@ def run_jobs(root, jobs, state, *, clean):
         state["status"] = "RUNNING"
         state["active"] = {"name": name, "command": command, "start_unix_s": time.time(), "log": str(log_path)}
         write_json(progress, state)
-        print(f"START {name} ({len(state['completed']) + 1}/{len(jobs)}) — {log_path}", flush=True)
+        print(f"START {name} ({position}/{len(jobs)}) — {log_path}", flush=True)
         with log_path.open("x") as log:
             child = subprocess.Popen(
                 command, cwd=job["cwd"], env=env, stdout=log, stderr=subprocess.STDOUT, start_new_session=True
@@ -254,13 +254,21 @@ def run_jobs(root, jobs, state, *, clean):
             "output": str(output) if output else None,
         }
         if code:
+            result["error"] = f"Child exited with code {code}"
+        elif output:
+            try:
+                result["index_sha256"] = digest(output / "evidence-index.json")
+                result["screen"] = summarize_run(output, job["kind"])
+            except (FileNotFoundError, ValueError, KeyError, TypeError, ZeroDivisionError) as error:
+                # Invalid results belong to this job; host I/O and launch errors
+                # still propagate and stop the run.
+                result["error"] = f"{type(error).__name__}: {error}"
+        if "error" in result:
             state["status"] = "FAILED"
             state.setdefault("failures", []).append(result)
             write_json(progress, state)
-            return 1
-        if output:
-            result["index_sha256"] = digest(output / "evidence-index.json")
-            result["screen"] = summarize_run(output, job["kind"])
+            print(f"FAIL {name}: {result['error']} — {log_path}; continuing", flush=True)
+            continue
         state["completed"][name] = result
         write_json(progress, state)
         print(f"DONE {name}: {result['end_unix_s'] - result['start_unix_s']:.1f}s", flush=True)
@@ -274,14 +282,18 @@ def run_jobs(root, jobs, state, *, clean):
             or not result["screen"]["pcg"]["hard_cap_passed"]
         )
     ]
-    state["status"] = "COMPLETED_WITH_OPEN_GATES" if open_gates else "COMPLETED"
+    failed = {row["name"]: row for row in state.get("failures", []) if row["name"] not in state["completed"]}
+    state["status"] = (
+        "COMPLETED_WITH_FAILURES" if failed else "COMPLETED_WITH_OPEN_GATES" if open_gates else "COMPLETED"
+    )
+    state["failed_jobs"] = list(failed)
     state["open_gates"] = open_gates
     state["performance_admission"] = "NOT_AUTOMATIC; 8A budgets remain draft and telemetry requires review"
     write_json(progress, state)
     report = [
         f"# {state['status']}",
         "",
-        f"Completed jobs: {len(state['completed'])}; runs with open gates: {len(open_gates)}.",
+        f"Completed jobs: {len(state['completed'])}; failed jobs: {len(failed)}; runs with open gates: {len(open_gates)}.",
         "",
         "| Job | Solver seconds | PCG call p95 | Numerical screen | PCG budget |",
         "|---|---:|---:|---|---|",
@@ -297,6 +309,11 @@ def run_jobs(root, jobs, state, *, clean):
             f"{'PASS' if screen['screen_passed'] else 'FAIL'} | "
             f"{'PASS' if pcg['p95_passed'] and pcg['hard_cap_passed'] else 'FAIL'} |"
         )
+    if failed:
+        report += ["", "## Failed jobs", ""]
+        for name, result in failed.items():
+            log = Path(result["log"]).relative_to(root)
+            report.append(f"- {name}: {result['error']} ([log]({log})).")
     report += [
         "",
         "Performance admission requires review of matched clocks, quality, repeated costs, tails and memory.",
@@ -304,8 +321,12 @@ def run_jobs(root, jobs, state, *, clean):
         "See plan.json, progress.json and the per-job logs/raw evidence for provenance and details.",
     ]
     (root / "summary.md").write_text("\n".join(report) + "\n")
-    print(f"{state['status']}: {len(state['completed'])} jobs; {len(open_gates)} runs with open gates", flush=True)
-    return 2 if open_gates else 0
+    print(
+        f"{state['status']}: {len(state['completed'])} completed; {len(failed)} failed; "
+        f"{len(open_gates)} runs with open gates",
+        flush=True,
+    )
+    return 1 if failed else 2 if open_gates else 0
 
 
 def main():
