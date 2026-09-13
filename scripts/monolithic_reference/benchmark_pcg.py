@@ -425,11 +425,13 @@ def compare_case(case, device, *, repeats=10, warmups=3, config=None, include_ex
         wp.synchronize_device(device)
         setup[mode] = (time.perf_counter() - start) * 1000
         w = runners[mode].workspace
+        offsets = w.k_global_scalar_bsr.offsets.numpy()
+        nnz = int(offsets[-1])  # BSR allocation can retain unused triplet capacity.
         bindings[mode] = array_fingerprint(
             {
-                "offsets": w.k_global_scalar_bsr.offsets,
-                "columns": w.k_global_scalar_bsr.columns,
-                "values": w.k_global_scalar_bsr.values,
+                "offsets": offsets,
+                "columns": w.k_global_scalar_bsr.columns[:nnz],
+                "values": w.k_global_scalar_bsr.values[:nnz],
                 "S": w.scale,
                 "rhs": runners[mode].rhs,
                 "q_cholesky": w._q_cholesky,

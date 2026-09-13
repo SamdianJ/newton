@@ -9,6 +9,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import numpy as np
+import warp as wp
 
 from newton.tests.unittest_utils import add_function_test, get_test_devices
 from scripts.monolithic_reference import benchmark_pcg as benchmark
@@ -47,6 +48,32 @@ def test_native_comparison(test, device):
 
 
 class TestMonolithicPcgBenchmark(unittest.TestCase):
+    def test_binding_uses_active_sparse_entries(self):
+        """Ignore unused BSR capacity while rejecting differences in the actual operator."""
+        case = benchmark.synthetic_cases()[0]
+        original_init = benchmark.Runner.__init__
+        for change_active in (False, True):
+            calls = []
+
+            def initialize(runner, *args, calls=calls, change_active=change_active, **kwargs):
+                original_init(runner, *args, **kwargs)
+                matrix = runner.workspace.k_global_scalar_bsr
+                nnz = int(matrix.offsets.numpy()[-1])
+                calls.append(runner.mode)
+                values = np.append(matrix.values.numpy()[:nnz], np.float32(len(calls)))
+                if change_active:
+                    values[0] += len(calls)
+                matrix.values = wp.array(values, dtype=float, device="cpu")
+                matrix.columns = wp.array(np.append(matrix.columns.numpy()[:nnz], 0), dtype=int, device="cpu")
+
+            with self.subTest(change_active=change_active), patch.object(benchmark.Runner, "__init__", initialize):
+                if change_active:
+                    with self.assertRaisesRegex(ValueError, "identical matrix"):
+                        benchmark.compare_case(case, "cpu", repeats=1, warmups=1, config=benchmark.pcg_config(30))
+                else:
+                    result = benchmark.compare_case(case, "cpu", repeats=1, warmups=1, config=benchmark.pcg_config(30))
+                    self.assertEqual(len(set(result["bound_input_sha256"].values())), 1)
+
     def test_reference_and_block_metrics(self):
         """Measure error against the quantized input's direct solution, including a hidden q error."""
         case = benchmark.synthetic_cases()[0]
