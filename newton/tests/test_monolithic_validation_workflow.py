@@ -16,25 +16,26 @@ from scripts.monolithic_reference import validate_p2 as workflow
 class TestMonolithicValidationWorkflow(unittest.TestCase):
     def test_development_scope(self):
         """Keep full trajectories out of the development gate."""
-        jobs = workflow.build_jobs("dev", Path("/candidate"), Path("/baseline"))
+        jobs = workflow.build_jobs("dev", Path("/candidate"))
         self.assertEqual(len(jobs), 1)
         self.assertEqual(jobs[0]["kind"], "tests")
         self.assertIn("newton.tests.test_monolithic_execution_options", jobs[0]["arguments"])
         self.assertNotIn("scripts.monolithic_reference.run_p2_8bc", jobs[0]["arguments"])
 
     def test_night_scope(self):
-        """Retain the fifty full trajectories and independent variant comparisons."""
-        jobs = workflow.build_jobs("night", Path(__file__).resolve().parents[2], Path("/baseline"))
-        trajectories = [j for j in jobs if j["kind"] != "tests"]
-        self.assertEqual(len(trajectories), 50)
+        """Schedule only the current diagnostic and owned implementations."""
+        repo = Path(__file__).resolve().parents[2]
+        jobs = workflow.build_jobs("night", repo)
         self.assertEqual(len({j["name"] for j in jobs}), len(jobs))
-        for repeat in range(1, 6):
-            for variant in ("baseline", "diagnostic", "owned", "production"):
-                self.assertIn(f"sharpa-r3-{variant}-rep{repeat:02d}", {j["name"] for j in trajectories})
-        self.assertTrue(all("--smoke" not in j["arguments"] for j in trajectories))
-        old = next(j for j in trajectories if j["name"] == "sharpa-r3-baseline-rep01")
-        self.assertEqual(old["cwd"], "/baseline")
-        self.assertNotIn("--pcg-mode", old["arguments"])
+        self.assertTrue(all(j["cwd"] == str(repo) for j in jobs))
+        for job in jobs[1:]:
+            self.assertNotIn("production", job["arguments"])
+            self.assertNotIn("--smoke", job["arguments"])
+
+    def test_reject_old_policy(self):
+        """Reject an old saved plan even when its evidence is intact."""
+        with self.assertRaises(ValueError):
+            workflow.validate_resume({"signature": {"policy": workflow.WORKFLOW_POLICY}, "completed": {}}, {})
 
     def test_resume_source_and_log_integrity(self):
         """Reject stale source and modified successful logs before skipping work."""
@@ -43,7 +44,7 @@ class TestMonolithicValidationWorkflow(unittest.TestCase):
             log = root / "test.log"
             log.write_text("passed\n")
             state = {
-                "signature": {"commit": "old"},
+                "signature": {"policy": workflow.WORKFLOW_POLICY, "commit": "old"},
                 "completed": {"tests": {"log": str(log), "log_sha256": workflow.digest(log), "output": None}},
             }
             with self.assertRaises(ValueError):
@@ -75,7 +76,7 @@ class TestMonolithicValidationWorkflow(unittest.TestCase):
             index = root / "evidence-index.json"
             index.write_text(json.dumps({raw.name: workflow.digest(raw)}))
             state = {
-                "signature": {},
+                "signature": {"policy": workflow.WORKFLOW_POLICY},
                 "completed": {
                     "case": {
                         "log": str(log),
@@ -85,10 +86,10 @@ class TestMonolithicValidationWorkflow(unittest.TestCase):
                     }
                 },
             }
-            workflow.validate_resume(state, {})
+            workflow.validate_resume(state, {"policy": workflow.WORKFLOW_POLICY})
             raw.write_text("changed\n")
             with self.assertRaises(ValueError):
-                workflow.validate_resume(state, {})
+                workflow.validate_resume(state, {"policy": workflow.WORKFLOW_POLICY})
 
     def test_failure_and_retry_logs(self):
         """Propagate child failure and retain its log when a retry succeeds."""

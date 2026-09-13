@@ -844,7 +844,7 @@ class SolverMonolithic(SolverBase):
             linear_tolerance: Positive relative linear residual tolerance.
             use_optimized_articulation_mass_matrix: Experimental private parallel
                 articulation mass evaluation; fixed at construction, defaults to False.
-            pcg_mode: Experimental diagnostic or production observation policy.
+            pcg_mode: Experimental PCG execution policy; production unavailable during 8C2 cleanup.
                 Production retains mandatory numerical checks and final force publication.
         """
         self._initialize(
@@ -922,6 +922,8 @@ class SolverMonolithic(SolverBase):
             raise ValueError("use_optimized_articulation_mass_matrix must be a bool")
         self._use_optimized_articulation_mass_matrix = use_optimized_articulation_mass_matrix
         self._pcg_mode = self.PCGMode(pcg_mode)
+        if self._pcg_mode != self.PCGMode.DIAGNOSTIC:
+            raise ValueError("production is unavailable during 8C2 cleanup")
         material_model = self.MaterialModel(material_model)
         mass_mode = self.MassMode(mass_mode)
         for name, value in (

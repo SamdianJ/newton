@@ -1,5 +1,7 @@
 # Newton Monolithic Solver P2 Architecture
 
+> Historical v1 design. Current 8C2 implementation and validation policy are tracked in `p2_validation_zh.md`; old production commands/tests are not active instructions.
+
 > 版本：v1，2026-09-09；状态：**DESIGN_FOR_REVIEW / IMPLEMENTATION_NOT_STARTED**。
 > 范围：P2性能优化，以及继承的自由球G6、剩余G7与条件patch Schur。本文明确实现方案、研究准入和PR依赖，不将设计记录算作开发或验收通过。
 > 阅读路径：§2 PR拆分 → §3–§9开发设计 → §10验证矩阵 → §11出口和证据。PR-8系列是本设计的新逻辑编号，不代表已创建远程PR；现有P2-0～P2-5任务编号及G0～G7编号保留。

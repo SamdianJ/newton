@@ -31,7 +31,7 @@ def main(argv=None):
     parser.add_argument("--device", choices=("cuda:0",), default="cuda:0")
     parser.add_argument("--refinement", type=int, default=3)
     parser.add_argument("--mass-matrix", choices=("reference", "owned"), default="reference")
-    parser.add_argument("--pcg-mode", choices=("diagnostic", "production"), default="diagnostic")
+    parser.add_argument("--pcg-mode", choices=("diagnostic",), default="diagnostic")
     parser.add_argument("--smoke", action="store_true")
     launch_argv = list(sys.argv[1:] if argv is None else argv)
     args = parser.parse_args(launch_argv)
@@ -50,7 +50,7 @@ def main(argv=None):
         "launch_argv": launch_argv,
         "requested": options,
         "constructions": [],
-        "binding": "Constructor-only adapter; production step/solve implementations remain unchanged.",
+        "binding": "Diagnostic/owned only during 8C2 cleanup; old production is removed.",
         "timing_scope": "SMOKE_CORRECTNESS_ONLY" if args.smoke else "REQUIRES_MATCHED_DEVICE_STATE_REVIEW",
         "failure": None,
     }

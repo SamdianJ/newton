@@ -350,15 +350,9 @@ is recorded in ``scripts/monolithic_reference/fixtures/p2_owned_mass_matrix_plan
 Planned PCG diagnostic modes
 ----------------------------
 
-P2 proposes ``pcg_mode="diagnostic"`` (default) or ``"production"`` as a
-construction-time choice. Diagnostic mode would accumulate optional metrics
-in preallocated device buffers and export a summary at solve completion.
-Production mode would skip optional metric calculations, writes and readbacks,
-using the existing NaN/None convention for unmeasured fields. Both retain
-convergence, true-residual, curvature, finite-value, stagnation and failure
-checks. This is a PCG policy, not a switch for all solver diagnostics or a
-promise of zero synchronization. The modes are **not implemented yet**; see
-``scripts/monolithic_reference/fixtures/p2_pcg_diagnostics_plan_v1.json``.
+PR-8C2 replaces the previous production policy with a fixed masked PCG chain.
+During cleanup production requests are rejected; diagnostic smart restart and
+owned mass remain available. Historical v1 fixtures describe the old plan only.
 
 Planned CUDA Graph scope and operation inventory
 ------------------------------------------------

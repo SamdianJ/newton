@@ -188,13 +188,10 @@ sharing its Jacobian and inertia buffers. It applies to current and trial
 candidates and returned-state evaluation, rather than freezing mass for a step.
 The public Newton mass evaluation remains the default reference path.
 
-``pcg_mode`` accepts ``"diagnostic"`` or ``"production"`` and the corresponding
-members of ``SolverMonolithic.PCGMode``. Production omits optional PCG summaries:
-``last_stats.min_p_ap``, ``min_r_z``, ``initial_guess_norm`` and the three
-``recursive_true_residual_gap`` fields contain NaN. It preserves curvature,
-preconditioner positivity, nonfinite checks, true global/q/x residual checks,
-stagnation and residual replacement, iteration counts and failure handling.
-Joint/contact final forces and other mandatory statistics remain available.
+During PR-8C2 cleanup only ``pcg_mode="diagnostic"`` is available. Requests
+for production fail at construction. Diagnostic smart restart uses algorithm
+scratch independently of optional summaries. The old production implementation
+has been removed; the replacement must pass its own correctness and capture gates.
 
 Both options are read-only after construction; create a new solver to choose
 different policies. They describe runtime execution, not material or asset

@@ -20,7 +20,6 @@ from scripts.monolithic_reference.profile_p2_owned_mass import load_samples
 class FakeSolver:
     class PCGMode(Enum):
         DIAGNOSTIC = "diagnostic"
-        PRODUCTION = "production"
 
     def __init__(self, **kwargs):
         self.use_optimized_articulation_mass_matrix = kwargs["use_optimized_articulation_mass_matrix"]
@@ -98,7 +97,7 @@ class TestP28BCRunner(unittest.TestCase):
 
             with patch.object(runner, "SolverMonolithic", FakeSolver), patch.object(runner.run_p2_8a, "main", run):
                 runner.main(
-                    ["--output", str(output), "--kind", "sharpa", "--mass-matrix", "owned", "--pcg-mode", "production"]
+                    ["--output", str(output), "--kind", "sharpa", "--mass-matrix", "owned", "--pcg-mode", "diagnostic"]
                 )
             self.assertIs(FakeSolver.__init__, original)
             index = json.loads((output / "evidence-index.json").read_text())
@@ -112,11 +111,13 @@ class TestP28BCRunner(unittest.TestCase):
 
             def run():
                 output.mkdir()
-                FakeSolver(pcg_mode="diagnostic")
+                FakeSolver(use_optimized_articulation_mass_matrix=True)
 
             with patch.object(runner, "SolverMonolithic", FakeSolver), patch.object(runner.run_p2_8a, "main", run):
-                with self.assertRaisesRegex(ValueError, "Conflicting constructor option: pcg_mode"):
-                    runner.main(["--output", str(output), "--kind", "tet", "--pcg-mode", "production"])
+                with self.assertRaisesRegex(
+                    ValueError, "Conflicting constructor option: use_optimized_articulation_mass_matrix"
+                ):
+                    runner.main(["--output", str(output), "--kind", "tet", "--pcg-mode", "diagnostic"])
             self.assertIs(FakeSolver.__init__, original)
             record = json.loads((output / "execution-options.json").read_text())
             self.assertEqual(record["constructions"], [])

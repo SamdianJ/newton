@@ -13,6 +13,8 @@ import warp as wp
 import warp.sparse as sparse
 from warp.optim.linear import LinearOperator
 
+from .pcg_common import decide_restart
+
 
 class MonolithicLinearStatus(enum.IntEnum):
     SUCCESS = 0
@@ -963,6 +965,8 @@ class MonolithicLinearWorkspace:
     ):
         if pcg_mode not in ("diagnostic", "production"):
             raise ValueError("pcg_mode must be diagnostic or production")
+        if pcg_mode != "diagnostic":
+            raise ValueError("production is unavailable during 8C2 cleanup")
         self._pcg_mode = pcg_mode
         self._pcg_active = False
         self._rhs_norms_cached = False
@@ -1058,6 +1062,13 @@ class MonolithicLinearWorkspace:
             self._diagnostic_norms = wp.zeros(6, dtype=float, device=device)
             self._diagnostic_status = wp.zeros(1, dtype=int, device=device)
             self._diagnostic_summary = wp.zeros(6, dtype=float, device=device)
+        self._gap_vector = wp.zeros(n, dtype=float, device=device)
+        self._gap_zero = wp.zeros(n, dtype=float, device=device)
+        self._gap_maxima = wp.zeros(6, dtype=float, device=device)
+        self._gap_sums = wp.zeros(6, dtype=float, device=device)
+        self._gap_norms = wp.zeros(6, dtype=float, device=device)
+        self._gap_status = wp.zeros(1, dtype=int, device=device)
+        self._restart_decision = wp.zeros(1, dtype=int, device=device)
         self._pcg_packet = wp.zeros(1, dtype=_MonolithicPcgPacket, device=device)
         self._rhs_denominator = wp.zeros(1, dtype=wp.float64, device=device)
         self.factor_setup_count = 0
@@ -1449,27 +1460,24 @@ class MonolithicLinearWorkspace:
             device=self.device,
         )
 
-    def _compute_gap_norms_for_restart(self, gap_vector) -> tuple:
-        """Compute block norms of gap vector for smart PCG restart.
-
-        Returns (global, articulation, deformable) norms to check drift per block.
-        """
-        if gap_vector is not self._diagnostic_vector:
-            wp.copy(self._diagnostic_vector, gap_vector)
-        self._diagnostic_status.zero_()
-        self._diagnostic_maxima.zero_()
-        self._diagnostic_sums.zero_()
-        self._diagnostic_norms.fill_(float("nan"))
+    def _compute_gap_norms_for_restart(self, gap_vector) -> None:
+        """Measure algorithm gap once for restart and optional observations."""
+        if gap_vector is not self._gap_vector:
+            wp.copy(self._gap_vector, gap_vector)
+        self._gap_status.zero_()
+        self._gap_maxima.zero_()
+        self._gap_sums.zero_()
+        self._gap_norms.fill_(float("nan"))
         wp.launch(
             _true_residual_maxima,
             gap_vector.size,
             [
-                self._diagnostic_zero,
-                self._diagnostic_vector,
+                self._gap_zero,
+                self._gap_vector,
                 self.layout.q_dof_count,
-                self._diagnostic_vector,
-                self._diagnostic_maxima,
-                self._diagnostic_status,
+                self._gap_vector,
+                self._gap_maxima,
+                self._gap_status,
                 True,
             ],
             device=self.device,
@@ -1478,12 +1486,12 @@ class MonolithicLinearWorkspace:
             _true_residual_sums,
             gap_vector.size,
             [
-                self._diagnostic_vector,
-                self._diagnostic_vector,
+                self._gap_vector,
+                self._gap_vector,
                 self.layout.q_dof_count,
-                self._diagnostic_maxima,
-                self._diagnostic_sums,
-                self._diagnostic_status,
+                self._gap_maxima,
+                self._gap_sums,
+                self._gap_status,
                 True,
             ],
             device=self.device,
@@ -1491,11 +1499,26 @@ class MonolithicLinearWorkspace:
         wp.launch(
             _compute_true_residual_norms,
             6,
-            [self._diagnostic_maxima, self._diagnostic_sums, self._diagnostic_norms, self._diagnostic_status],
+            [self._gap_maxima, self._gap_sums, self._gap_norms, self._gap_status],
             device=self.device,
         )
-        norms = self._diagnostic_norms.numpy()
-        return float(norms[0]), float(norms[1]), float(norms[2])
+
+    def _should_restart(self, config):
+        wp.launch(
+            decide_restart,
+            1,
+            [
+                self._gap_norms,
+                self._true_norms,
+                wp.vec3(config.residual_floor_global, config.residual_floor_q, config.residual_floor_x),
+                wp.float64(config.residual_replacement_threshold),
+                self._gap_status,
+                self._restart_decision,
+            ],
+            device=self.device,
+        )
+        decision = int(self._restart_decision.numpy()[0])
+        return decision
 
     def _products_of(self, a, b):
         self._products.zero_()
@@ -1581,7 +1604,7 @@ class MonolithicLinearWorkspace:
         min_p_ap, min_r_z = float("nan"), float("nan")
         applied_warm_start, initial_guess_norm, stagnation_window = None, float("nan"), None
         residual_gap, gap_samples = (float("nan"),) * 3, 0
-        diagnostic = self.pcg_mode == "diagnostic"
+        diagnostic = getattr(self, "_diagnostic_summary", None) is not None
         diagnostic_started = False
 
         def result(status):
@@ -1617,21 +1640,17 @@ class MonolithicLinearWorkspace:
 
         def record_gap():
             nonlocal gap_samples
-            if not diagnostic:
-                return
             wp.launch(
-                _combine_vectors,
-                self._r.size,
-                [self._r, self._true_r, self._diagnostic_vector, 1.0, -1.0],
-                device=self.device,
+                _combine_vectors, self._r.size, [self._r, self._true_r, self._gap_vector, 1.0, -1.0], device=self.device
             )
-            self._diagnostic_block_norms(self._diagnostic_vector)
-            wp.launch(
-                _record_monolithic_pcg_norms,
-                1,
-                [self._diagnostic_norms, self._diagnostic_summary, False, gap_samples == 0],
-                device=self.device,
-            )
+            self._compute_gap_norms_for_restart(self._gap_vector)
+            if diagnostic:
+                wp.launch(
+                    _record_monolithic_pcg_norms,
+                    1,
+                    [self._gap_norms, self._diagnostic_summary, False, gap_samples == 0],
+                    device=self.device,
+                )
             gap_samples += 1
 
         if not self._current(generation) or not self._scaling_valid:
@@ -1759,33 +1778,11 @@ class MonolithicLinearWorkspace:
                     status = MonolithicLinearStatus.STAGNATION
                     break
 
-                # Compute residual drift: eta = ||r_true - r_rec|| / max(||r_true||, epsilon)
-                # Check drift separately for global, articulation, and deformable blocks
-                # Replace if ANY block exceeds threshold (prevents articulation drift being masked by deformable)
-                if hasattr(self, "_diagnostic_vector"):
-                    # Diagnostic mode: compute drift precisely per block
-                    wp.launch(
-                        _combine_vectors,
-                        self._r.size,
-                        [self._r, self._true_r, self._diagnostic_vector, 1.0, -1.0],
-                        device=self.device,
-                    )
-                    gap_norms = self._compute_gap_norms_for_restart(self._diagnostic_vector)
-                    true_norms = self._true_norms.numpy()
-
-                    # Compute drift for each block: global, articulation, deformable
-                    drifts = [
-                        gap_norms[0] / max(true_norms[0], config.residual_floor_global),
-                        gap_norms[1] / max(true_norms[1], config.residual_floor_q),
-                        gap_norms[2] / max(true_norms[2], config.residual_floor_x),
-                    ]
-
-                    # Replace if ANY block drifts too much (max over all blocks)
-                    max_drift = max(drifts)
-                    should_replace = max_drift >= config.residual_replacement_threshold
-                else:
-                    # Production mode: always replace for safety without diagnostic overhead
-                    should_replace = True
+                decision = self._should_restart(config)
+                if decision < 0:
+                    status = MonolithicLinearStatus.NONFINITE_ITERATION
+                    break
+                should_replace = bool(decision)
 
                 if should_replace:
                     wp.copy(self._r, self._true_r)

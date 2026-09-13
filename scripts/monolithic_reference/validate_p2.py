@@ -21,6 +21,8 @@ REPO = Path(__file__).resolve().parents[2]
 DEV_MODULES = (
     "test_monolithic_owned_mass_matrix",
     "test_solver_monolithic_linear",
+    "test_monolithic_pcg_restart",
+    "test_monolithic_production_cleanup",
     "test_monolithic_execution_options",
     "test_monolithic_p2_8bc_runner",
     "test_monolithic_validation_workflow",
@@ -37,7 +39,10 @@ def write_json(path, value):
     temporary.replace(path)
 
 
-def build_jobs(suite, repo, baseline):
+WORKFLOW_POLICY = "p2-8c2-cleanup-v1"
+
+
+def build_jobs(suite, repo):
     modules = (
         DEV_MODULES
         if suite == "dev"
@@ -54,43 +59,31 @@ def build_jobs(suite, repo, baseline):
     if suite == "dev":
         return jobs
 
-    def add(kind, mesh, variant, repeat):
-        name = f"{kind}-r{mesh}-{variant}-rep{repeat:02d}"
-        old = variant == "baseline"
-        arguments = [
-            "-m",
-            "scripts.monolithic_reference.run_p2_8a" if old else "scripts.monolithic_reference.run_p2_8bc",
-            "--kind",
-            kind,
-            "--refinement",
-            str(mesh),
-            "--device",
-            "cuda:0",
-        ]
-        if not old:
-            arguments += [
-                "--mass-matrix",
-                "owned" if variant in ("owned", "combined") else "reference",
-                "--pcg-mode",
-                "production" if variant in ("production", "combined") else "diagnostic",
-            ]
-        jobs.append({"name": name, "kind": kind, "cwd": str(baseline if old else repo), "arguments": arguments})
-
-    for repeat in range(1, 6):
-        for kind, mesh, variants in (
-            ("sharpa", 3, ("baseline", "diagnostic", "owned", "production")),
-            ("sharpa", 2, ("diagnostic", "owned")),
-            ("tet", 5, ("baseline", "production")),
-        ):
-            for variant in variants if repeat % 2 else reversed(variants):
-                add(kind, mesh, variant, repeat)
-    for mesh in (3, 4, 6):
-        for variant in ("baseline", "production"):
-            add("tet", mesh, variant, 1)
-    add("tet", 5, "diagnostic", 1)
-    add("sharpa", 2, "production", 1)
-    for mesh in (3, 2):
-        add("sharpa", mesh, "combined", 1)
+    for kind, meshes in (("sharpa", (3, 2)), ("tet", (5, 3, 4, 6))):
+        for mesh in meshes:
+            for repeat in range(1, 6 if mesh in (2, 3, 5) else 2):
+                for variant in ("diagnostic", "owned") if kind == "sharpa" else ("diagnostic",):
+                    jobs.append(
+                        {
+                            "name": f"{kind}-r{mesh}-{variant}-rep{repeat:02d}",
+                            "kind": kind,
+                            "cwd": str(repo),
+                            "arguments": [
+                                "-m",
+                                "scripts.monolithic_reference.run_p2_8bc",
+                                "--kind",
+                                kind,
+                                "--refinement",
+                                str(mesh),
+                                "--device",
+                                "cuda:0",
+                                "--mass-matrix",
+                                "owned" if variant == "owned" else "reference",
+                                "--pcg-mode",
+                                "diagnostic",
+                            ],
+                        }
+                    )
     return jobs
 
 
@@ -112,7 +105,7 @@ def source_signature(repo, *, clean):
 
 
 def validate_resume(state, signature):
-    if state["signature"] != signature:
+    if state["signature"].get("policy") != WORKFLOW_POLICY or state["signature"] != signature:
         raise ValueError("Source, dependencies or plan changed; use a new output directory")
     for result in state["completed"].values():
         if digest(Path(result["log"])) != result["log_sha256"]:
@@ -310,13 +303,11 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--suite", choices=("dev", "night"), default="dev")
     parser.add_argument("--output", type=Path)
-    parser.add_argument("--baseline-repo", type=Path, default=REPO.parent / "monolithic-p28-baseline")
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--list", action="store_true", help="Print the plan without importing Warp or running jobs.")
     args = parser.parse_args()
     signal.signal(signal.SIGTERM, signal.default_int_handler)
-    baseline = args.baseline_repo.resolve()
-    jobs = build_jobs(args.suite, REPO, baseline)
+    jobs = build_jobs(args.suite, REPO)
     if args.list:
         print(json.dumps(jobs, indent=2))
         return 0
@@ -325,14 +316,13 @@ def main():
     root = (args.output or Path("/tmp") / f"monolithic-p2-{args.suite}-{datetime.now():%Y%m%d-%H%M%S}").resolve()
     if root.is_relative_to(REPO):
         parser.error("Keep evidence outside the source checkout")
-    if args.suite == "night" and baseline == REPO:
-        parser.error("Use a separate, reviewed reference checkout for the baseline")
     root.mkdir(parents=True, exist_ok=True)
     with (root / "validation.lock").open("a") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         sources = {cwd: source_signature(Path(cwd), clean=args.suite == "night") for cwd in {j["cwd"] for j in jobs}}
         dependencies = subprocess.check_output(["uv", "pip", "freeze", "--python", sys.executable])
         signature = {
+            "policy": WORKFLOW_POLICY,
             "sources": sources,
             "jobs": jobs,
             "driver_sha256": digest(Path(__file__)),

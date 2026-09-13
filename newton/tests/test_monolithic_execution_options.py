@@ -3,7 +3,6 @@
 
 """Check construction policies and shared stepping across P2 execution options."""
 
-import itertools
 import unittest
 from unittest.mock import patch
 
@@ -18,8 +17,8 @@ from newton.tests.unittest_utils import add_function_test, get_test_devices
 
 
 def _options():
-    for owned, mode in itertools.product((False, True), ("diagnostic", "production")):
-        yield {"use_optimized_articulation_mass_matrix": owned, "pcg_mode": mode}
+    for owned in (False, True):
+        yield {"use_optimized_articulation_mass_matrix": owned, "pcg_mode": "diagnostic"}
 
 
 class TestMonolithicExecutionOptions(unittest.TestCase):
@@ -39,7 +38,7 @@ class TestMonolithicExecutionOptions(unittest.TestCase):
 
 
 def test_configuration_and_step_parity(test, device):
-    """Preserve loaded physical stepping while freezing all four execution choices."""
+    """Preserve loaded physical stepping while freezing diagnostic and owned execution choices."""
     reference = None
     for options in _options():
         fixture, solver = step_tests._free_scene(device, gravity=(0, 0, -9.81), **options)
@@ -70,9 +69,6 @@ def test_configuration_and_step_parity(test, device):
                 )
             )
             states.append(step_tests._snapshot(state_next))
-            if options["pcg_mode"] == "production":
-                for field in ("min_p_ap", "min_r_z", "initial_guess_norm", "recursive_true_residual_gap"):
-                    test.assertTrue(np.isnan(getattr(stats, field)), field)
             state, state_next = state_next, state
         if reference is None:
             reference = states, decisions

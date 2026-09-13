@@ -224,12 +224,12 @@ Use the same physical configuration and measurement protocol for each variant:
 
 ```bash
 uv run --no-sync -m scripts.monolithic_reference.run_p2_8bc \
-  --kind sharpa --refinement 3 --mass-matrix owned --pcg-mode production \
-  --output /new/output/sharpa-r3-owned-production-01
+  --kind sharpa --refinement 3 --mass-matrix owned --pcg-mode diagnostic \
+  --output /new/output/sharpa-r3-owned-diagnostic-01
 ```
 
 The CUDA runner supports `reference`/`owned` mass and
-`diagnostic`/`production` PCG modes, with Sharpa r2/r3 or tet r3/r4/r5/r6.
+`diagnostic` PCG (production unavailable during 8C2 cleanup), with Sharpa r2/r3 or tet r3/r4/r5/r6.
 It records requested and actual immutable constructor options for both warmup
 and measurement in `execution-options.json`, in addition to the PR-8A evidence.
 The adapter changes construction only and restores the binding on exceptions.
