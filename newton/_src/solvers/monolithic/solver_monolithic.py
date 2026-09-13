@@ -687,7 +687,7 @@ class SolverMonolithic(SolverBase):
         line_search_iterations: int = 0
         linear_iterations: int = 0
         linear_scheduled_slots: int = 0
-        """Sum of fixed production slots across actual calls, including retries."""
+        """Sum of scheduled production slots; conditional graphs stop after terminal batches."""
         pcg_policy: str | None = None
         """Most recent linear solve's numerical scheduling and restart policy."""
         linear_converged_at_slot: int = -1

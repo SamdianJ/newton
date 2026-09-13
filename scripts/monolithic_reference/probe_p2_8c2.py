@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 The Newton Developers
 # SPDX-License-Identifier: Apache-2.0
-"""Emit short NVTX-labelled fixed PCG calls for a CUDA API trace audit, not timing."""
+"""Emit short NVTX-labelled bounded PCG calls for a CUDA API trace audit, not timing."""
 
 import json
 
@@ -23,6 +23,10 @@ def main():
             plan.capture()
             # Instantiate/upload outside the warmed replay audit ranges.
             plan.replay()
+            plan.collect_result()
+        else:
+            # Also warm specialized dot modules before the non-graph audit.
+            plan.enqueue_solve()
             plan.collect_result()
         for label, sign, warm in (
             ("success", 1, False),

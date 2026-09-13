@@ -4,6 +4,7 @@
 
 import unittest
 from contextlib import ExitStack
+from dataclasses import replace
 from unittest.mock import patch
 
 import numpy as np
@@ -11,6 +12,7 @@ import warp as wp
 
 from newton.tests.test_monolithic_pcg_production import impl, make_plan, solve
 from newton.tests.unittest_utils import add_function_test, get_test_devices
+from scripts.monolithic_reference import benchmark_pcg as benchmark
 
 
 def no_host_or_allocations():
@@ -100,6 +102,12 @@ def test_graph_terminal_boundaries(test, device):
     """Capture maximum-budget, zero-preconditioned, overflow and recovery terminal paths."""
     cases = [
         (np.diag([1, 2, 3, 4]), [1, 2, 3, 4], {"config": impl.MaskedPcgConfig(maximum_iterations=1)}, False),
+        (
+            np.diag(np.linspace(1, 100, 64)),
+            [1] * 64,
+            {"config": impl.MaskedPcgConfig(maximum_iterations=11, true_residual_interval=5, linear_tolerance=1e-12)},
+            False,
+        ),
         (np.eye(4), [1, 0, 0, 0], {"lower_q": [[1e30]], "lower_x": [np.eye(3) * 1e30]}, False),
         (np.eye(4), [3e38] * 4, {}, False),
         (np.zeros((4, 4)), [0] * 4, {"scale": [1e30] * 4, "empty": True}, True),
@@ -123,14 +131,158 @@ def test_graph_terminal_boundaries(test, device):
             "output_valid",
         ):
             test.assertEqual(getattr(results[0], key), getattr(results[1], key), key)
-        np.testing.assert_array_equal(plans[1].delta.numpy(), [23] * 4)
+        np.testing.assert_array_equal(plans[1].delta.numpy(), [23] * plans[1].n)
 
 
 class TestMonolithicPcgProductionGraph(unittest.TestCase):
     pass
 
 
+def test_workspace_graph_reuse(test, device):
+    """Reuse numeric generations but reject stale factors, changed topology and storage."""
+    case = benchmark.synthetic_cases()[0]
+    runner = benchmark.Runner(case, "production_graph", device, benchmark.pcg_config())
+    test.assertTrue(runner.solve().graph_rebuilt)
+    plan = runner.workspace._masked_pcg_plan
+    graph = plan.graph
+    old_generation = runner.workspace._generation
+    for regularization, rhs_factor in ((0.25, 2), (0.0, 1)):
+        runner.refresh_generation()
+        test.assertEqual(runner.solve().status, impl.MonolithicLinearStatus.PRECONDITIONER_NOT_FACTORED)
+        with test.assertRaisesRegex(ValueError, "Stale"):
+            plan.replay()
+        runner.workspace.set_regularization(regularization, generation=runner.workspace._generation)
+        runner.factor()
+        runner.rhs.assign(case.arrays["rhs_hat"] * rhs_factor)
+        result = runner.solve()
+        test.assertEqual(result.status, impl.MonolithicLinearStatus.SUCCESS)
+        test.assertFalse(result.graph_rebuilt)
+        test.assertIs(runner.workspace._masked_pcg_plan, plan)
+        test.assertIs(plan.graph, graph)
+        changed = replace(
+            case,
+            arrays={**case.arrays, "rhs_hat": case.arrays["rhs_hat"] * rhs_factor},
+            metadata={**case.metadata, "lambda": regularization},
+        )
+        test.assertTrue(
+            benchmark.Reference(changed, runner.config).measure(runner.y.numpy())["independent_residual_pass"]
+        )
+    stale = runner.workspace.solve_pcg(
+        runner.rhs,
+        runner.y,
+        generation=old_generation,
+        warm_start=impl.MonolithicPcgWarmStart.ZERO,
+        config=runner.config,
+    )
+    test.assertEqual(stale.status, impl.MonolithicLinearStatus.STALE_GENERATION)
+    rhs = runner.rhs
+    plan.replay()
+    runner.rhs = wp.clone(rhs)
+    with test.assertRaisesRegex(RuntimeError, "Collect"):
+        runner.solve()
+    test.assertIs(runner.workspace._masked_pcg_plan, plan)
+    plan.collect_result()
+    runner.rhs = rhs
+    matrix = runner.workspace.k_global_scalar_bsr
+    matrix.values = wp.clone(matrix.values)
+    with test.assertRaises(ValueError):
+        plan.replay()
+    test.assertTrue(runner.solve().graph_rebuilt)
+    runner.refresh_generation()
+    # Equivalent matrix with each row's entries reversed: valid but a different layout.
+    columns = matrix.columns.numpy().reshape(case.n, case.n)[:, ::-1].copy().reshape(-1)
+    values = matrix.values.numpy().reshape(case.n, case.n)[:, ::-1].copy().reshape(-1)
+    matrix.columns.assign(columns)
+    matrix.values.assign(values)
+    runner.factor()
+    test.assertTrue(runner.solve().graph_rebuilt)
+
+
+def test_conditional_slot_budget(test, device):
+    """Stop at checked terminal states while retaining WAIT_CHECK and partial budgets."""
+    for maximum, interval, rhs, expected_slots in (
+        (200, 10, [0, 0, 0, 0], 0),
+        (200, 10, [1, 2, 3, 4], 10),
+        (11, 5, [1, 2, 3, 4], 5),
+        (3, 10, [1, 2, 3, 4], 3),
+    ):
+        plan = make_plan(
+            device,
+            np.eye(4),
+            rhs,
+            config=impl.MaskedPcgConfig(maximum_iterations=maximum, true_residual_interval=interval),
+        )
+        result = solve(plan, graph=True)
+        test.assertEqual(result.status, impl.ProductionStatus.SUCCESS)
+        test.assertEqual(result.iteration_slots, expected_slots)
+        test.assertEqual(result.convergence_slot, expected_slots)
+        test.assertLessEqual(result.iterations, result.iteration_slots)
+    with patch.object(wp, "is_conditional_graph_supported", return_value=False):
+        fallback = make_plan(device, np.eye(4), [1, 2, 3, 4])
+    result = solve(fallback, graph=True)
+    test.assertEqual(result.status, impl.ProductionStatus.SUCCESS)
+    test.assertEqual(result.iteration_slots, fallback.config.maximum_iterations)
+
+
+def test_fused_products(test, device):
+    """Overwrite a masked dot in one launch, including partial tiles and nonfinite inputs."""
+    plan = make_plan(device, np.eye(4), [1, 2, 3, 4])
+    kernel = impl._make_products_kernel(256)
+    for n in (1, 33, 2051):
+        a = np.linspace(-2, 3, n, dtype=np.float32)
+        b = np.sin(a).astype(np.float32)
+        av, bv = (wp.array(v, device=device) for v in (a, b))
+        wp.launch(impl._initialize_state, 1, [plan.state, plan.error, plan.scalars, 200], device=device)
+        plan.products.fill_(123)
+        wp.launch_tiled(kernel, dim=1, inputs=[av, bv, plan.products, plan.state], block_dim=128, device=device)
+        test.assertAlmostEqual(float(plan.products.numpy()[0]), float(a.astype(float) @ b.astype(float)), delta=1e-3)
+    av.fill_(float("nan"))
+    wp.launch_tiled(kernel, dim=1, inputs=[av, bv, plan.products, plan.state], block_dim=128, device=device)
+    test.assertFalse(np.isfinite(plan.products.numpy()[0]))
+    state = plan.state.numpy()
+    state["enabled"] = 0
+    plan.state.assign(state)
+    plan.products.fill_(23)
+    wp.launch_tiled(kernel, dim=1, inputs=[av, bv, plan.products, plan.state], block_dim=128, device=device)
+    test.assertEqual(plan.products.numpy()[0], 23)
+    n = 2050
+    large = impl.MaskedPcgPlan(
+        offsets=wp.array(np.arange(n + 1, dtype=np.int32), device=device),
+        columns=wp.array(np.arange(n, dtype=np.int32), device=device),
+        values=wp.ones(n, dtype=float, device=device),
+        scale=wp.ones(n, dtype=float, device=device),
+        q_cholesky=wp.ones((1, 1), dtype=float, device=device),
+        x_cholesky=wp.array(np.repeat(np.eye(3)[None], (n - 1) // 3, axis=0), dtype=wp.mat33, device=device),
+        rhs_hat=wp.ones(n, dtype=float, device=device),
+        y=wp.zeros(n, dtype=float, device=device),
+        config=impl.MaskedPcgConfig(maximum_iterations=3, true_residual_interval=2),
+    )
+    test.assertIsNone(large._products_kernel)
+    result = solve(large, graph=True)
+    test.assertEqual(result.status, impl.ProductionStatus.SUCCESS)
+    test.assertEqual(result.iteration_slots, 2)
+    np.testing.assert_array_equal(large.y.numpy(), np.ones(n))
+
+
 add_function_test(TestMonolithicPcgProductionGraph, "test_hot_path", test_hot_path, devices=get_test_devices())
+add_function_test(
+    TestMonolithicPcgProductionGraph,
+    "test_workspace_graph_reuse",
+    test_workspace_graph_reuse,
+    devices=[d for d in get_test_devices() if d.is_cuda],
+)
+add_function_test(
+    TestMonolithicPcgProductionGraph,
+    "test_conditional_slot_budget",
+    test_conditional_slot_budget,
+    devices=[d for d in get_test_devices() if d.is_cuda],
+)
+add_function_test(
+    TestMonolithicPcgProductionGraph,
+    "test_fused_products",
+    test_fused_products,
+    devices=[d for d in get_test_devices() if d.is_cuda],
+)
 add_function_test(
     TestMonolithicPcgProductionGraph,
     "test_graph_replay",

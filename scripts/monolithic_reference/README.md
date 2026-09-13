@@ -232,7 +232,7 @@ The CUDA runner supports `reference`/`owned` mass and
 `diagnostic`/`production` PCG and explicit `--use-cuda-graph` for production, with Sharpa r2/r3 or tet r3/r4/r5/r6.
 It records requested and actual immutable constructor options for both warmup
 and measurement in `execution-options.json`, in addition to the PR-8A evidence.
-The runner binds the current masked production backend or dynamic diagnostic policy and restores the constructor on exceptions. Old production is not a fallback. Schema v3 records effective updates, fixed slots, checkpoints, recovery validity and graph setup costs.
+The runner binds the current masked production backend or dynamic diagnostic policy and restores the constructor on exceptions. Old production is not a fallback. Schema v3 records effective updates, scheduled slots, checkpoints, recovery validity and graph setup costs.
 Use a fresh process/output per repeat and schedule GPU work serially. A smoke
 run validates execution only. Performance comparisons require matched device
 state, complete trajectories and repeated measurements; historical clocks and
@@ -255,5 +255,7 @@ acceptance automatically. See [the validation workflow](p2_validation_zh.md)
 for commands, scope and exit codes.
 
 The PR-8C2 development snapshot is `fixtures/p2_cuda_graph_inventory_v2.json`: five PCG operations captured as one fixed chain, with CPU/CUDA correctness and warmed trace evidence. The v1 fixture remains a historical plan; full trajectory and performance admission remain pending the manual night run.
+
+Current `masked_smart_restart_v2` adds cross-generation graph reuse after storage/layout validation, conditional checkpoint batches on supported CUDA, and fused CUDA dot reductions. The PR-8C2 inventory remains a historical snapshot. See [current validation semantics](p2_validation_zh.md) for slot accounting, fallbacks and unchanged numerical gates.
 
 Use [the standalone PCG benchmark](pcg_benchmark_zh.md) to compare native diagnostic/production convergence, FP64 reference error, and complete linear-call costs under stable reuse and generation refresh. It also measures production graph on CUDA, with untimed convergence observation and per-round GPU telemetry.

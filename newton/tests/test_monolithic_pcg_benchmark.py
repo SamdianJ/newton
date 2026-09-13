@@ -30,7 +30,7 @@ def test_native_comparison(test, device):
         test.assertLess(sample["accuracy"]["y_relative_error"], 1e-3)
         test.assertGreaterEqual(sample["total_ms"], sample["solve_ms"])
         if sample["mode"] == "production_graph":
-            test.assertEqual(sample["graph_rebuilt"], sample["scope"] == "new_generation")
+            test.assertFalse(sample["graph_rebuilt"])
     for mode, curve in result["convergence"].items():
         test.assertEqual(len(result["vectors"][curve["iterate_key"]]), len(curve["points"]))
         test.assertEqual(
@@ -100,7 +100,7 @@ class TestMonolithicPcgBenchmark(unittest.TestCase):
             benchmark.linear.MonolithicLinearWorkspace, "_solve_pcg_diagnostic", side_effect=AssertionError
         ):
             result = runner.solve()
-        self.assertEqual(result.pcg_policy, "masked_smart_restart_v1")
+        self.assertEqual(result.pcg_policy, "masked_smart_restart_v2")
 
 
 add_function_test(

@@ -141,7 +141,7 @@ class TestP28BCRunner(unittest.TestCase):
                             MonolithicLinearWorkspace, "_solve_pcg_diagnostic", side_effect=AssertionError("fallback")
                         ):
                             solver.step(fixture.state, fixture.state_next, fixture.control, None, 0.001)
-                        self.assertEqual(solver.last_stats.pcg_policy, "masked_smart_restart_v1")
+                        self.assertEqual(solver.last_stats.pcg_policy, "masked_smart_restart_v2")
                         self.assertTrue(solver.last_stats.linear_output_valid)
 
                 arguments = ["--output", str(output), "--kind", "tet", "--pcg-mode", "production"]
@@ -151,7 +151,7 @@ class TestP28BCRunner(unittest.TestCase):
                     runner.main(arguments)
                 record = json.loads((output / "execution-options.json").read_text())
                 self.assertEqual(record["constructions"], [record["requested"]] * 2)
-                self.assertEqual(record["pcg_policy"], "masked_smart_restart_v1")
+                self.assertEqual(record["pcg_policy"], "masked_smart_restart_v2")
 
     def test_existing_evidence_is_untouched(self):
         """Reject output reuse before changing any existing evidence."""

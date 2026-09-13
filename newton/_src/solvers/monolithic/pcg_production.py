@@ -5,7 +5,8 @@
 The synchronous adapter at the end of this file implements the production
 dispatch from ``solve_pcg``; diagnostic retains its separate host policy.
 ``MaskedPcgPlan.enqueue_solve()`` is the capture-safe part: no host readback, allocation,
-data-dependent Python branch, dynamic graph node, or Python early exit.
+data-dependent Python branch, or Python early exit. CUDA graphs can stop between
+checkpoint batches through device-side conditional nodes.
 
 One enable mask covers the *entire coupled system*, not its q/x blocks.
 All expensive kernels, including the CSR/BSR(1x1) matvec and block solves, honor
@@ -18,6 +19,7 @@ q and per-particle 3x3 Cholesky blocks. This module does not assemble or factor.
 """
 
 import enum
+import functools
 import hashlib
 import math
 import time
@@ -29,7 +31,7 @@ import warp as wp
 from .linear import MonolithicLinearSolveResult, MonolithicLinearStatus, MonolithicPcgConfig, MonolithicPcgWarmStart
 from .pcg_common import block_drift, max_block_drift
 
-PCG_POLICY = "masked_smart_restart_v1"
+PCG_POLICY = "masked_smart_restart_v2"
 
 wp.set_module_options({"enable_backward": False})
 
@@ -100,6 +102,8 @@ class _DeviceResult:
     restart: int
     recovering: int
     slots: int
+    cursor: int
+    conditional: int
     effective_iterations: int
     true_residual_checks: int
     residual_replacements: int
@@ -178,12 +182,24 @@ def _initialize_vectors(y: wp.array[float], r: wp.array[float], zero_guess: wp.a
 @wp.kernel
 def _begin_slot(state: wp.array[_DeviceResult], error: wp.array[int], slot: int):
     s = state[0]
+    if slot < 0:
+        s.cursor += 1
+        slot = s.cursor
+        state[0] = s
     if s.status != _RUNNING:
         return
     s.restart = 0
     s.recovering = 0
     if error[0] != 0:
         s = _failed(s, error[0], slot)
+    state[0] = s
+
+
+@wp.kernel
+def _loop_condition(state: wp.array[_DeviceResult], condition: wp.array[int], limit: int):
+    s = state[0]
+    s.conditional = 1
+    condition[0] = int(s.status == _RUNNING and s.cursor < limit)
     state[0] = s
 
 
@@ -302,6 +318,31 @@ def _masked_products(
     wp.atomic_add(products, 0, av * bv)
 
 
+@functools.cache
+def _make_products_kernel(tile_size):
+    @wp.kernel(module="unique", enable_backward=False)
+    def products_kernel(
+        a: wp.array[float],
+        b: wp.array[float],
+        products: wp.array[float],
+        state: wp.array[_DeviceResult],
+    ):
+        if state[0].enabled == 0:
+            return
+        _, lane = wp.tid()
+        total = float(0.0)
+        for offset in range(0, a.shape[0], tile_size):
+            av = wp.tile_load(a, shape=tile_size, offset=offset)
+            bv = wp.tile_load(b, shape=tile_size, offset=offset)
+            total += wp.tile_sum(wp.tile_map(wp.mul, av, bv))[0]
+        # A single CTA overwrites the result: no clear launch or atomic add.
+        # Nonfinite inputs propagate to the existing alpha/gamma guards.
+        if lane == 0:
+            products[0] = total
+
+    return products_kernel
+
+
 @wp.kernel
 def _alpha_guard(
     products: wp.array[float],
@@ -312,6 +353,8 @@ def _alpha_guard(
     slot: int,
 ):
     s = state[0]
+    if slot < 0:
+        slot = s.cursor
     if s.enabled == 0:
         return
     curvature = products[0]
@@ -357,6 +400,8 @@ def _masked_update(
 @wp.kernel
 def _finish_update(state: wp.array[_DeviceResult], error: wp.array[int], slot: int):
     s = state[0]
+    if slot < 0:
+        slot = s.cursor
     if s.enabled == 0:
         return
     # A parallel update may be partially written on error; this y is invalid
@@ -379,6 +424,8 @@ def _gamma_and_beta_guard(
     slot: int,
 ):
     s = state[0]
+    if slot < 0:
+        slot = s.cursor
     if s.enabled == 0:
         return
     value = products[0]
@@ -431,6 +478,8 @@ def _masked_direction(
 @wp.kernel
 def _finish_direction(state: wp.array[_DeviceResult], error: wp.array[int], slot: int):
     s = state[0]
+    if slot < 0:
+        slot = s.cursor
     if s.enabled != 0 and error[0] != 0:
         state[0] = _failed(s, error[0], slot)
 
@@ -551,6 +600,9 @@ def _checkpoint_decision(
     final: bool,
 ):
     s = state[0]
+    if slot < 0:
+        slot = s.cursor
+        final = slot == s.slots
     if s.status != _RUNNING:
         return
     s.true_residual_checks += 1
@@ -647,6 +699,8 @@ def _finalize_result(state: wp.array[_DeviceResult], error: wp.array[int]):
         # Defensive fallback. The scheduled final checkpoint should decide it.
         s.status = _MAX_ITERATIONS
         s.enabled = 0
+    if s.conditional != 0:
+        s.slots = s.cursor
     state[0] = s
 
 
@@ -756,6 +810,12 @@ class MaskedPcgPlan:
         self.state = wp.zeros(1, dtype=_DeviceResult, device=self.device)
         self.regularization = wp.zeros(1, dtype=float, device=self.device)
         self.zero_guess = wp.ones(1, dtype=int, device=self.device)
+        self.condition = wp.zeros(1, dtype=int, device=self.device)
+        self._conditional_graph_supported = self.device.is_cuda and wp.is_conditional_graph_supported()
+        # Fuse single-tile dots; retain the parallel reduction for larger systems.
+        self._products_kernel = (
+            _make_products_kernel(1 << (self.n - 1).bit_length()) if self.device.is_cuda and self.n <= 2048 else None
+        )
         self.graph = None
         self._workspace = None
         self._generation = None
@@ -764,7 +824,7 @@ class MaskedPcgPlan:
         self._prepared_regularization = None
         self._storage = tuple(value for value in vars(self).values() if isinstance(value, wp.array))
         self._storage_signature = tuple(map(_signature, self._storage))
-        self._schedule_signature = (self.config, self.n, self.nq, self.nx)
+        self._schedule_signature = (self.config, self.n, self.nq, self.nx, self._conditional_graph_supported)
         self._layout_digest = self._layout_signature()
         c = self.config
         self.params = _Parameters()
@@ -813,7 +873,7 @@ class MaskedPcgPlan:
         if (
             self._stream_id() != self._stream
             or tuple(map(_signature, arrays)) != self._storage_signature
-            or (self.config, self.n, self.nq, self.nx) != self._schedule_signature
+            or (self.config, self.n, self.nq, self.nx, self._conditional_graph_supported) != self._schedule_signature
         ):
             raise ValueError("Stream, schedule or bound storage changed; construct a new PCG plan")
 
@@ -825,11 +885,12 @@ class MaskedPcgPlan:
                 or not workspace._scaling_valid
                 or not workspace._factor_valid
                 or regularization != workspace._lambda
+                or not self.matches_workspace(workspace, self.rhs, self.y, self.config, self.delta)
             ):
                 raise ValueError("Stale generation, scaling or regularization factors")
 
     def matches_workspace(self, workspace, rhs_hat, y, config, delta=None):
-        """Host metadata only. Call before replay, not from an emitted graph."""
+        """Check bindings; authenticate sparse layout once per numerical generation."""
         matrix = workspace.k_global_scalar_bsr
         arrays = (
             matrix.offsets,
@@ -842,12 +903,15 @@ class MaskedPcgPlan:
             y,
             self.delta if delta is None else delta,
         )
-        return (
-            self._generation == workspace._generation
+        bindings_match = (
+            self._workspace is workspace
             and self._stream == self._stream_id()
             and config == self.config
             and tuple(map(_signature, arrays)) == self._binding_signature
         )
+        if not bindings_match:
+            return False
+        return self._generation == workspace._generation or self._layout_signature() == self._layout_digest
 
     def set_solve_parameters(self, *, regularization: float, zero_initial_guess: bool = True):
         """Update device parameters before enqueue/replay; matrix/factors must match."""
@@ -894,8 +958,17 @@ class MaskedPcgPlan:
         )
 
     def _emit_products(self, a, b):
-        self._launch(_clear_products, 1, [self.products, self.state])
-        self._launch(_masked_products, self.n, [a, b, self.products, self.state, self.error])
+        if self._products_kernel is not None:
+            wp.launch_tiled(
+                self._products_kernel,
+                dim=1,
+                inputs=[a, b, self.products, self.state],
+                block_dim=128,
+                device=self.device,
+            )
+        else:
+            self._launch(_clear_products, 1, [self.products, self.state])
+            self._launch(_masked_products, self.n, [a, b, self.products, self.state, self.error])
 
     def _emit_direction(self, slot):
         if self.nq:  # Static layout test, not a device-dependent branch.
@@ -925,13 +998,14 @@ class MaskedPcgPlan:
         self._launch(_replace_recursive, self.n, [self.true_r, self.r, self.state])
 
     def enqueue_solve(self):
-        """Emit a fixed N-slot schedule; safe inside an external CUDA capture.
+        """Emit bounded PCG with conditional checkpoint batches on supported CUDA graphs.
 
         Does not capture, launch a graph, read device data or return a host
         convergence result. The caller must prepare, warm kernels and serialize
         use of the bound buffers before entering this low-level boundary.
         Every replay resets all lifecycle state. Neither
-        convergence nor error changes the host node sequence.
+        convergence nor error changes the host node sequence. CPU, non-captured
+        execution and older CUDA drivers retain the fixed masked schedule.
         """
         nslots = self.config.maximum_iterations
         interval = self.config.true_residual_interval
@@ -939,7 +1013,8 @@ class MaskedPcgPlan:
         self._launch(_initialize_vectors, self.n, [self.y, self.r, self.zero_guess])
         self._emit_checkpoint(0, initial=True)
         self._emit_direction(0)
-        for slot in range(1, nslots + 1):
+
+        def iteration(slot, *, checkpoint, final=False):
             self._launch(_begin_slot, 1, [self.state, self.error, slot])
             self._emit_matvec(self.p, checkpoint=False)
             self._emit_products(self.p, self.ap)
@@ -948,10 +1023,32 @@ class MaskedPcgPlan:
                 _masked_update, self.n, [self.y, self.r, self.p, self.ap, self.scalars, self.state, self.error]
             )
             self._launch(_finish_update, 1, [self.state, self.error, slot])
-            if slot % interval == 0 or slot == nslots:
-                self._emit_checkpoint(slot, final=slot == nslots)
-            if slot != nslots:
+            if checkpoint:
+                self._emit_checkpoint(slot, final=final)
+            if not final:
                 self._emit_direction(slot)
+
+        if self.device.is_capturing and self._conditional_graph_supported:
+            full_end = (nslots // interval) * interval
+
+            def batch(count):
+                for i in range(count):
+                    iteration(-1, checkpoint=i == count - 1)
+
+            def loop_body():
+                batch(interval)
+                self._launch(_loop_condition, 1, [self.state, self.condition, full_end])
+
+            self._launch(_loop_condition, 1, [self.state, self.condition, full_end])
+            if full_end:
+                wp.capture_while(self.condition, loop_body)
+            remainder = nslots - full_end
+            if remainder:
+                self._launch(_loop_condition, 1, [self.state, self.condition, nslots])
+                wp.capture_if(self.condition, lambda: batch(remainder))
+        else:
+            for slot in range(1, nslots + 1):
+                iteration(slot, checkpoint=slot % interval == 0 or slot == nslots, final=slot == nslots)
         self._launch(_recover_candidate, self.n, [self.scale, self.y, self.delta_candidate, self.state, self.error])
         self._launch(_finalize_result, 1, [self.state, self.error])
         self._launch(_publish_delta, self.n, [self.delta_candidate, self.delta, self.state])
@@ -968,6 +1065,8 @@ class MaskedPcgPlan:
         if self._in_flight or self._prepared_regularization is None:
             raise RuntimeError("Prepare an idle plan before capture")
         wp.load_module(module=__name__, device=self.device)
+        if self._products_kernel is not None:
+            wp.load_module(module=self._products_kernel.module, device=self.device, block_dim=128)
         with wp.ScopedCapture(device=self.device) as capture:
             self.enqueue_solve()
         self.graph = capture.graph
@@ -1056,9 +1155,14 @@ def solve_pcg_production(workspace, rhs_hat, y, *, generation, warm_start, confi
         if prod_config.maximum_iterations > workspace.capacities.pcg_max_iterations:
             return invalid(MonolithicLinearStatus.INVALID_ARGUMENT)
         plan = getattr(workspace, "_masked_pcg_plan", None)
+        if plan is not None and plan._in_flight:
+            raise RuntimeError("Collect the previous result before reusing this plan")
         if plan is None or not plan.matches_workspace(workspace, rhs_hat, y, prod_config, delta):
             plan = MaskedPcgPlan.from_workspace(workspace, rhs_hat, y, config=prod_config, delta=delta)
             workspace._masked_pcg_plan = plan
+        # Numeric validity was checked above; matching storage/layout permits
+        # reuse of captured nodes. Bind this request without accepting stale callers.
+        plan._generation = generation
         plan.set_solve_parameters(
             regularization=workspace._lambda, zero_initial_guess=warm_start == MonolithicPcgWarmStart.ZERO
         )

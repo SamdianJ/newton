@@ -49,7 +49,9 @@ env -u VIRTUAL_ENV OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 \
 | reuse | 同 generation/地址上的整次 PCG、主机准备、结果读取、成功后的 delta 恢复 | 观察稳定复用收益 |
 | new_generation | 更新 generation、重算 actor 因子、整次 PCG、当前策略要求的重新捕获和结果恢复 | 暴露当前集成的重建成本 |
 
-`new_generation` **不是完整 Newton step**：它不重做 BSR 装配或物理求值，只隔离数值版本更新对线性求解成本的影响。必须同时查看它和 reuse，不能只报预热图重放时间。固定 200 槽位的尾部开销完整计入；图捕获/延迟 instantiate/upload/主机提交沿用当前 `capture_seconds` 口径。
+`new_generation` **不是完整 Newton step**：它不重做 BSR 装配或物理求值，只隔离数值版本更新对线性求解成本的影响。必须同时查看它和 reuse，不能只报预热图重放时间。固定调度的尾部开销和条件图实际执行的批次完整计入；图捕获/延迟 instantiate/upload/主机提交沿用当前 `capture_seconds` 口径。
+
+当前 `masked_smart_restart_v2` 在存储/稀疏结构不变时跨 generation 复用图，新 generation 的结构摘要验证计入准备成本。支持 CUDA 条件图时每个原有检查批次后可退出；`scheduled_slots` 记录实际调度批次中的槽数，其余执行方式仍记录完整预算。旧 v1 报告的“每代重捕获”和固定 200 槽是历史数据，不回写。
 
 每轮前后读取 GPU P-state、SM 频率、温度、功耗及利用率，存入各 case JSON；采样在计时范围外，不修改设备功率/频率。未锁频时需要评审这些记录，短样本 p95 也不是整轨迹尾延迟。完整 solver/step 性能仍由独立的 nightly 测量。
 
@@ -78,7 +80,7 @@ uv run --no-sync python -m unittest -v newton.tests.test_monolithic_pcg_benchmar
 
 Kamino 的全局条件可能比各块独立判定更保守；不声称停止策略相同。Style3D 和 Kamino 都不新增 Monolithic 的真实残差 restart、曲率/事务诊断。统一精度判断始终由原来的 FP64 global/q/x 检查完成；不能只按原生 SUCCESS 或固定循环完成判断通过。
 
-两种外部图模式由基准包一层 outer capture/cache：Style3D 捕获完整固定循环，Kamino 调用其原生 `capture_while` 条件循环。固定地址、维度、lambda、参数时，更新数值 generation 不重捕获；当前 Monolithic graph 仍沿用原生 generation 失效政策。外部缓存只是本基准的固定绑定适配，没有模拟外部完整 solver 的拓扑变化处理，也没有修改 Monolithic 图缓存。
+两种外部图模式由基准包一层 outer capture/cache：Style3D 捕获完整固定循环，Kamino 调用其原生 `capture_while` 条件循环。固定地址、维度、lambda、参数时，更新数值 generation 不重捕获；当前 Monolithic graph 则执行自己的存储/结构和数值有效性检查。外部缓存只是本基准的固定绑定适配，没有模拟外部完整 solver 的拓扑变化处理。
 
 计时包含外部最终 delta 恢复，Kamino 另包含原生结果计数/残差读取。首次编译、捕获及暖机保存在 first_solve。`software_counts` 来自额外非计时调用，统计 Python 层 launch、CUDA `.numpy()` 读取、graph launch 及 Style3D inner 调用；**不是实际 GPU kernel 数量**，不包含底层内部 CUDA 操作。完整迭代向量和独立误差仍保存到原有 NPZ/JSON。
 

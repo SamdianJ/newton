@@ -51,7 +51,7 @@ def main(argv=None):
     }
     record = {
         "task": "PR-8C2",
-        "pcg_policy": "masked_smart_restart_v1" if args.pcg_mode == "production" else "dynamic_smart_restart_v1",
+        "pcg_policy": "masked_smart_restart_v2" if args.pcg_mode == "production" else "dynamic_smart_restart_v1",
         "launch_argv": launch_argv,
         "requested": options,
         "constructions": [],
