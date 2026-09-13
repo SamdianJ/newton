@@ -42,13 +42,15 @@ uv run --no-sync -m scripts.monolithic_reference.validate_p2 \
   --suite night --output /absolute/path/night-p28c2
 ```
 
-当前矩阵先运行 monolithic 单元回归，然后串行运行：
+当前 nightly 只比较 diagnostic 与 production graph。共 57 个作业：先运行 1 组 monolithic 单元回归，然后串行运行 40 个 Sharpa 和 16 个 tet 作业：
 
 | 场景 | 当前源码变体 | 重复 |
 |---|---|---|
-| Sharpa r3/r2 | diagnostic、owned diagnostic、production、production graph、owned production、owned production graph | 各 5 次 |
-| tet r5 | diagnostic、production、production graph | 各 5 次 |
-| tet r3/r4/r6 | diagnostic、production、production graph | 各 1 次 |
+| Sharpa r3/r2 | diagnostic、production graph、owned diagnostic、owned production graph | 各 5 次 |
+| tet r5 | diagnostic、production graph | 各 5 次 |
+| tet r3/r4/r6 | diagnostic、production graph | 各 1 次 |
+
+production 作业全部显式启用 `--use-cuda-graph`；重复轮次交替正序/逆序。reference/owned 质量矩阵覆盖保持，单元回归仍覆盖非图 production。
 
 nightly 默认无人值守：单个测试组或仿真任务以非零状态退出后，保留日志/输出并继续后续独立任务；单项结果文件缺失或格式错误同样记录为任务失败。不会在同一轮自动反复重试。源码冻结检查失败、CUDA 启动预检失败、主机进程启动/I/O 异常和用户中断仍立即停止。
 
@@ -74,7 +76,7 @@ uv run --no-sync -m scripts.monolithic_reference.validate_p2 \
 源码、依赖、policy 或计划改变时必须使用新输出目录。旧 policy 在任何子进程之前拒绝；日志/索引/原始证据哈希也会校验。
 中断、失败、旧日志和未完成输出保留；`--resume` 跳过已完成且证据校验通过的任务，只重试失败/未执行任务。重试前归档该任务旧输出，追加新日志；恢复成功后不再计为未解决失败，历史失败记录继续保留。已完成但指标未达标的任务不会自动重跑，也不会因其他任务恢复成功而变为通过。
 
-工作流标识为 `p2-8c2-masked-smart-v2-unattended`（数值 PCG policy 不变）；先前版本的运行不能直接 resume，请使用新输出目录。源码修复或依赖变更后也必须使用新目录，不能混合版本续跑。
+工作流标识为 `p2-8c2-masked-smart-v3-diagnostic-graph-unattended`（数值 PCG policy 不变）；原 85 作业计划不能直接 resume，请使用新输出目录。源码修复或依赖变更后也必须使用新目录，不能混合版本续跑。
 
 单项/短冒烟示例：
 

@@ -43,7 +43,7 @@ def write_json(path, value):
     temporary.replace(path)
 
 
-WORKFLOW_POLICY = "p2-8c2-masked-smart-v2-unattended"
+WORKFLOW_POLICY = "p2-8c2-masked-smart-v3-diagnostic-graph-unattended"
 
 
 def build_jobs(suite, repo):
@@ -66,9 +66,9 @@ def build_jobs(suite, repo):
     for kind, meshes in (("sharpa", (3, 2)), ("tet", (5, 3, 4, 6))):
         for mesh in meshes:
             repeats = 5 if kind == "sharpa" or mesh == 5 else 1
-            variants = ("diagnostic", "production", "production-graph")
+            variants = ("diagnostic", "production-graph")
             if kind == "sharpa":
-                variants += ("owned", "owned-production", "owned-production-graph")
+                variants += ("owned", "owned-production-graph")
             for repeat in range(1, repeats + 1):
                 for variant in variants if repeat % 2 else reversed(variants):
                     arguments = [

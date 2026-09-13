@@ -24,9 +24,10 @@ class TestMonolithicValidationWorkflow(unittest.TestCase):
         self.assertNotIn("scripts.monolithic_reference.run_p2_8bc", jobs[0]["arguments"])
 
     def test_night_scope(self):
-        """Schedule only current policies with explicit graph variants and balanced repeats."""
+        """Compare diagnostic and production graph while preserving scenario coverage and repeats."""
         repo = Path(__file__).resolve().parents[2]
         jobs = workflow.build_jobs("night", repo)
+        self.assertEqual(len(jobs), 57)  # One regression group, 40 Sharpa and 16 tet runs.
         self.assertEqual(len({j["name"] for j in jobs}), len(jobs))
         self.assertTrue(all(j["cwd"] == str(repo) for j in jobs))
         for job in jobs[1:]:
@@ -34,11 +35,34 @@ class TestMonolithicValidationWorkflow(unittest.TestCase):
             self.assertNotIn("--smoke", job["arguments"])
 
         names = {job["name"] for job in jobs}
-        for repeat in range(1, 6):
-            for mode in ("diagnostic", "production", "production-graph"):
-                self.assertIn(f"tet-r5-{mode}-rep{repeat:02d}", names)
+        expected = {"regression"}
+        for mesh in (2, 3):
+            for repeat in range(1, 6):
+                for mode in ("diagnostic", "production-graph", "owned", "owned-production-graph"):
+                    expected.add(f"sharpa-r{mesh}-{mode}-rep{repeat:02d}")
+        for mesh, repeats in ((3, 1), (4, 1), (5, 5), (6, 1)):
+            for repeat in range(1, repeats + 1):
+                for mode in ("diagnostic", "production-graph"):
+                    expected.add(f"tet-r{mesh}-{mode}-rep{repeat:02d}")
+        self.assertEqual(names, expected)
         for job in jobs[1:]:
-            self.assertEqual("--use-cuda-graph" in job["arguments"], "-graph-" in job["name"])
+            arguments = job["arguments"]
+            mode = arguments[arguments.index("--pcg-mode") + 1]
+            self.assertIn(mode, ("diagnostic", "production"))
+            self.assertEqual("--use-cuda-graph" in arguments, mode == "production")
+            self.assertEqual(
+                arguments[arguments.index("--mass-matrix") + 1], "owned" if "-owned-" in job["name"] else "reference"
+            )
+        for kind, mesh in (("sharpa", 3), ("sharpa", 2), ("tet", 5)):
+            orders = [
+                [
+                    j["name"].rsplit("-rep", 1)[0]
+                    for j in jobs
+                    if j["name"].startswith(f"{kind}-r{mesh}-") and j["name"].endswith(f"rep{repeat:02d}")
+                ]
+                for repeat in (1, 2)
+            ]
+            self.assertEqual(orders[0], list(reversed(orders[1])))
 
     def test_reject_old_policy(self):
         """Reject an old saved plan even when its evidence is intact."""
@@ -50,7 +74,7 @@ class TestMonolithicValidationWorkflow(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmp:
             (Path(tmp) / "progress.json").write_text(
-                json.dumps({"signature": {"policy": "p2-8c2-masked-smart-v1"}, "completed": {}})
+                json.dumps({"signature": {"policy": "p2-8c2-masked-smart-v2-unattended"}, "completed": {}})
             )
             with (
                 patch.object(sys, "argv", ["validate", "--resume", "--output", tmp]),
