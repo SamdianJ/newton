@@ -64,3 +64,26 @@ uv run --no-sync python -m unittest -v newton.tests.test_monolithic_pcg_benchmar
 ```
 
 只验证参考解、分块误差、快照完整性、CPU/CUDA 原生分派、曲线不改变政策、稳定图复用及 generation 重建。综合基准是单独的显式命令，不由这些单测启动完整矩阵扫描或 nightly。
+
+## 与 Style3D / Kamino 比较
+
+追加 `--include-external`，在同一轮中测量七种模式：原有三种，以及 Style3D、Kamino 的非图/图模式。CPU 无图模式。真实矩阵仍由相同的 `--snapshot` 参数追加。
+
+这是 **PCG 迭代实现的共享 A/M 比较**，不是完整 cloth / rigid-body solver 性能比较。所有模式使用原来的标量 `S K S + λI` 算子和同一 actor Cholesky 预条件器，逐份检查绑定哈希，没有改用更便宜的 Jacobi 或把稀疏系统变成稠密系统。
+
+| 实现 | 适配边界 | 原生停止条件 |
+|---|---|---|
+| Style3D | 继承原生 `PcgSolver.solve`、更新及归约；仅将 `step2_update_z` / `step5_update_Ap` 接到共同 A/M。标量向量零拷贝映射到 vec3，末尾不足三维补零 | 固定 200 次调度，无原生收敛状态；报告为 `FIXED_BUDGET`，迭代数包含零 alpha 更新 |
+| Kamino | 原生 `CGSolver`，通过 `BatchedLinearOperator` 回调绑定共同 A/M，单 active world | 全局递推残差；每次迭代判断一次。`rtol=0`，`atol=1e-4 * min(非空块残差分母)`，使全局绝对界足以覆盖所有块，但仍可能存在递推/真实残差偏差 |
+
+Kamino 的全局条件可能比各块独立判定更保守；不声称停止策略相同。Style3D 和 Kamino 都不新增 Monolithic 的真实残差 restart、曲率/事务诊断。统一精度判断始终由原来的 FP64 global/q/x 检查完成；不能只按原生 SUCCESS 或固定循环完成判断通过。
+
+两种外部图模式由基准包一层 outer capture/cache：Style3D 捕获完整固定循环，Kamino 调用其原生 `capture_while` 条件循环。固定地址、维度、lambda、参数时，更新数值 generation 不重捕获；当前 Monolithic graph 仍沿用原生 generation 失效政策。外部缓存只是本基准的固定绑定适配，没有模拟外部完整 solver 的拓扑变化处理，也没有修改 Monolithic 图缓存。
+
+计时包含外部最终 delta 恢复，Kamino 另包含原生结果计数/残差读取。首次编译、捕获及暖机保存在 first_solve。`software_counts` 来自额外非计时调用，统计 Python 层 launch、CUDA `.numpy()` 读取、graph launch 及 Style3D inner 调用；**不是实际 GPU kernel 数量**，不包含底层内部 CUDA 操作。完整迭代向量和独立误差仍保存到原有 NPZ/JSON。
+
+适配验证：
+
+```bash
+uv run --no-sync python -m unittest -v newton.tests.test_monolithic_pcg_backends
+```

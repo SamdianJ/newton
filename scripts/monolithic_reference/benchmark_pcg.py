@@ -304,6 +304,8 @@ class Runner:
 
 def observe_convergence(runner, reference):
     """Read native iterates only in a separate, explicitly untimed solve."""
+    if hasattr(runner, "observe"):
+        return runner.observe(reference)
     runner.y.zero_()
     iterates = [runner.y.numpy().copy()]
     points = [{"iterations": 0, "slot": 0, "accuracy": reference.measure(iterates[0])}]
@@ -368,7 +370,11 @@ def _timed_solve(runner, scope):
     wp.synchronize_device(device)
     end = time.perf_counter()
     return {
-        **pcg_call_record(result, end - solve_start, use_cuda_graph=runner.mode == "production_graph"),
+        **(
+            result
+            if isinstance(result, dict)
+            else pcg_call_record(result, end - solve_start, use_cuda_graph=runner.mode == "production_graph")
+        ),
         "mode": runner.mode,
         "scope": scope,
         "factor_ms": factor_ms,
@@ -393,7 +399,7 @@ def _gpu_sample(device):
     return {"unix_s": time.time(), "gpu_csv": query.stdout.strip(), "returncode": query.returncode}
 
 
-def compare_case(case, device, *, repeats=10, warmups=3, config=None):
+def compare_case(case, device, *, repeats=10, warmups=3, config=None, include_external=False):
     """Interleave modes on identical fixed input, with separate reuse and refresh scopes."""
     device = wp.get_device(device)
     config = config or pcg_config()
@@ -401,6 +407,10 @@ def compare_case(case, device, *, repeats=10, warmups=3, config=None):
         raise ValueError("repeats and warmups must be positive")
     reference = Reference(case, config)
     modes = ["diagnostic", "production"] + (["production_graph"] if device.is_cuda else [])
+    if include_external:
+        from scripts.monolithic_reference.pcg_backends import ExternalRunner  # noqa: PLC0415 - optional adapters
+
+        modes += ["style3d", "kamino"] + (["style3d_graph", "kamino_graph"] if device.is_cuda else [])
     runners, setup, cold, bindings = {}, {}, [], {}
     vectors = {"reference_y": reference.y, "reference_delta": reference.scale * reference.y}
 
@@ -410,7 +420,8 @@ def compare_case(case, device, *, repeats=10, warmups=3, config=None):
 
     for mode in modes:
         start = time.perf_counter()
-        runners[mode] = Runner(case, mode, device, config)
+        factory = ExternalRunner if mode.startswith(("style3d", "kamino")) else Runner
+        runners[mode] = factory(case, mode, device, config)
         wp.synchronize_device(device)
         setup[mode] = (time.perf_counter() - start) * 1000
         w = runners[mode].workspace
@@ -451,10 +462,15 @@ def compare_case(case, device, *, repeats=10, warmups=3, config=None):
             telemetry.append(
                 {"scope": scope, "repeat": repeat, "order": order, "before": before, "after": _gpu_sample(device)}
             )
-    convergence = {mode: observe_convergence(runners[mode], reference) for mode in ("diagnostic", "production")}
+    convergence = {mode: observe_convergence(runners[mode], reference) for mode in modes if not mode.endswith("_graph")}
     for mode, curve in convergence.items():
         curve["iterate_key"] = f"{mode}-curve-y"
         vectors[curve["iterate_key"]] = curve.pop("iterate_y")
+    counts = {}
+    if include_external:
+        from scripts.monolithic_reference.pcg_backends import software_counts  # noqa: PLC0415 - optional adapters
+
+        counts = {mode: software_counts(runner) for mode, runner in runners.items()}
     return {
         "name": case.name,
         "n": case.n,
@@ -464,6 +480,8 @@ def compare_case(case, device, *, repeats=10, warmups=3, config=None):
         "metadata": case.metadata,
         "reference": reference.describe(),
         "modes": modes,
+        "backend_metadata": {mode: getattr(runner, "metadata", {}) for mode, runner in runners.items()},
+        "software_counts": counts,
         "setup_ms": setup,
         "bound_input_sha256": bindings,
         "first_solve": cold,
@@ -502,9 +520,10 @@ def write_report(output, results, config):
         "",
         "reuse：同 generation/绑定的预热重复求解。new_generation：相同矩阵更新 generation，计入 actor 因子重算、PCG 准备/捕获、结果读取及 delta 恢复；不包含 BSR 装配、Newton 或物理 step。初次/JIT/捕获成本另存在 JSON，不能用 reuse 替代整体集成效率。",
         "",
-        "曲线是单独同步观察的原生非图求解，不计入耗时；graph 数值结果独立测量，数值策略与 production 相同。GPU 频率/温度按交错轮次记录，未锁频；短基准不能代替稳定设备状态的完整轨迹验收。",
+        "曲线是单独同步观察的原生非图求解，不计入耗时；各图模式的数值结果独立测量，沿用各自非图实现的迭代政策。GPU 频率/温度按交错轮次记录，未锁频；短基准不能代替稳定设备状态的完整轨迹验收。",
+        "可选 Style3D/Kamino 使用共享 A/M 适配；Style3D FIXED_BUDGET 不声称原生收敛，迭代列表示调度更新数。Kamino SUCCESS 仅按全局递推残差判断。各模式统一以独立分块残差验收。外部 outer graph 由基准缓存，固定绑定时跨 generation 复用；并非完整外部物理 solver。",
         "",
-        "| 系统 | 模式/范围 | 原生成功/独立通过/样本 | 有效迭代 p50 | 总耗时 p50/p95 ms | 解相对误差最大值 | 独立残差比最大值 | 图重建次数 |",
+        "| 系统 | 模式/范围 | 原生成功/独立通过/样本 | 迭代 p50 | 总耗时 p50/p95 ms | 解相对误差最大值 | 独立残差比最大值 | 图重建次数 |",
         "|---|---|---:|---:|---:|---:|---:|---:|",
     ]
     figures = []
@@ -519,7 +538,7 @@ def write_report(output, results, config):
                 report.append(
                     f"| {result['name']} | {mode}/{scope} | {sum(r['status'] == 'SUCCESS' for r in rows)}/{success}/{len(rows)} | {np.median([r['iterations'] for r in rows]):.0f} | {times[0]:.3f}/{times[1]:.3f} | {max(errors):.3g} | {max(residuals):.3g} | {sum(r['graph_rebuilt'] for r in rows)} |"
                 )
-        fig, axes = plt.subplots(1, 3, figsize=(13, 3.6))
+        fig, axes = plt.subplots(1, 3, figsize=(17 if len(result["modes"]) > 3 else 13, 4.2))
         for mode, curve in result["convergence"].items():
             x = [p["iterations"] for p in curve["points"]]
             for axis, metric in zip(axes[:2], ("max_true_ratio", "y_relative_error"), strict=True):
@@ -532,7 +551,7 @@ def write_report(output, results, config):
         axes[0].set_ylabel("Max global/q/x true residual ratio")
         axes[1].set_ylabel("Relative solution error vs FP64")
         for axis in axes[:2]:
-            axis.set_xlabel("Effective PCG updates")
+            axis.set_xlabel("PCG updates (Style3D: scheduled)")
             axis.grid(alpha=0.2)
             axis.legend(fontsize=8)
         positions = np.arange(len(result["modes"]))
@@ -542,7 +561,7 @@ def write_report(output, results, config):
                 for mode in result["modes"]
             ]
             axes[2].bar(positions + shift, values, width=0.36, label=scope)
-        axes[2].set_xticks(positions, [m.replace("production", "prod") for m in result["modes"]], rotation=15)
+        axes[2].set_xticks(positions, [m.replace("production", "prod") for m in result["modes"]], rotation=40)
         axes[2].set_ylabel("Median complete linear call (ms)")
         axes[2].legend(fontsize=8)
         fig.suptitle(
@@ -563,6 +582,9 @@ def main(argv=None):
     parser.add_argument("--snapshot", type=Path, action="append", default=[])
     parser.add_argument("--repeats", type=int, default=10)
     parser.add_argument("--warmups", type=int, default=3)
+    parser.add_argument(
+        "--include-external", action="store_true", help="Compare native Style3D/Kamino iterations with shared A/M"
+    )
     args = parser.parse_args(argv)
     if args.repeats < 1 or args.warmups < 1:
         parser.error("repeats and warmups must be positive")
@@ -581,7 +603,14 @@ def main(argv=None):
     results = []
     for case in cases:
         print(f"COMPARE {case.name}: n={case.n}", flush=True)
-        result = compare_case(case, args.device, repeats=args.repeats, warmups=args.warmups, config=config)
+        result = compare_case(
+            case,
+            args.device,
+            repeats=args.repeats,
+            warmups=args.warmups,
+            config=config,
+            include_external=args.include_external,
+        )
         np.savez_compressed(args.output / f"{case.name}-input.npz", **case.arrays)
         result["vectors_file"] = f"{case.name}-solutions.npz"
         np.savez_compressed(args.output / result["vectors_file"], **result.pop("vectors"))
@@ -594,6 +623,7 @@ def main(argv=None):
         "config": asdict(config),
         "repeats": args.repeats,
         "warmups": args.warmups,
+        "include_external": args.include_external,
         "cases": [{"name": r["name"], "input_sha256": r["input_sha256"]} for r in results],
         "timing_scope": "Standalone linear solves; no physical stepping; convergence observers excluded from all timing",
         "performance_admission": "PENDING_MATCHED_DEVICE_STATE_REVIEW",
