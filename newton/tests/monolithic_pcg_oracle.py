@@ -80,7 +80,7 @@ def solve_fixed(matrix, rhs, inverse, nq, config, initial=None):
             true_norm = norms(true)
             ratios = tuple(true_norm / denominator)
             last = slot
-            if max(ratios) <= config.linear_tolerance:
+            if np.all(true_norm <= np.maximum(config.linear_tolerance * denominator, config.linear_absolute_tolerance)):
                 return result("SUCCESS", slot)
             if slot == config.maximum_iterations:
                 return result("MAX_ITERATIONS")

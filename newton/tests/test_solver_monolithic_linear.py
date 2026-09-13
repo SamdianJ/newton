@@ -514,7 +514,12 @@ def test_scaling_operator_preconditioner(test, device):
 
 def _pcg_config(**kwargs):
     # Explicit test thresholds; these do not claim to be P0 calibration.
-    return replace(MonolithicPcgConfig(100, 10, 1e-4, 1e-12, 1e-12, 1e-12, 0.0, 1e-8, 0.0, 20, 0.001), **kwargs)
+    return replace(
+        MonolithicPcgConfig(
+            100, 10, 1e-4, 1e-12, 1e-12, 1e-12, 0.0, 1e-8, 0.0, 20, 0.001, linear_absolute_tolerance=0.0
+        ),
+        **kwargs,
+    )
 
 
 def _ready_system(device, *, contact=True, heterogeneous=False):

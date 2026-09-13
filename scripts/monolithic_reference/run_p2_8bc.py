@@ -33,6 +33,7 @@ def main(argv=None):
     parser.add_argument("--mass-matrix", choices=("reference", "owned"), default="reference")
     parser.add_argument("--pcg-mode", choices=("diagnostic", "production"), default="diagnostic")
     parser.add_argument("--use-cuda-graph", action="store_true")
+    parser.add_argument("--linear-absolute-tolerance", type=float, default=1e-6)
     parser.add_argument("--smoke", action="store_true")
     launch_argv = list(sys.argv[1:] if argv is None else argv)
     args = parser.parse_args(launch_argv)
@@ -48,10 +49,11 @@ def main(argv=None):
         "use_optimized_articulation_mass_matrix": args.mass_matrix == "owned",
         "pcg_mode": args.pcg_mode,
         "use_cuda_graph": args.use_cuda_graph,
+        "linear_absolute_tolerance": args.linear_absolute_tolerance,
     }
     record = {
         "task": "PR-8C2",
-        "pcg_policy": "masked_smart_restart_v2" if args.pcg_mode == "production" else "dynamic_smart_restart_v1",
+        "pcg_policy": "masked_smart_restart_v3" if args.pcg_mode == "production" else "dynamic_smart_restart_v2",
         "launch_argv": launch_argv,
         "requested": options,
         "constructions": [],
@@ -76,6 +78,7 @@ def main(argv=None):
             "use_optimized_articulation_mass_matrix": self.use_optimized_articulation_mass_matrix,
             "pcg_mode": self.pcg_mode.value,
             "use_cuda_graph": self.use_cuda_graph,
+            "linear_absolute_tolerance": self.linear_absolute_tolerance,
         }
         if actual != options:
             raise RuntimeError(f"Constructor options were not bound: {actual}")

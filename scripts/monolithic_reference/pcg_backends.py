@@ -87,7 +87,7 @@ class ExternalRunner(Runner):
             active_blocks = [0] + ([1] if case.nq else []) + ([2] if case.n > case.nq else [])
             # A global absolute bound sufficient for every nonempty block;
             # acceptance is still checked independently against true residuals.
-            atol = float(config.linear_tolerance * min(reference.denominators[active_blocks]))
+            atol = float(min(reference.residual_targets[active_blocks]))
             self.solver = CGSolver(
                 operator(self.workspace.operator),
                 Mi=operator(self.workspace.preconditioner),

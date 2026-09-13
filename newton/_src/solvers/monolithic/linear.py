@@ -13,7 +13,7 @@ import warp as wp
 import warp.sparse as sparse
 from warp.optim.linear import LinearOperator
 
-from .pcg_common import decide_restart
+from .pcg_common import decide_restart, residual_converged
 
 
 class MonolithicLinearStatus(enum.IntEnum):
@@ -70,8 +70,21 @@ class MonolithicPcgConfig:
     ||gap||_block / max(||r_true||_block, floor_block). Checking per-block drift
     prevents articulation drift from being masked by larger deformable residuals.
     Default 0.1 (replace when any block drifts >= 10%). Set to 0.0 for always-replace."""
+    linear_absolute_tolerance: float = 1.0e-6
+    """Absolute scaled residual norm tolerance for every block; provisional, pending calibration.
+    Zero retains the legacy relative-with-floor acceptance rule."""
 
     def __post_init__(self):
+        value = self.linear_absolute_tolerance
+        if (
+            isinstance(value, (bool, np.bool_))
+            or not isinstance(value, (int, float, np.integer, np.floating))
+            or not np.isfinite(value)
+            or value < 0
+            or value > float(np.finfo(np.float32).max)
+            or (0 < value < np.finfo(np.float32).smallest_subnormal)
+        ):
+            raise ValueError("linear_absolute_tolerance must be nonnegative and representable in float32")
         if any(
             not isinstance(value, int) or isinstance(value, bool) or value <= 0
             for value in (self.maximum_iterations, self.true_residual_interval, self.stagnation_window)
@@ -188,7 +201,7 @@ class MonolithicLinearSolveResult:
     stagnation_window: int | None = None
     """Configured stagnation window in true-residual checks; None before a solve starts."""
 
-    pcg_policy: str = "dynamic_smart_restart_v1"
+    pcg_policy: str = "dynamic_smart_restart_v2"
     scheduled_slots: int = 0
     converged_at_slot: int = -1
     last_checked_slot: int = -1
@@ -809,11 +822,22 @@ class _MonolithicPcgPacket:
 
 @wp.kernel
 def _pack_monolithic_pcg_residual(
-    status: wp.array[int], ratios: wp.array[float], packet: wp.array[_MonolithicPcgPacket]
+    status: wp.array[int],
+    ratios: wp.array[float],
+    norms: wp.array[float],
+    floors: wp.vec3,
+    rtol: float,
+    atol: float,
+    packet: wp.array[_MonolithicPcgPacket],
 ):
     value = _MonolithicPcgPacket()
     value.status = status[0]
     value.ratios = wp.vec3(ratios[0], ratios[1], ratios[2])
+    value.check = int(
+        residual_converged(
+            wp.vec3(norms[0], norms[1], norms[2]), wp.vec3(norms[3], norms[4], norms[5]), floors, rtol, atol
+        )
+    )
     packet[0] = value
 
 
@@ -828,13 +852,14 @@ def _pack_monolithic_pcg_check(
     status: wp.array[int],
     denominator: wp.array[wp.float64],
     tolerance: wp.float64,
+    absolute_tolerance: wp.float64,
     scheduled: bool,
     packet: wp.array[_MonolithicPcgPacket],
 ):
     value = _MonolithicPcgPacket()
     value.status = status[0]
     # The old host decision used Python doubles, including the configured floor.
-    threshold = tolerance * denominator[0]
+    threshold = wp.max(tolerance * denominator[0], absolute_tolerance)
     value.check = int(scheduled or wp.float64(products[0]) <= threshold * threshold)
     packet[0] = value
 
@@ -1594,11 +1619,20 @@ class MonolithicLinearWorkspace:
         wp.launch(
             _pack_monolithic_pcg_residual,
             1,
-            [self._status, self._ratios, self._pcg_packet],
+            [
+                self._status,
+                self._ratios,
+                self._true_norms,
+                wp.vec3(config.residual_floor_global, config.residual_floor_q, config.residual_floor_x),
+                config.linear_tolerance,
+                config.linear_absolute_tolerance,
+                self._pcg_packet,
+            ],
             device=self.device,
         )
         packet = self._pcg_packet.numpy()[0]
         self._pcg_boundary_status = MonolithicLinearStatus(int(packet["status"]))
+        self._pcg_converged = bool(packet["check"])
         return tuple(float(value) for value in packet["ratios"])
 
     def solve_pcg(
@@ -1727,7 +1761,7 @@ class MonolithicLinearWorkspace:
         status = self._pcg_boundary_status
         if status != MonolithicLinearStatus.SUCCESS:
             return result(status)
-        if max(ratios) <= config.linear_tolerance:
+        if self._pcg_converged:
             self._warm_start_key = (generation, y.ptr)
             return result(MonolithicLinearStatus.SUCCESS)
         wp.copy(self._r, self._true_r)
@@ -1784,6 +1818,7 @@ class MonolithicLinearWorkspace:
                     self._status,
                     self._rhs_denominator,
                     config.linear_tolerance,
+                    config.linear_absolute_tolerance,
                     iteration % config.true_residual_interval == 0 or iteration == config.maximum_iterations,
                     self._pcg_packet,
                 ],
@@ -1801,7 +1836,7 @@ class MonolithicLinearWorkspace:
                 status = self._pcg_boundary_status
                 if status != MonolithicLinearStatus.SUCCESS:
                     break
-                if max(ratios) <= config.linear_tolerance:
+                if self._pcg_converged:
                     self._warm_start_key = (generation, y.ptr)
                     return result(MonolithicLinearStatus.SUCCESS)
                 history.append(max(ratios))

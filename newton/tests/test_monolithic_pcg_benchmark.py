@@ -127,7 +127,7 @@ class TestMonolithicPcgBenchmark(unittest.TestCase):
             benchmark.linear.MonolithicLinearWorkspace, "_solve_pcg_diagnostic", side_effect=AssertionError
         ):
             result = runner.solve()
-        self.assertEqual(result.pcg_policy, "masked_smart_restart_v2")
+        self.assertEqual(result.pcg_policy, "masked_smart_restart_v3")
 
 
 add_function_test(

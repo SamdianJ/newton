@@ -1,6 +1,10 @@
 # P2 验证：PR-8C2 masked smart PCG
 
-当前 production 唯一实现为 `masked_smart_restart_v2`；diagnostic 为 `dynamic_smart_restart_v1`。
+当前 production 唯一实现为 `masked_smart_restart_v3`；diagnostic 为 `dynamic_smart_restart_v2`。
+当前 PCG 新增公开超参数 `linear_absolute_tolerance=1e-6`，默认值为用户批准的暂定值，最优默认值等待标定。
+global/q/x 每块分别要求 `||r_true|| <= max(linear_tolerance * max(||rhs||, residual_floor), linear_absolute_tolerance)`。
+相对容差默认仍为 `1e-4`；绝对容差作用于缩放后线性系统的残差范数，不是物理位置误差。设绝对容差为 `0` 恢复旧验收规则。
+残差替换的 gap/floor 判据独立于验收，不随本次改动调整。原 `rho`/`checkpoint_ratios` 仍记录相对带 floor 的残差比，绝对容差通过时可大于相对容差。
 两者共用 global/q/x 分块 gap 判据，阈值默认 0.1。默认仍为 diagnostic，CUDA graph 默认关闭。
 固定 production 检查点为 0、每 10 槽、预算末尾；不保留 stagnation、近零曲率启发式、递推候选额外检查或失败后额外真残差。
 旧 always-replace production、旧专用测试和旧 baseline checkout 调度已删除，历史数据仅作离线追溯。
@@ -87,6 +91,7 @@ uv run --no-sync -m scripts.monolithic_reference.run_p2_8bc \
 ```
 
 省略 `--use-cuda-graph` 为相同 fixed smart 策略的非图执行。与 diagnostic 比较是策略对照；production 图开/关才隔离图执行方式。
+单项 runner 支持 `--linear-absolute-tolerance 1e-6`（或 `0`）；nightly 两种模式使用相同暂定默认值。实际设置写入 `execution-options.json`，历史结果不回写，比较不同容差时必须区分精度策略。
 
 ## 结果与保留门槛
 

@@ -1,8 +1,18 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 The Newton Developers
 # SPDX-License-Identifier: Apache-2.0
-"""Shared block gap policy; observation buffers never select the algorithm."""
+"""Shared block residual acceptance and gap policies."""
 
 import warp as wp
+
+
+@wp.func
+def residual_converged(norms: wp.vec3, rhs_norms: wp.vec3, floors: wp.vec3, rtol: float, atol: float):
+    accepted = bool(True)
+    for k in range(3):
+        target = wp.max(wp.float64(rtol) * wp.float64(wp.max(rhs_norms[k], floors[k])), wp.float64(atol))
+        if not wp.isfinite(norms[k]) or wp.float64(norms[k]) > target:
+            accepted = False
+    return accepted
 
 
 @wp.func

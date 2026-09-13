@@ -257,6 +257,6 @@ for commands, scope and exit codes.
 
 The PR-8C2 development snapshot is `fixtures/p2_cuda_graph_inventory_v2.json`: five PCG operations captured as one fixed chain, with CPU/CUDA correctness and warmed trace evidence. The v1 fixture remains a historical plan; full trajectory and performance admission remain pending the manual night run.
 
-Current `masked_smart_restart_v2` adds cross-generation graph reuse after storage/layout validation, conditional checkpoint batches on supported CUDA, and fused CUDA dot reductions. The PR-8C2 inventory remains a historical snapshot. See [current validation semantics](p2_validation_zh.md) for slot accounting, fallbacks and unchanged numerical gates.
+Current `masked_smart_restart_v3` retains validated cross-generation graph reuse, conditional checkpoint batches, and fused CUDA dot reductions. Diagnostic and production now share the public `linear_absolute_tolerance=1e-6` parameter (provisional, pending calibration), combined with the existing per-block relative acceptance bound. Setting it to zero restores the previous acceptance rule. The PR-8C2 inventory remains a historical snapshot. See [current validation semantics](p2_validation_zh.md) for tolerances, slot accounting and fallbacks.
 
 Use [the standalone PCG benchmark](pcg_benchmark_zh.md) to compare native diagnostic/production convergence, FP64 reference error, and complete linear-call costs under stable reuse and generation refresh. It also measures production graph on CUDA, with untimed convergence observation and per-round GPU telemetry.

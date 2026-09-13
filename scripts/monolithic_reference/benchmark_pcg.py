@@ -30,7 +30,7 @@ from scripts.monolithic_reference.p2_measurement import (
 )
 
 
-def pcg_config(maximum_iterations=200):
+def pcg_config(maximum_iterations=200, *, linear_absolute_tolerance=1e-6):
     """Use the solver's current tolerances and policies, without tuning per mode."""
     defaults = _SolverMonolithicInternalConfig()
     return linear.MonolithicPcgConfig(
@@ -45,6 +45,7 @@ def pcg_config(maximum_iterations=200):
         0.0,
         10,
         1e-3,
+        linear_absolute_tolerance=linear_absolute_tolerance,
     )
 
 
@@ -173,6 +174,9 @@ class Reference:
         self.condition_estimate_1 = float(self.norm1 * sla.onenormest(inverse))
         self.floors = np.array([config.residual_floor_global, config.residual_floor_q, config.residual_floor_x])
         self.denominators = np.maximum(self.block_norms(self.rhs), self.floors)
+        self.residual_targets = np.maximum(
+            config.linear_tolerance * self.denominators, config.linear_absolute_tolerance
+        )
         self.energy = float(self.y @ (self.matrix @ self.y))
 
     def block_norms(self, vector):
@@ -191,13 +195,16 @@ class Reference:
         error = y - self.y
         residual = self.rhs - self.matrix @ y
         ratios = self.block_norms(residual) / self.denominators
+        acceptance_ratios = self.block_norms(residual) / self.residual_targets
         relative = self.block_norms(error) / np.maximum(self.block_norms(self.y), np.finfo(float).tiny)
         energy_error = float(error @ (self.matrix @ error))
         return {
             "finite": True,
             "true_ratios": ratios.tolist(),
             "max_true_ratio": float(max(ratios)),
-            "independent_residual_pass": bool(max(ratios) <= self.config.linear_tolerance),
+            "acceptance_ratios": acceptance_ratios.tolist(),
+            "max_acceptance_ratio": float(max(acceptance_ratios)),
+            "independent_residual_pass": bool(max(acceptance_ratios) <= 1.0),
             "y_absolute_error": float(np.linalg.norm(error)),
             "delta_absolute_error": float(np.linalg.norm(self.scale * error)),
             "y_relative_error": float(relative[0]),
@@ -518,7 +525,7 @@ def write_report(output, results, config):
         "",
         "使用当前原生 diagnostic / production；CUDA 另测 production graph。参考解为相同 float32 输入定义的线性系统的 float64 直接解，不是非线性物理真值。",
         "",
-        f"两种数值策略保留各自检查点、stagnation 和 restart 行为；K={config.maximum_iterations}、间隔 {config.true_residual_interval}、原分块容差不因结果调整。原生 SUCCESS 与 float64 独立残差通过分开统计；后者更严格地检验目标矩阵，不据此改写求解器状态。",
+        f"两种数值策略保留各自检查点、stagnation 和 restart 行为；K={config.maximum_iterations}、间隔 {config.true_residual_interval}、rtol={config.linear_tolerance:g}、atol={config.linear_absolute_tolerance:g}（默认待标定）。global/q/x 各自满足 ||r|| <= max(rtol * max(||rhs||, floor), atol)。原生 SUCCESS 与 float64 独立残差通过分开统计，不据此改写求解器状态。",
         "",
         "reuse：同 generation/绑定的预热重复求解。new_generation：相同矩阵更新 generation，计入 actor 因子重算、PCG 准备/捕获、结果读取及 delta 恢复；不包含 BSR 装配、Newton 或物理 step。初次/JIT/捕获成本另存在 JSON，不能用 reuse 替代整体集成效率。",
         "",
@@ -543,14 +550,14 @@ def write_report(output, results, config):
         fig, axes = plt.subplots(1, 3, figsize=(17 if len(result["modes"]) > 3 else 13, 4.2))
         for mode, curve in result["convergence"].items():
             x = [p["iterations"] for p in curve["points"]]
-            for axis, metric in zip(axes[:2], ("max_true_ratio", "y_relative_error"), strict=True):
+            for axis, metric in zip(axes[:2], ("max_acceptance_ratio", "y_relative_error"), strict=True):
                 axis.semilogy(
                     x,
                     [max(p["accuracy"].get(metric, math.nan), 1e-16) for p in curve["points"]],
                     label=f"{mode}: {curve['result']['status']}",
                 )
-        axes[0].axhline(config.linear_tolerance, color="gray", linestyle="--", label="tolerance")
-        axes[0].set_ylabel("Max global/q/x true residual ratio")
+        axes[0].axhline(1.0, color="gray", linestyle="--", label="acceptance bound")
+        axes[0].set_ylabel("Max global/q/x residual / acceptance bound")
         axes[1].set_ylabel("Relative solution error vs FP64")
         for axis in axes[:2]:
             axis.set_xlabel("PCG updates (Style3D: scheduled)")
@@ -584,6 +591,7 @@ def main(argv=None):
     parser.add_argument("--snapshot", type=Path, action="append", default=[])
     parser.add_argument("--repeats", type=int, default=10)
     parser.add_argument("--warmups", type=int, default=3)
+    parser.add_argument("--linear-absolute-tolerance", type=float, default=1e-6)
     parser.add_argument(
         "--include-external", action="store_true", help="Compare native Style3D/Kamino iterations with shared A/M"
     )
@@ -597,7 +605,7 @@ def main(argv=None):
         parser.error("Snapshot case names must be unique")
     args.output.mkdir(parents=True)
     wp.init()
-    config = pcg_config()
+    config = pcg_config(linear_absolute_tolerance=args.linear_absolute_tolerance)
     np.random.seed(20260913)  # noqa: NPY002 - SciPy onenormest uses NumPy's legacy global RNG.
     provenance = args.output / "provenance"
     provenance.mkdir()
@@ -619,7 +627,7 @@ def main(argv=None):
         (args.output / f"{case.name}.json").write_text(json.dumps(_json_safe(result), indent=2, allow_nan=False) + "\n")
         results.append(result)
     manifest = {
-        "schema": "monolithic-pcg-benchmark/v1",
+        "schema": "monolithic-pcg-benchmark/v2",
         "device": str(wp.get_device(args.device)),
         "device_name": wp.get_device(args.device).name,
         "config": asdict(config),

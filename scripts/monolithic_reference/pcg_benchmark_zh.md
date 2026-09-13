@@ -31,7 +31,8 @@ env -u VIRTUAL_ENV OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 \
 记录以下独立指标：
 
 - 原生退出状态、有效迭代、固定调度槽位、检查次数、restart 次数与失败位置。
-- float64 复算 global/q/x 真实残差；分母沿用当前 solver 的 `max(||rhs||_block, floor_block)`，门槛仍为 1e-4。
+- float64 复算 global/q/x 真实残差；每块验收界为 `max(rtol * max(||rhs||_block, floor_block), atol)`，默认 `rtol=1e-4`、`atol=1e-6`（暂定、待标定）。`--linear-absolute-tolerance` 可覆盖 atol，设为 `0` 恢复旧验收规则。
+- `true_ratios` 保留原相对带 floor 的残差比；新增 `acceptance_ratios` 为残差范数除以联合验收界，各块都不超过 1 才独立通过。收敛图改画该验收比，水平线为 1；schema 升至 `monolithic-pcg-benchmark/v2`，历史 v1 报告不回写。
 - `||y-y_ref||/||y_ref||`、q/x 分块偏差、物理增量 `delta=S*y` 的相对及绝对偏差。
 - 1-范数后向误差、SPD 能量范数相对偏差。零参考解且零误差记为 0，非有限量在 JSON 中记为 null。
 
@@ -51,7 +52,7 @@ env -u VIRTUAL_ENV OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 \
 
 `new_generation` **不是完整 Newton step**：它不重做 BSR 装配或物理求值，只隔离数值版本更新对线性求解成本的影响。必须同时查看它和 reuse，不能只报预热图重放时间。固定调度的尾部开销和条件图实际执行的批次完整计入；图捕获/延迟 instantiate/upload/主机提交沿用当前 `capture_seconds` 口径。
 
-当前 `masked_smart_restart_v2` 在存储/稀疏结构不变时跨 generation 复用图，新 generation 的结构摘要验证计入准备成本。支持 CUDA 条件图时每个原有检查批次后可退出；`scheduled_slots` 记录实际调度批次中的槽数，其余执行方式仍记录完整预算。旧 v1 报告的“每代重捕获”和固定 200 槽是历史数据，不回写。
+当前 `masked_smart_restart_v3` 在存储/稀疏结构不变时跨 generation 复用图，新 generation 的结构摘要验证计入准备成本。支持 CUDA 条件图时每个原有检查批次后可退出；`scheduled_slots` 记录实际调度批次中的槽数，其余执行方式仍记录完整预算。旧 v1 报告的“每代重捕获”和固定 200 槽是历史数据，不回写。
 
 每轮前后读取 GPU P-state、SM 频率、温度、功耗及利用率，存入各 case JSON；采样在计时范围外，不修改设备功率/频率。未锁频时需要评审这些记录，短样本 p95 也不是整轨迹尾延迟。完整 solver/step 性能仍由独立的 nightly 测量。
 
@@ -76,7 +77,7 @@ uv run --no-sync python -m unittest -v newton.tests.test_monolithic_pcg_benchmar
 | 实现 | 适配边界 | 原生停止条件 |
 |---|---|---|
 | Style3D | 继承原生 `PcgSolver.solve`、更新及归约；仅将 `step2_update_z` / `step5_update_Ap` 接到共同 A/M。标量向量零拷贝映射到 vec3，末尾不足三维补零 | 固定 200 次调度，无原生收敛状态；报告为 `FIXED_BUDGET`，迭代数包含零 alpha 更新 |
-| Kamino | 原生 `CGSolver`，通过 `BatchedLinearOperator` 回调绑定共同 A/M，单 active world | 全局递推残差；每次迭代判断一次。`rtol=0`，`atol=1e-4 * min(非空块残差分母)`，使全局绝对界足以覆盖所有块，但仍可能存在递推/真实残差偏差 |
+| Kamino | 原生 `CGSolver`，通过 `BatchedLinearOperator` 回调绑定共同 A/M，单 active world | 全局递推残差；每次迭代判断一次。`rtol=0`，`atol=min(非空块联合验收界)`，使全局绝对界足以覆盖所有块，但仍可能存在递推/真实残差偏差 |
 
 Kamino 的全局条件可能比各块独立判定更保守；不声称停止策略相同。Style3D 和 Kamino 都不新增 Monolithic 的真实残差 restart、曲率/事务诊断。统一精度判断始终由原来的 FP64 global/q/x 检查完成；不能只按原生 SUCCESS 或固定循环完成判断通过。
 

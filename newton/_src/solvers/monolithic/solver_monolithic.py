@@ -833,6 +833,7 @@ class SolverMonolithic(SolverBase):
         line_search_max_iterations: int = 8,
         linear_max_iterations: int = 200,
         linear_tolerance: float = 1.0e-4,
+        linear_absolute_tolerance: float = 1.0e-6,
         use_optimized_articulation_mass_matrix: bool = False,
         pcg_mode: SolverMonolithic.PCGMode | str = PCGMode.DIAGNOSTIC,
         use_cuda_graph: bool = False,
@@ -855,6 +856,9 @@ class SolverMonolithic(SolverBase):
             line_search_max_iterations: Positive backtracking iteration limit.
             linear_max_iterations: Positive linear iteration limit.
             linear_tolerance: Positive relative linear residual tolerance.
+            linear_absolute_tolerance: Nonnegative absolute scaled linear residual
+                norm tolerance, applied to global/q/x blocks. Provisional default
+                1e-6 pending calibration; zero restores relative-with-floor acceptance.
             use_optimized_articulation_mass_matrix: Experimental private parallel
                 articulation mass evaluation; fixed at construction, defaults to False.
             pcg_mode: Experimental dynamic diagnostic or fixed masked production PCG policy.
@@ -876,6 +880,7 @@ class SolverMonolithic(SolverBase):
             line_search_max_iterations=line_search_max_iterations,
             linear_max_iterations=linear_max_iterations,
             linear_tolerance=linear_tolerance,
+            linear_absolute_tolerance=linear_absolute_tolerance,
             use_optimized_articulation_mass_matrix=use_optimized_articulation_mass_matrix,
             pcg_mode=pcg_mode,
             use_cuda_graph=use_cuda_graph,
@@ -934,11 +939,21 @@ class SolverMonolithic(SolverBase):
         line_search_max_iterations=8,
         linear_max_iterations=200,
         linear_tolerance=1.0e-4,
+        linear_absolute_tolerance=1.0e-6,
         use_optimized_articulation_mass_matrix=False,
         pcg_mode=PCGMode.DIAGNOSTIC,
         use_cuda_graph=False,
     ):
         # Freeze names now; accepting an option must never silently run different physics.
+        if (
+            isinstance(linear_absolute_tolerance, (bool, np.bool_))
+            or not isinstance(linear_absolute_tolerance, (int, float, np.integer, np.floating))
+            or not math.isfinite(linear_absolute_tolerance)
+            or linear_absolute_tolerance < 0
+            or linear_absolute_tolerance > float(np.finfo(np.float32).max)
+            or (0 < linear_absolute_tolerance < np.finfo(np.float32).smallest_subnormal)
+        ):
+            raise ValueError("linear_absolute_tolerance must be nonnegative and representable in float32")
         if type(use_optimized_articulation_mass_matrix) is not bool:
             raise ValueError("use_optimized_articulation_mass_matrix must be a bool")
         self._use_optimized_articulation_mass_matrix = use_optimized_articulation_mass_matrix
@@ -1054,6 +1069,7 @@ class SolverMonolithic(SolverBase):
         self.line_search_max_iterations = line_search_max_iterations
         self.linear_max_iterations = linear_max_iterations
         self.linear_tolerance = linear_tolerance
+        self.linear_absolute_tolerance = linear_absolute_tolerance
         self._config = _SolverMonolithicInternalConfig()
         layout = self._layout
         nq, nx, size = layout.q_dof_count, layout.dynamic_particle_count, layout.scalar_dof_count
@@ -1580,6 +1596,7 @@ class SolverMonolithic(SolverBase):
                 maximum_iterations=self.linear_max_iterations,
                 true_residual_interval=10,
                 linear_tolerance=self.linear_tolerance,
+                linear_absolute_tolerance=self.linear_absolute_tolerance,
                 residual_floor_global=config.residual_floor_global,
                 residual_floor_q=config.residual_floor_q,
                 residual_floor_x=config.residual_floor_x,

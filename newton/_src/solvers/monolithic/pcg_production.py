@@ -29,9 +29,9 @@ import numpy as np
 import warp as wp
 
 from .linear import MonolithicLinearSolveResult, MonolithicLinearStatus, MonolithicPcgConfig, MonolithicPcgWarmStart
-from .pcg_common import block_drift, max_block_drift
+from .pcg_common import block_drift, max_block_drift, residual_converged
 
-PCG_POLICY = "masked_smart_restart_v2"
+PCG_POLICY = "masked_smart_restart_v3"
 
 wp.set_module_options({"enable_backward": False})
 
@@ -62,6 +62,7 @@ class MaskedPcgConfig:
     residual_floor_q: float = 1.0e-12
     residual_floor_x: float = 1.0e-12
     residual_replacement_threshold: float = 0.1
+    linear_absolute_tolerance: float = 1.0e-6
 
     def __post_init__(self):
         for name in ("maximum_iterations", "true_residual_interval"):
@@ -73,14 +74,17 @@ class MaskedPcgConfig:
         positive = {"linear_tolerance", "residual_floor_global", "residual_floor_q", "residual_floor_x"}
         for name in positive | {
             "residual_replacement_threshold",
+            "linear_absolute_tolerance",
         }:
             value = getattr(self, name)
             if isinstance(value, (bool, np.bool_)) or not isinstance(value, (int, float, np.integer, np.floating)):
                 raise ValueError(f"{name} must be a real scalar")
-            if not math.isfinite(value) or value < 0 or value > np.finfo(np.float32).max:
+            if not math.isfinite(value) or value < 0 or value > float(np.finfo(np.float32).max):
                 raise ValueError(f"{name} must be nonnegative and finite in float32")
             if name in positive and value < np.finfo(np.float32).smallest_subnormal:
                 raise ValueError(f"{name} must be positive and representable in float32")
+            if name == "linear_absolute_tolerance" and 0 < value < np.finfo(np.float32).smallest_subnormal:
+                raise ValueError(f"{name} must be representable in float32")
 
     @classmethod
     def from_monolithic(cls, config):
@@ -90,6 +94,7 @@ class MaskedPcgConfig:
 @wp.struct
 class _Parameters:
     tolerance: float
+    absolute_tolerance: float
     floors: wp.vec3
     replacement_threshold: wp.float64
 
@@ -631,8 +636,13 @@ def _checkpoint_decision(
     s.drifts = drifts
     s.last_true_slot = slot
     s.residual_current = 1
-    worst = wp.max(ratios[0], wp.max(ratios[1], ratios[2]))
-    if worst <= params.tolerance:
+    if residual_converged(
+        wp.vec3(norms[0], norms[1], norms[2]),
+        wp.vec3(norms[6], norms[7], norms[8]),
+        params.floors,
+        params.tolerance,
+        params.absolute_tolerance,
+    ):
         s.status = _SUCCESS
         s.enabled = 0
         s.pending_check = 0
@@ -829,6 +839,7 @@ class MaskedPcgPlan:
         c = self.config
         self.params = _Parameters()
         self.params.tolerance = float(c.linear_tolerance)
+        self.params.absolute_tolerance = float(c.linear_absolute_tolerance)
         self.params.floors = wp.vec3(
             float(c.residual_floor_global), float(c.residual_floor_q), float(c.residual_floor_x)
         )

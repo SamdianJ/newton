@@ -27,6 +27,7 @@ class FakeSolver:
         self.use_optimized_articulation_mass_matrix = kwargs["use_optimized_articulation_mass_matrix"]
         self.pcg_mode = self.PCGMode(kwargs["pcg_mode"])
         self.use_cuda_graph = kwargs["use_cuda_graph"]
+        self.linear_absolute_tolerance = kwargs["linear_absolute_tolerance"]
 
 
 class TestP28BCRunner(unittest.TestCase):
@@ -97,10 +98,22 @@ class TestP28BCRunner(unittest.TestCase):
                 record = json.loads((output / "execution-options.json").read_text())
                 self.assertEqual(len(record["constructions"]), 2)
                 self.assertEqual(record["constructions"], [record["requested"]] * 2)
+                self.assertEqual(record["requested"]["linear_absolute_tolerance"], 0.0)
 
             with patch.object(runner, "SolverMonolithic", FakeSolver), patch.object(runner.run_p2_8a, "main", run):
                 runner.main(
-                    ["--output", str(output), "--kind", "sharpa", "--mass-matrix", "owned", "--pcg-mode", "diagnostic"]
+                    [
+                        "--output",
+                        str(output),
+                        "--kind",
+                        "sharpa",
+                        "--mass-matrix",
+                        "owned",
+                        "--pcg-mode",
+                        "diagnostic",
+                        "--linear-absolute-tolerance",
+                        "0",
+                    ]
                 )
             self.assertIs(FakeSolver.__init__, original)
             index = json.loads((output / "evidence-index.json").read_text())
@@ -141,7 +154,7 @@ class TestP28BCRunner(unittest.TestCase):
                             MonolithicLinearWorkspace, "_solve_pcg_diagnostic", side_effect=AssertionError("fallback")
                         ):
                             solver.step(fixture.state, fixture.state_next, fixture.control, None, 0.001)
-                        self.assertEqual(solver.last_stats.pcg_policy, "masked_smart_restart_v2")
+                        self.assertEqual(solver.last_stats.pcg_policy, "masked_smart_restart_v3")
                         self.assertTrue(solver.last_stats.linear_output_valid)
 
                 arguments = ["--output", str(output), "--kind", "tet", "--pcg-mode", "production"]
@@ -151,7 +164,7 @@ class TestP28BCRunner(unittest.TestCase):
                     runner.main(arguments)
                 record = json.loads((output / "execution-options.json").read_text())
                 self.assertEqual(record["constructions"], [record["requested"]] * 2)
-                self.assertEqual(record["pcg_policy"], "masked_smart_restart_v2")
+                self.assertEqual(record["pcg_policy"], "masked_smart_restart_v3")
 
     def test_existing_evidence_is_untouched(self):
         """Reject output reuse before changing any existing evidence."""
