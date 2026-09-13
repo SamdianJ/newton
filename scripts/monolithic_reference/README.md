@@ -253,3 +253,5 @@ failed attempts, and separates execution completion from numerical budget
 failures. It does not change system power settings or grant performance
 acceptance automatically. See [the validation workflow](p2_validation_zh.md)
 for commands, scope and exit codes.
+
+The PR-8C2 development snapshot is `fixtures/p2_cuda_graph_inventory_v2.json`: five PCG operations captured as one fixed chain, with CPU/CUDA correctness and warmed trace evidence. The v1 fixture remains a historical plan; full trajectory and performance admission remain pending the manual night run.
