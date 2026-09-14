@@ -6,10 +6,11 @@ import warp as wp
 
 
 @wp.func
-def residual_converged(norms: wp.vec3, rhs_norms: wp.vec3, floors: wp.vec3, rtol: float, atol: float):
+def residual_converged(norms: wp.vec3, rhs_norms: wp.vec3, floors: wp.vec3, rtol: float, atol: float, limits: wp.vec3):
     accepted = bool(True)
     for k in range(3):
         target = wp.max(wp.float64(rtol) * wp.float64(wp.max(rhs_norms[k], floors[k])), wp.float64(atol))
+        target = wp.min(target, wp.float64(limits[k]))
         if not wp.isfinite(norms[k]) or wp.float64(norms[k]) > target:
             accepted = False
     return accepted

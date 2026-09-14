@@ -861,6 +861,8 @@ class SolverMonolithic(SolverBase):
             linear_absolute_tolerance: Nonnegative absolute scaled linear residual
                 norm tolerance, applied to global/q/x blocks. Provisional default
                 1e-6 pending calibration; zero restores relative-with-floor acceptance.
+                Both tolerance branches are capped at half of each current outer
+                Newton residual goal, converted from RMS to L2.
             use_optimized_articulation_mass_matrix: Experimental private parallel
                 articulation mass evaluation; fixed at construction, defaults to False.
             pcg_mode: Experimental dynamic diagnostic or fixed masked production PCG policy.
@@ -1643,6 +1645,14 @@ class SolverMonolithic(SolverBase):
                 true_residual_interval=10,
                 linear_tolerance=self.linear_tolerance,
                 linear_absolute_tolerance=self.linear_absolute_tolerance,
+                # Leave half the outer residual budget for nonlinear error. Convert
+                # each block's RMS goal to L2 in the current scaling, including q-only.
+                residual_norm_limits=tuple(
+                    0.5
+                    * math.sqrt(max(vector.size, 1))
+                    * (getattr(config, f"merit_absolute_{block}") + getattr(config, f"merit_relative_{block}") * ref)
+                    for block, ref, vector in zip(("global", "q", "x"), reference, self._metric_slices, strict=True)
+                ),
                 residual_floor_global=config.residual_floor_global,
                 residual_floor_q=config.residual_floor_q,
                 residual_floor_x=config.residual_floor_x,

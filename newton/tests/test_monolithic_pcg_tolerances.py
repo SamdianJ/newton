@@ -10,6 +10,7 @@ from unittest.mock import patch
 import numpy as np
 import warp as wp
 
+import newton
 from newton._src.solvers.monolithic import linear, pcg_production
 from newton._src.solvers.monolithic.pcg_production import MaskedPcgConfig
 from newton.solvers.experimental.monolithic import SolverMonolithic
@@ -51,13 +52,19 @@ def test_block_acceptance(test, device):
     plan = make_plan(device, np.eye(4), [1, 0, 0, 0])
     packet = wp.zeros(1, dtype=linear._MonolithicPcgPacket, device=device)
     ratios = wp.zeros(3, dtype=float, device=device)
-    for norms, rhs, expected in (
-        ((5e-7, 3e-7, 4e-7), (5e-7, 3e-7, 4e-7), True),
-        ((1e-5, 0, 1e-5), (1, 0, 1), True),
-        ((2e-6, 2e-6, 0), (10, 2e-6, 10), False),
-        ((2e-6, 0, 2e-6), (10, 10, 2e-6), False),
+    unbounded = (float("inf"),) * 3
+    for norms, rhs, limits, expected in (
+        ((5e-7, 3e-7, 4e-7), (5e-7, 3e-7, 4e-7), unbounded, True),
+        ((1e-5, 0, 1e-5), (1, 0, 1), unbounded, True),
+        ((2e-6, 2e-6, 0), (10, 2e-6, 10), unbounded, False),
+        ((2e-6, 0, 2e-6), (10, 10, 2e-6), unbounded, False),
+        ((5e-7, 3e-7, 4e-7), (5e-7, 3e-7, 4e-7), (1e-7, 1e-6, 1e-6), False),
+        ((5e-7, 3e-7, 4e-7), (5e-7, 3e-7, 4e-7), (1e-6, 1e-7, 1e-6), False),
+        ((5e-7, 3e-7, 4e-7), (5e-7, 3e-7, 4e-7), (1e-6, 1e-6, 1e-7), False),
+        ((1e-5, 0, 1e-5), (1, 0, 1), (1e-6, 1e-6, 1e-6), False),
     ):
-        with test.subTest(norms=norms, rhs=rhs):
+        with test.subTest(norms=norms, rhs=rhs, limits=limits):
+            plan.residual_norm_limits.assign(np.asarray(limits, dtype=np.float32))
             plan._launch(pcg_production._initialize_state, 1, [plan.state, plan.error, plan.scalars, 11])
             plan.norms.assign(np.array([*norms, 0, 0, 0, *rhs], dtype=np.float32))
             plan._launch(
@@ -70,7 +77,7 @@ def test_block_acceptance(test, device):
             wp.launch(
                 linear._pack_monolithic_pcg_residual,
                 1,
-                [plan.error, ratios, diagnostic_norms, plan.params.floors, 1e-4, 1e-6, packet],
+                [plan.error, ratios, diagnostic_norms, plan.params.floors, 1e-4, 1e-6, wp.vec3(*limits), packet],
                 device=device,
             )
             test.assertEqual(bool(packet.numpy()[0]["check"]), expected)
@@ -84,8 +91,17 @@ def test_solver_option(test, device):
         original = solver._linear.solve_pcg
         values = []
 
-        def solve(*args, original=original, values=values, **kwargs):
-            values.append(kwargs["config"].linear_absolute_tolerance)
+        def solve(*args, original=original, values=values, solver=solver, **kwargs):
+            config = kwargs["config"]
+            values.append(config.linear_absolute_tolerance)
+            limits = config.residual_norm_limits
+            test.assertIsNotNone(limits)
+            metrics = solver._metrics
+            for i, block in enumerate(("global", "q", "x")):
+                ref = metrics["merit_reference" if i == 0 else f"merit_{block}_reference"]
+                goal = getattr(solver._config, f"merit_absolute_{block}") + 1e-4 * ref
+                count = (14, 2, 12)[i]  # TinyFixture's scalar global/q/x counts.
+                np.testing.assert_allclose(limits[i] / np.sqrt(count), 0.5 * goal, rtol=1e-12, atol=0)
             return original(*args, **kwargs)
 
         with patch.object(solver._linear, "solve_pcg", solve):
@@ -93,6 +109,66 @@ def test_solver_option(test, device):
         test.assertEqual(solver.last_stats.status, SolverMonolithic.Status.SUCCESS)
         test.assertTrue(values)
         test.assertEqual(set(values), {atol})
+
+
+def test_unresolved_q_small_rhs(test, device):
+    """Advance a small joint load that passes PCG atol but fails outer q acceptance."""
+    for mode in ("diagnostic", "production"):
+        fixture, solver = stepping._free_scene(
+            device,
+            pcg_mode=mode,
+            use_cuda_graph=device.is_cuda and mode == "production",
+            use_optimized_articulation_mass_matrix=True,
+        )
+        fixture.state.joint_q.zero_()
+        newton.eval_fk(fixture.model, fixture.state.joint_q, fixture.state.joint_qd, fixture.state)
+        fixture.control.joint_f.assign([0, 5e-4])
+        solver.step(fixture.state, fixture.state_next, fixture.control, None, 0.001)
+        test.assertEqual(solver.last_stats.status, SolverMonolithic.Status.SUCCESS)
+        test.assertGreater(solver.last_stats.linear_iterations, 0)
+        test.assertLessEqual(solver.last_stats.convergence_ratio_q, 1)
+        # Independent backward Euler response: h^2 * force / 0.5 kg.
+        np.testing.assert_allclose(fixture.state_next.joint_q.numpy(), [0, 1e-9], atol=1e-12, rtol=1e-4)
+
+
+def test_limits_reuse_graph(test, device):
+    """Apply changing outer caps on the same buffers, including empty q/x blocks and reset."""
+    for case in (benchmark.synthetic_cases()[i] for i in (0, 3, 4)):
+        if case.nq == 0:
+            # Use identity for the empty-q lifecycle check, avoiding the separate
+            # ill-conditioned benchmark's stagnation/iteration-budget behavior.
+            case.arrays["K_values"][:] = np.eye(case.n, dtype=np.float32).reshape(-1)
+            case.arrays["ax_internal_values"][:] = (
+                np.eye(case.n, dtype=np.float32)
+                .reshape(case.n // 3, 3, case.n // 3, 3)
+                .transpose(0, 2, 1, 3)
+                .reshape(-1, 3, 3)
+            )
+            for name in ("S", "D", "dynamic_diagonal"):
+                case.arrays[name][:] = 1
+        case.arrays["rhs_hat"] = np.zeros(case.n, dtype=np.float32)
+        case.arrays["rhs_hat"][0] = 5e-7
+        for mode in (
+            ("diagnostic", "production", "production_graph") if device.is_cuda else ("diagnostic", "production")
+        ):
+            config = benchmark.pcg_config(30)
+            runner = benchmark.Runner(case, mode, device, config)
+            graph = None
+            for limits in (None, (1e-7, 1e-7, 1e-7), (2e-7, 2e-7, 2e-7), None):
+                runner.config = replace(config, residual_norm_limits=limits)
+                result = runner.solve()
+                test.assertEqual(result.status.name, "SUCCESS")
+                test.assertEqual(result.iterations == 0, limits is None)
+                reference = benchmark.Reference(case, runner.config)
+                test.assertTrue(reference.measure(runner.y.numpy())["independent_residual_pass"])
+                if limits is not None:
+                    test.assertFalse(reference.measure(np.zeros(case.n))["independent_residual_pass"])
+                if mode == "production_graph":
+                    if graph is None:
+                        graph = runner.workspace._masked_pcg_plan.graph
+                    else:
+                        test.assertFalse(result.graph_rebuilt)
+                        test.assertIs(runner.workspace._masked_pcg_plan.graph, graph)
 
 
 class TestMonolithicPcgTolerances(unittest.TestCase):
@@ -111,8 +187,30 @@ class TestMonolithicPcgTolerances(unittest.TestCase):
             with self.subTest(public=value), self.assertRaisesRegex(ValueError, "linear_absolute_tolerance"):
                 SolverMonolithic(None, collision_pipeline=None, contact_stiffness=1, linear_absolute_tolerance=value)
 
+    def test_invalid_outer_limits(self):
+        """Reject malformed or unrepresentable per-block residual caps."""
+        for limits in (
+            (1e-7,),
+            [1e-7] * 3,
+            (True, 1, 1),
+            (0, 1, 1),
+            (-1, 1, 1),
+            (float("nan"), 1, 1),
+            (float("inf"), 1, 1),
+            (1e40, 1, 1),
+            (1e-100, 1, 1),
+        ):
+            with self.subTest(limits=limits), self.assertRaisesRegex(ValueError, "residual_norm_limits"):
+                replace(benchmark.pcg_config(), residual_norm_limits=limits)
 
-for function in (test_absolute_acceptance, test_block_acceptance, test_solver_option):
+
+for function in (
+    test_absolute_acceptance,
+    test_block_acceptance,
+    test_solver_option,
+    test_unresolved_q_small_rhs,
+    test_limits_reuse_graph,
+):
     add_function_test(TestMonolithicPcgTolerances, function.__name__, function, devices=get_test_devices())
 
 if __name__ == "__main__":

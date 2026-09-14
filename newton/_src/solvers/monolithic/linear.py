@@ -73,8 +73,22 @@ class MonolithicPcgConfig:
     linear_absolute_tolerance: float = 1.0e-6
     """Absolute scaled residual norm tolerance for every block; provisional, pending calibration.
     Zero retains the legacy relative-with-floor acceptance rule."""
+    residual_norm_limits: tuple[float, float, float] | None = None
+    """Optional outer-solve caps on global/q/x scaled L2 residuals, applied after rtol/atol.
+    None leaves standalone PCG acceptance unchanged. These are per-solve numeric data."""
 
     def __post_init__(self):
+        if self.residual_norm_limits is not None:
+            if not isinstance(self.residual_norm_limits, tuple) or len(self.residual_norm_limits) != 3:
+                raise ValueError("residual_norm_limits must be a global/q/x tuple")
+            for limit in self.residual_norm_limits:
+                if (
+                    isinstance(limit, (bool, np.bool_))
+                    or not isinstance(limit, (int, float, np.integer, np.floating))
+                    or not np.isfinite(limit)
+                    or not float(np.finfo(np.float32).smallest_subnormal) <= limit <= float(np.finfo(np.float32).max)
+                ):
+                    raise ValueError("residual_norm_limits must be positive and finite in float32")
         value = self.linear_absolute_tolerance
         if (
             isinstance(value, (bool, np.bool_))
@@ -830,6 +844,7 @@ def _pack_monolithic_pcg_residual(
     floors: wp.vec3,
     rtol: float,
     atol: float,
+    limits: wp.vec3,
     packet: wp.array[_MonolithicPcgPacket],
 ):
     value = _MonolithicPcgPacket()
@@ -837,7 +852,7 @@ def _pack_monolithic_pcg_residual(
     value.ratios = wp.vec3(ratios[0], ratios[1], ratios[2])
     value.check = int(
         residual_converged(
-            wp.vec3(norms[0], norms[1], norms[2]), wp.vec3(norms[3], norms[4], norms[5]), floors, rtol, atol
+            wp.vec3(norms[0], norms[1], norms[2]), wp.vec3(norms[3], norms[4], norms[5]), floors, rtol, atol, limits
         )
     )
     packet[0] = value
@@ -1703,6 +1718,7 @@ class MonolithicLinearWorkspace:
                 wp.vec3(config.residual_floor_global, config.residual_floor_q, config.residual_floor_x),
                 config.linear_tolerance,
                 config.linear_absolute_tolerance,
+                wp.vec3(*(config.residual_norm_limits or (float("inf"),) * 3)),
                 self._pcg_packet,
             ],
             device=self.device,

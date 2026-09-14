@@ -178,6 +178,8 @@ class Reference:
         self.residual_targets = np.maximum(
             config.linear_tolerance * self.denominators, config.linear_absolute_tolerance
         )
+        if config.residual_norm_limits is not None:
+            self.residual_targets = np.minimum(self.residual_targets, config.residual_norm_limits)
         self.energy = float(self.y @ (self.matrix @ self.y))
 
     def block_norms(self, vector):

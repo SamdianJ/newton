@@ -97,6 +97,7 @@ class _Parameters:
     absolute_tolerance: float
     floors: wp.vec3
     replacement_threshold: wp.float64
+    residual_norm_limits: wp.array[float]
 
 
 @wp.struct
@@ -642,6 +643,7 @@ def _checkpoint_decision(
         params.floors,
         params.tolerance,
         params.absolute_tolerance,
+        wp.vec3(params.residual_norm_limits[0], params.residual_norm_limits[1], params.residual_norm_limits[2]),
     ):
         s.status = _SUCCESS
         s.enabled = 0
@@ -830,6 +832,7 @@ class MaskedPcgPlan:
         self.regularization = wp.zeros(1, dtype=float, device=self.device)
         self.zero_guess = wp.ones(1, dtype=int, device=self.device)
         self.condition = wp.zeros(1, dtype=int, device=self.device)
+        self.residual_norm_limits = wp.full(3, float("inf"), dtype=float, device=self.device)
         self._conditional_graph_supported = self.device.is_cuda and wp.is_conditional_graph_supported()
         # Fuse single-tile dots; retain the parallel reduction for larger systems.
         self._products_kernel = (
@@ -853,6 +856,7 @@ class MaskedPcgPlan:
             float(c.residual_floor_global), float(c.residual_floor_q), float(c.residual_floor_x)
         )
         self.params.replacement_threshold = float(c.residual_replacement_threshold)
+        self.params.residual_norm_limits = self.residual_norm_limits
 
     @classmethod
     def from_workspace(cls, workspace, rhs_hat, y, *, config, delta=None):
@@ -1191,6 +1195,10 @@ def solve_pcg_production(workspace, rhs_hat, y, *, generation, warm_start, confi
         # Numeric validity was checked above; matching storage/layout permits
         # reuse of captured nodes. Bind this request without accepting stale callers.
         plan._generation = generation
+        # Per-Newton residual caps change numerically without changing graph bindings.
+        plan.residual_norm_limits.assign(
+            np.asarray(config.residual_norm_limits or (float("inf"),) * 3, dtype=np.float32)
+        )
         plan.set_solve_parameters(
             regularization=workspace._lambda, zero_initial_guess=warm_start == MonolithicPcgWarmStart.ZERO
         )
