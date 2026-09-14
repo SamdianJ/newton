@@ -1,0 +1,143 @@
+{
+  "schema": "monolithic-p2-cube-grasp/v3",
+  "status": "PR8H_FIRST_SCAN_FAILED_NO_FROZEN_GRASP",
+  "object": {
+    "type": "cube",
+    "edge_m": 0.04,
+    "cells_per_axis": [
+      4,
+      6,
+      8
+    ],
+    "nodes": [
+      125,
+      343,
+      729
+    ],
+    "tets": [
+      384,
+      1296,
+      3072
+    ],
+    "mass_kg": 0.064,
+    "density": 1000.0,
+    "all_nodes_dynamic": true
+  },
+  "execution": {
+    "pcg_mode": "production",
+    "use_cuda_graph": true,
+    "use_optimized_articulation_mass_matrix": true,
+    "preconditioner": "actor_block",
+    "dt": 0.001,
+    "frame_dt": 0.01,
+    "rtol": 0.0001,
+    "atol": 1e-06,
+    "pcg_p95_budget": 64,
+    "pcg_hard_cap": 200,
+    "linear_outer_residual_limit_fraction": 0.5
+  },
+  "grasp": {
+    "status": "FAILED_NO_FEASIBLE_FIRST_SCAN_STOP_FREEZE",
+    "duration_s": 9.0,
+    "stage_ends_s": [
+      0.5,
+      2.5,
+      4.5,
+      5.5,
+      6.5,
+      8.5,
+      9.0
+    ],
+    "lift_m": 0.05,
+    "initial_center_m": [
+      0.025,
+      -0.03,
+      0.19
+    ],
+    "offsets_x_y_mm": [
+      -10,
+      0,
+      10
+    ],
+    "offsets_z_mm": [
+      -5,
+      0,
+      5
+    ],
+    "scan_grid": 2,
+    "required": "side-face friction support by at least two fingers; independent friction-off negative control",
+    "source_commit": "3d013e28",
+    "completed_jobs": 27,
+    "completed_trajectories": 0,
+    "failure_stages": {
+      "prepare": 14,
+      "close": 13
+    },
+    "failure_counts": {
+      "REGULARIZATION_EXHAUSTED": 17,
+      "NONLINEAR_STAGNATION": 6,
+      "TET_INVERSION": 4
+    },
+    "maximum_accepted_time_s": 1.417,
+    "initial_hand_penetrating_cases": 18,
+    "initial_hand_penetration_mm_range": [
+      2.501476816557743,
+      7.057272451899377
+    ],
+    "initial_nonpenetrating_cases": 9,
+    "scan_analysis_sha256": "b32cc1b96e64c6808b5d67cab82c41bf2bf064d8b243965a2b73278376ac637a"
+  },
+  "calibration": {
+    "status": "FROZEN",
+    "stiffness_scan_n_m3": [
+      500000.0,
+      1000000.0,
+      2000000.0,
+      5000000.0,
+      10000000.0,
+      20000000.0,
+      50000000.0,
+      100000000.0
+    ],
+    "cases": 24,
+    "passed": 21,
+    "failure": "1e8: all three grids below 99% normal convergence",
+    "budget_and_physics_separate": true,
+    "frozen_stiffness": 500000.0,
+    "initial_grasp_stiffness": 10000000.0,
+    "source_commit": "2c9789be",
+    "result_sha256": "d07299546763e54274130981957f300e4d96dad18b8bde54a3d91df8431c4933"
+  },
+  "pr8i": {
+    "status": "HISTORICAL_TRIGGER_RETAINED_CUBE_SCREEN_INCOMPLETE",
+    "historical_evidence": "dev/monothlic/newton_monolithic_solver_p2_architecture_zh.md sections 9.1/9.2; S=1/2 coarse-h over-budget records retained",
+    "cube_evidence": "Prepare 5389 calls, Close 10761 calls: all SUCCESS, p95/max=10 including retries; Hold/Lift missing. Partial only, not NOT_TRIGGERED.",
+    "spd_design": "SCHUR-SPD-01_CLOSED_MATHEMATICAL_DESIGN_ONLY",
+    "production_apply": "NOT_IMPLEMENTED",
+    "spd_design_commit": "bfe49c9d",
+    "spd_adr": "../normal_patch_spd_adr_zh.md",
+    "historical_raw_evidence": "Original P2-0 summary not available in this workspace; preserve accepted report evidence, not independently remeasured."
+  },
+  "pr8j": {
+    "status": "NOT_STARTED_PR8H_PR8I_DEPENDENCIES_OPEN"
+  },
+  "g6": "NOT_VALIDATED",
+  "g7": "NOT_VALIDATED",
+  "nightly": "USER_MANUAL_ONLY",
+  "push": "NOT_AUTHORIZED",
+  "evidence": "agents/integration/artifacts/p2/pr8hij-resume-20260914",
+  "historical_ball": "PRESERVED; not a matched performance comparison",
+  "pending_freeze": [
+    "grasp fixture",
+    "support duration and force thresholds",
+    "deformation/recovery/release gates",
+    "time-error and performance budgets"
+  ],
+  "previous": "p2_cube_grasp_v2.json",
+  "next_round": {
+    "status": "PLANNED_NOT_EXECUTED",
+    "plan": "../cube_grasp_round2_zh.md",
+    "first": "Reproduce nonpenetrating positions 18 and 24; inspect outer residual, merit and contact/history before changing poses or timing.",
+    "pose_timing_scan": "Freeze a new joint-name pose/trajectory manifest only after diagnosis and static clearance/side-contact design; no online tuning."
+  }
+}

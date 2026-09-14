@@ -1,6 +1,6 @@
 # PR8H：40 mm cube 抓取入口
 
-**三档物理校准已通过，抓取 fixture 尚未冻结。** 三档资产与入口可用；不能用旧球校准或修改结果中的状态绕过门槛。版本化状态见 [cube v2](fixtures/p2_cube_grasp_v2.json)；[历史 v1](fixtures/p2_cube_grasp_v1.json) 保留。历史球入口与 anchored-close 保留，cube 不用于重写旧性能结果。
+**三档物理校准已通过，抓取 fixture 尚未冻结。** 三档资产与入口可用；不能用旧球校准或修改结果中的状态绕过门槛。版本化状态见 [cube v3](fixtures/p2_cube_grasp_v3.json)；[历史 v1](fixtures/p2_cube_grasp_v1.json) 保留。历史球入口与 anchored-close 保留，cube 不用于重写旧性能结果。
 
 资产为每边 4/6/8 格的 Freudenthal tet cube，125/343/729 节点，质量 0.064 kg，全部动态。默认使用 actor_block、owned articulation mass 和 production graph；`--pcg-mode diagnostic` 为独立数值对照。CPU 支持资产/双压板组件，真实手部 SDF 抓取需要 CUDA。
 
@@ -37,4 +37,13 @@ example 默认中档 `cube_r2.npz`，`--cube` 可选择独立三档资产；默�
 
 ## 2026-09-14 校准续跑
 
-基于 `2c9789be` 的内外层验收兼容修复，24 点中 21 点通过。三档共同通过的最低已测刚度为 `5e5 N/m³`，抓取仍从 `1e7 N/m³` 开始。`1e8` 三档正常收敛率不足 99%，完整保留失败，不将轨迹完成等同通过。所有点 PCG p95 为 10；这是压板结果，不是自由抓取触发结论。源码及完整逐步结果见工作区 `agents/integration/artifacts/p2/pr8hij-resume-20260914/calibration`。下一步为预声明的 27 位置中档探索，尚无抓取或性能 GO。
+基于 `2c9789be` 的内外层验收兼容修复，24 点中 21 点通过。三档共同通过的最低已测刚度为 `5e5 N/m³`，抓取仍从 `1e7 N/m³` 开始。`1e8` 三档正常收敛率不足 99%，完整保留失败，不将轨迹完成等同通过。所有点 PCG p95 为 10；这是压板结果，不是自由抓取触发结论。源码及完整逐步结果见工作区 `agents/integration/artifacts/p2/pr8hij-resume-20260914/calibration`。随后已完成预声明的 27 位置中档探索，结果见下；尚无抓取或性能 GO。
+
+
+## 2026-09-14 首轮抓取结果
+
+27 个独立作业全部完成失败记录，0 条完整 9 秒轨迹。14 个在 Prepare 失败、13 个在 Close 失败，最长接受到 1.417 秒。17 次 regularization 耗尽、6 次非线性停滞、4 次 tet inversion；失败均记录 rollback。原始初态重建的接触查询显示18个配置有2.501–7.057mm手部穿透，其余9个无初始手部负间隙但仍在Close失败，不能将全部失败归因为初态几何。
+
+包含 retry 的 Prepare/Close 共16150次PCG均SUCCESS，最大迭代与p95均10。Hold/Lift未测，逐作业`patch_schur_trigger=false`只代表已测阶段，不能关闭历史触发或出具完整NOT_TRIGGERED结论。当前停止抓取冻结，不执行没有候选的三档抓取/摩擦负对照，不计失败轨迹为性能样本。
+
+[下一轮计划](cube_grasp_round2_zh.md)优先诊断无初态穿插的Close失败，再冻结新姿态/时序扫描。[SPD ADR](normal_patch_spd_adr_zh.md)与6项FP64测试已关闭8I数学公式障碍，production仍未实现；8J依赖仍开放。校准v2和早期失败v1保持历史。完整失败分布、逐调用数据与只读间隙核查位于工作区`agents/integration/artifacts/p2/pr8hij-resume-20260914`。
