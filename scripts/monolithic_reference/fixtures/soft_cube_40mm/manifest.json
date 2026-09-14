@@ -1,0 +1,56 @@
+{
+  "schema": "tet-cube/v1",
+  "assets": [
+    {
+      "node_count": 125,
+      "tet_count": 384,
+      "boundary_count": 192,
+      "interior_node_count": 27,
+      "minimum_rest_volume_m3": 1.6666665549079594e-07,
+      "volume_m3": 6.399999570846564e-05,
+      "minimum_mean_ratio": 0.755952629936924,
+      "mass_kg": 0.06399999570846564,
+      "all_nodes_dynamic": true,
+      "object_type": "cube",
+      "edge_m": 0.04,
+      "cells_per_axis": 4,
+      "refinement": 1,
+      "file": "cube_r1.npz",
+      "sha256": "c35a2c4a025db2b3de1c7a679a63b14eb35bfb809d74c0ae65f97786bcf483e9"
+    },
+    {
+      "node_count": 343,
+      "tet_count": 1296,
+      "boundary_count": 432,
+      "interior_node_count": 125,
+      "minimum_rest_volume_m3": 4.9382698940644033e-08,
+      "volume_m3": 6.399999570846562e-05,
+      "minimum_mean_ratio": 0.7559526158562009,
+      "mass_kg": 0.06399999570846562,
+      "all_nodes_dynamic": true,
+      "object_type": "cube",
+      "edge_m": 0.04,
+      "cells_per_axis": 6,
+      "refinement": 2,
+      "file": "cube_r2.npz",
+      "sha256": "47483392284d11afce163bd0d2712b4b749a7b9d54c00cc5ba9bf24a980b7a4b"
+    },
+    {
+      "node_count": 729,
+      "tet_count": 3072,
+      "boundary_count": 768,
+      "interior_node_count": 343,
+      "minimum_rest_volume_m3": 2.0833331936349486e-08,
+      "volume_m3": 6.399999570846564e-05,
+      "minimum_mean_ratio": 0.755952629936924,
+      "mass_kg": 0.06399999570846564,
+      "all_nodes_dynamic": true,
+      "object_type": "cube",
+      "edge_m": 0.04,
+      "cells_per_axis": 8,
+      "refinement": 3,
+      "file": "cube_r3.npz",
+      "sha256": "fef6af96b2fb68bfd088dc44164aa16d4ad7ea4412e6637dc12719b67ccceb7c"
+    }
+  ]
+}

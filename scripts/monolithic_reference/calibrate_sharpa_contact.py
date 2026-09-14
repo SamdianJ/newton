@@ -5,6 +5,7 @@
 
 import argparse
 import json
+import time
 from pathlib import Path
 
 import numpy as np
@@ -13,7 +14,9 @@ from newton.solvers.experimental.monolithic import MonolithicCollisionPipeline, 
 
 import newton
 from newton.examples.softbody.monolithic_soft_ball import load_ball
+from newton.examples.softbody.monolithic_soft_cube import load_cube
 from newton.examples.softbody.sharpa_close import sha256
+from scripts.monolithic_reference.p2_measurement import pcg_call_record
 
 CONFIG = {
     "schema": "sharpa-contact-calibration/v1",
@@ -37,9 +40,12 @@ CONFIG = {
 }
 
 
-def make_case(ball, stiffness, device):
+def make_case(ball, stiffness, device, *, cube=False):
     """Clamp a fully dynamic sphere between fixed and damped force-driven planes."""
-    mesh = load_ball(ball)
+    if cube:
+        mesh = load_cube(ball)
+    else:
+        mesh = load_ball(ball)
     b = newton.ModelBuilder(gravity=CONFIG["gravity"])
     base = b.add_link(mass=1.0, inertia=wp.diag(wp.vec3(0.01)))
     plate = b.add_link(mass=CONFIG["plate_mass"], inertia=wp.diag(wp.vec3(1e-5)))
@@ -59,7 +65,7 @@ def make_case(ball, stiffness, device):
         effort_limit=5.0,
     )
     b.add_articulation([fixed, drive])
-    radius = 0.02 + CONFIG["particle_radius"]
+    radius = (float(np.max(np.abs(mesh.vertices[:, 2]))) if cube else 0.02) + CONFIG["particle_radius"]
     cfg = b.ShapeConfig(margin=0.0)
     b.add_shape_plane(
         body=base, width=0.0, length=0.0, xform=wp.transform((0, 0, -radius), wp.quat_identity()), cfg=cfg
@@ -87,6 +93,15 @@ def make_case(ball, stiffness, device):
         tangential_stiffness=CONFIG["tangential_stiffness"],
         material_model="smith_log_stabilized",
         mass_mode="consistent",
+        **(
+            {
+                "pcg_mode": "production",
+                "use_cuda_graph": wp.get_device(device).is_cuda,
+                "use_optimized_articulation_mass_matrix": True,
+            }
+            if cube
+            else {}
+        ),
         tet_rest_density=wp.full(model.tet_count, 1000.0, device=device),
         joint_terms=SolverMonolithic.JointTerms(implicit_pd=True),
     )
@@ -96,17 +111,31 @@ def make_case(ball, stiffness, device):
     return model, solver, state, control, load
 
 
-def run_case(ball, stiffness, device, output):
+def run_case(ball, stiffness, device, output, *, cube=False):
     """Run a fixed schedule without adaptive stepping or acceptance changes."""
-    _model, solver, state, control, load = make_case(ball, stiffness, device)
+    _model, solver, state, control, load = make_case(ball, stiffness, device, cube=cube)
     rows = []
     steps = round((CONFIG["ramp_seconds"] + CONFIG["hold_seconds"]) / CONFIG["dt"])
     failure = None
+    calls = []
+    if cube:
+        solve = solver._linear.solve_pcg
+
+        def measured_solve(*args, **kwargs):
+            wp.synchronize_device(solver.model.device)
+            start = time.perf_counter()
+            result = solve(*args, **kwargs)
+            wp.synchronize_device(solver.model.device)
+            calls.append(pcg_call_record(result, time.perf_counter() - start, use_cuda_graph=solver.use_cuda_graph))
+            return result
+
+        solver._linear.solve_pcg = measured_solve
     for step in range(steps):
         t = (step + 1) * CONFIG["dt"]
         u = min(t / CONFIG["ramp_seconds"], 1)
         target_load = load * u * u * (3 - 2 * u)
         control.joint_target_qd.assign([-target_load / CONFIG["plate_velocity_gain"]])
+        calls.clear()
         try:
             solver.step(state, state, control, None, CONFIG["dt"])
         except Exception as error:
@@ -134,6 +163,7 @@ def run_case(ball, stiffness, device, output):
                 "load": target_load,
                 "pd_force": stats.joint_pd_force,
                 "linear_iterations": stats.linear_iterations,
+                **({"pcg_calls": list(calls)} if cube else {}),
             }
         )
         if stats.rolled_back:
@@ -160,6 +190,21 @@ def run_case(ball, stiffness, device, output):
         "maximum_penetration": max((r["penetration"] for r in rows), default=None),
         "minimum_det_f": min((r["min_det_f"] for r in rows), default=None),
     }
+    if cube:
+        iterations = [c["iterations"] for row in rows for c in row["pcg_calls"]]
+        summary["cube_sha256"] = summary.pop("ball_sha256")
+        summary["accepted_steps"] = sum(not row["rollback"] for row in rows)
+        summary["failure_status"] = rows[-1]["status"] if rows and rows[-1]["rollback"] else None
+        summary["failure_reason"] = rows[-1]["reason"] if rows and rows[-1]["rollback"] else failure
+        summary["force_error_is_full_hold"] = len(rows) == steps and not any(row["rollback"] for row in rows)
+        summary["converged_fraction"] = float(np.mean([row["converged"] for row in rows])) if rows else 0.0
+        summary["failed_step_calls"] = list(calls) if failure else []
+        summary["pcg_iteration_p95"] = float(np.percentile(iterations, 95)) if iterations else None
+        summary["patch_schur_trigger"] = bool(iterations and summary["pcg_iteration_p95"] > 64)
+        summary["pcg_budget_status"] = (
+            ("EXCEEDED" if summary["patch_schur_trigger"] else "WITHIN_BUDGET") if iterations else "NO_CALLS"
+        )
+        summary["pcg_failure_calls"] = [c for row in rows for c in row["pcg_calls"] if c["status"] != "SUCCESS"]
     output.mkdir(parents=True, exist_ok=True)
     (output / "trace.json").write_text(json.dumps(rows, indent=2) + "\n")
     (output / "summary.json").write_text(json.dumps(summary, indent=2) + "\n")

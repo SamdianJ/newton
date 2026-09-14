@@ -15,6 +15,23 @@ YOUNG_MODULUS = 10000.0
 POISSON_RATIO = 0.3
 
 
+def _grid_tets(n):
+    """Consistent Freudenthal subdivision shared by ball and cube assets."""
+    ids = np.arange((n + 1) ** 3).reshape((n + 1,) * 3)
+    tets = []
+    for cell in itertools.product(range(n), repeat=3):
+        for order in itertools.permutations(range(3)):
+            corner = np.array(cell)
+            tet = [ids[tuple(corner)]]
+            for axis in order:
+                corner[axis] += 1
+                tet.append(ids[tuple(corner)])
+            if order in ((0, 2, 1), (1, 0, 2), (2, 1, 0)):
+                tet[0], tet[1] = tet[1], tet[0]
+            tets.append(tet)
+    return np.asarray(tets, dtype=np.int32)
+
+
 def generate_ball(refinement, *, radius=RADIUS):
     """Map a conforming Freudenthal cube grid onto a sphere, in SI units.
 
@@ -42,20 +59,7 @@ def generate_ball(refinement, *, radius=RADIUS):
             )
         )
     )
-    ids = np.arange(len(points)).reshape((n + 1,) * 3)
-    tets = []
-    for cell in itertools.product(range(n), repeat=3):
-        for order in itertools.permutations(range(3)):
-            corner = np.array(cell)
-            tet = [ids[tuple(corner)]]
-            for axis in order:
-                corner[axis] += 1
-                tet.append(ids[tuple(corner)])
-            tets.append(tet)
-    tets = np.asarray(tets, dtype=np.int32)
-    p = points[tets]
-    negative = np.linalg.det(p[:, 1:] - p[:, :1]) < 0
-    tets[negative, :2] = tets[negative, 1::-1]
+    tets = _grid_tets(n)
     points = points.astype(np.float32)
     validate_ball(points, tets, radius=radius)
     mu = YOUNG_MODULUS / (2 * (1 + POISSON_RATIO))
@@ -63,10 +67,8 @@ def generate_ball(refinement, *, radius=RADIUS):
     return newton.TetMesh(points, tets.flatten(), density=DENSITY, k_mu=mu, k_lambda=lam, k_damp=0.0)
 
 
-def validate_ball(vertices, tets, *, radius=RADIUS):
+def _validate_volume(vertices, tets):
     """Reject invalid volume topology and return independent rest-quality data."""
-    if not np.isfinite(radius) or radius <= 0:
-        raise ValueError("Ball radius must be positive and finite")
     x = np.asarray(vertices, dtype=np.float64)
     t = np.asarray(tets)
     if x.ndim != 2 or x.shape[1] != 3 or not len(x) or not np.isfinite(x).all():
@@ -113,26 +115,36 @@ def validate_ball(vertices, tets, *, radius=RADIUS):
     surface_nodes = np.unique(boundary)
     if len(surface_nodes) - len(edge_counts) + len(boundary) != 2:
         raise ValueError("Ball boundary is not a topological sphere")
-    radii = np.linalg.norm(x, axis=1)
-    if not np.allclose(radii[surface_nodes], radius, rtol=1e-6, atol=1e-10) or np.any(radii > radius * (1 + 1e-6)):
-        raise ValueError("Ball boundary radius mismatch")
     squared_edges = sum(np.sum((p[:, i] - p[:, j]) ** 2, axis=1) for i, j in itertools.combinations(range(4), 2))
     quality = 12 * (3 * volumes) ** (2 / 3) / squared_edges
     if quality.min() < 0.1:
         raise ValueError("Ball tet mean-ratio quality below 0.1")
     volume = float(volumes.sum())
     return {
-        "radius_m": radius,
         "node_count": len(x),
         "tet_count": len(t),
         "boundary_count": len(boundary),
         "interior_node_count": len(x) - len(surface_nodes),
         "minimum_rest_volume_m3": float(volumes.min()),
         "volume_m3": volume,
-        "relative_volume_error": abs(volume / (4 * np.pi * radius**3 / 3) - 1),
         "minimum_mean_ratio": float(quality.min()),
         "mass_kg": volume * DENSITY,
         "all_nodes_dynamic": True,
+    }, surface_nodes
+
+
+def validate_ball(vertices, tets, *, radius=RADIUS):
+    """Reject invalid ball topology, geometry and rest quality."""
+    if not np.isfinite(radius) or radius <= 0:
+        raise ValueError("Ball radius must be positive and finite")
+    report, surface_nodes = _validate_volume(vertices, tets)
+    radii = np.linalg.norm(np.asarray(vertices, dtype=np.float64), axis=1)
+    if not np.allclose(radii[surface_nodes], radius, rtol=1e-6, atol=1e-10) or np.any(radii > radius * (1 + 1e-6)):
+        raise ValueError("Ball boundary radius mismatch")
+    return {
+        "radius_m": radius,
+        **report,
+        "relative_volume_error": abs(report["volume_m3"] / (4 * np.pi * radius**3 / 3) - 1),
     }
 
 
