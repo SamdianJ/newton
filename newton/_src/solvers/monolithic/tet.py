@@ -707,7 +707,7 @@ def _check_scatter_finite(values: wp.array[float], failure_flags: wp.array[int])
         wp.atomic_max(failure_flags, 0, 2)
 
 
-def _prepare_evaluation(model, args):
+def _validate_evaluation(model, args):
     dt, guard, workspace = args["dt"], args["min_det_f_guard"], args["workspace"]
     with np.errstate(divide="ignore", over="ignore", invalid="ignore", under="ignore"):
         dt32 = np.float32(dt)
@@ -740,6 +740,11 @@ def _prepare_evaluation(model, args):
             raise ValueError("tet workspace has incompatible dtype, shape or device")
     if workspace.physics is not None:
         workspace.physics.validate_identity()
+
+
+def _prepare_evaluation(model, args):
+    _validate_evaluation(model, args)
+    dt, workspace = args["dt"], args["workspace"]
     workspace.failure_flags.zero_()
     workspace.min_det_f.fill_(float("inf"))
     workspace.tet_energy.zero_()

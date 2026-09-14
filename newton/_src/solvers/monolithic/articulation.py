@@ -233,6 +233,7 @@ class MonolithicArticulationWorkspace:
             raise ValueError("Workspace stream must belong to the model device")
         self.model = model
         self.device = model.device
+        self._segment_graphs = None
         self.stream = stream if stream is not None else (wp.get_stream(model.device) if model.device.is_cuda else None)
         self._arrays = {name: getattr(model, name) for name in self._array_names}
         self._array_layouts = {
@@ -354,7 +355,26 @@ def eval_articulation_passive_candidate(
     """Overwrite FK, Jacobian and passive dynamics using preallocated storage."""
     workspace._validate_state(model, candidate_state)
     with wp.ScopedStream(workspace.stream):
-        _eval_passive_dynamics(model, candidate_state, workspace)
+        if workspace._segment_graphs is None or not workspace._segment_graphs.enabled:
+            _eval_passive_dynamics(model, candidate_state, workspace)
+        else:
+            buffers = [
+                candidate_state.joint_q,
+                candidate_state.joint_qd,
+                candidate_state.body_q,
+                candidate_state.body_qd,
+                workspace.M,
+                workspace.C,
+                workspace.g,
+                *workspace._arrays.values(),
+            ]
+            buffers.extend(value for value in vars(workspace.scratch).values() if isinstance(value, wp.array))
+            workspace._segment_graphs.run(
+                "articulation",
+                (workspace.use_optimized_articulation_mass_matrix,),
+                buffers,
+                lambda: _eval_passive_dynamics(model, candidate_state, workspace),
+            )
 
 
 @wp.kernel

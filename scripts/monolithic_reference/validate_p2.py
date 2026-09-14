@@ -19,6 +19,7 @@ import numpy as np
 
 REPO = Path(__file__).resolve().parents[2]
 DEV_MODULES = (
+    "test_monolithic_segment_graphs",
     "test_monolithic_pcg_tolerances",
     "test_monolithic_pcg_backends",
     "test_monolithic_pcg_benchmark",

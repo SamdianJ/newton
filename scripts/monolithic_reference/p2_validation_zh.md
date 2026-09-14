@@ -91,6 +91,8 @@ uv run --no-sync -m scripts.monolithic_reference.run_p2_8bc \
 ```
 
 省略 `--use-cuda-graph` 为相同 fixed smart 策略的非图执行。与 diagnostic 比较是策略对照；production 图开/关才隔离图执行方式。
+
+P8D 扩展：solver 的 `--use-cuda-graph` 同时启用 articulation、trial tet residual、非线性归约、装配初始化、scaling 和 factor 六个稳定段。PCG 算法及图外检查/事务边界不变；compact.json 新增各段捕获/重放/驻留/淘汰统计。详见 [稳定段说明](p2_segment_graphs_zh.md)。 standalone PCG benchmark 仍只测线性求解，不包含这些物理 solver 段。
 单项 runner 支持 `--linear-absolute-tolerance 1e-6`（或 `0`）；nightly 两种模式使用相同暂定默认值。实际设置写入 `execution-options.json`，历史结果不回写，比较不同容差时必须区分精度策略。
 
 ## 结果与保留门槛

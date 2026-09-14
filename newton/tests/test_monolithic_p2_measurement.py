@@ -280,6 +280,7 @@ class TestP2Measurement(unittest.TestCase):
             return SimpleNamespace(merit=1, merit_q=1, merit_x=1, min_det_f=1)
 
         solver = SimpleNamespace(
+            _segment_graphs=SimpleNamespace(summary=lambda: {"enabled": False, "segments": {}}),
             _evaluate_current=original,
             model=SimpleNamespace(device=device),
             use_cuda_graph=False,

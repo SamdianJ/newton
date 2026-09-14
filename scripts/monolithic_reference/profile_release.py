@@ -292,7 +292,14 @@ class _StageProfile:
 
         def launch(kernel, *args, **kwargs):
             stage = kernel_stages.get(kernel)
-            if stage is None:
+            segments = getattr(solver, "_segment_graphs", None)
+            # Graph internals cannot be synchronized separately; their parent
+            # segment includes capture, replay and completion in its total.
+            if (
+                stage is None
+                or (solver.model.device.is_cuda and solver.model.device.is_capturing)
+                or (segments is not None and segments.enabled)
+            ):
                 return original_launch(kernel, *args, **kwargs)
             return self._timed(stage, original_launch)(kernel, *args, **kwargs)
 

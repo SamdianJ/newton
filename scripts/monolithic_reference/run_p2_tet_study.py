@@ -152,6 +152,7 @@ def diagnostic_run(device, refinement, output):
         "failure": failure,
         "summary": summary,
         "manifest": case.manifest,
+        "segment_graphs": case.solver._segment_graphs.summary(),
         "solver_configuration": {
             "newton_max_iterations": case.solver.newton_max_iterations,
             "linear_max_iterations": case.solver.linear_max_iterations,
@@ -262,6 +263,7 @@ def timing_run(device, refinement, output, *, steps=None):
         "frame_dt_s": 6 * case.dt,
         "setup_seconds": setup_seconds,
         "manifest": case.manifest,
+        "segment_graphs": case.solver._segment_graphs.summary(),
         "solver_configuration": {
             "newton_max_iterations": case.solver.newton_max_iterations,
             "linear_max_iterations": case.solver.linear_max_iterations,

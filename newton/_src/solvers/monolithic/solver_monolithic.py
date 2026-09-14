@@ -47,10 +47,12 @@ from .linear import (
     MonolithicPcgConfig,
     MonolithicPcgWarmStart,
 )
+from .segment_graph import _SegmentGraphCache
 from .tet import (
     TetEvaluationStatus,
     TetPhysicsWorkspace,
     TetScatterBuffers,
+    _validate_evaluation,
     assemble_tet_residual_tangent,
     build_tet_triplet_pattern,
     create_tet_assembly_workspace,
@@ -862,7 +864,7 @@ class SolverMonolithic(SolverBase):
             use_optimized_articulation_mass_matrix: Experimental private parallel
                 articulation mass evaluation; fixed at construction, defaults to False.
             pcg_mode: Experimental dynamic diagnostic or fixed masked production PCG policy.
-            use_cuda_graph: Capture the production PCG chain on CUDA; default False.
+            use_cuda_graph: Capture production PCG and stable device segments on CUDA; default False.
                 Production retains mandatory numerical checks and final force publication.
         """
         self._initialize(
@@ -913,7 +915,7 @@ class SolverMonolithic(SolverBase):
 
     @property
     def use_cuda_graph(self) -> bool:
-        """Return the immutable experimental production-PCG capture option."""
+        """Return the immutable experimental PCG and stable-segment capture option."""
         return self._use_cuda_graph
 
     @property
@@ -1154,6 +1156,9 @@ class SolverMonolithic(SolverBase):
         self._delta = wp.zeros(size, dtype=float, device=model.device)
         self._final_residual = wp.zeros(size, dtype=float, device=model.device)
         self._contact_status = wp.zeros(1, dtype=int, device=model.device)
+        self._segment_graphs = _SegmentGraphCache(model.device, enabled=use_cuda_graph)
+        self._articulation._segment_graphs = self._segment_graphs
+        self._linear._segment_graphs = self._segment_graphs
         self._default_control = model.control(clone_variables=False)
         self._generation = None
         self._assembly_sequence = 0
@@ -1269,6 +1274,28 @@ class SolverMonolithic(SolverBase):
         )
 
     def _rms(self, values: wp.array[float], *, scaled: bool = True) -> tuple[float, float, float]:
+        self._segment_graphs.run(
+            "norms",
+            (scaled,),
+            (
+                values,
+                self._linear.scale,
+                self._metric_vector,
+                *self._metric_slices,
+                self._norm_values,
+                *self._norm_outputs,
+            ),
+            lambda: self._reduce_norms(values, scaled=scaled),
+        )
+        norms = self._norm_values.numpy()
+        if not np.isfinite(norms).all() or np.any(norms < 0):
+            raise _StepFailure(self.Status.NONFINITE, "Nonfinite scaled reduction")
+        return tuple(
+            math.sqrt(float(value) / max(vector.size, 1))
+            for value, vector in zip(norms, self._metric_slices, strict=True)
+        )
+
+    def _reduce_norms(self, values, *, scaled):
         if scaled:
             wp.launch(
                 _scale_vector,
@@ -1282,13 +1309,6 @@ class SolverMonolithic(SolverBase):
         for vector, output in zip(self._metric_slices, self._norm_outputs, strict=True):
             if vector.size:
                 wp.utils.array_inner(vector, vector, out=output)
-        norms = self._norm_values.numpy()
-        if not np.isfinite(norms).all() or np.any(norms < 0):
-            raise _StepFailure(self.Status.NONFINITE, "Nonfinite scaled reduction")
-        return tuple(
-            math.sqrt(float(value) / max(vector.size, 1))
-            for value, vector in zip(norms, self._metric_slices, strict=True)
-        )
 
     def _converged(self, merit: tuple[float, float, float], reference: tuple[float, float, float]) -> bool:
         config = self._config
@@ -1497,7 +1517,33 @@ class SolverMonolithic(SolverBase):
         if self._joint_diagnostic:
             return _TrialResult(0, *self._rms(candidate.residual), math.nan, math.nan)
         self._collide(candidate.state, self._trial_contacts)
-        evaluate_tet_residual(self.model, **self._tet_arguments(candidate, dt))
+        args = self._tet_arguments(candidate, dt)
+        if self._segment_graphs.enabled and self._tet_workspace.physics is not None:
+            _validate_evaluation(self.model, args)
+            physics, workspace = self._tet_workspace.physics, self._tet_workspace
+            buffers = [value for value in args.values() if isinstance(value, wp.array)]
+            buffers += [
+                self.model.tet_indices,
+                self.model.gravity,
+                self.model.particle_world,
+                physics.poses,
+                physics.materials,
+                physics.mass,
+                physics.row_mass,
+                physics.coefficients,
+                workspace.elastic_block_slots,
+                workspace.tet_energy,
+                workspace.min_det_f,
+                workspace.failure_flags,
+            ]
+            self._segment_graphs.run(
+                "tet_residual",
+                (dt, self._config.det_f_guard, physics.material_model, physics.mass_mode),
+                buffers,
+                lambda: evaluate_tet_residual(self.model, **args),
+            )
+        else:
+            evaluate_tet_residual(self.model, **args)
         min_det = self._check_tet()
         wp.launch(
             _copy_particle_residual,

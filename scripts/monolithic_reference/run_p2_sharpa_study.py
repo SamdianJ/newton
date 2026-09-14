@@ -477,6 +477,7 @@ def run_case(job, output, *, nsys_window=None, stage_profile=False):
         )
     compact = {
         "schema": SCHEMA,
+        "segment_graphs": case.solver._segment_graphs.summary(),
         "timing_mode": "synchronized_hierarchy" if stage_profile else "step_and_solve_boundaries",
         "matrix_capture": bool(job.get("capture_matrices")),
         "matrix_sampling": {

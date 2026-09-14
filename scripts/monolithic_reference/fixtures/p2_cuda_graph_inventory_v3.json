@@ -1,0 +1,51 @@
+{
+  "schema": "monolithic-p2-cuda-graph-inventory/v3",
+  "policy": "pcg-and-stable-segments-v1",
+  "status": "DEVELOPMENT_VALIDATED_PERFORMANCE_REVIEW_REQUIRED",
+  "historical_inventory": "p2_cuda_graph_inventory_v2.json",
+  "pcg_policy": "masked_smart_restart_v3",
+  "defaults": {
+    "pcg_mode": "diagnostic",
+    "use_cuda_graph": false,
+    "linear_absolute_tolerance": 1e-06
+  },
+  "stable_segments": [
+    "articulation",
+    "tet_residual",
+    "norms",
+    "assembly_initialize",
+    "scaling",
+    "factor"
+  ],
+  "cache": {
+    "owner": "solver",
+    "max_bindings_per_segment": 4,
+    "max_stable_graphs": 24,
+    "pcg_graph_independent": true,
+    "key": [
+      "stream",
+      "scalar_parameters",
+      "array_address_shape_stride_dtype_device"
+    ],
+    "numerical_generation_requires_recapture": false,
+    "retain": [
+      "buffers",
+      "stream"
+    ],
+    "cold_execution": "overwrite-only derived scratch warmup, capture, first replay"
+  },
+  "outside_graph": [
+    "host_validation",
+    "tet_tangent",
+    "collision",
+    "contact",
+    "bsr_build",
+    "newton_line_search_retry",
+    "state_history_transaction",
+    "publication",
+    "full_step"
+  ],
+  "correctness_tests": "newton.tests.test_monolithic_segment_graphs",
+  "report": "../p2_segment_graphs_zh.md",
+  "performance_gate": "Matched PCG-only graph baseline, >=5 independent warmed repeats, full step quality/cost and bounded memory; nightly remains manual."
+}

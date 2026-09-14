@@ -1035,6 +1035,7 @@ class MonolithicLinearWorkspace:
             layout.dynamic_particle_count, layout.dynamic_particle_count, wp.mat33, device=device
         )
         self._active_token = wp.zeros(1, dtype=int, device=device)
+        self._segment_graphs = None
         self._token = 0
         self._generation = None
         self._sealed = True
@@ -1183,7 +1184,6 @@ class MonolithicLinearWorkspace:
         self._scaling_valid = False
         self._factor_valid = False
         self._warm_start_key = None
-        self.aq_actor_dense.zero_()
         # Copy only struct descriptors: old views retain their captured token.
         for name, struct_type, fields in [
             (
@@ -1240,9 +1240,31 @@ class MonolithicLinearWorkspace:
             for field in fields:
                 setattr(current, field, getattr(previous, field))
             current.token = self._token
-            current.count.zero_()
-            current.status.zero_()
             setattr(self, name, current)
+        if self._segment_graphs is None:
+            self._initialize_assembly_device()
+        else:
+            buffers = [
+                self.aq_actor_dense,
+                self._factors.gq,
+                self._factors.gx_columns,
+                self._factors.gx_values,
+                self._factors.weights,
+                self._factors.count,
+                self._factors.status,
+            ]
+            for buffer in (self._global, self._internal):
+                buffers.extend((buffer.rows, buffer.columns, buffer.values, buffer.count, buffer.status))
+            if self._fixed_patterns is not None:
+                buffers.extend(array for pattern in self._fixed_patterns for array in pattern)
+            self._segment_graphs.run("assembly_initialize", (), buffers, self._initialize_assembly_device)
+        return MonolithicLinearAssembly(generation, self.aq_actor_dense, self._internal, self._factors, self._global)
+
+    def _initialize_assembly_device(self):
+        self.aq_actor_dense.zero_()
+        for buffer in (self._global, self._internal, self._factors):
+            buffer.count.zero_()
+            buffer.status.zero_()
         for index, buffer in enumerate((self._global, self._internal)):
             buffer.values.zero_()
             if self._fixed_patterns is not None:
@@ -1256,7 +1278,6 @@ class MonolithicLinearWorkspace:
         self._factors.gx_columns.fill_(-1)
         self._factors.gx_values.zero_()
         self._factors.weights.zero_()
-        return MonolithicLinearAssembly(generation, self.aq_actor_dense, self._internal, self._factors, self._global)
 
     def finalize_assembly(self, *, generation: MonolithicLinearGeneration) -> MonolithicLinearBuildResult:
         if generation != self._generation or self._sealed:
@@ -1361,6 +1382,33 @@ class MonolithicLinearWorkspace:
         self._warm_start_key = None
         if not self._vector_valid(dynamic_diagonal) or not np.isfinite(epsilon_d) or epsilon_d <= 0:
             return MonolithicLinearStatus.INVALID_ARGUMENT
+        if self._segment_graphs is None:
+            self._build_scaling_device(dynamic_diagonal, epsilon_d)
+        else:
+            matrix = self.k_global_scalar_bsr
+            self._segment_graphs.run(
+                "scaling",
+                (matrix.nrow, epsilon_d),
+                (
+                    dynamic_diagonal,
+                    self.dynamic_diagonal,
+                    self._status,
+                    self.floor_count,
+                    matrix.offsets,
+                    matrix.columns,
+                    matrix.values,
+                    self._matrix_diagonal,
+                    self.diagonal,
+                    self.scale,
+                ),
+                lambda: self._build_scaling_device(dynamic_diagonal, epsilon_d),
+            )
+        status = self._read_status()
+        self._scaling_valid = status == MonolithicLinearStatus.SUCCESS
+        self._lambda = 0.0
+        return status
+
+    def _build_scaling_device(self, dynamic_diagonal, epsilon_d):
         wp.copy(self.dynamic_diagonal, dynamic_diagonal)
         self._status.zero_()
         self.floor_count.zero_()
@@ -1385,10 +1433,6 @@ class MonolithicLinearWorkspace:
             ],
             device=self.device,
         )
-        status = self._read_status()
-        self._scaling_valid = status == MonolithicLinearStatus.SUCCESS
-        self._lambda = 0.0
-        return status
 
     def set_regularization(
         self, lambda_value: float, *, generation: MonolithicLinearGeneration
@@ -1411,6 +1455,39 @@ class MonolithicLinearWorkspace:
         if not np.isfinite(pivot_tolerance) or pivot_tolerance < 0:
             return MonolithicLinearStatus.INVALID_ARGUMENT
         self.factor_setup_count += 1
+        if self._segment_graphs is None:
+            self._factor_actor_device(pivot_tolerance)
+        else:
+            matrix, factors = self.ax_internal_bsr3, self._factors
+            self._segment_graphs.run(
+                "factor",
+                (matrix.nrow, self.layout.q_dof_count, self._lambda, pivot_tolerance),
+                (
+                    self._status,
+                    self.aq_actor_dense,
+                    self.scale,
+                    self._q_preconditioner,
+                    self._x_preconditioner,
+                    self._q_cholesky,
+                    self._x_cholesky,
+                    matrix.offsets,
+                    matrix.columns,
+                    matrix.values,
+                    factors.count,
+                    factors.weights,
+                    factors.gq,
+                    factors.gx_columns,
+                    factors.gx_values,
+                ),
+                lambda: self._factor_actor_device(pivot_tolerance),
+            )
+        status = self._read_status()
+        self._factor_valid = status == MonolithicLinearStatus.SUCCESS
+        self.factor_last_status = status
+        self.factor_failure_count += int(not self._factor_valid)
+        return status
+
+    def _factor_actor_device(self, pivot_tolerance):
         self._status.zero_()
         wp.launch(
             _assemble_monolithic_q_preconditioner,
@@ -1448,11 +1525,6 @@ class MonolithicLinearWorkspace:
                 [self._x_preconditioner, self._x_cholesky, pivot_tolerance, self._status],
                 device=self.device,
             )
-        status = self._read_status()
-        self._factor_valid = status == MonolithicLinearStatus.SUCCESS
-        self.factor_last_status = status
-        self.factor_failure_count += int(not self._factor_valid)
-        return status
 
     @property
     def pcg_mode(self) -> str:
