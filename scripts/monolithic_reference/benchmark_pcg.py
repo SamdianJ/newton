@@ -21,6 +21,7 @@ import warp as wp
 import warp.sparse as sparse
 
 from newton._src.solvers.monolithic import linear, pcg_production
+from newton._src.solvers.monolithic.soft_preconditioner import _BlockPreconditioner
 from newton._src.solvers.monolithic.solver_monolithic import _SolverMonolithicInternalConfig
 from scripts.monolithic_reference.p2_measurement import (
     array_fingerprint,
@@ -244,7 +245,7 @@ def _bsr(arrays, prefix, rows, device, *, blocks=False):
 class Runner:
     """Offline binding of one shared input to an actual monolithic solve implementation."""
 
-    def __init__(self, case, mode, device, config):
+    def __init__(self, case, mode, device, config, *, study_hierarchy=None):
         self.mode, self.config = mode, config
         a = case.arrays
         nx = (case.n - case.nq) // 3
@@ -273,6 +274,8 @@ class Runner:
         w._generation = linear.MonolithicLinearGeneration(1, 0, 1, 1)
         w._sealed = w._valid = w._scaling_valid = True
         self._require(w.set_regularization(case.metadata["lambda"], generation=w._generation))
+        if study_hierarchy is not None:
+            w._study_soft = _BlockPreconditioner(w, study_hierarchy)
         self.factor()
         self.rhs = wp.array(a["rhs_hat"], dtype=float, device=device)
         self.y = wp.zeros(case.n, dtype=float, device=device)

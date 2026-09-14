@@ -72,6 +72,24 @@ class TestMonolithicPreconditionerStudy(unittest.TestCase):
         self.assertLessEqual(len(hierarchy.level_counts), 3)
         self.assertEqual(hierarchy.block_ids.shape[1], 40)
 
+    def test_coarse_aggregates_split_disconnected_components(self):
+        """Exercise actual coarse levels with interleaved components, fixed nodes and an isolated tail."""
+        rng = np.random.default_rng(832)
+        ids = np.array([i for i in range(80) if i not in (0, 26, 53)], dtype=np.int32)
+        components = np.repeat(np.arange(4), [26, 27, 26, 1])
+        tets = np.array(
+            [range(i, i + 4) for start, stop in ((0, 26), (26, 53), (53, 79)) for i in range(start, stop - 3)],
+            dtype=np.int32,
+        )
+        arrays = {"rest_x": rng.normal(size=(80, 3)), "dynamic_particle_ids": ids, "tet_indices": tets}
+        for candidate in ("mas_16", "mas_32"):
+            hierarchy = study.build_hierarchy(arrays, candidate)
+            self.assertGreater(len(hierarchy.level_counts), 1)
+            self.assertTrue(np.all(hierarchy.block_ids >= 0))
+            for domain in hierarchy.domains[hierarchy.level_counts[0] :]:
+                for group in domain:
+                    self.assertEqual(len(np.unique(components[ids[list(group)]])), 1)
+
 
 if __name__ == "__main__":
     unittest.main()

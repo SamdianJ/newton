@@ -739,6 +739,11 @@ def _overlap(a, b):
     return a0 < b1 and b0 < a1
 
 
+@wp.kernel
+def _study_mask(state: wp.array[_DeviceResult], active: wp.array[int]):
+    active[0] = state[0].enabled
+
+
 class MaskedPcgPlan:
     """Preallocated plan bound to one scalar-BSR matrix and actor factors.
 
@@ -761,6 +766,7 @@ class MaskedPcgPlan:
         y,
         delta=None,
         config: MaskedPcgConfig | None = None,
+        _study_soft=None,
     ):
         self.config = MaskedPcgConfig() if config is None else config
         if not isinstance(self.config, MaskedPcgConfig):
@@ -768,6 +774,9 @@ class MaskedPcgPlan:
         self.device = wp.get_device(y.device)
         if self.device.is_capturing:
             raise RuntimeError("Construct/bind the plan outside graph capture")
+        self._study_soft = _study_soft
+        self._study_signature = None if _study_soft is None else _study_soft.signature()
+        self._study_active = None if _study_soft is None else wp.zeros(1, dtype=int, device=self.device)
         self.n = y.size
         self.nq = q_cholesky.shape[0]
         self.nx = x_cholesky.size
@@ -861,6 +870,7 @@ class MaskedPcgPlan:
             y=y,
             delta=delta,
             config=config,
+            _study_soft=workspace._study_soft,
         )
         plan._workspace = workspace
         plan._generation = workspace._generation
@@ -880,6 +890,8 @@ class MaskedPcgPlan:
         return hashlib.sha256(offsets.tobytes() + columns.tobytes()).digest()
 
     def _validate_storage(self):
+        if self._study_soft is not None:
+            self._study_soft.validate()
         arrays = tuple(value for value in vars(self).values() if isinstance(value, wp.array))
         if (
             self._stream_id() != self._stream
@@ -916,6 +928,8 @@ class MaskedPcgPlan:
         )
         bindings_match = (
             self._workspace is workspace
+            and self._study_soft is workspace._study_soft
+            and (self._study_soft is None or self._study_signature == self._study_soft.signature())
             and self._stream == self._stream_id()
             and config == self.config
             and tuple(map(_signature, arrays)) == self._binding_signature
@@ -984,7 +998,10 @@ class MaskedPcgPlan:
     def _emit_direction(self, slot):
         if self.nq:  # Static layout test, not a device-dependent branch.
             self._launch(_masked_q_solve, 1, [self.q_cholesky, self.r, self.temporary, self.z, self.state, self.error])
-        if self.nx:
+        if self._study_soft is not None:
+            self._launch(_study_mask, 1, [self.state, self._study_active])
+            self._study_soft.apply(self.r, self.z, active=self._study_active, error=self.error)
+        elif self.nx:
             self._launch(_masked_x_solve, self.nx, [self.x_cholesky, self.nq, self.r, self.z, self.state, self.error])
         self._emit_products(self.r, self.z)
         self._launch(_gamma_and_beta_guard, 1, [self.products, self.scalars, self.state, self.error, self.params, slot])

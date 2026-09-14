@@ -702,7 +702,9 @@ def _monolithic_preconditioner_matvec(workspace, x, y, z, alpha, beta) -> None:
     wp.launch(
         _apply_q_preconditioner, 1, [workspace._q_cholesky, x, workspace._preconditioned], device=workspace.device
     )
-    if workspace.layout.dynamic_particle_count:
+    if workspace._study_soft is not None:
+        workspace._study_soft.apply(x, workspace._preconditioned)
+    elif workspace.layout.dynamic_particle_count:
         wp.launch(
             _apply_x_preconditioner,
             workspace.layout.dynamic_particle_count,
@@ -1124,6 +1126,7 @@ class MonolithicLinearWorkspace:
         self._q_cholesky = wp.zeros_like(self.aq_actor_dense)
         self._x_preconditioner = wp.zeros(layout.dynamic_particle_count, dtype=wp.mat33, device=device)
         self._x_cholesky = wp.zeros_like(self._x_preconditioner)
+        self._study_soft = None  # Private PR8F research entry; no public solver option.
         self._scaling_valid = False
         self._factor_valid = False
         self._lambda = 0.0
@@ -1455,7 +1458,7 @@ class MonolithicLinearWorkspace:
         if not np.isfinite(pivot_tolerance) or pivot_tolerance < 0:
             return MonolithicLinearStatus.INVALID_ARGUMENT
         self.factor_setup_count += 1
-        if self._segment_graphs is None:
+        if self._segment_graphs is None or self._study_soft is not None:
             self._factor_actor_device(pivot_tolerance)
         else:
             matrix, factors = self.ax_internal_bsr3, self._factors
@@ -1496,7 +1499,7 @@ class MonolithicLinearWorkspace:
             device=self.device,
         )
         matrix = self.ax_internal_bsr3
-        if matrix.nrow:
+        if matrix.nrow and self._study_soft is None:
             wp.launch(
                 _assemble_monolithic_x_preconditioner,
                 matrix.nrow,
@@ -1518,7 +1521,9 @@ class MonolithicLinearWorkspace:
             [self._q_preconditioner, self._q_cholesky, pivot_tolerance, self._status],
             device=self.device,
         )
-        if matrix.nrow:
+        if self._study_soft is not None:
+            self._study_soft.factor(self, pivot_tolerance)
+        elif matrix.nrow:
             wp.launch(
                 _factor_monolithic_x_cholesky,
                 matrix.nrow,

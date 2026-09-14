@@ -1,6 +1,6 @@
 {
   "schema": "monolithic-p2-preconditioner-study/v2",
-  "status": "ALGEBRA_IMPLEMENTED_GPU_PENDING",
+  "status": "PR8F_PILOT_COMPLETE_REVIEW_REQUIRED",
   "candidates": [
     "actor_block",
     "local_block_4",
@@ -38,5 +38,39 @@
     "public soft_preconditioner option"
   ],
   "nightly": "USER_MANUAL_ONLY",
-  "historical_manifest": "p2_preconditioner_study_v1.json"
+  "historical_manifest": "p2_preconditioner_study_v1.json",
+  "performance_budget": {
+    "minimum_total_time_gain": null,
+    "maximum_tail_regression": null,
+    "maximum_extra_gpu_bytes": null,
+    "approved_scenes": null,
+    "status": "NOT_FROZEN"
+  },
+  "plan_snapshot": "dev/monothlic/newton_monolithic_solver_p2_preconditioners_v2_zh.md",
+  "plan_sha256": "261bfc6fb3f3976be808f23ea13bacc6abf78d301015b113c2624f4f207171cc",
+  "research_environment": {
+    "pyamg": "5.3.0",
+    "numpy": "2.5.0",
+    "scipy": "1.17.1",
+    "warp-lang": "1.17.0"
+  },
+  "numeric_build": "FP64 projected blocks and Cholesky; MAS inverse rounded to FP32 for apply",
+  "pilot_evidence": "agents/integration/artifacts/p2/p8ef-preconditioner-study-20260914",
+  "pilot_counts": {
+    "matrix_case_candidate_processes": 195,
+    "matrix_independent_residual_pass": 195,
+    "real_projection_cpu_cuda_checks": 130,
+    "real_projection_pass": 130,
+    "trajectory_jobs": 24,
+    "complete_trajectories": 21,
+    "failed_trajectories": 3
+  },
+  "observed_blockers": [
+    "Second Sharpa r3 pilot fails for baseline, local_block_4 and mas_16 at the outer Newton layer",
+    "MAS32 diagnostic friction regression fails on CPU and CUDA",
+    "First tet6 trajectory timings have mismatched power states",
+    "Final state error bounds remain uncalibrated"
+  ],
+  "formal_admission": "NOT_STARTED_BUDGET_NOT_FROZEN",
+  "amg_gpu": "NOT_MEASURED"
 }
