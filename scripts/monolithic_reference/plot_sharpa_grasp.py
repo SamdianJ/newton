@@ -23,30 +23,30 @@ def main():
     args = parser.parse_args()
     rows = json.loads((args.run / "trace.json").read_text())
     manifest = json.loads((args.run / "manifest.json").read_text())
+    cube = manifest.get("object_type") == "cube"
+    com_key = "object_com" if cube else "ball_com"
+    object_name = "cube" if cube else "ball"
     t = np.array([r["time"] for r in rows])
     fig, axes = plt.subplots(3, 2, figsize=(12, 10), constrained_layout=True)
     anchored = manifest.get("experiment") == "anchored-close"
     fig.suptitle(
         "Sharpa anchored closure: collision stability"
         if anchored
-        else "Sharpa / soft ball: exploratory integration (G6/G7 not validated)"
+        else f"Sharpa / soft {object_name}: exploratory integration (G6/G7 not validated)"
     )
-    axes[0, 0].plot(t, [r["ball_com"][2] * 1000 for r in rows], label="Ball COM")
+    axes[0, 0].plot(t, [r[com_key][2] * 1000 for r in rows], label=f"{object_name.title()} COM")
     lift_target = manifest["mapping"].get("monolithic_lift", (0, 0, None))[2]
     axes[0, 0].plot(
         t,
-        [
-            1000 * (rows[0]["ball_com"][2] + (r["q_target"][lift_target] if lift_target is not None else 0))
-            for r in rows
-        ],
+        [1000 * (rows[0][com_key][2] + (r["q_target"][lift_target] if lift_target is not None else 0)) for r in rows],
         ls="--",
-        label="Initial ball height" if anchored else "Initial ball height + commanded lift",
+        label="Initial object height" if anchored else "Initial object height + commanded lift",
     )
     axes[0, 0].set_ylabel("World height [mm]")
     axes[0, 1].plot(
         t,
         [np.linalg.norm(r["palm_force"]) if anchored else -r["support_force"][2] for r in rows],
-        label="Palm on ball" if anchored else "Support on ball",
+        label="Palm on object" if anchored else "Support on object",
     )
     for finger in ("thumb", "index", "middle", "ring", "pinky"):
         axes[0, 1].plot(
@@ -54,7 +54,7 @@ def main():
             [np.linalg.norm(r["finger_forces"][finger]) if anchored else -r["finger_forces"][finger][2] for r in rows],
             label=finger,
         )
-    axes[0, 1].set_ylabel("Contact force magnitude [N]" if anchored else "Vertical force on ball [N]")
+    axes[0, 1].set_ylabel("Contact force magnitude [N]" if anchored else "Vertical force on object [N]")
     axes[1, 0].plot(t, [1000 * r["penetration"] for r in rows], label="Penetration")
     axes[1, 0].plot(t, [1000 * r["deformation_rms"] for r in rows], label="Rigid-fit deformation RMS")
     axes[1, 0].set_ylabel("Distance [mm]")

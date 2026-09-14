@@ -14,6 +14,7 @@ import warp as wp
 import newton
 from newton import ShapeFlags
 from newton.examples.softbody.monolithic_soft_ball import RADIUS, load_ball
+from newton.examples.softbody.monolithic_soft_cube import load_cube, validate_cube
 from newton.examples.softbody.sharpa_close import build_hand, finalize_hand, sha256
 
 
@@ -136,6 +137,29 @@ def load_hand_ball(
 ):
     """Assemble a free soft sphere and the unchanged 22-DoF hand for diagnostics."""
     mesh = load_ball(ball_path, radius=ball_radius)
+    model, manifest = _load_hand_soft(
+        asset_dir,
+        contact_dir,
+        mesh,
+        device=device,
+        parameters=parameters,
+        position=position,
+        resolution=resolution,
+        _mount=_mount,
+    )
+    manifest.update(
+        ball_sha256=sha256(ball_path),
+        ball_radius_m=ball_radius,
+        ball_position_m=list(position),
+        particle_radius_m=0.0002,
+        gravity=parameters["gravity"],
+        all_ball_nodes_dynamic=True,
+    )
+    return model, manifest
+
+
+def _load_hand_soft(asset_dir, contact_dir, mesh, *, device, parameters, position, resolution=128, _mount=None):
+    """Share the unchanged hand assembly and all-dynamic soft-mesh attachment."""
     builder, manifest = build_contact_hand(
         asset_dir, contact_dir, device=device, parameters=parameters, resolution=resolution, _mount=_mount
     )
@@ -155,13 +179,30 @@ def load_hand_ball(
     flags &= ~int(ShapeFlags.COLLIDE_SHAPES)
     model.shape_flags.assign(flags)
     if not np.all(model.particle_inv_mass.numpy() > 0):
-        raise ValueError("Soft sphere must have all dynamic nodes")
+        raise ValueError("Soft object must have all dynamic nodes")
+    return model, manifest
+
+
+def load_hand_cube(asset_dir, contact_dir, cube_path, *, device, parameters, position, resolution=128, _mount=None):
+    """Assemble the independent 40 mm cube fixture without sphere metadata."""
+
+    mesh = load_cube(cube_path)
+    report = validate_cube(mesh.vertices, mesh.tet_indices.reshape(-1, 4))
+    model, manifest = _load_hand_soft(
+        asset_dir,
+        contact_dir,
+        mesh,
+        device=device,
+        parameters=parameters,
+        position=position,
+        resolution=resolution,
+        _mount=_mount,
+    )
     manifest.update(
-        ball_sha256=sha256(ball_path),
-        ball_radius_m=ball_radius,
-        ball_position_m=list(position),
+        **report,
+        cube_sha256=sha256(cube_path),
+        object_position_m=list(position),
         particle_radius_m=0.0002,
         gravity=parameters["gravity"],
-        all_ball_nodes_dynamic=True,
     )
     return model, manifest

@@ -3,6 +3,7 @@
 
 """Shared Sharpa controls for anchored closure and exploratory grasp integration."""
 
+import copy
 import hashlib
 import json
 import time
@@ -13,7 +14,8 @@ import warp as wp
 from newton.solvers.experimental.monolithic import MonolithicCollisionPipeline, SolverMonolithic
 
 import newton
-from newton.examples.softbody.monolithic_sharpa_assets import load_hand_ball
+from newton.examples.softbody.monolithic_sharpa_assets import load_hand_ball, load_hand_cube
+from newton.examples.softbody.monolithic_soft_cube import validate_cube_calibration
 from newton.examples.softbody.sharpa_close import ClosureTrajectory, load_fixture, sha256
 
 FIXTURE = {
@@ -129,7 +131,7 @@ def load_calibration(path):
     """Require a complete frozen three-grid scan and its unchanged protocol."""
     result = json.loads(Path(path).read_text())
     if result.get("status") != "FROZEN" or result.get("pcg_iteration_p95_budget") != 64:
-        raise ValueError("Freeze the PR-7A calibration before running the grasp stages")
+        raise ValueError("Freeze the contact calibration before running the grasp stages")
     protocol = result.get("protocol", {})
     digest = hashlib.sha256((json.dumps(protocol, indent=2) + "\n").encode()).hexdigest()
     if digest != result.get("protocol_sha256"):
@@ -161,36 +163,51 @@ class GraspCase:
     """Run all stages through the existing coupled solver and its state transaction."""
 
     def __init__(self, args):
+        self.cube = getattr(args, "cube", None) is not None
         self.anchored = getattr(args, "experiment", "grasp") == "anchored-close"
+        if self.cube and self.anchored:
+            raise ValueError("Cube grasp requires all dynamic nodes; anchored-close is a historical ball fixture")
         ball_radius = getattr(args, "ball_radius", 0.020)
         if not np.isfinite(ball_radius) or ball_radius <= 0:
             raise ValueError("Ball radius must be positive and finite")
-        self.fixture = ANCHORED_FIXTURE if self.anchored else FIXTURE
+        self.fixture = copy.deepcopy(ANCHORED_FIXTURE if self.anchored else FIXTURE)
+        if self.cube:
+            offset = np.asarray(getattr(args, "position_offset_mm", (0, 0, 0)), dtype=float)
+            if offset.shape != (3,) or not np.isfinite(offset).all():
+                raise ValueError("Expected a finite xyz position offset")
+            self.fixture.update(schema="sharpa-cube-grasp-exploratory/v1", object_type="cube", edge_m=0.04)
+            self.fixture["ball_position"] = (np.asarray(FIXTURE["ball_position"]) + offset * 0.001).tolist()
         self.total_steps = round(self.fixture["duration"] / self.fixture["dt"])
         device = wp.get_device(args.device)
         if not device.is_cuda:
             raise ValueError("Sharpa mesh SDF grasp requires CUDA; CPU components have independent tests")
         calibration = load_calibration(args.calibration)
+        if self.cube:
+            validate_cube_calibration(calibration, args.cube, dt=self.fixture["dt"])
+        elif calibration.get("protocol", {}).get("object_type") == "cube":
+            raise ValueError("Cube calibration cannot certify a ball")
         floor = calibration.get("stiffness_floor_n_m3")
         if not isinstance(floor, (int, float)) or not np.isfinite(floor) or floor <= 0:
             raise ValueError("Invalid frozen contact stiffness floor")
         self.parameters = load_fixture(Path(__file__).with_name("sharpa_g1h.json"))
-        with np.load(args.ball, allow_pickle=False) as ball:
+        object_path = args.cube if self.cube else args.ball
+        with np.load(object_path, allow_pickle=False) as ball:
             # The archive format is checked again by load_hand_ball/load_ball.
             rest_positions = ball["vertices"] if "vertices" in ball else ball["rest_positions"]
             height = (
                 self.fixture["ball_position"][2] + float(rest_positions[:, 2].min()) - self.fixture["particle_radius"]
             )
         mount = None if self.anchored else {"support_height": height, "carriage": self.fixture["carriage"]}
-        self.model, self.manifest = load_hand_ball(
+        loader = load_hand_cube if self.cube else load_hand_ball
+        self.model, self.manifest = loader(
             args.asset_dir,
             args.contact_dir,
-            args.ball,
+            object_path,
             device=device,
             parameters=self.parameters,
             position=self.fixture["ball_position"],
             resolution=128,
-            ball_radius=ball_radius,
+            **({} if self.cube else {"ball_radius": ball_radius}),
             _mount=mount,
         )
         model = self.model
@@ -235,6 +252,15 @@ class GraspCase:
             tangential_stiffness=self.fixture["tangential_stiffness"],
             material_model="smith_log_stabilized",
             mass_mode="consistent",
+            **(
+                {
+                    "use_optimized_articulation_mass_matrix": True,
+                    "pcg_mode": getattr(args, "pcg_mode", "production"),
+                    "use_cuda_graph": getattr(args, "pcg_mode", "production") == "production",
+                }
+                if self.cube
+                else {}
+            ),
             tet_rest_density=wp.full(model.tet_count, 1000.0, device=device),
             joint_terms=SolverMonolithic.JointTerms(
                 implicit_pd=True,
@@ -268,10 +294,27 @@ class GraspCase:
         solve = self.solver._linear.solve_pcg
 
         def measure_pcg(*a, **kw):
+            if self.cube:
+                wp.synchronize_device(self.model.device)
             start = time.perf_counter()
             result = solve(*a, **kw)
+            if self.cube:
+                wp.synchronize_device(self.model.device)
             self._pcg_calls.append(
-                {"iterations": result.iterations, "status": result.status.name, "seconds": time.perf_counter() - start}
+                {
+                    "iterations": result.iterations,
+                    "status": result.status.name,
+                    "seconds": time.perf_counter() - start,
+                    **(
+                        {
+                            "capture_seconds": result.capture_seconds,
+                            "prepare_seconds": result.prepare_seconds,
+                            "graph_rebuilt": result.graph_rebuilt,
+                        }
+                        if self.cube
+                        else {}
+                    ),
+                }
             )
             return result
 
@@ -303,6 +346,18 @@ class GraspCase:
             if self.anchored
             else "PR-7A exploratory integration; G6/G7 NOT_VALIDATED",
         )
+        if self.cube:
+            self.manifest.pop("radius_calibration")
+            self.manifest.update(
+                scope="PR8H cube exploration; G6/G7 NOT_VALIDATED",
+                force_convention="world force on rigid body; negate for force on the cube",
+                default_preconditioner="actor_block",
+                pcg_mode=self.solver.pcg_mode.value,
+                use_cuda_graph=self.solver.use_cuda_graph,
+                linear_absolute_tolerance=1e-6,
+                use_optimized_articulation_mass_matrix=self.solver.use_optimized_articulation_mass_matrix,
+            )
+            self.fixture["object_position"] = self.fixture.pop("ball_position")
 
     def set_target(self, time_s):
         """Freeze the complete hand and carriage control for one physical step."""
@@ -327,12 +382,23 @@ class GraspCase:
         stage = self.set_target(time_s)
         self._pcg_calls.clear()
         self._collision_seconds = 0.0
+        if self.cube:
+            wp.synchronize_device(self.model.device)
         start = time.perf_counter()
         try:
             self.solver.step(self.state, self.state, self.control, None, self.fixture["dt"])
         except Exception as error:
             self.failure = f"{type(error).__name__}: {error}"
+            if self.cube:
+                self._exception_step = {
+                    "stage": stage,
+                    "target_time": time_s,
+                    "pcg_calls": list(self._pcg_calls),
+                    "step_seconds": time.perf_counter() - start,
+                }
             return
+        if self.cube:
+            wp.synchronize_device(self.model.device)
         elapsed = time.perf_counter() - start
         stats = self.solver.last_stats
         if stats.rolled_back:
@@ -358,6 +424,22 @@ class GraspCase:
             per_finger[name] = np.sum(forces[np.asarray(mask, dtype=bool)], axis=0).tolist()
         support = np.zeros(3) if self.anchored else np.sum(forces[body == 0], axis=0)
         palm = np.sum(forces[body == (0 if self.anchored else 1)], axis=0)
+        cube_observation = {}
+        if self.cube:
+            normals = contacts.soft_contact_normal.numpy()[:count]
+            normal_forces = np.sum(forces * normals, axis=1)[:, None] * normals
+            finger_mask = body > 1
+            cube_observation = {
+                "finger_normal_force_on_object": (-np.sum(normal_forces[finger_mask], axis=0)).tolist(),
+                "finger_tangent_force_on_object": (-np.sum((forces - normal_forces)[finger_mask], axis=0)).tolist(),
+                "two_finger_upward_support": sum(-force[2] > 0.001 for force in per_finger.values()) >= 2,
+                "support_threshold_n": 0.001,
+                "support_threshold_status": "EXPLORATORY_NOT_FROZEN",
+                "rigid_fit_extents_m": np.ptp(centered @ rotation.T, axis=0).tolist(),
+                "object_speed_rms": float(
+                    np.sqrt(np.average(np.sum(self.state.particle_qd.numpy() ** 2, axis=1), weights=self.weights))
+                ),
+            }
         q = self.state.joint_q.numpy()
         qd = self.state.joint_qd.numpy()
         hand_root = self.state.body_q.numpy()[0 if self.anchored else 1, :3]
@@ -405,7 +487,7 @@ class GraspCase:
                 "limit_force": stats.joint_limit_force,
                 "friction_force": stats.joint_friction_force,
                 "joint_friction_power": stats.joint_friction_power,
-                "ball_com": com.tolist(),
+                ("object_com" if self.cube else "ball_com"): com.tolist(),
                 "deformation_rms": deformation,
                 "support_force": support.tolist(),
                 "finger_forces": per_finger,
@@ -417,6 +499,7 @@ class GraspCase:
                 "x_residual_ratio": stats.convergence_ratio_x,
                 "history": dict(stats.contact_history),
                 "query_counts": self.solver.collision_pipeline._query_counts.numpy().tolist(),
+                **cube_observation,
             }
         )
 
@@ -426,11 +509,20 @@ class GraspCase:
         output.mkdir(parents=True, exist_ok=True)
         pcg = {}
         for stage in ("close", "hold", "lift", "hold_high"):
-            calls = [c["iterations"] for r in self.records if r["stage"] == stage for c in r["pcg_calls"]]
+            source_rows = self.records + (
+                [self._exception_step] if self.cube and hasattr(self, "_exception_step") else []
+            )
+            calls = [c["iterations"] for r in source_rows if r["stage"] == stage for c in r["pcg_calls"]]
             pcg[stage] = float(np.percentile(calls, 95)) if calls else None
         summary = {
-            "ball_radius_m": self.manifest["ball_radius_m"],
-            "radius_calibration": self.manifest["radius_calibration"],
+            **(
+                {"object_type": "cube", "edge_m": self.manifest["edge_m"], "mass_kg": self.manifest["mass_kg"]}
+                if self.cube
+                else {
+                    "ball_radius_m": self.manifest["ball_radius_m"],
+                    "radius_calibration": self.manifest["radius_calibration"],
+                }
+            ),
             "complete_schedule": self.step_count == self.total_steps and self.failure is None,
             "accepted_steps": self.step_count,
             "failure": self.failure,
@@ -442,13 +534,40 @@ class GraspCase:
         }
         high = [r for r in self.records if r["stage"] == "hold_high"]
         if high:
-            relative = np.array([np.array(r["ball_com"]) - r["hand_root"] for r in high])
+            relative = np.array([np.array(r["object_com" if self.cube else "ball_com"]) - r["hand_root"] for r in high])
             summary["high_hold_relative_drift_m"] = float(np.max(np.linalg.norm(relative - relative[0], axis=1)))
             summary["high_hold_support_absent"] = all(not r["support_present"] for r in high)
         lift = [r for r in self.records if r["stage"] == "lift"]
         if lift:
-            summary["lift_com_rise_m"] = lift[-1]["ball_com"][2] - lift[0]["ball_com"][2]
+            summary["lift_com_rise_m"] = (
+                lift[-1]["object_com" if self.cube else "ball_com"][2]
+                - lift[0]["object_com" if self.cube else "ball_com"][2]
+            )
             summary["lift_support_absent"] = all(not r["support_present"] for r in lift)
+        if self.cube:
+            summary["fixture_status"] = "EXPLORATORY_NOT_FROZEN"
+            summary["exception_step"] = getattr(self, "_exception_step", None)
+            summary["dynamic_nodes"] = int(np.count_nonzero(~self.fixed))
+            summary["fixed_nodes"] = int(np.count_nonzero(self.fixed))
+            summary["two_finger_support_fraction"] = {
+                stage: float(np.mean([r["two_finger_upward_support"] for r in self.records if r["stage"] == stage]))
+                for stage in ("hold", "lift", "hold_high")
+                if any(r["stage"] == stage for r in self.records)
+            }
+            summary["stage_timing"] = {
+                stage: {
+                    field: np.percentile([r[field] for r in self.records if r["stage"] == stage], [50, 95]).tolist()
+                    for field in ("step_seconds", "pcg_seconds")
+                }
+                for stage in dict.fromkeys(r["stage"] for r in self.records)
+            }
+            summary["solve_seconds_p50_p95"] = (
+                np.percentile([c["seconds"] for r in self.records for c in r["pcg_calls"]], [50, 95]).tolist()
+                if any(r["pcg_calls"] for r in self.records)
+                else None
+            )
+            summary["maximum_penetration_m"] = max((r["penetration"] for r in self.records), default=None)
+            summary["minimum_det_f"] = min((r["min_det_f"] for r in self.records), default=None)
         if self.anchored:
             hold = [r for r in self.records if r["stage"] == "hold"]
             gates = self.fixture["gates"]

@@ -922,6 +922,14 @@ If you run the examples from a source checkout with uv, use
       <br><a href="docs/guide/monolithic_sharpa_grasp.rst">Required asset arguments and usage</a>
       <br>Palm-anchored soft sphere: closure stability and efficiency.
     </td>
+    <td align="center" width="33%">
+      <a href="newton/examples/softbody/example_monolithic_sharpa_soft_cube.py">
+        <img width="320" src="docs/images/examples/example_monolithic_sharpa_soft_cube.jpg" alt="40 mm deformable cube asset preview; grasp calibration pending">
+      </a>
+      <br><code>python -m newton.examples monolithic_sharpa_soft_cube</code>
+      <br><a href="scripts/monolithic_reference/cube_grasp_zh.md">Required assets and independent cube calibration</a>
+      <br>Experimental cube grasp; physical calibration is not yet passed.
+    </td>
   </tr>
   <tr>
     <td colspan="3"><h3>Kamino Examples</h3></td>

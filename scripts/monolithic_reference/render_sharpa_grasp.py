@@ -11,7 +11,7 @@ import numpy as np
 import warp as wp
 
 import newton
-from newton.examples.softbody.monolithic_sharpa_assets import load_hand_ball
+from newton.examples.softbody.monolithic_sharpa_assets import load_hand_ball, load_hand_cube
 from newton.examples.softbody.sharpa_close import load_fixture, sha256
 from newton.viewer import ViewerGL
 
@@ -23,21 +23,25 @@ def main():
     parser.add_argument("--asset-dir", required=True)
     parser.add_argument("--contact-dir", required=True)
     parser.add_argument("--ball", default="scripts/monolithic_reference/fixtures/soft_ball/ball_r2.npz")
+    parser.add_argument("--cube")
     parser.add_argument("--run", type=Path, required=True)
     parser.add_argument("--state", default="state_500.npz")
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
     manifest = json.loads((args.run / "manifest.json").read_text())
-    if manifest["ball_sha256"] != sha256(args.ball):
-        raise ValueError("Snapshot ball asset mismatch")
-    model, _ = load_hand_ball(
+    cube = manifest.get("object_type") == "cube"
+    path = args.cube if cube else args.ball
+    if path is None or manifest["cube_sha256" if cube else "ball_sha256"] != sha256(path):
+        raise ValueError("Snapshot object asset mismatch")
+    loader = load_hand_cube if cube else load_hand_ball
+    model, _ = loader(
         args.asset_dir,
         args.contact_dir,
-        args.ball,
-        ball_radius=manifest.get("ball_radius_m", 0.020),
+        path,
+        **({} if cube else {"ball_radius": manifest.get("ball_radius_m", 0.020)}),
         device="cpu",
         parameters=load_fixture("newton/examples/softbody/sharpa_g1h.json"),
-        position=manifest["ball_position_m"],
+        position=manifest["object_position_m" if cube else "ball_position_m"],
         _mount=manifest.get("mount"),
     )
     state = model.state()

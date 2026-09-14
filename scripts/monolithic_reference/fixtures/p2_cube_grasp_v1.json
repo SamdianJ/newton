@@ -1,0 +1,110 @@
+{
+  "schema": "monolithic-p2-cube-grasp/v1",
+  "status": "PR8H_ASSET_AND_ENTRY_IMPLEMENTED_CALIBRATION_BLOCKED",
+  "object": {
+    "type": "cube",
+    "edge_m": 0.04,
+    "cells_per_axis": [
+      4,
+      6,
+      8
+    ],
+    "nodes": [
+      125,
+      343,
+      729
+    ],
+    "tets": [
+      384,
+      1296,
+      3072
+    ],
+    "mass_kg": 0.064,
+    "density": 1000.0,
+    "all_nodes_dynamic": true
+  },
+  "execution": {
+    "pcg_mode": "production",
+    "use_cuda_graph": true,
+    "use_optimized_articulation_mass_matrix": true,
+    "preconditioner": "actor_block",
+    "dt": 0.001,
+    "frame_dt": 0.01,
+    "rtol": 0.0001,
+    "atol": 1e-06,
+    "pcg_p95_budget": 64,
+    "pcg_hard_cap": 200
+  },
+  "grasp": {
+    "status": "NOT_RUN_CALIBRATION_BLOCKED",
+    "duration_s": 9.0,
+    "stage_ends_s": [
+      0.5,
+      2.5,
+      4.5,
+      5.5,
+      6.5,
+      8.5,
+      9.0
+    ],
+    "lift_m": 0.05,
+    "initial_center_m": [
+      0.025,
+      -0.03,
+      0.19
+    ],
+    "offsets_x_y_mm": [
+      -10,
+      0,
+      10
+    ],
+    "offsets_z_mm": [
+      -5,
+      0,
+      5
+    ],
+    "scan_grid": 2,
+    "required": "side-face friction support by at least two fingers; independent friction-off negative control"
+  },
+  "calibration": {
+    "status": "FAILED_NO_PHYSICAL_ENVELOPE",
+    "stiffness_scan_n_m3": [
+      500000.0,
+      1000000.0,
+      2000000.0,
+      5000000.0,
+      10000000.0,
+      20000000.0,
+      50000000.0,
+      100000000.0
+    ],
+    "cases": 24,
+    "passed": 0,
+    "failure": "NONLINEAR_STAGNATION",
+    "budget_and_physics_separate": true,
+    "frozen_stiffness": null
+  },
+  "pr8i": {
+    "status": "HISTORICAL_TRIGGER_RETAINED_CUBE_SCREEN_INCOMPLETE",
+    "historical_evidence": "dev/monothlic/newton_monolithic_solver_p2_architecture_zh.md sections 9.1/9.2; S=1/2 coarse-h over-budget records retained",
+    "cube_evidence": "Incomplete plate trajectories cannot establish NOT_TRIGGERED for free grasp",
+    "spd_design": "SCHUR-SPD-01_OPEN",
+    "production_apply": "NOT_IMPLEMENTED"
+  },
+  "pr8j": {
+    "status": "NOT_STARTED_PR8H_PR8I_DEPENDENCIES_OPEN"
+  },
+  "g6": "NOT_VALIDATED",
+  "g7": "NOT_VALIDATED",
+  "nightly": "USER_MANUAL_ONLY",
+  "push": "NOT_AUTHORIZED",
+  "evidence": "agents/integration/artifacts/p2/pr8h-cube-20260914",
+  "historical_ball": "PRESERVED; not a matched performance comparison",
+  "pending_freeze": [
+    "contact envelope",
+    "grasp fixture",
+    "support duration and force thresholds",
+    "deformation/recovery/release gates",
+    "time-error and performance budgets"
+  ]
+}
