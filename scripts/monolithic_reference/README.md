@@ -267,3 +267,5 @@ Current `masked_smart_restart_v3` retains validated cross-generation graph reuse
 The solver graph option now also captures six stable device segments with bounded per-solver caches. Host validation, numerical decisions, BSR construction and transactions remain outside capture. See [P8D segment boundaries and measurement](p2_segment_graphs_zh.md) and `fixtures/p2_cuda_graph_inventory_v3.json`. The standalone linear PCG benchmark continues to measure PCG alone.
 
 Use [the standalone PCG benchmark](pcg_benchmark_zh.md) to compare native diagnostic/production convergence, FP64 reference error, and complete linear-call costs under stable reuse and generation refresh. It also measures production graph on CUDA, with untimed convergence observation and per-round GPU telemetry.
+
+PR8E/F fixed-hierarchy block/MAS research starts with [the preconditioner study](preconditioner_study_zh.md). Algebra results do not grant production admission.

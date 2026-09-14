@@ -1,0 +1,42 @@
+{
+  "schema": "monolithic-p2-preconditioner-study/v2",
+  "status": "ALGEBRA_IMPLEMENTED_GPU_PENDING",
+  "candidates": [
+    "actor_block",
+    "local_block_4",
+    "local_block_8",
+    "mas_16",
+    "mas_32",
+    "sa_amg_cpu"
+  ],
+  "mas": {
+    "maximum_levels": 3,
+    "geometry": "fixed reference Morton order; connected-component coarse aggregates",
+    "numeric_update": "full scaled regularized A_xx projection every required generation",
+    "coarse_basis": "physical piecewise constant, transformed by inverse scale"
+  },
+  "primary": [
+    "tet-r5",
+    "tet-r6"
+  ],
+  "contact_controls": [
+    "sharpa-r2-close",
+    "sharpa-r2-hold",
+    "sharpa-r3-close",
+    "sharpa-r3-hold"
+  ],
+  "baseline": "production graph including P8D stable segments",
+  "rtol": 0.0001,
+  "atol": 1e-06,
+  "pcg_p95_limit": 64,
+  "pcg_hard_cap": 200,
+  "admission": "PILOT_THEN_USER_REVIEW_AND_BUDGET_FREEZE; no GO or public option before formal validation",
+  "not_implemented": [
+    "dynamic hierarchy",
+    "selective inverse updates",
+    "delayed Hessian",
+    "public soft_preconditioner option"
+  ],
+  "nightly": "USER_MANUAL_ONLY",
+  "historical_manifest": "p2_preconditioner_study_v1.json"
+}
