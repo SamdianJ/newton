@@ -1,6 +1,6 @@
 {
   "schema": "monolithic-p2-preconditioner-study/v2",
-  "status": "PR8F_PILOT_COMPLETE_REVIEW_REQUIRED",
+  "status": "P2_PR8EF_CLOSED_PR8G_NOT_APPLICABLE",
   "candidates": [
     "actor_block",
     "local_block_4",
@@ -30,7 +30,7 @@
   "atol": 1e-06,
   "pcg_p95_limit": 64,
   "pcg_hard_cap": 200,
-  "admission": "PILOT_THEN_USER_REVIEW_AND_BUDGET_FREEZE; no GO or public option before formal validation",
+  "admission": "CLOSED_WITHOUT_ADMITTED_CANDIDATE; actor_block retained; no public option",
   "not_implemented": [
     "dynamic hierarchy",
     "selective inverse updates",
@@ -71,6 +71,17 @@
     "First tet6 trajectory timings have mismatched power states",
     "Final state error bounds remain uncalibrated"
   ],
-  "formal_admission": "NOT_STARTED_BUDGET_NOT_FROZEN",
-  "amg_gpu": "NOT_MEASURED"
+  "formal_admission": "NOT_STARTED; P2 research closed before budget freeze",
+  "amg_gpu": "NOT_MEASURED",
+  "closeout": {
+    "date": "2026-09-14",
+    "decision": "USER_CONFIRMED",
+    "pr8e": "CLOSED_RESEARCH_COMPLETE",
+    "pr8f": "CLOSED_PROTOTYPE_AND_PILOT_COMPLETE",
+    "pr8g": "NOT_APPLICABLE",
+    "default_preconditioner": "actor_block",
+    "mas": "NO_CLEAR_END_TO_END_GAIN_IN_CURRENT_SCENES_AND_IMPLEMENTATION; not a formal budgeted NO_GO",
+    "amg": "DEFERRED_TO_P3_FOR_CONSIDERATION; CPU convergence promising, GPU NOT_MEASURED",
+    "record": "scripts/monolithic_reference/preconditioner_closeout_p2_zh.md"
+  }
 }

@@ -1,5 +1,7 @@
 # PR8E/F 预条件器研究
 
+**当前状态：P2 8E/8F 已收尾，8G 为 NOT_APPLICABLE。** 当前 MAS 未展现明显端到端提升，默认保留 actor_block；SA-AMG 转入 P3 考虑，GPU 未测。见[收尾决定](preconditioner_closeout_p2_zh.md)。以下门槛与命令保留为研究协议，不代表 P2 仍等待性能准入。
+
 本工具不改变 solver 默认值，不接入公共预条件器选项。候选为 actor_block、local_block_4/8、mas_16/32；研究范围是完整已尺度化、含 lambda 的 A_xx，q 侧保持 dense，完整 q-x 在全局算子中。
 
 `uv run --no-sync -m scripts.monolithic_reference.preconditioner_study --snapshot <export.npz> --output <新目录>` 可重复指定快照；省略快照运行具有几何、非均匀尺度与 q-x 耦合的合成 SPD 用例。`--linear-absolute-tolerance 0` 仅用于独立压力对照。输入使用现有 NPZ/JSON 哈希认证，结果保留向量、逐轮误差、独立真实残差与异常，不改变验收阈值。
