@@ -11,6 +11,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+import numpy as np
+
 from scripts.monolithic_reference import validate_p2 as workflow
 
 
@@ -27,7 +29,7 @@ class TestMonolithicValidationWorkflow(unittest.TestCase):
         """Compare diagnostic and production graph while preserving scenario coverage and repeats."""
         repo = Path(__file__).resolve().parents[2]
         jobs = workflow.build_jobs("night", repo)
-        self.assertEqual(len(jobs), 57)  # One regression group, 40 Sharpa and 16 tet runs.
+        self.assertEqual(len(jobs), 65)  # One regression group, 40 Sharpa and 24 tet runs.
         self.assertEqual(len({j["name"] for j in jobs}), len(jobs))
         self.assertTrue(all(j["cwd"] == str(repo) for j in jobs))
         for job in jobs[1:]:
@@ -40,7 +42,7 @@ class TestMonolithicValidationWorkflow(unittest.TestCase):
             for repeat in range(1, 6):
                 for mode in ("diagnostic", "production-graph", "owned", "owned-production-graph"):
                     expected.add(f"sharpa-r{mesh}-{mode}-rep{repeat:02d}")
-        for mesh, repeats in ((3, 1), (4, 1), (5, 5), (6, 1)):
+        for mesh, repeats in ((3, 1), (4, 1), (5, 5), (6, 5)):
             for repeat in range(1, repeats + 1):
                 for mode in ("diagnostic", "production-graph"):
                     expected.add(f"tet-r{mesh}-{mode}-rep{repeat:02d}")
@@ -53,7 +55,7 @@ class TestMonolithicValidationWorkflow(unittest.TestCase):
             self.assertEqual(
                 arguments[arguments.index("--mass-matrix") + 1], "owned" if "-owned-" in job["name"] else "reference"
             )
-        for kind, mesh in (("sharpa", 3), ("sharpa", 2), ("tet", 5)):
+        for kind, mesh in (("sharpa", 3), ("sharpa", 2), ("tet", 5), ("tet", 6)):
             orders = [
                 [
                     j["name"].rsplit("-rep", 1)[0]
@@ -63,6 +65,124 @@ class TestMonolithicValidationWorkflow(unittest.TestCase):
                 for repeat in (1, 2)
             ]
             self.assertEqual(orders[0], list(reversed(orders[1])))
+
+    def _accuracy_fixture(self, root, prefix="tet-r6-"):
+        jobs = [job for job in workflow.build_jobs("night", root) if job["name"].startswith(prefix)]
+        completed = {}
+        for job in jobs:
+            output = root / job["name"]
+            output.mkdir()
+            repeat = int(job["name"][-2:])
+            production = "production" in job["name"]
+            value = repeat * 0.001 + (0.0002 if production else 0.0)
+            np.savez(
+                output / "final_state.npz", x=np.full((2, 3), value), v=np.zeros((2, 3)), q=np.zeros(0), qd=np.zeros(0)
+            )
+            options = {
+                "pcg_mode": "production" if production else "diagnostic",
+                "use_cuda_graph": production,
+                "use_optimized_articulation_mass_matrix": "-owned-" in job["name"],
+                "linear_absolute_tolerance": 1e-6,
+            }
+            workflow.write_json(
+                output / "execution-options.json", {"failure": None, "constructions": [options, options]}
+            )
+            workflow.write_json(
+                output / "evidence-index.json",
+                {name: workflow.digest(output / name) for name in ("final_state.npz", "execution-options.json")},
+            )
+            completed[job["name"]] = {"output": str(output), "screen": {"screen_passed": True}}
+        return jobs, completed
+
+    def test_accuracy_separates_modes_and_repeat_variability(self):
+        """Measure paired final states separately from within-mode variation without granting accuracy admission."""
+        with tempfile.TemporaryDirectory() as tmp:
+            jobs, completed = self._accuracy_fixture(Path(tmp))
+            report = workflow.summarize_accuracy(jobs, completed)
+            group = report["groups"][0]
+            self.assertEqual(group["status"], "REVIEW_REQUIRED")
+            self.assertEqual(group["expected_runs"], 10)
+            self.assertEqual(group["available_runs"], 10)
+            pairs = group["comparisons"]
+            self.assertEqual(len(pairs["cross_mode"]), 5)
+            self.assertEqual(len(pairs["diagnostic_repeat"]), 10)
+            self.assertEqual(len(pairs["production_graph_repeat"]), 10)
+            metrics = pairs["cross_mode"][0]["arrays"]
+            self.assertAlmostEqual(metrics["x"]["max_abs"], 0.0002)
+            self.assertAlmostEqual(metrics["x"]["rms"], 0.0002)
+            self.assertIsNone(metrics["v"]["relative_l2"])
+            self.assertEqual(metrics["q"]["max_abs"], 0)
+            self.assertAlmostEqual(group["max_position_difference"]["diagnostic_repeat"], 0.004)
+            self.assertAlmostEqual(group["max_position_difference"]["cross_mode"], 0.0002)
+            json.dumps(report, allow_nan=False)
+
+    def test_accuracy_missing_invalid_and_mismatched_runs(self):
+        """Keep incomplete and invalid evidence visible without stopping other comparisons."""
+        for problem in ("missing", "nonfinite", "shape", "options", "screen", "tamper"):
+            with self.subTest(problem=problem), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                jobs, completed = self._accuracy_fixture(root)
+                name = jobs[0]["name"]
+                output = Path(completed[name]["output"])
+                if problem == "missing":
+                    del completed[name]
+                elif problem == "screen":
+                    completed[name]["screen"]["screen_passed"] = False
+                elif problem == "options":
+                    workflow.write_json(output / "execution-options.json", {"failure": None, "constructions": []})
+                else:
+                    np.savez(
+                        output / "final_state.npz",
+                        x=np.full((3 if problem == "shape" else 2, 3), np.nan if problem == "nonfinite" else 1.0),
+                        v=np.zeros((2, 3)),
+                        q=np.zeros(0),
+                        qd=np.zeros(0),
+                    )
+                if problem != "tamper":
+                    workflow.write_json(
+                        output / "evidence-index.json",
+                        {
+                            file: workflow.digest(output / file)
+                            for file in ("final_state.npz", "execution-options.json")
+                        },
+                    )
+                group = workflow.summarize_accuracy(jobs, completed)["groups"][0]
+                self.assertEqual(group["status"], "INCOMPLETE")
+                self.assertTrue(group["errors"])
+                self.assertTrue(group["comparisons"]["cross_mode"])
+
+    def test_accuracy_grouping_and_insufficient_repeats(self):
+        """Separate mesh and mass variants and leave single-run variability unavailable."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            jobs, completed = self._accuracy_fixture(root, "tet-r3-")
+            extra_jobs, extra_completed = self._accuracy_fixture(root, "sharpa-r3-")
+            report = workflow.summarize_accuracy(jobs + extra_jobs, completed | extra_completed)
+            groups = {group["group"]: group for group in report["groups"]}
+            self.assertEqual(set(groups), {"tet-r3-reference", "sharpa-r3-reference", "sharpa-r3-owned"})
+            tet = groups["tet-r3-reference"]
+            self.assertEqual(len(tet["comparisons"]["cross_mode"]), 1)
+            self.assertIsNone(tet["max_position_difference"]["diagnostic_repeat"])
+            self.assertIsNone(tet["max_position_difference"]["production_graph_repeat"])
+            self.assertTrue(all(group["status"] == "REVIEW_REQUIRED" for group in groups.values()))
+
+    def test_accuracy_summary_remains_open_and_resume_recomputes(self):
+        """Publish the nightly accuracy report and retain its gate after completed jobs are skipped."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "logs").mkdir()
+            jobs, completed = self._accuracy_fixture(root)
+            for result in completed.values():
+                result["screen"].update(pcg=workflow.pcg_budget([]), solver_seconds=1.0)
+            state = {"suite": "night", "signature": {}, "completed": completed}
+            for _ in range(2):
+                self.assertEqual(workflow.run_jobs(root, jobs, state, clean=False), 2)
+                self.assertEqual(state["accuracy_open_groups"], ["tet-r6-reference"])
+                self.assertEqual(state["status"], "COMPLETED_WITH_OPEN_GATES")
+                self.assertIn("accuracy.json", (root / "summary.md").read_text())
+                self.assertEqual(
+                    json.loads((root / "accuracy.json").read_text())["groups"][0]["status"], "REVIEW_REQUIRED"
+                )
 
     def test_reject_old_policy(self):
         """Reject an old saved plan even when its evidence is intact."""

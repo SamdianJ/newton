@@ -246,14 +246,19 @@ small CPU/CUDA development gate. It runs the owned-mass, linear/PCG, execution
 policy, transaction and runner regressions without full trajectories.
 
 Use `--suite night` explicitly for all monolithic regression modules and the
-56 full PR-8B/8C comparison trajectories in diagnostic and production CUDA graph
+64 full PR-8B/8C comparison trajectories in diagnostic and production CUDA graph
 modes. `--list` prints the plan without GPU
 work; `--resume --output <previous-output>` verifies and skips completed jobs.
 The overnight runner requires a clean current checkout, retains
 failed attempts, and separates execution completion from numerical budget
 failures. It does not change system power settings or grant performance
 acceptance automatically. See [the validation workflow](p2_validation_zh.md)
-for commands, scope and exit codes.
+for commands, scope and exit codes. Tet r6 now has five repeats per mode.
+Nightly writes `accuracy.json` with paired final-state q/qd/x/v differences and
+within-mode repeat variability, grouped by mesh and mass mode. Physical error
+limits remain uncalibrated: complete comparisons require review and keep exit
+code 2; incomplete evidence is explicit. Diagnostic is not ground truth, and
+repeat variability is not an automatic acceptance threshold.
 
 The PR-8C2 development snapshot is `fixtures/p2_cuda_graph_inventory_v2.json`: five PCG operations captured as one fixed chain, with CPU/CUDA correctness and warmed trace evidence. The v1 fixture remains a historical plan; full trajectory and performance admission remain pending the manual night run.
 

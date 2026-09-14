@@ -17,6 +17,8 @@ from pathlib import Path
 
 import numpy as np
 
+from scripts.monolithic_reference.p2_accuracy import summarize_accuracy
+
 REPO = Path(__file__).resolve().parents[2]
 DEV_MODULES = (
     "test_monolithic_segment_graphs",
@@ -45,7 +47,7 @@ def write_json(path, value):
     temporary.replace(path)
 
 
-WORKFLOW_POLICY = "p2-8c2-masked-smart-v3-diagnostic-graph-unattended"
+WORKFLOW_POLICY = "p2-8d-night-accuracy-v1"
 
 
 def build_jobs(suite, repo):
@@ -67,7 +69,7 @@ def build_jobs(suite, repo):
 
     for kind, meshes in (("sharpa", (3, 2)), ("tet", (5, 3, 4, 6))):
         for mesh in meshes:
-            repeats = 5 if kind == "sharpa" or mesh == 5 else 1
+            repeats = 5 if kind == "sharpa" or mesh in (5, 6) else 1
             variants = ("diagnostic", "production-graph")
             if kind == "sharpa":
                 variants += ("owned", "owned-production-graph")
@@ -92,6 +94,12 @@ def build_jobs(suite, repo):
                     jobs.append(
                         {
                             "name": f"{kind}-r{mesh}-{variant}-rep{repeat:02d}",
+                            "accuracy": {
+                                "group": f"{kind}-r{mesh}-{'owned' if variant.startswith('owned') else 'reference'}",
+                                "mode": "production_graph" if "production" in variant else "diagnostic",
+                                "mass": "owned" if variant.startswith("owned") else "reference",
+                                "repeat": repeat,
+                            },
                             "kind": kind,
                             "cwd": str(repo),
                             "arguments": arguments,
@@ -287,8 +295,17 @@ def run_jobs(root, jobs, state, *, clean):
         )
     ]
     failed = {row["name"]: row for row in state.get("failures", []) if row["name"] not in state["completed"]}
+    accuracy = summarize_accuracy(jobs, state["completed"]) if state.get("suite") == "night" else None
+    accuracy_open = [group["group"] for group in accuracy["groups"]] if accuracy else []
+    if accuracy is not None:
+        write_json(root / "accuracy.json", accuracy)
+    state["accuracy_open_groups"] = accuracy_open
     state["status"] = (
-        "COMPLETED_WITH_FAILURES" if failed else "COMPLETED_WITH_OPEN_GATES" if open_gates else "COMPLETED"
+        "COMPLETED_WITH_FAILURES"
+        if failed
+        else "COMPLETED_WITH_OPEN_GATES"
+        if open_gates or accuracy_open
+        else "COMPLETED"
     )
     state["failed_jobs"] = list(failed)
     state["open_gates"] = open_gates
@@ -318,6 +335,29 @@ def run_jobs(root, jobs, state, *, clean):
         for name, result in failed.items():
             log = Path(result["log"]).relative_to(root)
             report.append(f"- {name}: {result['error']} ([log]({log})).")
+    if accuracy is not None:
+        report += [
+            "",
+            "## Final-state accuracy (review required)",
+            "",
+            "[Detailed comparisons and evidence](accuracy.json). " + accuracy["admission"],
+            "",
+            "Position differences below are maximum coordinate differences in metres; — means insufficient evidence.",
+            "",
+            "| Scene / mass | Status | Loaded runs | Mode difference | Diagnostic repeat | Graph repeat |",
+            "|---|---|---:|---:|---:|---:|",
+        ]
+        for group in accuracy["groups"]:
+            values = ["—" if value is None else f"{value:.6g}" for value in group["max_position_difference"].values()]
+            report.append(
+                f"| {group['group']} | {group['status']} | {group['available_runs']}/{group['expected_runs']} | "
+                + " | ".join(values)
+                + " |"
+            )
+        report += [
+            "",
+            "Only final states are compared here; full trajectories, timestep and physical accuracy remain open.",
+        ]
     report += [
         "",
         "Performance admission requires review of matched clocks, quality, repeated costs, tails and memory.",
@@ -327,10 +367,10 @@ def run_jobs(root, jobs, state, *, clean):
     (root / "summary.md").write_text("\n".join(report) + "\n")
     print(
         f"{state['status']}: {len(state['completed'])} completed; {len(failed)} failed; "
-        f"{len(open_gates)} runs with open gates",
+        f"{len(open_gates)} runs with open gates; {len(accuracy_open)} accuracy groups require review",
         flush=True,
     )
-    return 1 if failed else 2 if open_gates else 0
+    return 1 if failed else 2 if open_gates or accuracy_open else 0
 
 
 def main():

@@ -46,13 +46,13 @@ uv run --no-sync -m scripts.monolithic_reference.validate_p2 \
   --suite night --output /absolute/path/night-p28c2
 ```
 
-当前 nightly 只比较 diagnostic 与 production graph。共 57 个作业：先运行 1 组 monolithic 单元回归，然后串行运行 40 个 Sharpa 和 16 个 tet 作业：
+当前 nightly 只比较 diagnostic 与 production graph。共 65 个作业：先运行 1 组 monolithic 单元回归，然后串行运行 40 个 Sharpa 和 24 个 tet 作业：
 
 | 场景 | 当前源码变体 | 重复 |
 |---|---|---|
 | Sharpa r3/r2 | diagnostic、production graph、owned diagnostic、owned production graph | 各 5 次 |
-| tet r5 | diagnostic、production graph | 各 5 次 |
-| tet r3/r4/r6 | diagnostic、production graph | 各 1 次 |
+| tet r5/r6 | diagnostic、production graph | 各 5 次 |
+| tet r3/r4 | diagnostic、production graph | 各 1 次 |
 
 production 作业全部显式启用 `--use-cuda-graph`；重复轮次交替正序/逆序。reference/owned 质量矩阵覆盖保持，单元回归仍覆盖非图 production。
 
@@ -62,9 +62,9 @@ nightly 默认无人值守：单个测试组或仿真任务以非零状态退出
 
 | 退出码 | 最终状态 | 含义 |
 |---|---|---|
-| 0 | COMPLETED | 所有任务正常结束且现有筛查通过；正式性能仍需评审 |
+| 0 | COMPLETED | 所有任务正常结束且现有筛查通过；nightly 精度待标定阶段保留退出码 2 |
 | 1 | COMPLETED_WITH_FAILURES | 存在任务退出失败或结果无法读取；其他独立任务已继续执行 |
-| 2 | COMPLETED_WITH_OPEN_GATES | 无任务执行失败，但仍有数值或 PCG 预算未通过 |
+| 2 | COMPLETED_WITH_OPEN_GATES | 无任务执行失败，但仍有数值、PCG 预算或末态精度评审未完成 |
 
 任务失败和指标未达标同时发生时返回 1，两类问题都保留在汇总中。
 
@@ -80,7 +80,7 @@ uv run --no-sync -m scripts.monolithic_reference.validate_p2 \
 源码、依赖、policy 或计划改变时必须使用新输出目录。旧 policy 在任何子进程之前拒绝；日志/索引/原始证据哈希也会校验。
 中断、失败、旧日志和未完成输出保留；`--resume` 跳过已完成且证据校验通过的任务，只重试失败/未执行任务。重试前归档该任务旧输出，追加新日志；恢复成功后不再计为未解决失败，历史失败记录继续保留。已完成但指标未达标的任务不会自动重跑，也不会因其他任务恢复成功而变为通过。
 
-工作流标识为 `p2-8c2-masked-smart-v3-diagnostic-graph-unattended`（数值 PCG policy 不变）；原 85 作业计划不能直接 resume，请使用新输出目录。源码修复或依赖变更后也必须使用新目录，不能混合版本续跑。
+工作流标识为 `p2-8d-night-accuracy-v1`（数值 PCG policy 不变）；原 57/85 作业计划不能直接 resume，请使用新输出目录。源码修复或依赖变更后也必须使用新目录，不能混合版本续跑。
 
 单项/短冒烟示例：
 
@@ -94,6 +94,14 @@ uv run --no-sync -m scripts.monolithic_reference.run_p2_8bc \
 
 P8D 扩展：solver 的 `--use-cuda-graph` 同时启用 articulation、trial tet residual、非线性归约、装配初始化、scaling 和 factor 六个稳定段。PCG 算法及图外检查/事务边界不变；compact.json 新增各段捕获/重放/驻留/淘汰统计。详见 [稳定段说明](p2_segment_graphs_zh.md)。 standalone PCG benchmark 仍只测线性求解，不包含这些物理 solver 段。
 单项 runner 支持 `--linear-absolute-tolerance 1e-6`（或 `0`）；nightly 两种模式使用相同暂定默认值。实际设置写入 `execution-options.json`，历史结果不回写，比较不同容差时必须区分精度策略。
+
+## 夜间末态精度检查
+
+运行结束后自动生成 `accuracy.json`，并在 `summary.md` 展示位置差异摘要。按场景、网格和 reference/owned 分组；同一重复编号配对 diagnostic 与 production graph，分别输出 q/qd/x/v 的最大坐标绝对差、坐标 RMS 和相对 L2。x 单位为米、v 为米/秒，q/qd 保留各关节量纲。差值用 FP64 计算；左侧状态范数为零时相对 L2 为 null，不用任意 floor 隐藏绝对差。
+
+同时计算每种模式全部重复的两两差异；tet6 与 tet5、Sharpa 各模式均运行五次。tet r3/r4 仍仅一次，重复波动标为 null，不能解读为零。末态文件与实际 solver 构造配置须通过证据哈希、有限性、形状及匹配配置检查；单项完整时程/质量筛查未通过或任务失败时，其数据不用于精度比较，分组标为 `INCOMPLETE`，其他有效比较仍保留。恢复运行完成后由核验过的单项证据重新生成汇总。
+
+当前物理误差界与 1e-6 线性绝对容差尚待标定，数据完整的组标为 `REVIEW_REQUIRED`，记录于 `progress.json.accuracy_open_groups`，使无任务失败的 nightly 返回 2。不把观测到的重复波动自动当作验收阈值，也不把 diagnostic 当作真实解；任务失败时仍优先返回 1。此检查针对完整仿真后的末态，未新增逐步全状态轨迹快照，不能代替时间离散、近静态或物理精度标定。diagnostic 与 production graph 对比包含 PCG 调度及稳定段执行差异，不能单独归因于 P8D 图优化。
 
 ## 结果与保留门槛
 
