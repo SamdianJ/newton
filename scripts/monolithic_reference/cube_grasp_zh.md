@@ -1,6 +1,6 @@
 # PR8H：40 mm cube 抓取入口
 
-**当前物理校准未通过，抓取扫描和 fixture 冻结尚未开展。** 三档资产与入口可用；不能用旧球校准或修改结果中的状态绕过门槛。版本化状态见 [cube v1](fixtures/p2_cube_grasp_v1.json)。历史球入口与 anchored-close 保留，cube 不用于重写旧性能结果。
+**三档物理校准已通过，抓取 fixture 尚未冻结。** 三档资产与入口可用；不能用旧球校准或修改结果中的状态绕过门槛。版本化状态见 [cube v2](fixtures/p2_cube_grasp_v2.json)；[历史 v1](fixtures/p2_cube_grasp_v1.json) 保留。历史球入口与 anchored-close 保留，cube 不用于重写旧性能结果。
 
 资产为每边 4/6/8 格的 Freudenthal tet cube，125/343/729 节点，质量 0.064 kg，全部动态。默认使用 actor_block、owned articulation mass 和 production graph；`--pcg-mode diagnostic` 为独立数值对照。CPU 支持资产/双压板组件，真实手部 SDF 抓取需要 CUDA。
 
@@ -33,4 +33,8 @@ example 默认中档 `cube_r2.npz`，`--cube` 可选择独立三档资产；默�
 
 `render_sharpa_grasp --cube <asset.npz> ...` 根据cube manifest重放记录状态；`plot_sharpa_grasp`自动使用cube COM字段。README缩略图只展示初态资产，不是成功抓取证据。
 
-8I保留历史触发与 `SCHUR-SPD-01` 前置关卡；当前压板轨迹不完整，不能据此标记自由抓取 `NOT_TRIGGERED`。8J等待8H/8I关闭后重新profile。MAS不进入生产，AMG GPU留P3；无自动nightly或推送。
+8I保留历史触发与 `SCHUR-SPD-01` 前置关卡；压板校准不能据此标记自由抓取 `NOT_TRIGGERED`。8J等待8H/8I关闭后重新profile。MAS不进入生产，AMG GPU留P3；无自动nightly或推送。
+
+## 2026-09-14 校准续跑
+
+基于 `2c9789be` 的内外层验收兼容修复，24 点中 21 点通过。三档共同通过的最低已测刚度为 `5e5 N/m³`，抓取仍从 `1e7 N/m³` 开始。`1e8` 三档正常收敛率不足 99%，完整保留失败，不将轨迹完成等同通过。所有点 PCG p95 为 10；这是压板结果，不是自由抓取触发结论。源码及完整逐步结果见工作区 `agents/integration/artifacts/p2/pr8hij-resume-20260914/calibration`。下一步为预声明的 27 位置中档探索，尚无抓取或性能 GO。
