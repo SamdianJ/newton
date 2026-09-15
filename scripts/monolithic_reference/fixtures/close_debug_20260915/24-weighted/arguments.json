@@ -1,0 +1,21 @@
+{
+  "asset_dir": "/home/lightwheel/Desktop/newton/SamiulJ/assets/left_sharpa_wave",
+  "contact_dir": "/home/lightwheel/Desktop/newton/SamiulJ/agents/integration/artifacts/p1/pr6d-assets/hand",
+  "trajectory": "/home/lightwheel/Desktop/newton/SamiulJ/assets/trajectory/Ball_catch - Left_hand_motion_rad.csv",
+  "calibration": "/home/lightwheel/Desktop/newton/SamiulJ/agents/integration/artifacts/p2/pr8hij-resume-20260914/calibration/calibration.json",
+  "position": 24,
+  "output": "/home/lightwheel/Desktop/newton/SamiulJ/agents/integration/artifacts/p2/close-repair-20260915-24-weighted",
+  "fd_multiplier": 0.5,
+  "goal_weighted": true,
+  "cube": "scripts/monolithic_reference/fixtures/soft_cube_40mm/cube_r2.npz",
+  "device": "cuda:0",
+  "experiment": "grasp",
+  "pcg_mode": "production",
+  "friction_off": false,
+  "disable_aabb": false,
+  "position_offset_mm": [
+    10,
+    10,
+    -5
+  ]
+}

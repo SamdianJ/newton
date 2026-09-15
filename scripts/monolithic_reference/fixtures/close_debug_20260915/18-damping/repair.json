@@ -1,0 +1,248 @@
+{
+  "scope": "first failure physical step only, full FD research, no production backend change",
+  "position": 18,
+  "from_step_start": false,
+  "damped_least_squares": false,
+  "raw_status": "NONLINEAR_MAX_ITERATIONS",
+  "published_status": "REGULARIZATION_EXHAUSTED",
+  "failure": "REGULARIZATION_EXHAUSTED: Research repair did not converge: NONLINEAR_MAX_ITERATIONS",
+  "rolled_back": true,
+  "rollback_arrays_unchanged": true,
+  "currents": [
+    {
+      "iteration": 0,
+      "merit": [
+        2.2491485705701982e-05,
+        2.097181244398044e-05,
+        2.252428150101062e-05
+      ]
+    },
+    {
+      "iteration": 1,
+      "merit": [
+        1.2660836984994356e-05,
+        1.2847505661767316e-05,
+        1.2656633642640237e-05
+      ]
+    },
+    {
+      "iteration": 2,
+      "merit": [
+        1.1671846790822831e-05,
+        1.1723253076009247e-05,
+        1.167069482949314e-05
+      ]
+    },
+    {
+      "iteration": 3,
+      "merit": [
+        1.145248360745963e-05,
+        1.1414008668131833e-05,
+        1.1453340946666438e-05
+      ]
+    },
+    {
+      "iteration": 4,
+      "merit": [
+        1.140304471233164e-05,
+        1.1318865886580982e-05,
+        1.1404918858716836e-05
+      ]
+    },
+    {
+      "iteration": 5,
+      "merit": [
+        1.1387726602870305e-05,
+        1.1298877487992605e-05,
+        1.138970449806774e-05
+      ]
+    },
+    {
+      "iteration": 6,
+      "merit": [
+        1.1386824442284948e-05,
+        1.1298953532111986e-05,
+        1.138878051299362e-05
+      ]
+    },
+    {
+      "iteration": 7,
+      "merit": [
+        1.136821901536434e-05,
+        1.128546521110651e-05,
+        1.137006094746771e-05
+      ]
+    },
+    {
+      "iteration": 8,
+      "merit": [
+        1.1371608026152044e-05,
+        1.128620215432269e-05,
+        1.1373508136510324e-05
+      ]
+    },
+    {
+      "iteration": 9,
+      "merit": [
+        1.098911285544468e-05,
+        1.2295960104477006e-05,
+        1.0958122009746667e-05
+      ]
+    },
+    {
+      "iteration": 10,
+      "merit": [
+        1.0939583360222809e-05,
+        1.2242257460920062e-05,
+        1.0908689267677678e-05
+      ]
+    }
+  ],
+  "fallbacks": [
+    {
+      "step": 1293,
+      "iteration": 8,
+      "before": [
+        1.1371608026152044e-05,
+        1.128620215432269e-05,
+        1.1373508136510324e-05
+      ],
+      "trials": [
+        {
+          "damping": 0.0,
+          "alpha": 1.0,
+          "merit": 1.6496415822074408e-05,
+          "q": 1.7213204504029365e-05,
+          "x": 1.6480037641262965e-05,
+          "threshold": 1.1378397295070345e-05,
+          "passes": false
+        },
+        {
+          "damping": 0.0,
+          "alpha": 0.5,
+          "merit": 1.1912092634400038e-05,
+          "q": 1.3647884893579484e-05,
+          "x": 1.1870393646188972e-05,
+          "threshold": 1.1378965875471653e-05,
+          "passes": false
+        },
+        {
+          "damping": 0.0,
+          "alpha": 0.25,
+          "merit": 1.093490053767879e-05,
+          "q": 1.2294086605454871e-05,
+          "x": 1.0902584193725313e-05,
+          "threshold": 1.1379250165672307e-05,
+          "passes": true
+        }
+      ],
+      "fd_seconds": 2.6048138349997316,
+      "center_merit": 1.1371613965687364e-05,
+      "chosen_damping": 0.0,
+      "chosen_alpha": 0.25,
+      "chosen_merit": 1.0934912273486763e-05,
+      "predicted_derivative": -1.293136033791482e-10,
+      "linear_system_rank": 1052,
+      "accepted": true
+    },
+    {
+      "step": 1293,
+      "iteration": 9,
+      "before": [
+        1.098911285544468e-05,
+        1.2295960104477006e-05,
+        1.0958122009746667e-05
+      ],
+      "trials": [
+        {
+          "damping": 0.0,
+          "alpha": 1.0,
+          "merit": 0.00045563844496305606,
+          "q": 0.00046878758296067444,
+          "x": 0.000455340216090527,
+          "threshold": 1.0995940373880052e-05,
+          "passes": false
+        },
+        {
+          "damping": 0.0,
+          "alpha": 0.5,
+          "merit": 0.00020494575268259209,
+          "q": 0.00020784564473853428,
+          "x": 0.00020488047022516293,
+          "threshold": 1.0996489829522825e-05,
+          "passes": false
+        },
+        {
+          "damping": 0.0,
+          "alpha": 0.25,
+          "merit": 7.519968147782802e-05,
+          "q": 6.986712168644704e-05,
+          "x": 7.531455678433713e-05,
+          "threshold": 1.099676455734421e-05,
+          "passes": false
+        },
+        {
+          "damping": 0.0,
+          "alpha": 0.125,
+          "merit": 3.069450698172508e-05,
+          "q": 2.215606271873365e-05,
+          "x": 3.085837480350713e-05,
+          "threshold": 1.0996901921254905e-05,
+          "passes": false
+        },
+        {
+          "damping": 0.0,
+          "alpha": 0.0625,
+          "merit": 2.8503560997688114e-05,
+          "q": 2.8103054804113482e-05,
+          "x": 2.8512450387308663e-05,
+          "threshold": 1.099697060321025e-05,
+          "passes": false
+        },
+        {
+          "damping": 0.0,
+          "alpha": 0.03125,
+          "merit": 2.950359338620281e-05,
+          "q": 3.1441563727501575e-05,
+          "x": 2.9458821738595265e-05,
+          "threshold": 1.0997004944187924e-05,
+          "passes": false
+        },
+        {
+          "damping": 0.0,
+          "alpha": 0.015625,
+          "merit": 2.3936840106671562e-05,
+          "q": 2.6569168833384433e-05,
+          "x": 2.3874687950474367e-05,
+          "threshold": 1.099702211467676e-05,
+          "passes": false
+        },
+        {
+          "damping": 0.0,
+          "alpha": 0.0078125,
+          "merit": 1.0955373339704306e-05,
+          "q": 1.2242707737130422e-05,
+          "x": 1.0924867457968064e-05,
+          "threshold": 1.0997030699921178e-05,
+          "passes": true
+        }
+      ],
+      "fd_seconds": 2.6367350410000654,
+      "center_merit": 1.0989122689476716e-05,
+      "chosen_damping": 0.0,
+      "chosen_alpha": 0.0078125,
+      "chosen_merit": 1.0955370257103076e-05,
+      "predicted_derivative": -1.2076081352740687e-10,
+      "linear_system_rank": 1052,
+      "accepted": true
+    }
+  ],
+  "newton_budget": 10,
+  "final_ratios": [
+    1.6170180873880031,
+    48.561699805178364,
+    1.4928761513539555
+  ],
+  "recovered_physical_step": false,
+  "full_close_fixed": false
+}

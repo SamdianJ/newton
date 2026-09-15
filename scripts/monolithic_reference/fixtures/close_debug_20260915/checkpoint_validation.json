@@ -1,0 +1,36 @@
+{
+  "schema": "close-debug-checkpoint-validation/v1",
+  "date": "2026-09-15",
+  "branch": "debug/cube-close-residual-20260915",
+  "pre_commit": {
+    "command": "uvx pre-commit run -a",
+    "status": "PASS"
+  },
+  "unittest": {
+    "command": [
+      "uv",
+      "run",
+      "--no-sync",
+      "-m",
+      "unittest",
+      "newton.tests.test_monolithic_contact_continuity",
+      "newton.tests.test_monolithic_close_balance",
+      "newton.tests.test_monolithic_close_diagnosis",
+      "newton.tests.test_monolithic_close_merit",
+      "newton.tests.test_monolithic_close_repair",
+      "newton.tests.test_solver_monolithic_collision",
+      "newton.tests.test_solver_monolithic_contact",
+      "newton.tests.test_solver_monolithic_friction"
+    ],
+    "tests_run": 85,
+    "passed": 84,
+    "skipped": 1,
+    "failed": 0,
+    "errors": 0,
+    "status": "PASS",
+    "log": "checkpoint_tests.log"
+  },
+  "nightly": "NOT_RUN",
+  "close_repair": "UNRESOLVED: final global/x targets not met",
+  "source_evidence_hashes_verified": 41
+}

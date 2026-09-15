@@ -19,6 +19,7 @@ from ...geometry.soft_contacts_sdf import _shape_frames, eval_shape_sdf
 from ...geometry.types import GeoType
 from ...sim import Contacts, Model, State
 from .aabb import _CandidateBounds, _overlap, aggregate_overlap
+from .contact_continuity import CubicField, build_fields, query_field
 
 
 def _validate_and_collect_boundary_faces(model: Model) -> tuple[np.ndarray, np.ndarray]:
@@ -232,6 +233,8 @@ def create_monolithic_p1q3_face_contacts(
     shape_hi: wp.array[wp.vec3],
     aggregate: wp.array2d[float],
     counters: wp.array[int],
+    cubic_fields: wp.array[CubicField],
+    cubic_sdf: bool,
 ):
     pair_id = wp.tid()
     pair = face_pairs[pair_id]
@@ -260,16 +263,23 @@ def create_monolithic_p1q3_face_contacts(
     if not wp.isfinite(lower) or not wp.isfinite(reach):
         wp.atomic_max(out_status, 0, int(MonolithicCollisionPipeline.Status.INVALID_SDF_GRADIENT))
         return
-    if lower > threshold + reach:
+    cubic = cubic_sdf and (shape_type[shape] == GeoType.MESH or shape_type[shape] == GeoType.CONVEX_MESH)
+    # A reconstructed scalar field need not be 1-Lipschitz. The original
+    # centroid-distance rejection is therefore disabled for the experiment.
+    if not cubic and lower > threshold + reach:
         return
     for slot in range(3):
         bary = wp.vec3(1.0 / 6.0)
         bary[slot] = 2.0 / 3.0
         x = bary[0] * a + bary[1] * b + bary[2] * c
         wp.atomic_add(counters, 3, 1)
-        _lower, phi, grad = eval_shape_sdf(
-            shape_type[shape], shape_scale[shape], x, shape_sdf_index[shape], texture_sdf_table
-        )
+        phi, grad = float(0.0), wp.vec3()
+        if cubic:
+            phi, grad = query_field(cubic_fields[shape_sdf_index[shape]], x, shape_scale[shape])
+        else:
+            _lower, phi, grad = eval_shape_sdf(
+                shape_type[shape], shape_scale[shape], x, shape_sdf_index[shape], texture_sdf_table
+            )
         grad_length = wp.length(grad)
         if not wp.isfinite(grad_length) or grad_length == 0.0 or not wp.isfinite(phi):
             wp.atomic_max(out_status, 0, int(MonolithicCollisionPipeline.Status.INVALID_SDF_GRADIENT))
@@ -345,6 +355,8 @@ class MonolithicCollisionPipeline:
         soft_contact_gap: float = 0.01,
         _enable_aabb: bool = True,
         _sdf_query_error: float = 0.0,
+        _cubic_sdf: bool = False,
+        _smooth_history: bool = False,
     ):
         if not isinstance(_enable_aabb, bool):
             raise ValueError("_enable_aabb must be bool")
@@ -352,7 +364,10 @@ class MonolithicCollisionPipeline:
             raise ValueError("Detection gap must cover finite nonnegative SDF query error")
         self._enable_aabb = _enable_aabb
         self._sdf_query_error = float(_sdf_query_error)
-        self._bounds_config = (_enable_aabb, self._sdf_query_error)
+        if not isinstance(_cubic_sdf, bool) or not isinstance(_smooth_history, bool):
+            raise ValueError("Contact experiment switches must be bool")
+        self._cubic_sdf, self._smooth_history = _cubic_sdf, _smooth_history
+        self._bounds_config = (_enable_aabb, self._sdf_query_error, _cubic_sdf, _smooth_history)
         if not math.isfinite(soft_contact_gap) or soft_contact_gap < 0.0 or soft_contact_gap > np.finfo(np.float32).max:
             raise self.Error(self.Status.INVALID_SHAPE, "soft_contact_gap_must_be_finite_nonnegative")
         if model.requires_grad:
@@ -374,10 +389,28 @@ class MonolithicCollisionPipeline:
         self._r_soft = float(radii[0])
         target_bodies = np.unique(model.joint_child.numpy())
         shapes = _validate_and_collect_shapes(model, target_bodies)
+        self._cubic_storage, self._cubic_evidence = [], []
+        self._cubic_fields = wp.empty(0, dtype=CubicField, device=model.device)
+        if _cubic_sdf:
+            self._cubic_fields, self._cubic_storage, self._cubic_evidence = build_fields(
+                model, shapes, self._r_soft + self._soft_contact_gap
+            )
+        self._cubic_binding = self._cubic_fields
+        self._cubic_storage_binding = tuple(self._cubic_storage)
         pairs = _build_face_shape_pairs(model, faces, shapes)
         self._face_pairs = wp.array(pairs, dtype=wp.vec2i, device=model.device)
         self._status = wp.zeros(1, dtype=int, device=model.device)
         self._bounds = _CandidateBounds(model, faces, shapes, referenced)
+        if _cubic_sdf:
+            lo, hi = self._bounds.local_lo.numpy(), self._bounds.local_hi.numpy()
+            scales = model.shape_scale.numpy()
+            for item in self._cubic_evidence:
+                for shape in item["shapes"]:
+                    scale = 1.0 if item["scale_baked"] else scales[shape]
+                    lo[shape] = np.asarray(item["lower"]) * scale
+                    hi[shape] = np.asarray(item["upper"]) * scale
+            self._bounds.local_lo.assign(lo)
+            self._bounds.local_hi.assign(hi)
         self._query_counts = wp.zeros(4, dtype=int, device=model.device)
         self._token = object()
         self._contact_contracts = WeakKeyDictionary()
@@ -430,8 +463,14 @@ class MonolithicCollisionPipeline:
         return self._r_soft
 
     def _validate_model(self) -> None:
-        if self._bounds_config != (self._enable_aabb, self._sdf_query_error):
+        if self._bounds_config != (self._enable_aabb, self._sdf_query_error, self._cubic_sdf, self._smooth_history):
             raise self.Error(self.Status.INVALID_MODEL, "changed_bounds_configuration")
+        if (
+            self._cubic_fields is not self._cubic_binding
+            or len(self._cubic_storage) != len(self._cubic_storage_binding)
+            or any(a is not b for a, b in zip(self._cubic_storage, self._cubic_storage_binding, strict=True))
+        ):
+            raise self.Error(self.Status.INVALID_MODEL, "replaced_cubic_field")
         if self.model.device != self._device or self.model.requires_grad:
             raise self.Error(self.Status.INVALID_MODEL, "changed_device_or_grad")
         if any(getattr(self.model, name) is not value for name, value in self._model_arrays.items()):
@@ -556,6 +595,8 @@ class MonolithicCollisionPipeline:
                     self._bounds.shape_hi,
                     self._bounds.aggregate,
                     self._query_counts,
+                    self._cubic_fields,
+                    self._cubic_sdf,
                 ],
                 device=m.device,
             )

@@ -1,0 +1,212 @@
+{
+  "scope": "first failure physical step only, full FD research, no production backend change",
+  "position": 24,
+  "from_step_start": false,
+  "damped_least_squares": false,
+  "raw_status": "NONLINEAR_MAX_ITERATIONS",
+  "published_status": "REGULARIZATION_EXHAUSTED",
+  "failure": "REGULARIZATION_EXHAUSTED: Research repair did not converge: NONLINEAR_MAX_ITERATIONS",
+  "rolled_back": true,
+  "rollback_arrays_unchanged": true,
+  "currents": [
+    {
+      "iteration": 0,
+      "merit": [
+        3.69747962210361e-05,
+        3.4579372192516474e-05,
+        3.702657197706771e-05
+      ]
+    },
+    {
+      "iteration": 1,
+      "merit": [
+        3.6967817545219145e-05,
+        3.4941785347076904e-05,
+        3.701183912396356e-05
+      ]
+    },
+    {
+      "iteration": 2,
+      "merit": [
+        3.6212634133833665e-05,
+        3.724826493623198e-05,
+        3.618915159684374e-05
+      ]
+    },
+    {
+      "iteration": 3,
+      "merit": [
+        3.608852459873871e-05,
+        3.762594325616946e-05,
+        3.605341271321682e-05
+      ]
+    },
+    {
+      "iteration": 4,
+      "merit": [
+        3.6090330241233185e-05,
+        3.774826711575026e-05,
+        3.605240144009993e-05
+      ]
+    },
+    {
+      "iteration": 5,
+      "merit": [
+        3.6094249641841016e-05,
+        3.7910825651792434e-05,
+        3.6052596035767345e-05
+      ]
+    },
+    {
+      "iteration": 6,
+      "merit": [
+        3.6076372340913145e-05,
+        3.800836883589382e-05,
+        3.60320029077007e-05
+      ]
+    },
+    {
+      "iteration": 7,
+      "merit": [
+        3.607373319513456e-05,
+        3.811844934942363e-05,
+        3.602670405214846e-05
+      ]
+    },
+    {
+      "iteration": 8,
+      "merit": [
+        3.607747167838957e-05,
+        3.812740986602144e-05,
+        3.6030319501597284e-05
+      ]
+    },
+    {
+      "iteration": 9,
+      "merit": [
+        2.9667839158712135e-05,
+        3.462605872201935e-05,
+        2.9547509340251728e-05
+      ]
+    },
+    {
+      "iteration": 10,
+      "merit": [
+        2.8340063490269763e-05,
+        3.3236539899022155e-05,
+        2.8220910212742723e-05
+      ]
+    }
+  ],
+  "fallbacks": [
+    {
+      "step": 1436,
+      "iteration": 8,
+      "before": [
+        3.607747167838957e-05,
+        3.812740986602144e-05,
+        3.6030319501597284e-05
+      ],
+      "trials": [
+        {
+          "damping": 0.0,
+          "alpha": 1.0,
+          "merit": 3.777608832717706e-05,
+          "q": 4.190289838463917e-05,
+          "x": 3.7678686871198185e-05,
+          "threshold": 3.608179036094265e-05,
+          "passes": false
+        },
+        {
+          "damping": 0.0,
+          "alpha": 0.5,
+          "merit": 2.9503582397640678e-05,
+          "q": 3.461344191524844e-05,
+          "x": 2.9379217554929683e-05,
+          "threshold": 3.608359423452657e-05,
+          "passes": true
+        }
+      ],
+      "fd_seconds": 3.850235249999969,
+      "center_merit": 3.6077474673813765e-05,
+      "chosen_damping": 0.0,
+      "chosen_alpha": 0.5,
+      "chosen_merit": 2.9503586060495176e-05,
+      "predicted_derivative": -1.3015841717097105e-09,
+      "linear_system_rank": 1052,
+      "accepted": true
+    },
+    {
+      "step": 1436,
+      "iteration": 9,
+      "before": [
+        2.9667839158712135e-05,
+        3.462605872201935e-05,
+        2.9547509340251728e-05
+      ],
+      "trials": [
+        {
+          "damping": 0.0,
+          "alpha": 1.0,
+          "merit": 8.693473716780642e-05,
+          "q": 0.00010855175628510294,
+          "x": 8.638977553752316e-05,
+          "threshold": 2.967279880451718e-05,
+          "passes": false
+        },
+        {
+          "damping": 0.0,
+          "alpha": 0.5,
+          "merit": 4.7989195837330663e-05,
+          "q": 1.6800858776628096e-05,
+          "x": 4.8457488193821774e-05,
+          "threshold": 2.9674282196475115e-05,
+          "passes": false
+        },
+        {
+          "damping": 0.0,
+          "alpha": 0.25,
+          "merit": 4.885673681499857e-05,
+          "q": 4.997318965585719e-05,
+          "x": 4.8831491673871925e-05,
+          "threshold": 2.9675023892454082e-05,
+          "passes": false
+        },
+        {
+          "damping": 0.0,
+          "alpha": 0.125,
+          "merit": 3.0460253258263424e-05,
+          "q": 3.526334448758211e-05,
+          "x": 3.0344209944172808e-05,
+          "threshold": 2.967539474044357e-05,
+          "passes": false
+        },
+        {
+          "damping": 0.0,
+          "alpha": 0.0625,
+          "merit": 2.8504694592575392e-05,
+          "q": 3.3246008931548365e-05,
+          "x": 2.8389670476160203e-05,
+          "threshold": 2.967558016443831e-05,
+          "passes": true
+        }
+      ],
+      "fd_seconds": 3.8296672699998453,
+      "center_merit": 2.9667852818366127e-05,
+      "chosen_damping": 0.0,
+      "chosen_alpha": 0.0625,
+      "chosen_merit": 2.8504698383787003e-05,
+      "predicted_derivative": -8.801814389648686e-10,
+      "linear_system_rank": 1052,
+      "accepted": true
+    }
+  ],
+  "newton_budget": 10,
+  "final_ratios": [
+    4.188150851128787,
+    131.13243788469876,
+    3.8613252772919284
+  ],
+  "recovered_physical_step": false,
+  "full_close_fixed": false
+}

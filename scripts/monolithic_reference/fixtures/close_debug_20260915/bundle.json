@@ -1,0 +1,217 @@
+{
+  "schema": "close-debug-bundle/v1",
+  "base_commit": "60f8cd82f5ec6fab5027588c23ee968569f68fa8",
+  "source_root": "/home/lightwheel/Desktop/newton/SamiulJ/agents/integration/artifacts/p2",
+  "scope": "Selected recorded results and physical inputs; original evidence indexes also reference matrices/logs kept outside Git",
+  "files": [
+    {
+      "file": "18-damping/damped-step-start/repair.json",
+      "source": "close-repair-20260915-18-damping/damped-step-start/repair.json",
+      "sha256": "7f91cebeeadead3542a299bb67046dd490f3ec9ff95c9b7442c045435cd9735d"
+    },
+    {
+      "file": "18-damping/damped-step-start/physical-input.npz",
+      "source": "close-repair-20260915-18-damping/damped-step-start/physical-input.npz",
+      "sha256": "189407a6f789cbab5325ee97a43c258ac7ce8c848c3832c17f1e7cb54ae02be1"
+    },
+    {
+      "file": "18-damping/damped-step-start/evidence-index.json",
+      "source": "close-repair-20260915-18-damping/damped-step-start/evidence-index.json",
+      "sha256": "64977a66d2ad853afb41d41f0c9377a6eaa75f192886a54c47a5966cd3aa53c2"
+    },
+    {
+      "file": "18-damping/from-step-start/repair.json",
+      "source": "close-repair-20260915-18-damping/from-step-start/repair.json",
+      "sha256": "48f9fadc5ea35be1c580ab6611c0e64ab6b9e851b147bc563cc4c37d62384c85"
+    },
+    {
+      "file": "18-damping/from-step-start/physical-input.npz",
+      "source": "close-repair-20260915-18-damping/from-step-start/physical-input.npz",
+      "sha256": "189407a6f789cbab5325ee97a43c258ac7ce8c848c3832c17f1e7cb54ae02be1"
+    },
+    {
+      "file": "18-damping/from-step-start/evidence-index.json",
+      "source": "close-repair-20260915-18-damping/from-step-start/evidence-index.json",
+      "sha256": "c54b03a518a5791c824d1cb3bb193eb12da3885244f913e1f34c644da9a6ba3e"
+    },
+    {
+      "file": "18-damping/repair.json",
+      "source": "close-repair-20260915-18-damping/repair.json",
+      "sha256": "3a23e0a418af7b10bf65bb0ee4ef5eb58ea648afa4f57b88c3781716233b777a"
+    },
+    {
+      "file": "18-damping/physical-input.npz",
+      "source": "close-repair-20260915-18-damping/physical-input.npz",
+      "sha256": "189407a6f789cbab5325ee97a43c258ac7ce8c848c3832c17f1e7cb54ae02be1"
+    },
+    {
+      "file": "18-damping/evidence-index.json",
+      "source": "close-repair-20260915-18-damping/evidence-index.json",
+      "sha256": "2d690a681091b7e7d451a232144f300b41b1d3e3a53c3d851774f7cb03ac4b52"
+    },
+    {
+      "file": "18-damping/arguments.json",
+      "source": "close-repair-20260915-18-damping/arguments.json",
+      "sha256": "fd8097e4e6a39fdadf353465ae3c3ad0f256a2608b4e0e210ad47c8e5a175364"
+    },
+    {
+      "file": "18-damping/manifest.json",
+      "source": "close-repair-20260915-18-damping/manifest.json",
+      "sha256": "60d2f60aeabfab0d83209290d2a322863fd45b429388de146e2d50649c061d12"
+    },
+    {
+      "file": "24-damping/damped-step-start/repair.json",
+      "source": "close-repair-20260915-24-damping/damped-step-start/repair.json",
+      "sha256": "ae3dda6976ff22c22c4ec99ae068b0849a5f39a7361a02eaa8a2344b9dfedb41"
+    },
+    {
+      "file": "24-damping/damped-step-start/physical-input.npz",
+      "source": "close-repair-20260915-24-damping/damped-step-start/physical-input.npz",
+      "sha256": "8ab6ced02d163e6e016b73080df981a51d237d2e4f37f87c31a48c925ab771e6"
+    },
+    {
+      "file": "24-damping/damped-step-start/evidence-index.json",
+      "source": "close-repair-20260915-24-damping/damped-step-start/evidence-index.json",
+      "sha256": "c81a76bdf95ede46564bbdaf6a3e744defc44172fd919355d111c34a1186804f"
+    },
+    {
+      "file": "24-damping/from-step-start/repair.json",
+      "source": "close-repair-20260915-24-damping/from-step-start/repair.json",
+      "sha256": "2ea57fc5973eac9a4247e86693ad3e8c6efd5e05586cf7c04c41b1bbd14c04f0"
+    },
+    {
+      "file": "24-damping/from-step-start/physical-input.npz",
+      "source": "close-repair-20260915-24-damping/from-step-start/physical-input.npz",
+      "sha256": "8ab6ced02d163e6e016b73080df981a51d237d2e4f37f87c31a48c925ab771e6"
+    },
+    {
+      "file": "24-damping/from-step-start/evidence-index.json",
+      "source": "close-repair-20260915-24-damping/from-step-start/evidence-index.json",
+      "sha256": "793043d8d03137409db095599474508207ad2a460097649a4446a233e6a048df"
+    },
+    {
+      "file": "24-damping/repair.json",
+      "source": "close-repair-20260915-24-damping/repair.json",
+      "sha256": "889af55792500c8deaf2ecbc797301b2cb7c2622519045e5cac948c623705136"
+    },
+    {
+      "file": "24-damping/physical-input.npz",
+      "source": "close-repair-20260915-24-damping/physical-input.npz",
+      "sha256": "8ab6ced02d163e6e016b73080df981a51d237d2e4f37f87c31a48c925ab771e6"
+    },
+    {
+      "file": "24-damping/evidence-index.json",
+      "source": "close-repair-20260915-24-damping/evidence-index.json",
+      "sha256": "7e760d836112195e9f2d2bd6885164aeea518ad04bfb59bf85e60c70cccedba6"
+    },
+    {
+      "file": "24-damping/arguments.json",
+      "source": "close-repair-20260915-24-damping/arguments.json",
+      "sha256": "6073017fa35b2f5767ef0b006da6378d9ec1c9338234c167f9c659adcc598a58"
+    },
+    {
+      "file": "24-damping/manifest.json",
+      "source": "close-repair-20260915-24-damping/manifest.json",
+      "sha256": "4c767bc9789792efb2c0e7f3ab249fd114f42452f13db3cdece0b2b5afa09a40"
+    },
+    {
+      "file": "18-weighted/goal-weighted-step-start/repair.json",
+      "source": "close-repair-20260915-18-weighted/goal-weighted-step-start/repair.json",
+      "sha256": "f943b4482980c9b6ea913ba921fbe2f13ab0832aef9952b509bb033fafe86624"
+    },
+    {
+      "file": "18-weighted/goal-weighted-step-start/physical-input.npz",
+      "source": "close-repair-20260915-18-weighted/goal-weighted-step-start/physical-input.npz",
+      "sha256": "5473631d3100b631ebe416d66a07729c4cd2ae8d376af906139231629478354c"
+    },
+    {
+      "file": "18-weighted/goal-weighted-step-start/evidence-index.json",
+      "source": "close-repair-20260915-18-weighted/goal-weighted-step-start/evidence-index.json",
+      "sha256": "39f9e3678f0cd3d68084b964937aabbf4f224c0412068c3664c26ec096f6971e"
+    },
+    {
+      "file": "18-weighted/repair.json",
+      "source": "close-repair-20260915-18-weighted/repair.json",
+      "sha256": "5b772fe8175b763c181d90451f78b4ec8ff081034b8953ba68c69c028482d5c5"
+    },
+    {
+      "file": "18-weighted/physical-input.npz",
+      "source": "close-repair-20260915-18-weighted/physical-input.npz",
+      "sha256": "5473631d3100b631ebe416d66a07729c4cd2ae8d376af906139231629478354c"
+    },
+    {
+      "file": "18-weighted/evidence-index.json",
+      "source": "close-repair-20260915-18-weighted/evidence-index.json",
+      "sha256": "f11725088430f376895e764d65590e59bc7147791eb8970d1360c21b909cbae6"
+    },
+    {
+      "file": "18-weighted/arguments.json",
+      "source": "close-repair-20260915-18-weighted/arguments.json",
+      "sha256": "b5f49cabf0cd05b429023b032d15f281a79bb3095a68c54530fe80487f70d64e"
+    },
+    {
+      "file": "18-weighted/manifest.json",
+      "source": "close-repair-20260915-18-weighted/manifest.json",
+      "sha256": "586270b5eff0d9630599239c58202d4824308f532110a5764f38b05257203c53"
+    },
+    {
+      "file": "24-weighted/goal-weighted-step-start/repair.json",
+      "source": "close-repair-20260915-24-weighted/goal-weighted-step-start/repair.json",
+      "sha256": "84be1c1084477ccbfa6438b05235325f7b215b9bfa88b1aa1d37f738f252bcc5"
+    },
+    {
+      "file": "24-weighted/goal-weighted-step-start/physical-input.npz",
+      "source": "close-repair-20260915-24-weighted/goal-weighted-step-start/physical-input.npz",
+      "sha256": "c3f0531bb4f3505c82cb21d2d517e0c2d6d565989691fe77bc3149a9ad54a32c"
+    },
+    {
+      "file": "24-weighted/goal-weighted-step-start/evidence-index.json",
+      "source": "close-repair-20260915-24-weighted/goal-weighted-step-start/evidence-index.json",
+      "sha256": "d324a834f0a44dce49f4cb973eed3c5865921cd2d8cfa08f5c0a283ab8d4c8bb"
+    },
+    {
+      "file": "24-weighted/repair.json",
+      "source": "close-repair-20260915-24-weighted/repair.json",
+      "sha256": "27a4262a0cb0aac68c7afdd4bf3eb3847bd9dd8763cfa562d964960e2419e503"
+    },
+    {
+      "file": "24-weighted/physical-input.npz",
+      "source": "close-repair-20260915-24-weighted/physical-input.npz",
+      "sha256": "c3f0531bb4f3505c82cb21d2d517e0c2d6d565989691fe77bc3149a9ad54a32c"
+    },
+    {
+      "file": "24-weighted/evidence-index.json",
+      "source": "close-repair-20260915-24-weighted/evidence-index.json",
+      "sha256": "32ce84534a20aeb3ef2c3559f9d7dc573a888359b4cae2805e421d977ee6df70"
+    },
+    {
+      "file": "24-weighted/arguments.json",
+      "source": "close-repair-20260915-24-weighted/arguments.json",
+      "sha256": "a280717240b29412b9b5bf7237f80b17f2dd98755167fa8ce9ca2b594862591d"
+    },
+    {
+      "file": "24-weighted/manifest.json",
+      "source": "close-repair-20260915-24-weighted/manifest.json",
+      "sha256": "2dca2aa43a21221567a10566691389776a1786765e523d420a785fafe2ff0373"
+    },
+    {
+      "file": "audit.json",
+      "source": "close-repair-20260915-closeout/audit.json",
+      "sha256": "f19c4fae15e8f2b4977a8ddb7c3c463cdb9b67c9185563669e74fdc04ddd1a1f"
+    },
+    {
+      "file": "validation.json",
+      "source": "close-repair-20260915-closeout/validation.json",
+      "sha256": "41e5ef6d73af936b95a93e74ffdb642d8a0b1eb7219f3efbf8231197f1aa0216"
+    },
+    {
+      "file": "dependencies.txt",
+      "source": "close-repair-20260915-24-weighted/dependencies.txt",
+      "sha256": "7479fbe1c62dc2cb69069a0a9a5d4e6b761e289e9ede5e99c50444d07111fc97"
+    }
+  ],
+  "checkpoint_files": {
+    "checkpoint_validation.json": "63ed7a437259fa2b2a78022ce19cf051fb74de03016c7a933a494d8630ed1e0e",
+    "checkpoint_tests.log": "31b017d4381e0906d02407648374d826a4286efe923d90080356a44659ec2a73"
+  }
+}

@@ -1,0 +1,25 @@
+{
+  "schema": "monolithic-contact-continuity-frozen-input/v1",
+  "sha256": "af9ae0e36a45954ee3e347cec0d74b737ceca6e451d7def30e227959a5a32698",
+  "source_commit": "60f8cd82",
+  "source_diagnosis": "agents/integration/artifacts/p2/cube-close-fresh-20260914",
+  "sdf": {
+    "position": 24,
+    "key": 3588,
+    "shape": 19,
+    "queries": [
+      "current",
+      "alpha=1/128",
+      "alpha=1/256",
+      "alpha=1/1024"
+    ],
+    "grid": "12^3 canonical fine-grid nodes, texture-local coordinates"
+  },
+  "history": {
+    "position": 18,
+    "key": 5293,
+    "inputs": "committed body-local xi/normal; current/trial body rotation and world contact normal"
+  },
+  "scope": "Local regression only; does not contain a complete solver checkpoint",
+  "export_evidence": "agents/integration/artifacts/p2/contact-continuity-20260915-local"
+}
