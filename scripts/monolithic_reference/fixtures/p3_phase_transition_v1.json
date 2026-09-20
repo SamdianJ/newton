@@ -1,0 +1,110 @@
+{
+  "schema": "monolithic-phase-transition/v1",
+  "date": "2026-09-19",
+  "p2": {
+    "status": "HALTED_REQUIRES_REARCHITECTURE",
+    "reason": "当前架构遇到了不可解决的阻碍，需要评估重构。",
+    "exit_passed": false,
+    "g6": "NOT_PASSED",
+    "remaining_g7": "NOT_PASSED",
+    "patch_production": "UNFINISHED_HISTORICAL_TRIGGER_RETAINED"
+  },
+  "p3": {
+    "status": "PLANNED_NOT_IMPLEMENTED",
+    "implementation_started": false,
+    "approach": "Variational / projected Newton with explicit objective-residual-tangent contracts",
+    "prs": [
+      {
+        "id": "P3-PR1",
+        "scope": "Nonlinear evaluation, globalization, status/publish and diagnostics",
+        "status": "NOT_STARTED"
+      },
+      {
+        "id": "P3-PR2",
+        "scope": "Variational contact and frozen friction context",
+        "status": "NOT_STARTED"
+      },
+      {
+        "id": "P3-PR3",
+        "scope": "Variational articulation, unified objective and Close validation",
+        "status": "NOT_STARTED"
+      }
+    ],
+    "first_implementation_unit": "P3-PR1",
+    "energy_globalization_gate": "Every active term objective-consistent and verified",
+    "excluded": [
+      "AMG/MAS",
+      "contact patch implementation",
+      "performance optimization",
+      "new grasp trajectory exploration"
+    ]
+  },
+  "baseline": {
+    "commit": "fd4f095a6ed5782f0395e34ce9c30054ffd958b8",
+    "branch": "debug/cube-close-residual-20260915",
+    "uncommitted_research_files": 12,
+    "snapshot_index": "dev/monothlic/archive/p2_stop_20260919/index.json",
+    "snapshot_index_sha256": "22b7201285c64a5c5cd01cc6a953c845927f4f9b2329f72f337d4decad5a286d"
+  },
+  "publication": {
+    "v02_grasp_mvp": "NOT_COMPLETE",
+    "new_grasp_trajectory": "AWAITING_USER",
+    "nightly": "USER_MANUAL",
+    "automatic_commit": false,
+    "automatic_push": false
+  },
+  "documents": [
+    {
+      "workspace_path": "dev/monothlic/frame_reconstruct_variantion_view.md",
+      "sha256": "905915fbf663ded3460c8a611ad6c11a8a228c79c9a6c235987e7c03afa93a08",
+      "snapshot": "agents/integration/artifacts/p3/planning-20260919/documents/dev/monothlic/frame_reconstruct_variantion_view.md"
+    },
+    {
+      "workspace_path": "dev/monothlic/newton_monolithic_solver_p2_stop_zh.md",
+      "sha256": "70fb993365e924035943a6d6a014a72b1527399af94be8c5f15d7773ca6fa96b",
+      "snapshot": "agents/integration/artifacts/p3/planning-20260919/documents/dev/monothlic/newton_monolithic_solver_p2_stop_zh.md"
+    },
+    {
+      "workspace_path": "dev/monothlic/newton_monolithic_solver_p3_plan_zh.md",
+      "sha256": "1ec8d602664da73393939d3a9f8956f4b7b8cba9221762bbb75c0cb2ff0bc6f9",
+      "snapshot": "agents/integration/artifacts/p3/planning-20260919/documents/dev/monothlic/newton_monolithic_solver_p3_plan_zh.md"
+    },
+    {
+      "workspace_path": "dev/monothlic/newton_monolithic_solver_prd_zh.md",
+      "sha256": "9b5d6c8acb3b0f922903f76e6ac4fbfae7df103598b8cffa7376f392296b822f",
+      "snapshot": "agents/integration/artifacts/p3/planning-20260919/documents/dev/monothlic/newton_monolithic_solver_prd_zh.md"
+    },
+    {
+      "workspace_path": "dev/monothlic/newton_monolithic_solver_next_phase_plan_zh.md",
+      "sha256": "fe646de7d77b8e3879af2bfc1be0618be7a19e12787562e375590c9d1e57219f",
+      "snapshot": "agents/integration/artifacts/p3/planning-20260919/documents/dev/monothlic/newton_monolithic_solver_next_phase_plan_zh.md"
+    },
+    {
+      "workspace_path": "dev/monothlic/newton_monolithic_solver_p2_plan_zh.md",
+      "sha256": "44c2c487b23512dc25444157df68a21b50ad096e4fcdbff0000d89b476e51430",
+      "snapshot": "agents/integration/artifacts/p3/planning-20260919/documents/dev/monothlic/newton_monolithic_solver_p2_plan_zh.md"
+    },
+    {
+      "workspace_path": "dev/monothlic/newton_monolithic_solver_p2_architecture_zh.md",
+      "sha256": "4ba6815a3d27cf762bd0a1372bcc4f5470b5d21d555d99043a1c110346e90e6a",
+      "snapshot": "agents/integration/artifacts/p3/planning-20260919/documents/dev/monothlic/newton_monolithic_solver_p2_architecture_zh.md"
+    },
+    {
+      "workspace_path": "dev/monothlic/newton_monolithic_solver_p2_cube_grasp_v2_zh.md",
+      "sha256": "3d16dbbea478d55677aa926b17d3e6d9dbbaf638a2b71485ba2ab14239fce69c",
+      "snapshot": "agents/integration/artifacts/p3/planning-20260919/documents/dev/monothlic/newton_monolithic_solver_p2_cube_grasp_v2_zh.md"
+    },
+    {
+      "workspace_path": "dev/monothlic/newton_monolithic_solver_p2_preconditioners_v2_zh.md",
+      "sha256": "48042dc83367798fa68b14b8ae14565f5a115d4d589fb72abd6b1d2b6dd6d53e",
+      "snapshot": "agents/integration/artifacts/p3/planning-20260919/documents/dev/monothlic/newton_monolithic_solver_p2_preconditioners_v2_zh.md"
+    },
+    {
+      "workspace_path": "agents/README.md",
+      "sha256": "3f6ccc94c1da69fd75741a96992237fe1785ea0fad3e2f416515efd405fb3483",
+      "snapshot": "agents/integration/artifacts/p3/planning-20260919/documents/agents/README.md"
+    }
+  ],
+  "portable_summary": "scripts/monolithic_reference/p3_phase_transition_zh.md",
+  "portable_summary_sha256": "938b9040406b5615e273ea9b178ce4dffb552281523e3d6add087ba6cf84b0c3"
+}

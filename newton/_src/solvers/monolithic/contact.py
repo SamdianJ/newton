@@ -15,7 +15,6 @@ import warp as wp
 from ...sim import Contacts, Model, State
 from .articulation import MonolithicArticulationWorkspace, articulation_point_jacobian_column
 from .collision import MonolithicCollisionPipeline
-from .contact_continuity import transport_history
 from .linear import (
     MonolithicContactFactorKind,
     MonolithicLinearAssembly,
@@ -73,7 +72,6 @@ class _ContactStepContext:
     integrate: int
     prepare: int
     transport_cos: float
-    transport_retain_cos: float
     start_x: wp.array[wp.vec3]
     committed: _MonolithicHistoryBuffer
     pending: _MonolithicHistoryBuffer
@@ -224,16 +222,8 @@ def evaluate_monolithic_p1q3_contacts(
             old_world = wp.quat_rotate(rotation, context.committed.xi_local[key])
             original_energy = 0.5 * kt * wp.dot(old_world, old_world)
             old_normal = wp.quat_rotate(rotation, context.committed.normal_local[key])
-            alignment = wp.dot(old_normal, n)
-            allowed = alignment >= context.transport_cos
-            if context.transport_retain_cos > context.transport_cos:
-                allowed = alignment > context.transport_cos
-            if allowed:
+            if wp.dot(old_normal, n) >= context.transport_cos:
                 old = old_world - wp.dot(n, old_world) * n
-                if context.transport_retain_cos > context.transport_cos:
-                    old = transport_history(
-                        old_world, old_normal, n, context.transport_cos, context.transport_retain_cos
-                    )
                 matched, reset = 1.0, 0.0
             else:
                 reset = 2.0
@@ -577,7 +567,6 @@ class MonolithicContactWorkspace:
         self.friction_coefficient = float(friction_coefficient)
         self.tangential_stiffness = float(tangential_stiffness or 0)
         self.transport_cos = math.cos(math.pi / 4)
-        self.transport_retain_cos = math.cos(math.radians(40.0)) if pipeline._smooth_history else 0.0
         self.history_epoch = 0
         self._step_epoch = 0
         self._step_open = False
@@ -610,7 +599,6 @@ class MonolithicContactWorkspace:
             self.friction_coefficient,
             self.tangential_stiffness,
             self.transport_cos,
-            self.transport_retain_cos,
             pipeline._bounds_config,
         )
         self.config_sha256 = hashlib.sha256((json.dumps(self._configuration) + physics_identity).encode()).hexdigest()
@@ -738,7 +726,6 @@ class MonolithicContactWorkspace:
             self.friction_coefficient,
             self.tangential_stiffness,
             self.transport_cos,
-            self.transport_retain_cos,
             pipeline._bounds_config,
         ):
             raise ValueError("History configuration is stale; rebuild the solver")
@@ -899,7 +886,6 @@ def _evaluate(mode, model, state, contacts, pipeline, articulation, workspace, o
     context.integrate = int(workspace._step_open and not workspace._rollback)
     context.prepare = int(mode == 2 and context.integrate)
     context.transport_cos = workspace.transport_cos
-    context.transport_retain_cos = workspace.transport_retain_cos
     context.start_x = workspace._start_x
     context.committed, context.pending = workspace.committed, workspace.pending
     context.samples = workspace._samples[mode]

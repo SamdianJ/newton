@@ -1,8 +1,0 @@
-{
-  "unittest_passed": 7,
-  "ruff_check": "PASS",
-  "ruff_format_check": "PASS",
-  "git_diff_check": "PASS",
-  "nightly": "NOT_RUN",
-  "production_solver_changed_this_turn": false
-}

@@ -1,0 +1,250 @@
+{
+  "schema": "monolithic-phase-transition/v3",
+  "date": "2026-09-19",
+  "p2": {
+    "status": "HALTED_REQUIRES_REARCHITECTURE",
+    "reason": "当前架构遇到了不可解决的阻碍，需要评估重构。",
+    "exit_passed": false,
+    "g6": "NOT_PASSED",
+    "remaining_g7": "NOT_PASSED",
+    "patch_production": "UNFINISHED_HISTORICAL_TRIGGER_RETAINED"
+  },
+  "p3": {
+    "status": "PLANNED_NOT_IMPLEMENTED",
+    "implementation_started": false,
+    "approach": "Module-scoped variational migration, with explicitly classified nonintegrable contact research controls",
+    "prs": [
+      {
+        "id": "P3-PR1",
+        "scope": "Tet-only Kim/Smith objective, residual, exact Hessian versus production B, full incremental objective and three globalization modes",
+        "status": "NOT_STARTED"
+      },
+      {
+        "id": "P3-PR2",
+        "scope": "SuperDex-inspired link/joint articulation energy architecture, time-discretization ADR, small systems and contact-free Sharpa",
+        "status": "NOT_STARTED"
+      },
+      {
+        "id": "P3-PR3",
+        "scope": "Contact penalty/dissipation and freeze ADRs, EE/EI/II comparisons, coupled Close and user-trajectory grasp",
+        "status": "NOT_STARTED"
+      }
+    ],
+    "first_implementation_unit": "P3-PR1_TET_ONLY",
+    "energy_globalization_gate": "Consistent variational paths require a complete verified objective; nonintegrable research candidates require a separate merit/slope/mode ADR and are never labeled objective-gradient consistent.",
+    "excluded": [
+      "AMG/MAS",
+      "contact patch implementation",
+      "performance optimization",
+      "new grasp trajectory exploration"
+    ],
+    "line_search": {
+      "required_modes": [
+        "Armijo",
+        "ResNorm",
+        "ArmijoOrResNorm"
+      ],
+      "required_in": "P3-PR1",
+      "armijo": "s < 0 and objective_trial <= objective_current + c1 * alpha * s; s = r^T p",
+      "resnorm": "scaled residual RMS trial <= current with scale fixed in each line search",
+      "hybrid": "armijo_pass OR resnorm_pass",
+      "common_safety_checks": "finite, geometry, capacity, generation, context and transaction validity",
+      "energy_descent_is_global_prerequisite": false,
+      "energy_unavailable": "Reject energy-based mode selection; require explicit ResNorm selection",
+      "floating_point_noise": "separately calibrated energy and residual margins; distinguish equality/noise from improvement",
+      "default": "NOT_FROZEN_NO_AUTOMATIC_SWITCH",
+      "nonintegrable_candidate_policy": "P3-CONTACT-04 TODO: separate surrogate true directional derivative from physical residual dot direction; any reference approximate policy labeled as research"
+    },
+    "nonlinear_convergence": {
+      "criterion": "Original active global/q/x residual targets only; q N/A for PR1, x N/A for PR2",
+      "requires_energy_decrease": false,
+      "requires_line_search_branch_pass": false,
+      "stopped_is_converged": false
+    },
+    "articulation": {
+      "architecture": "link inertia, gravity, contact (PR3), external loads, plus explicit joint terms; reduced pullback",
+      "time_discretization": "ADR_NOT_FROZEN",
+      "reference_merit_inertia": "Recorded in formulation document; not a selected Newton integrator",
+      "separate_coriolis_potential": false,
+      "legacy_bias_added_to_new_inertia": false
+    },
+    "contact": {
+      "dissipation_reference": "SuperDex IPCstepC1 incremental dissipation; optional viscous terms not enabled by this plan",
+      "freeze_policy": "ADR_NOT_FROZEN",
+      "candidates": [
+        {
+          "id": "C-EE",
+          "explicitNormals": true,
+          "implicitNormalForceForDissipation": false,
+          "reference_support": "SUPPORTED",
+          "role": "INTEGRABLE_BASELINE_SUBJECT_TO_CONTEXT_AND_MAPPING_VERIFICATION"
+        },
+        {
+          "id": "C-EI",
+          "explicitNormals": true,
+          "implicitNormalForceForDissipation": true,
+          "reference_support": "EXPLICITLY_REJECTED_BY_ASSERT",
+          "role": "ADDITIONAL_RESEARCH_CANDIDATE_GENERALLY_NONINTEGRABLE"
+        },
+        {
+          "id": "C-II",
+          "explicitNormals": false,
+          "implicitNormalForceForDissipation": true,
+          "reference_support": "SUPPORTED",
+          "role": "GENERALLY_NONINTEGRABLE_RESEARCH_CANDIDATE"
+        }
+      ],
+      "additional_reference_path": "implicit normals with explicit load estimated from current geometry; neither strict EE nor EI",
+      "normal_penalty_gradient": "CURRENT_SDF_GRADIENT_IN_ALL_REFERENCE_COMBINATIONS"
+    },
+    "grasp": {
+      "scope": "P3-PR3 final substage",
+      "input_status": "AWAITING_USER_OVERHEAD_TRAJECTORY",
+      "gate_status_if_input_missing": "BLOCKED_AWAITING_TRAJECTORY",
+      "old_side_push_is_grasp_fixture": false
+    }
+  },
+  "baseline": {
+    "commit": "fd4f095a6ed5782f0395e34ce9c30054ffd958b8",
+    "branch": "debug/cube-close-residual-20260915",
+    "uncommitted_research_files": 12,
+    "snapshot_index": "dev/monothlic/archive/p2_stop_20260919/index.json",
+    "snapshot_index_sha256": "22b7201285c64a5c5cd01cc6a953c845927f4f9b2329f72f337d4decad5a286d"
+  },
+  "publication": {
+    "v02_grasp_mvp": "NOT_COMPLETE",
+    "new_grasp_trajectory": "AWAITING_USER",
+    "nightly": "USER_MANUAL",
+    "automatic_commit": false,
+    "automatic_push": false,
+    "automatic_simulation": false
+  },
+  "documents": [
+    {
+      "workspace_path": "dev/monothlic/frame_reconstruct_variantion_view.md",
+      "sha256": "905915fbf663ded3460c8a611ad6c11a8a228c79c9a6c235987e7c03afa93a08",
+      "snapshot": "agents/integration/artifacts/p3/planning-20260919-v3/documents/dev/monothlic/frame_reconstruct_variantion_view.md"
+    },
+    {
+      "workspace_path": "dev/monothlic/newton_monolithic_solver_p2_stop_zh.md",
+      "sha256": "70fb993365e924035943a6d6a014a72b1527399af94be8c5f15d7773ca6fa96b",
+      "snapshot": "agents/integration/artifacts/p3/planning-20260919-v3/documents/dev/monothlic/newton_monolithic_solver_p2_stop_zh.md"
+    },
+    {
+      "workspace_path": "dev/monothlic/newton_monolithic_solver_p3_plan_zh.md",
+      "sha256": "5dcb2756114b929d01b1ab41b57abd92d42ca4895882e39f4282a5e34ddc82f1",
+      "snapshot": "agents/integration/artifacts/p3/planning-20260919-v3/documents/dev/monothlic/newton_monolithic_solver_p3_plan_zh.md"
+    },
+    {
+      "workspace_path": "dev/monothlic/newton_monolithic_solver_prd_zh.md",
+      "sha256": "bbf56128a3acd0b7a3d69f87801e44e329ee9d0363c58687940113704e238993",
+      "snapshot": "agents/integration/artifacts/p3/planning-20260919-v3/documents/dev/monothlic/newton_monolithic_solver_prd_zh.md"
+    },
+    {
+      "workspace_path": "dev/monothlic/newton_monolithic_solver_next_phase_plan_zh.md",
+      "sha256": "fe646de7d77b8e3879af2bfc1be0618be7a19e12787562e375590c9d1e57219f",
+      "snapshot": "agents/integration/artifacts/p3/planning-20260919-v3/documents/dev/monothlic/newton_monolithic_solver_next_phase_plan_zh.md"
+    },
+    {
+      "workspace_path": "dev/monothlic/newton_monolithic_solver_p2_plan_zh.md",
+      "sha256": "44c2c487b23512dc25444157df68a21b50ad096e4fcdbff0000d89b476e51430",
+      "snapshot": "agents/integration/artifacts/p3/planning-20260919-v3/documents/dev/monothlic/newton_monolithic_solver_p2_plan_zh.md"
+    },
+    {
+      "workspace_path": "dev/monothlic/newton_monolithic_solver_p2_architecture_zh.md",
+      "sha256": "4ba6815a3d27cf762bd0a1372bcc4f5470b5d21d555d99043a1c110346e90e6a",
+      "snapshot": "agents/integration/artifacts/p3/planning-20260919-v3/documents/dev/monothlic/newton_monolithic_solver_p2_architecture_zh.md"
+    },
+    {
+      "workspace_path": "dev/monothlic/newton_monolithic_solver_p2_cube_grasp_v2_zh.md",
+      "sha256": "3d16dbbea478d55677aa926b17d3e6d9dbbaf638a2b71485ba2ab14239fce69c",
+      "snapshot": "agents/integration/artifacts/p3/planning-20260919-v3/documents/dev/monothlic/newton_monolithic_solver_p2_cube_grasp_v2_zh.md"
+    },
+    {
+      "workspace_path": "dev/monothlic/newton_monolithic_solver_p2_preconditioners_v2_zh.md",
+      "sha256": "48042dc83367798fa68b14b8ae14565f5a115d4d589fb72abd6b1d2b6dd6d53e",
+      "snapshot": "agents/integration/artifacts/p3/planning-20260919-v3/documents/dev/monothlic/newton_monolithic_solver_p2_preconditioners_v2_zh.md"
+    },
+    {
+      "workspace_path": "agents/README.md",
+      "sha256": "f2419b8588154152314b95b54dc4676e9103aed154968a88ffa3b084843a6715",
+      "snapshot": "agents/integration/artifacts/p3/planning-20260919-v3/documents/agents/README.md"
+    },
+    {
+      "workspace_path": "dev/monothlic/newton_monolithic_solver_p3_formulations_zh.md",
+      "sha256": "a13a605b712c97067c5d7771f48421a006fddad5537588238b35c17615a779eb",
+      "snapshot": "agents/integration/artifacts/p3/planning-20260919-v3/documents/dev/monothlic/newton_monolithic_solver_p3_formulations_zh.md"
+    }
+  ],
+  "portable_summary": "scripts/monolithic_reference/p3_phase_transition_zh.md",
+  "portable_summary_sha256": "ff0663352d361d3022c67936f1cb1e41081df1fceaf7103ed0e140faa4a9be53",
+  "supersedes": {
+    "manifest": "scripts/monolithic_reference/fixtures/p3_phase_transition_v2.json",
+    "sha256": "6d81f158f5c9fea294c303e344d400099e1f4e977095f9a1ca315b3386b8073a",
+    "reason": "User scopes PR1 to tet, PR2 to articulation/no-contact Sharpa, PR3 to contact/grasp; adds material formulas, SuperDex dissipation comparisons and articulation design TODOs."
+  },
+  "reference": {
+    "path": "worktrees/superdex-reference-54ae749a/superdex_physics/libraries/mochi/mochi_core/include/mochi_core/solvers/line_search.h",
+    "sha256": "48dc39a06591aeaa8d72cc8762234839b4336f9b7bbd25a3aa426994aefe065d",
+    "note": "Standalone ResidualNorm uses <=; mixed loop uses < and positive energy slope routes to ResidualNorm. Plan explicitly uses one common nonincrease predicate."
+  },
+  "formulation_sources": [
+    {
+      "workspace_path": "worktrees/superdex-reference-54ae749a/superdex_physics/libraries/mochi/mochi_core/include/mochi_core/utils/rigid_body_assembly.h",
+      "sha256": "bc023efa86791bb8962eb4cfcd950a662c6c566e5dae1a0c3c37daf64881cbef"
+    },
+    {
+      "workspace_path": "worktrees/superdex-reference-54ae749a/superdex_physics/libraries/mochi/mochi_core/include/mochi_core/utils/rigid_body_utils.h",
+      "sha256": "4b87c6950df0c4a07c4326dad8010cd12c041a408411b4c7f55dbb406f44a2fa"
+    },
+    {
+      "workspace_path": "worktrees/superdex-reference-54ae749a/superdex_physics/libraries/mochi/mochi_core/include/mochi_core/utils/lie.h",
+      "sha256": "eb7c83602f9d1f7b33753e59febdeecc220794329ad7cd1e8997d99d99a64111"
+    },
+    {
+      "workspace_path": "worktrees/superdex-reference-54ae749a/superdex_physics/libraries/mochi/mochi_core/include/mochi_core/utils/single_dof_assembly.h",
+      "sha256": "1a4f11a1c3ada862ebeab4c48cb8689086f65dea9c343484dd457feb98c711c7"
+    },
+    {
+      "workspace_path": "worktrees/superdex-reference-54ae749a/superdex_physics/libraries/mochi/mochi_core/include/mochi_core/contact/contact_utils.h",
+      "sha256": "6e0e1b45a7c0dfce792321883cccfe623a2848fcc342edc0198435b1761df11c"
+    },
+    {
+      "workspace_path": "worktrees/superdex-reference-54ae749a/superdex_physics/libraries/mochi/mochi_core/include/mochi_core/utils/eval_params.h",
+      "sha256": "b2ba90cbc1ec087e39a4fa9dbdeaece4dc299e997a29c78d2f6599ba993d3e1a"
+    },
+    {
+      "workspace_path": "worktrees/superdex-reference-54ae749a/superdex_physics/libraries/mochi/mochi_core/include/mochi_core/utils/activations.h",
+      "sha256": "6f6a4db857bd5f33bf207f279a87569e362824269313eb91fd277a0df8220dd1"
+    },
+    {
+      "workspace_path": "worktrees/superdex-reference-54ae749a/superdex_physics/libraries/mochi/mochi_physics/src/mochi_rigid.cpp",
+      "sha256": "bc5e2332ef10c1294b8581b7dbdf1bc1ac732b32d8fa63eb42d6a59d6b62d1ea"
+    },
+    {
+      "workspace_path": "worktrees/superdex-reference-54ae749a/superdex_physics/libraries/mochi/mochi_physics/src/mochi_articulated_body.cpp",
+      "sha256": "5a55fd41684ee9136d6d231e3801447d91d2d738c8049f113a44d5ef9054ee79"
+    },
+    {
+      "workspace_path": "worktrees/monolithic-integration/newton/_src/solvers/monolithic/tet.py",
+      "sha256": "49db73424656d771bbac2d7d994d7ead0f716d391bf881ae683f9fcae8343bf2"
+    },
+    {
+      "workspace_path": "worktrees/monolithic-integration/newton/_src/solvers/monolithic/contact.py",
+      "sha256": "d2c278680d9d5aa7a1e45d6d4aba13b4e62cb8b95334a15a41bb24e0fc5441c0"
+    }
+  ],
+  "superdex_checkout": {
+    "commit": "54ae749a042709e897cad12da66822c71bcd1b97",
+    "dirty": false
+  },
+  "formula_verification": {
+    "status": "PASS",
+    "scope": "Document expressions only; no solver certification",
+    "checks": 93,
+    "report": "agents/integration/artifacts/p3/planning-20260919-v3/formula-validation.json",
+    "report_sha256": "9a326d69344fc12a40e4995b0dcad2717cdc791eb7d65236c200f3723bc8139d",
+    "script": "agents/integration/artifacts/p3/planning-20260919-v3/verify_formulas.py",
+    "script_sha256": "ecda5fdbb1a05e360172a0785471599946c9bb903aaca5b0ce91ea4cc137d5f6"
+  }
+}
