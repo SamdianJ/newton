@@ -1,0 +1,94 @@
+{
+  "schema": "monolithic-p3-pr1-acceptance/v1",
+  "date": "2026-09-20",
+  "status": "PASS_PRIVATE_TET_ONLY",
+  "base_head": "fd4f095a6ed5782f0395e34ce9c30054ffd958b8",
+  "branch": "debug/cube-close-residual-20260915",
+  "source_hashes": {
+    "newton/_src/solvers/monolithic/solver_monolithic.py": "7112a6336199df1486d44ecf8accd2970c668f01f1c3a0d645d4fa9e5ebf2f0d",
+    "newton/_src/solvers/monolithic/tet.py": "4437908c73fa02ba9394e52de87a7cb26f96952c8c659e8c6e5eb2614684d40a",
+    "newton/_src/solvers/monolithic/tet_variational.py": "f6a71c8b18f7c626ccaad4ec9b4defde02d09e47d0256f6215032e59f246805c",
+    "newton/tests/test_monolithic_p3_tet.py": "63194314d04c0f10c5f15b542ee4f7c22dd96f73557506a74aff271884fccc86",
+    "scripts/monolithic_reference/p3_tet_fixtures.py": "7a66d8f04b5708a7f26da14b4cff4da28e2b58e4dd0c1c932f97ded3719ffe64",
+    "scripts/monolithic_reference/p3_tet_oracle.py": "d895803ca5fd2cfa530e20ad491ceb6decc1a7aff8d283559c1677311ce82aae",
+    "scripts/monolithic_reference/verify_p3_tet.py": "816e14161f2324b60b70849bf6d7be8e06ba16b7308b047b939e40911f50c0e9",
+    "scripts/monolithic_reference/diagnose_p3_tet_resolution.py": "84f77544b07884e656090e9f104f6656663ef126a854d6f6e7fbc11009d39df1",
+    "scripts/monolithic_reference/diagnose_p3_tet_accuracy.py": "68fd617faa48eddce46418e14fae3f5f40e9c84ea0830a0e5920485e34c4a33f",
+    "scripts/monolithic_reference/summarize_p3_tet.py": "b786217c1710398084b9ff68344cc46ff033df44d42234fe3970bd1cc468cb5b",
+    "scripts/monolithic_reference/study_p3_tet_stopping.py": "e76e5a86f5b53b33f37e2570f506de4b820bb274eaa7e0d0ef71b0459557dea9",
+    "scripts/monolithic_reference/verify_p3_tet_stopping.py": "d5e5989b5a1770d208624d552b4fd3fe8d5cff80a6d8b48341a46356aac6cced",
+    "scripts/monolithic_reference/summarize_p3_tet_refinement.py": "f73b6f2a5e6dac83ee9790cb7ac014248f5d604bc486269ce9f67638eb0acdea"
+  },
+  "scope": {
+    "zero_articulation_body_shape": true,
+    "state_position_velocity": "float64",
+    "residual_tangent_pcg": "float32",
+    "publish_default": "strict",
+    "globalization_default": null,
+    "public_coupled_defaults_changed": false
+  },
+  "stopping": {
+    "absolute_global_x": 1e-07,
+    "relative_global_x": 1e-06,
+    "small_step_global_x": 1e-10,
+    "budget_and_physical_gates_unchanged": true
+  },
+  "unit_tests": {
+    "passed": 129,
+    "logs": {
+      "configuration-green-and-p3-v2.log": 25,
+      "final-legacy-regression.log": 104
+    }
+  },
+  "baseline": {
+    "passed": 144,
+    "total": 144,
+    "physical_steps": 223200,
+    "common_passing_modes": [
+      "Armijo",
+      "ResNorm",
+      "ArmijoOrResNorm"
+    ],
+    "cpu_cuda_max_position_difference_m": 1.2007160876237322e-05,
+    "cpu_cuda_gate_m": 5e-05
+  },
+  "time_refinement": {
+    "passed_groups": 12,
+    "total_groups": 12,
+    "new_trajectories": 24,
+    "new_physical_steps": 216000,
+    "device": "cpu",
+    "execution": "diagnostic",
+    "mode": "ArmijoOrResNorm",
+    "dt_s": [
+      0.001,
+      0.0005,
+      0.00025
+    ],
+    "output_grid_s": 0.001,
+    "maximum_error_ratio": 0.4223616148841097,
+    "maximum_adjacent_difference_ratio": 0.7291594912045024,
+    "gate": 0.8
+  },
+  "numerics": {
+    "calibration_groups": 8,
+    "fd_groups": 16,
+    "near_root_groups": 8,
+    "max_near_root_independent_error_rms": 5.062286363797224e-10
+  },
+  "evidence_root_workspace_relative": "agents/integration/artifacts/p3/pr1",
+  "limitations": [
+    "Private FP64 State requires _create_tet_state; ordinary FP32 State is rejected.",
+    "No production globalization default was selected.",
+    "Temporal refinement was run on CPU diagnostic; CUDA production graph was included in the full baseline and dt-change unit tests.",
+    "Combined FP32/FP64 test process did not finish within 9 minutes and was superseded by two complete independent-process test runs. No mixed-process pass or performance claim."
+  ],
+  "not_done": [
+    "commit",
+    "push",
+    "nightly",
+    "P3-PR2",
+    "P3-PR3",
+    "V0.2"
+  ]
+}

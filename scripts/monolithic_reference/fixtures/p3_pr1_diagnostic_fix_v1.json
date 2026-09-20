@@ -1,0 +1,23 @@
+{
+  "schema": "monolithic-p3-pr1-diagnostic-fix/v1",
+  "date": "2026-09-20",
+  "status": "PASS",
+  "historical_acceptance": "p3_pr1_acceptance_v1.json",
+  "evidence_root_workspace_relative": "agents/integration/artifacts/p3/pr1/p2-diagnostic-fix",
+  "baseline_existing_fields_unchanged": true,
+  "refined_physical_steps": 200,
+  "refined_samples": 100,
+  "refined_center_of_mass_error": [
+    -5.791075232306278e-06,
+    4.360664762659977e-06,
+    -1.8220590800033975e-09
+  ],
+  "source_hashes": {
+    "scripts/monolithic_reference/diagnose_p3_tet_accuracy.py": "2daa4ca0865f2bd29563a282e4aae6b6a7a5c60c5eaef0163a51575ece7b4634",
+    "newton/tests/test_monolithic_p3_accuracy_diagnostic.py": "ea8c51e01d96fd086aec793db1da10ac55e7c0a0d8a2275e252bb15e1f2a5f54"
+  },
+  "regression_tests": 5,
+  "changed_since_v6": [
+    "scripts/monolithic_reference/diagnose_p3_tet_accuracy.py"
+  ]
+}

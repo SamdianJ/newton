@@ -16,6 +16,7 @@ import enum
 import hashlib
 import json
 from dataclasses import dataclass
+from typing import Any
 
 import numpy as np
 import warp as wp
@@ -77,6 +78,8 @@ class TetPhysicsWorkspace:
             )
             if not np.isfinite(mapped).all() or np.any(mapped[:, 1] <= 0) or np.any(mapped > np.finfo(np.float32).max):
                 raise ValueError("Smith mapped parameters must be finite with lambda_hat > 0")
+        self.indices = wp.clone(model.tet_indices)
+        self.worlds = wp.clone(model.particle_world)
         self.materials = wp.clone(model.tet_materials)
         self.poses = wp.clone(model.tet_poses)
         self.mass = wp.clone(model.particle_mass)
@@ -288,7 +291,9 @@ def _compute_cofactor_derivative(F: wp.mat33) -> mat99:
 
 
 @wp.func
-def _evaluate_stable_neo_hookean(F: wp.mat33, rest_volume: float, mu_lame: float, lambda_lame: float):
+def _evaluate_stable_neo_hookean(
+    F: wp.mat33, rest_volume: float, mu_lame: float, lambda_lame: float, tangent: bool = True
+):
     j_minus_one = wp.determinant(F) - 1.0
     lambda_nh = lambda_lame + mu_lame
     cofactor = _compute_cofactor(F)
@@ -296,9 +301,10 @@ def _evaluate_stable_neo_hookean(F: wp.mat33, rest_volume: float, mu_lame: float
     projected = mat99(0.0)
     for i in range(9):
         squared_norm += F[i % 3, i // 3] * F[i % 3, i // 3]
-        for j in range(9):
-            projected[i, j] = rest_volume * lambda_nh * cofactor[i % 3, i // 3] * cofactor[j % 3, j // 3]
-        projected[i, i] += rest_volume * mu_lame
+        if tangent:
+            for j in range(9):
+                projected[i, j] = rest_volume * lambda_nh * cofactor[i % 3, i // 3] * cofactor[j % 3, j // 3]
+            projected[i, i] += rest_volume * mu_lame
     energy = rest_volume * (
         0.5 * mu_lame * (squared_norm - 3.0) - mu_lame * j_minus_one + 0.5 * lambda_nh * j_minus_one * j_minus_one
     )
@@ -307,27 +313,28 @@ def _evaluate_stable_neo_hookean(F: wp.mat33, rest_volume: float, mu_lame: float
 
 
 @wp.func
-def _evaluate_smith(F: wp.mat33, rest_volume: float, mu: float, lam: float):
+def _evaluate_smith(F: wp.mat33, rest_volume: float, mu: float, lam: float, tangent: bool = True):
     mu_hat = (4.0 / 3.0) * mu
     lam_hat = lam + (5.0 / 6.0) * mu
     ic = wp.ddot(F, F)
     d = wp.determinant(F) - 1.0
     c = _compute_cofactor(F)
-    dc = _compute_cofactor_derivative(F)
     s = lam_hat * d - mu
     a = mu_hat * (1.0 - 1.0 / (ic + 1.0))
     # Rest-shifted energy avoids subtracting the large alpha-dependent constant.
     energy = rest_volume * (0.5 * mu_hat * (ic - 3.0 - wp.log((ic + 1.0) / 4.0)) + 0.5 * lam_hat * d * d - mu * d)
     stress = rest_volume * (a * F + s * c)
     raw = mat99(0.0)
-    for i in range(9):
-        for j in range(9):
-            raw[i, j] = rest_volume * (
-                2.0 * mu_hat / ((ic + 1.0) * (ic + 1.0)) * F[i % 3, i // 3] * F[j % 3, j // 3]
-                + lam_hat * c[i % 3, i // 3] * c[j % 3, j // 3]
-                + s * dc[i, j]
-            )
-        raw[i, i] += rest_volume * a
+    if tangent:
+        dc = _compute_cofactor_derivative(F)
+        for i in range(9):
+            for j in range(9):
+                raw[i, j] = rest_volume * (
+                    2.0 * mu_hat / ((ic + 1.0) * (ic + 1.0)) * F[i % 3, i // 3] * F[j % 3, j // 3]
+                    + lam_hat * c[i % 3, i // 3] * c[j % 3, j // 3]
+                    + s * dc[i, j]
+                )
+            raw[i, i] += rest_volume * a
     return energy, stress, raw
 
 
@@ -421,9 +428,9 @@ def _scatter_internal_block(slot: int, block: wp.mat33, ax_values: wp.array[wp.m
 
 @wp.kernel
 def _validate_candidate_particles(
-    candidate: wp.array[wp.vec3],
-    positions: wp.array[wp.vec3],
-    velocities: wp.array[wp.vec3],
+    candidate: wp.array[Any],
+    positions: wp.array[Any],
+    velocities: wp.array[Any],
     forces: wp.array[wp.vec3],
     indices: wp.array2d[int],
     mapping: wp.array[int],
@@ -449,9 +456,9 @@ def _evaluate_inertia_residual(
     dt: float,
     gravity: wp.array[wp.vec3],
     particle_world: wp.array[int],
-    particle_q_n: wp.array[wp.vec3],
-    particle_qd_n: wp.array[wp.vec3],
-    candidate_particle_q: wp.array[wp.vec3],
+    particle_q_n: wp.array[Any],
+    particle_qd_n: wp.array[Any],
+    candidate_particle_q: wp.array[Any],
     particle_mass: wp.array[float],
     particle_f: wp.array[wp.vec3],
     dynamic_particle_ids: wp.array[int],
@@ -513,9 +520,9 @@ def _add_consistent_inertia(
     indices: wp.array2d[int],
     mapping: wp.array[int],
     coefficients: wp.array[float],
-    candidate: wp.array[wp.vec3],
-    x_n: wp.array[wp.vec3],
-    v_n: wp.array[wp.vec3],
+    candidate: wp.array[Any],
+    x_n: wp.array[Any],
+    v_n: wp.array[Any],
     residual: wp.array[wp.vec3],
 ):
     tet, a = wp.tid()
@@ -533,17 +540,87 @@ def _add_consistent_inertia(
 
 
 @wp.func
+def _evaluate_energy_stress64(f: wp.mat33d, volume: wp.float64, mu: wp.float64, lam: wp.float64, material: int):
+    ic = wp.ddot(f, f)
+    d = wp.determinant(f) - wp.float64(1.0)
+    cof = wp.matrix_from_cols(wp.cross(f[:, 1], f[:, 2]), wp.cross(f[:, 2], f[:, 0]), wp.cross(f[:, 0], f[:, 1]))
+    a = mu
+    s = (lam + mu) * d - mu
+    energy = wp.float64(0.5) * mu * (ic - wp.float64(3.0)) - mu * d + wp.float64(0.5) * (lam + mu) * d * d
+    if material == 1:
+        mh = wp.float64(4.0) * mu / wp.float64(3.0)
+        lh = lam + wp.float64(5.0) * mu / wp.float64(6.0)
+        a = mh * (wp.float64(1.0) - wp.float64(1.0) / (ic + wp.float64(1.0)))
+        s = lh * d - mu
+        energy = (
+            wp.float64(0.5) * mh * (ic - wp.float64(3.0) - wp.log((ic + wp.float64(1.0)) / wp.float64(4.0)))
+            + wp.float64(0.5) * lh * d * d
+            - mu * d
+        )
+    return volume * energy, volume * (a * f + s * cof)
+
+
+@wp.kernel
+def _evaluate_inertia_residual64(
+    dt: wp.float64,
+    gravity: wp.array[wp.vec3],
+    worlds: wp.array[int],
+    xn: wp.array[wp.vec3d],
+    vn: wp.array[wp.vec3d],
+    x: wp.array[wp.vec3d],
+    mass: wp.array[float],
+    forces: wp.array[wp.vec3],
+    ids: wp.array[int],
+    residual: wp.array[wp.vec3],
+):
+    i = wp.tid()
+    p = ids[i]
+    world = worlds[p]
+    if world < 0:
+        world = gravity.shape[0] - 1
+    residual[i] = wp.vec3(
+        wp.float64(mass[p]) * ((x[p] - xn[p] - dt * vn[p]) / (dt * dt) - wp.vec3d(gravity[world])) - wp.vec3d(forces[p])
+    )
+
+
+@wp.kernel
+def _add_consistent_inertia64(
+    dt: wp.float64,
+    indices: wp.array2d[int],
+    mapping: wp.array[int],
+    coefficients: wp.array[float],
+    x: wp.array[wp.vec3d],
+    xn: wp.array[wp.vec3d],
+    vn: wp.array[wp.vec3d],
+    residual: wp.array[wp.vec3],
+):
+    tet, a = wp.tid()
+    i = mapping[indices[tet, a]]
+    if i >= 0:
+        r = wp.vec3d(0.0)
+        for b in range(4):
+            j = indices[tet, b]
+            weight = wp.float64(coefficients[tet])
+            if a == b:
+                weight *= wp.float64(2.0)
+            r += weight * (x[j] - xn[j] - dt * vn[j]) / (dt * dt)
+        wp.atomic_add(residual, i, wp.vec3(r))
+
+
+@wp.func
 def _elastic_state(
     tet: int,
     material_model: int,
     min_det_f_guard: float,
-    candidate_particle_q: wp.array[wp.vec3],
+    candidate_particle_q: wp.array[Any],
     tet_indices: wp.array2d[int],
     tet_poses: wp.array[wp.mat33],
     tet_materials: wp.array2d[float],
     tet_energy: wp.array[float],
     min_det_f: wp.array[float],
     failure_flags: wp.array[int],
+    tangent: bool,
+    high_precision: bool,
 ):
     origin = candidate_particle_q[tet_indices[tet, 0]]
     ds = wp.matrix_from_cols(
@@ -551,7 +628,7 @@ def _elastic_state(
         candidate_particle_q[tet_indices[tet, 2]] - origin,
         candidate_particle_q[tet_indices[tet, 3]] - origin,
     )
-    f = ds * tet_poses[tet]
+    f = wp.mat33(ds) * tet_poses[tet]
     determinant = wp.determinant(f)
     valid = True
     if not wp.isfinite(determinant):
@@ -567,10 +644,22 @@ def _elastic_state(
         wp.atomic_max(failure_flags, 0, 2)
         valid = False
     energy, stress, projected = _evaluate_stable_neo_hookean(
-        f, rest_volume, tet_materials[tet, 0], tet_materials[tet, 1]
+        f, rest_volume, tet_materials[tet, 0], tet_materials[tet, 1], tangent
     )
     if material_model == 1:
-        energy, stress, projected = _evaluate_smith(f, rest_volume, tet_materials[tet, 0], tet_materials[tet, 1])
+        energy, stress, projected = _evaluate_smith(
+            f, rest_volume, tet_materials[tet, 0], tet_materials[tet, 1], tangent
+        )
+    if high_precision:
+        exact_energy, exact_stress = _evaluate_energy_stress64(
+            wp.mat33d(ds) * wp.mat33d(tet_poses[tet]),
+            wp.float64(rest_volume),
+            wp.float64(tet_materials[tet, 0]),
+            wp.float64(tet_materials[tet, 1]),
+            material_model,
+        )
+        energy = float(exact_energy)
+        stress = wp.mat33(exact_stress)
     if not wp.isfinite(energy):
         wp.atomic_max(failure_flags, 0, 2)
         valid = False
@@ -578,10 +667,11 @@ def _elastic_state(
         if not wp.isfinite(stress[i % 3, i // 3]):
             wp.atomic_max(failure_flags, 0, 2)
             valid = False
-        for j in range(9):
-            if not wp.isfinite(projected[i, j]):
-                wp.atomic_max(failure_flags, 0, 2)
-                valid = False
+        if tangent:
+            for j in range(9):
+                if not wp.isfinite(projected[i, j]):
+                    wp.atomic_max(failure_flags, 0, 2)
+                    valid = False
     tet_energy[tet] = energy
     return valid, stress, projected
 
@@ -589,8 +679,9 @@ def _elastic_state(
 @wp.kernel
 def _evaluate_elastic_residual(
     material_model: int,
+    high_precision: bool,
     min_det_f_guard: float,
-    candidate_particle_q: wp.array[wp.vec3],
+    candidate_particle_q: wp.array[Any],
     tet_indices: wp.array2d[int],
     tet_poses: wp.array[wp.mat33],
     tet_materials: wp.array2d[float],
@@ -612,6 +703,8 @@ def _evaluate_elastic_residual(
         tet_energy,
         min_det_f,
         failure_flags,
+        False,
+        high_precision,
     )
     if valid:
         for a in range(4):
@@ -623,11 +716,12 @@ def _evaluate_elastic_residual(
 @wp.kernel
 def _assemble_elastic_residual_tangent(
     material_model: int,
+    high_precision: bool,
     consistent: int,
     inv_dt_sq: float,
     mass_coefficients: wp.array[float],
     min_det_f_guard: float,
-    candidate_particle_q: wp.array[wp.vec3],
+    candidate_particle_q: wp.array[Any],
     tet_indices: wp.array2d[int],
     tet_poses: wp.array[wp.mat33],
     tet_materials: wp.array2d[float],
@@ -652,6 +746,8 @@ def _assemble_elastic_residual_tangent(
         tet_energy,
         min_det_f,
         failure_flags,
+        True,
+        high_precision,
     )
     if valid:
         nodal = mat1212(0.0)
@@ -717,10 +813,13 @@ def _validate_evaluation(model, args):
         raise ValueError("dt must be finite, positive and representable in float32 inertia")
     if not np.isfinite(guard32) or guard32 <= 0:
         raise ValueError("min_det_f_guard must be finite and positive in runtime float32 arithmetic")
+    position_dtype = args["candidate_particle_q"].dtype
+    if position_dtype not in (wp.vec3, wp.vec3d):
+        raise ValueError("Unsupported tet position dtype")
     specifications = (
-        ("candidate_particle_q", wp.vec3, (model.particle_count,)),
-        ("particle_q_n", wp.vec3, (model.particle_count,)),
-        ("particle_qd_n", wp.vec3, (model.particle_count,)),
+        ("candidate_particle_q", position_dtype, (model.particle_count,)),
+        ("particle_q_n", position_dtype, (model.particle_count,)),
+        ("particle_qd_n", position_dtype, (model.particle_count,)),
         ("frozen_particle_f", wp.vec3, (model.particle_count,)),
         ("particle_to_dynamic", wp.int32, (model.particle_count,)),
         ("dynamic_particle_ids", wp.int32, (args["dynamic_particle_ids"].size,)),
@@ -748,6 +847,7 @@ def _prepare_evaluation(model, args):
     workspace.failure_flags.zero_()
     workspace.min_det_f.fill_(float("inf"))
     workspace.tet_energy.zero_()
+    physics = workspace.physics
     wp.launch(
         _validate_candidate_particles,
         (model.tet_count, 4),
@@ -756,20 +856,21 @@ def _prepare_evaluation(model, args):
             args["particle_q_n"],
             args["particle_qd_n"],
             args["frozen_particle_f"],
-            model.tet_indices,
+            physics.indices if physics is not None else model.tet_indices,
             args["particle_to_dynamic"],
             workspace.failure_flags,
         ],
         device=model.device,
     )
-    physics = workspace.physics
+    gravity = args.get("frozen_gravity")
+    gravity = model.gravity if gravity is None else gravity
     if physics is not None and physics.mass_mode == "consistent":
         wp.launch(
             _initialize_consistent_residual,
             args["dynamic_particle_ids"].size,
             [
-                model.gravity,
-                model.particle_world,
+                gravity,
+                physics.worlds if physics is not None else model.particle_world,
                 physics.row_mass,
                 args["frozen_particle_f"],
                 args["dynamic_particle_ids"],
@@ -778,11 +879,11 @@ def _prepare_evaluation(model, args):
             device=model.device,
         )
         wp.launch(
-            _add_consistent_inertia,
+            _add_consistent_inertia64 if args["candidate_particle_q"].dtype == wp.vec3d else _add_consistent_inertia,
             (model.tet_count, 4),
             [
                 dt,
-                model.tet_indices,
+                physics.indices if physics is not None else model.tet_indices,
                 args["particle_to_dynamic"],
                 physics.coefficients,
                 args["candidate_particle_q"],
@@ -794,12 +895,14 @@ def _prepare_evaluation(model, args):
         )
     else:
         wp.launch(
-            _evaluate_inertia_residual,
+            _evaluate_inertia_residual64
+            if args["candidate_particle_q"].dtype == wp.vec3d
+            else _evaluate_inertia_residual,
             args["dynamic_particle_ids"].size,
             [
                 dt,
-                model.gravity,
-                model.particle_world,
+                gravity,
+                physics.worlds if physics is not None else model.particle_world,
                 args["particle_q_n"],
                 args["particle_qd_n"],
                 args["candidate_particle_q"],
@@ -815,9 +918,9 @@ def _prepare_evaluation(model, args):
 def evaluate_tet_residual(
     model: Model,
     *,
-    candidate_particle_q: wp.array[wp.vec3],
-    particle_q_n: wp.array[wp.vec3],
-    particle_qd_n: wp.array[wp.vec3],
+    candidate_particle_q: wp.array[Any],
+    particle_q_n: wp.array[Any],
+    particle_qd_n: wp.array[Any],
     frozen_particle_f: wp.array[wp.vec3],
     dynamic_particle_ids: wp.array[int],
     particle_to_dynamic: wp.array[int],
@@ -825,6 +928,7 @@ def evaluate_tet_residual(
     dt: float,
     min_det_f_guard: float,
     workspace: TetAssemblyWorkspace,
+    frozen_gravity: wp.array[wp.vec3] | None = None,
 ) -> None:
     """Evaluate a trial without accessing tangent buffers; inspect failure_flags."""
     physics = workspace.physics
@@ -837,9 +941,10 @@ def evaluate_tet_residual(
         model.tet_count,
         [
             mode,
+            candidate_particle_q.dtype == wp.vec3d,
             min_det_f_guard,
             candidate_particle_q,
-            model.tet_indices,
+            physics.indices if physics is not None else model.tet_indices,
             poses,
             materials,
             particle_to_dynamic,
@@ -856,9 +961,9 @@ def evaluate_tet_residual(
 def assemble_tet_residual_tangent(
     model: Model,
     *,
-    candidate_particle_q: wp.array[wp.vec3],
-    particle_q_n: wp.array[wp.vec3],
-    particle_qd_n: wp.array[wp.vec3],
+    candidate_particle_q: wp.array[Any],
+    particle_q_n: wp.array[Any],
+    particle_qd_n: wp.array[Any],
     frozen_particle_f: wp.array[wp.vec3],
     dynamic_particle_ids: wp.array[int],
     particle_to_dynamic: wp.array[int],
@@ -867,6 +972,7 @@ def assemble_tet_residual_tangent(
     min_det_f_guard: float,
     workspace: TetAssemblyWorkspace,
     scatter: TetScatterBuffers,
+    frozen_gravity: wp.array[wp.vec3] | None = None,
 ) -> None:
     """Write exact residual and identical projected/inertial owner and global blocks."""
     if (
@@ -906,12 +1012,13 @@ def assemble_tet_residual_tangent(
         model.tet_count,
         [
             mode,
+            candidate_particle_q.dtype == wp.vec3d,
             consistent,
             1.0 / dt**2,
             physics.coefficients if physics is not None else model.particle_mass,
             min_det_f_guard,
             candidate_particle_q,
-            model.tet_indices,
+            physics.indices if physics is not None else model.tet_indices,
             poses,
             materials,
             particle_to_dynamic,
