@@ -996,6 +996,17 @@ class SolverMonolithic(SolverBase):
         )
 
     @classmethod
+    def _create_articulation_only(
+        cls, model: Model, *, globalization, joint_terms=None, publish_policy="strict", **options
+    ):
+        """Create the private FP64 PR2 articulation validation path."""
+        from .articulation_solver import _ArticulationSolver  # noqa: PLC0415 -- private subclass imports this base
+
+        return _ArticulationSolver(
+            model, globalization=globalization, joint_terms=joint_terms, publish_policy=publish_policy, **options
+        )
+
+    @classmethod
     def _create_joint_diagnostic(cls, model: Model, *, joint_terms: SolverMonolithic.JointTerms, **options):
         """Create the internal G1H test entry; not a supported rigid-only solver API."""
         solver = cls.__new__(cls)

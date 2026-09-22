@@ -1,0 +1,398 @@
+{
+  "schema": "p3-pr2-fixtures/v2",
+  "status": "IMPLEMENTATION_IN_PROGRESS_ANGLE_GATE_REVISED",
+  "units": "SI",
+  "dt": 0.001,
+  "coordinate_storage": "float64",
+  "defaults": {
+    "parent": "previous link, first attached to world",
+    "parent_transform": "identity unless specified",
+    "child_transform": "identity",
+    "axis_direction": "normalize before ModelBuilder",
+    "armature": 0,
+    "damping": 0,
+    "target_ke": 0,
+    "target_kd": 0,
+    "friction": 0,
+    "limit_ke": 0,
+    "limit_kd": 0,
+    "limits": "unbounded unless specified",
+    "external_forces": "zero unless specified",
+    "target_sampling": "piecewise linear position and segment slope at step end; exact knots use outgoing segment; final endpoint slope=0; cast actual Control arrays to float32 and freeze",
+    "initialization": "cast model geometry and physical constants through normal ModelBuilder storage; use the resulting values in both independent oracles; q0/qd0 assigned to private FP64 State then explicit reset"
+  },
+  "cases": [
+    {
+      "id": "static",
+      "duration": 1.0,
+      "joints": [
+        {
+          "type": "REVOLUTE",
+          "axis": [
+            0,
+            0,
+            1
+          ],
+          "mass": 1,
+          "inertia_diag": [
+            0.01,
+            0.01,
+            0.01
+          ],
+          "com": [
+            0.05,
+            0.02,
+            -0.01
+          ],
+          "q0": 0.5,
+          "qd0": 0
+        }
+      ],
+      "gravity": [
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "id": "free_translation",
+      "duration": 1.0,
+      "joints": [
+        {
+          "type": "PRISMATIC",
+          "axis": [
+            1,
+            0,
+            0
+          ],
+          "mass": 1,
+          "inertia_diag": [
+            0.01,
+            0.01,
+            0.01
+          ],
+          "com": [
+            0.1,
+            -0.02,
+            0.03
+          ],
+          "q0": 0.5,
+          "qd0": 0.2
+        }
+      ],
+      "gravity": [
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "id": "free_rotor",
+      "duration": 1.0,
+      "joints": [
+        {
+          "type": "REVOLUTE",
+          "axis": [
+            0,
+            0,
+            1
+          ],
+          "mass": 1,
+          "inertia_diag": [
+            0.01,
+            0.01,
+            0.01
+          ],
+          "com": [
+            0,
+            0,
+            0
+          ],
+          "q0": 0.5,
+          "qd0": 1
+        }
+      ],
+      "gravity": [
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "id": "constant_force",
+      "duration": 1.0,
+      "joints": [
+        {
+          "type": "PRISMATIC",
+          "axis": [
+            1,
+            0,
+            0
+          ],
+          "mass": 1,
+          "inertia_diag": [
+            0.01,
+            0.01,
+            0.01
+          ],
+          "com": [
+            0,
+            0,
+            0
+          ],
+          "q0": 0.5,
+          "qd0": 0
+        }
+      ],
+      "gravity": [
+        0,
+        0,
+        0
+      ],
+      "world_COM_force": [
+        1,
+        0,
+        0
+      ]
+    },
+    {
+      "id": "pendulum",
+      "duration": 1.0,
+      "joints": [
+        {
+          "type": "REVOLUTE",
+          "axis": [
+            0,
+            1,
+            0
+          ],
+          "mass": 1,
+          "inertia_diag": [
+            0.01,
+            0.02,
+            0.01
+          ],
+          "com": [
+            0,
+            0,
+            -0.2
+          ],
+          "q0": 0.2,
+          "qd0": 0
+        }
+      ],
+      "gravity": [
+        0,
+        0,
+        -9.81
+      ]
+    },
+    {
+      "id": "noncollinear_chain",
+      "duration": 1.0,
+      "joints": [
+        {
+          "type": "REVOLUTE",
+          "axis": [
+            0,
+            1,
+            0
+          ],
+          "mass": 1,
+          "inertia_diag": [
+            0.01,
+            0.02,
+            0.01
+          ],
+          "com": [
+            0,
+            0,
+            -0.2
+          ],
+          "q0": 0.2,
+          "qd0": 0.1
+        },
+        {
+          "type": "REVOLUTE",
+          "axis_direction": [
+            1,
+            1,
+            0
+          ],
+          "mass": 0.7,
+          "inertia_diag": [
+            0.006,
+            0.008,
+            0.004
+          ],
+          "com": [
+            0.03,
+            0,
+            -0.15
+          ],
+          "parent_translation": [
+            0,
+            0,
+            -0.4
+          ],
+          "q0": -0.15,
+          "qd0": -0.05
+        }
+      ],
+      "gravity": [
+        0,
+        0,
+        -9.81
+      ]
+    },
+    {
+      "id": "driven_terms",
+      "duration": 1.2,
+      "joints": [
+        {
+          "type": "REVOLUTE",
+          "axis": [
+            0,
+            0,
+            1
+          ],
+          "mass": 1,
+          "inertia_diag": [
+            0.01,
+            0.01,
+            0.01
+          ],
+          "com": [
+            0,
+            0,
+            0
+          ],
+          "q0": 0,
+          "qd0": 0,
+          "armature": 0.002,
+          "damping": 0.002,
+          "target_ke": 0.5,
+          "target_kd": 0.02,
+          "effort_limit": 0.03,
+          "velocity_limit": 100,
+          "limit_lower": -0.25,
+          "limit_upper": 0.25,
+          "limit_ke": 10,
+          "limit_kd": 0.05,
+          "limit_width": 0.02,
+          "friction": 0.001,
+          "friction_velocity_scale": 0.02
+        }
+      ],
+      "gravity": [
+        0,
+        0,
+        0
+      ],
+      "target_knots": [
+        [
+          0,
+          0
+        ],
+        [
+          0.2,
+          0.35
+        ],
+        [
+          0.5,
+          0.35
+        ],
+        [
+          0.9,
+          -0.35
+        ],
+        [
+          1.2,
+          -0.35
+        ]
+      ]
+    }
+  ],
+  "continuous_reference_max_errors": {
+    "static": {
+      "q": 1e-10,
+      "qd": 1e-10
+    },
+    "free_translation": {
+      "q_m": 1e-06,
+      "qd_m_s": 1e-05
+    },
+    "free_rotor": {
+      "q_rad": 0.001,
+      "qd_rad_s": 0.002
+    },
+    "constant_force": {
+      "q_m": 0.0006,
+      "qd_m_s": 1e-05
+    },
+    "pendulum": {
+      "q_rad": 0.01,
+      "qd_rad_s": 0.05,
+      "link_COM_m": 0.003,
+      "link_rotation_rad": 0.015
+    },
+    "noncollinear_chain": {
+      "q_rad": 0.01,
+      "qd_rad_s": 0.05,
+      "link_COM_m": 0.003,
+      "link_rotation_rad": 0.015
+    },
+    "driven_terms": {
+      "q_rad": 0.01,
+      "qd_rad_s": 0.05,
+      "link_COM_m": 0.003,
+      "link_rotation_rad": 0.015
+    }
+  },
+  "same_discrete_oracle_max_errors": {
+    "q_rad": 0.0005,
+    "qd_rad_s": 0.0005,
+    "q_m": 2e-06,
+    "qd_m_s": 2e-05,
+    "link_COM_m": 1e-05,
+    "link_rotation_rad": 0.0005
+  },
+  "all_physical_steps": "SUCCESS and global/q residual pass; no coordinate or velocity clipping",
+  "refinement_cases": [
+    "noncollinear_chain",
+    "driven_terms",
+    "sharpa_g1h"
+  ],
+  "refinement_dt": [
+    0.001,
+    0.0005,
+    0.00025
+  ],
+  "refinement_ratio_max": 0.8,
+  "sharpa_assets": {
+    "assets/left_sharpa_wave/left_sharpa_wave.urdf": "4cf9fcf07a4545b538995c6c17aaf1a5768e61541b11b1cc385026da3626bad8",
+    "assets/trajectory/Ball_catch - Left_hand_motion_rad.csv": "b9018705cdb04563beac026f53c19f61a1993a97481253c9fdf1501cdb4c8429",
+    "worktrees/monolithic-integration/newton/examples/softbody/sharpa_g1h.json": "8d5ca1b949e75155dfea61e1c42d44bee9a47c7daa079c435264bc5f42db94cb",
+    "worktrees/monolithic-integration/newton/examples/softbody/sharpa_close.py": "1f2605bbe9f2bf374f85f90c719c764837e59fe1b39d64b5c28bb2d3398faba0"
+  },
+  "sharpa_gate_override": {
+    "converged_fraction": 1.0
+  },
+  "unchanged_sharpa_gates": "all other thresholds loaded verbatim from sharpa_g1h.json",
+  "revision": {
+    "date": "2026-09-22",
+    "source_sha256": "1b525f62807c40b56d16b6aca1bb350f71c23c40c9c6c0b00e9b5d508d409113",
+    "authorization": "User approved relaxing the same-discrete angular-position acceptance after reviewing the approximately 5e-4 rad discrepancy.",
+    "changes": {
+      "same_discrete_oracle_max_errors.q_rad": [
+        5e-05,
+        0.0005
+      ],
+      "same_discrete_oracle_max_errors.link_rotation_rad": [
+        5e-05,
+        0.0005
+      ]
+    },
+    "unchanged": "Angular velocity and all other gates, solver tolerances, physics, time step and iteration budgets."
+  }
+}

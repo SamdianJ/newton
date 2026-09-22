@@ -1,0 +1,22 @@
+{
+  "schema": "p3-pr2-noise/v1",
+  "calibration_sha256": "65cba2bc6b85d11e8c94b11f477dc8e504d55e371885679d851930f58b28e752",
+  "fixture_sha256": "2b7897835227c190fbaea02ee3f7da9d9861ed1224f885c428ac5dc729a71c3f",
+  "envelope": {
+    "energy": 5.820766091346741e-11,
+    "residual": 2.0935893019213836e-09,
+    "slope": 1.5498947892952669e-09
+  },
+  "maxima": {
+    "energy": 7.275957614183426e-12,
+    "residual": 2.6169866274017295e-10,
+    "slope": 1.9373684866190836e-10,
+    "scaled_residual": 1.2182648848345584e-13,
+    "repeat_energy": 0.0,
+    "repeat_residual": 0.0,
+    "fk": 1.887379141862766e-15,
+    "jacobian": 3.3306690738754696e-16
+  },
+  "repeats": 32,
+  "passed": true
+}
