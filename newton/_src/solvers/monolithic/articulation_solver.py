@@ -20,12 +20,10 @@ from .linear import (
     MonolithicLinearGeneration,
     MonolithicLinearLayout,
     MonolithicLinearWorkspace,
-    MonolithicPcgConfig,
-    MonolithicPcgWarmStart,
 )
 from .segment_graph import _SegmentGraphCache
 from .solver_monolithic import SolverMonolithic, _SolverMonolithicInternalConfig, _StepFailure
-from .tet_variational import acceptance
+from .variational_iteration import iterate
 
 
 @wp.kernel
@@ -101,7 +99,7 @@ class _ArticulationSolver(SolverMonolithic):
             if name not in self._joint_terms.allowed_properties and np.any(getattr(model, name).numpy() != 0):
                 raise ValueError(f"Disabled joint term has nonzero parameters: {name}")
         parameters = self._joint_terms.params.numpy()
-        self._kinematics = ArticulationKinematics(
+        self._kinematics = self._make_kinematics(
             model,
             extra_config={
                 "joint_terms": parameters,
@@ -111,7 +109,7 @@ class _ArticulationSolver(SolverMonolithic):
             },
         )
         SolverBase.__init__(self, model)
-        self._states = ArticulationState(self._kinematics)
+        self._states = self._make_states()
         self._objective = ArticulationObjective(self._kinematics, parameters)
         self._config = _SolverMonolithicInternalConfig()
         # Sharpa refinement certifies these tighter goals within the existing budgets.
@@ -155,6 +153,18 @@ class _ArticulationSolver(SolverMonolithic):
         self._last_stats = self.Stats(self.Status.NOT_RUN)
         self._old_joint_t = wp.empty_like(self._kinematics.joint_translations)
         self._old_joint_r = wp.empty_like(self._kinematics.joint_rotations)
+
+    def _make_kinematics(self, model, *, extra_config):
+        return ArticulationKinematics(model, extra_config=extra_config)
+
+    def _make_states(self):
+        return ArticulationState(self._kinematics)
+
+    def _prepare_step(self, state_in, state_out, dt):
+        """Freeze additional coupled inputs; q-only has no additional components."""
+
+    def _finish_candidate(self, state, dt):
+        """Validate additional final forces before any published-state write."""
 
     @property
     def last_stats(self):
@@ -222,180 +232,66 @@ class _ArticulationSolver(SolverMonolithic):
         return b.astype(float), linear.scale.numpy().astype(float)
 
     def _iterate_articulation(self, dt):
-        config = self._config
-        reference = None
-        small = False
-        for iteration in range(self.newton_max_iterations + 1):
-            e, residual, absolute = self._evaluate(self._accepted, dt)
-            b, scale = self._assemble(iteration)
-            if reference is None:
-                reference = residual.copy()
-            merit = float(np.linalg.norm(scale * residual) / math.sqrt(len(residual)))
-            ref = float(np.linalg.norm(scale * reference) / math.sqrt(len(reference)))
-            goals = (
-                config.merit_absolute_global + config.merit_relative_global * ref,
-                config.merit_absolute_q + config.merit_relative_q * ref,
-            )
-            self._metrics.update(
-                nonlinear_iterations=iteration,
-                merit_final=merit,
-                merit_q_final=merit,
-                merit_reference=ref,
-                merit_q_reference=ref,
-                convergence_ratio=merit / goals[0],
-                convergence_ratio_q=merit / goals[1],
-                raw_residual_q_norm=float(np.linalg.norm(residual)),
-            )
-            if iteration == 0:
-                self._metrics.update(merit_initial=merit, merit_q_initial=merit)
-            self._variational.update(objective_total=e, residual=residual.tolist())
-            if merit <= min(goals):
-                return self.Status.SUCCESS
-            if small:
-                raise _StepFailure(
-                    self.Status.NONLINEAR_STAGNATION, "Small effective step with unresolved physical residual"
-                )
-            if iteration == self.newton_max_iterations:
-                return self.Status.NONLINEAR_MAX_ITERATIONS
-            rhs64 = -scale * residual
-            self._rhs.assign(rhs64.astype(np.float32))
-            caps = tuple(0.5 * math.sqrt(len(residual)) * goal for goal in goals)
-            pcg = MonolithicPcgConfig(
-                maximum_iterations=self.linear_max_iterations,
-                true_residual_interval=10,
-                linear_tolerance=self.linear_tolerance,
-                linear_absolute_tolerance=self.linear_absolute_tolerance,
-                residual_norm_limits=(*caps, 1.0),
-                residual_floor_global=config.residual_floor_global,
-                residual_floor_q=config.residual_floor_q,
-                residual_floor_x=config.residual_floor_x,
-                curvature_absolute_tolerance=0.0,
-                curvature_relative_tolerance=1e-12,
-                preconditioner_positive_tolerance=0.0,
-                stagnation_window=10,
-                stagnation_minimum_reduction=1e-3,
-            )
-            accepted = False
-            for retry, regularization in enumerate(config.regularization_values):
-                self._metrics["regularization_retries"] += int(retry > 0)
-                self._metrics["lambda_value"] = regularization
-                try:
-                    self._require_linear(self._linear.set_regularization(regularization, generation=self._generation))
-                    self._require_linear(
-                        self._linear.factor_actor_preconditioner(generation=self._generation, pivot_tolerance=0.0)
-                    )
-                    result = self._linear.solve_pcg(
-                        self._rhs,
-                        self._y,
-                        generation=self._generation,
-                        warm_start=MonolithicPcgWarmStart.ZERO,
-                        config=pcg,
-                        delta=self._delta,
-                    )
-                    self._metrics["linear_iterations"] += result.iterations
-                    self._metrics["linear_scheduled_slots"] += result.scheduled_slots
-                    self._require_linear(result.status)
-                    if self.pcg_mode == self.PCGMode.DIAGNOSTIC:
-                        self._require_linear(
-                            self._linear.recover_delta(self._y, self._delta, generation=self._generation)
-                        )
-                    elif not result.output_valid:
-                        raise _StepFailure(self.Status.NONFINITE, "Invalid PCG output")
-                except _StepFailure:
-                    continue
-                direction = self._delta.numpy().astype(float)
-                post = float(np.linalg.norm(scale * (b @ direction + residual)))
-                limit = min(
-                    *caps,
-                    max(
-                        self.linear_absolute_tolerance,
-                        self.linear_tolerance * max(np.linalg.norm(rhs64), config.residual_floor_global),
-                    ),
-                    max(
-                        self.linear_absolute_tolerance,
-                        self.linear_tolerance * max(np.linalg.norm(rhs64), config.residual_floor_q),
-                    ),
-                )
-                self._variational["linear_postchecks"].append(
-                    {"residual": post, "limit": limit, "regularization": regularization}
-                )
-                if not np.isfinite(post) or post > limit:
-                    continue
-                for search in range(self.line_search_max_iterations):
-                    alpha = 0.5**search
-                    self._metrics["line_search_iterations"] += 1
-                    wp.launch(
-                        _coordinate_trial,
-                        len(residual),
-                        [
-                            self._accepted.joint_q,
-                            self._delta,
-                            wp.float64(alpha),
-                            self._objective.qn,
-                            wp.float64(dt),
-                            self._trial.joint_q,
-                            self._trial.joint_qd,
-                        ],
-                        device=self.model.device,
-                    )
-                    te, tr, ta = self._evaluate(self._trial, dt, build_tangent=False)
-                    if not self._domain(self._trial):
-                        continue
-                    effective = self._trial.joint_q.numpy() - self._accepted.joint_q.numpy()
-                    slope = float(residual @ effective) / alpha
-                    trial_merit = float(np.linalg.norm(scale * tr) / math.sqrt(len(tr)))
-                    # CPU/CUDA common envelope frozen in fixtures/p3_pr2_noise_v1.json.
-                    eps = 128 * np.finfo(float).eps
-                    en = max(5.820766091346741e-11, eps * max(1.0, absolute, ta))
-                    rn = max(
-                        2.0935893019213836e-9 * float(np.linalg.norm(scale)) / math.sqrt(len(scale)),
-                        eps * max(1.0, merit, trial_merit),
-                    )
-                    sn = max(
-                        1.5498947892952669e-9 * float(np.linalg.norm(direction)),
-                        2.0935893019213836e-9 * float(abs(direction).sum()),
-                        eps * max(1.0, float(abs(residual * direction).sum())),
-                    )
-                    passes, a, r, improved = acceptance(
-                        self._globalization,
-                        e,
-                        te,
-                        slope,
-                        alpha,
-                        merit,
-                        trial_merit,
-                        energy_noise=en,
-                        residual_noise=rn,
-                        slope_noise=sn,
-                    )
-                    self._variational["trials"].append(
-                        {
-                            "iteration": iteration,
-                            "retry": retry,
-                            "alpha": alpha,
-                            "energy": te,
-                            "merit": trial_merit,
-                            "slope": slope,
-                            "Armijo": a,
-                            "ResNorm": r,
-                            "accepted": passes,
-                            "improved": improved,
-                        }
-                    )
-                    if passes:
-                        scaled_step = float(np.linalg.norm(effective / scale) / math.sqrt(len(effective)))
-                        small = scaled_step <= min(config.step_tolerance_global, config.step_tolerance_q)
-                        self._accepted, self._trial = self._trial, self._accepted
-                        self._metrics.update(accepted_alpha=alpha, scaled_step=scaled_step, scaled_step_q=scaled_step)
-                        accepted = True
-                        break
-                if accepted:
-                    break
-            if not accepted:
-                raise _StepFailure(
-                    self.Status.REGULARIZATION_EXHAUSTED, "No direction/trial passed unchanged physical gates"
-                )
-        raise AssertionError("Unreachable")
+        return iterate(self, dt)
+
+    def _initial_reference(self, dt):
+        return None
+
+    def _conservative_energy(self):
+        return True
+
+    def _physical_linear_error(self, matrix, direction, residual, scale):
+        return scale * (matrix @ direction + residual)
+
+    def _take_trial(self, alpha, dt):
+        wp.launch(
+            _coordinate_trial,
+            self._kinematics.count,
+            [
+                self._accepted.joint_q,
+                self._delta,
+                wp.float64(alpha),
+                self._objective.qn,
+                wp.float64(dt),
+                self._trial.joint_q,
+                self._trial.joint_qd,
+            ],
+            device=self.model.device,
+        )
+
+    def _trial_evaluation(self, dt):
+        return self._evaluate(self._trial, dt, build_tangent=False)
+
+    def _effective_displacement(self):
+        return self._trial.joint_q.numpy() - self._accepted.joint_q.numpy()
+
+    def _can_publish(self, status):
+        return status == self.Status.SUCCESS or (
+            self._publish_policy == "legacy" and status == self.Status.NONLINEAR_MAX_ITERATIONS
+        )
+
+    def _validate_final(self, dt, status):
+        # Re-evaluate the actual stored candidate against the original frozen stage.
+        energy, residual, _ = self._evaluate(self._accepted, dt, build_tangent=False)
+        scale = self._linear.scale.numpy().astype(float)
+        merit = float(np.linalg.norm(scale * residual) / math.sqrt(len(residual)))
+        reference = self._metrics["merit_reference"]
+        goals = (
+            self._config.merit_absolute_global + self._config.merit_relative_global * reference,
+            self._config.merit_absolute_q + self._config.merit_relative_q * reference,
+        )
+        self._metrics.update(
+            merit_final=merit,
+            merit_q_final=merit,
+            convergence_ratio=merit / goals[0],
+            convergence_ratio_q=merit / goals[1],
+            raw_residual_q_norm=float(np.linalg.norm(residual)),
+        )
+        self._variational.update(objective_total=energy, residual=residual.tolist())
+        if status == self.Status.SUCCESS and merit > min(goals):
+            raise _StepFailure(self.Status.NONLINEAR_STAGNATION, "Final articulation residual failed publication gates")
+        if not self._domain(self._accepted):
+            raise _StepFailure(self.Status.NONFINITE, "Final articulation candidate left the local domain")
 
     def _joint_force_metrics(self, state):
         """Bind scalar force diagnostics to the successfully published state."""
@@ -454,6 +350,7 @@ class _ArticulationSolver(SolverMonolithic):
             self._trial = self._states.copy(state_in)
         for state in (self._original, self._accepted, self._trial):
             state.assign(state_in)
+        self._prepare_step(state_in, state_out, dt)
         self._step_generation += 1
         self._metrics = {
             "matrix_assembly_count": 0,
@@ -476,7 +373,7 @@ class _ArticulationSolver(SolverMonolithic):
         wp.copy(self._old_joint_r, k.joint_rotations)
         wp.copy(obj.qn, state_in.joint_q)
         wp.copy(obj.vn, state_in.joint_qd)
-        history = state_in._monolithic_articulation
+        history = getattr(state_in, self._states.namespace)
         wp.launch(
             _predict,
             k.bodies,
@@ -511,38 +408,14 @@ class _ArticulationSolver(SolverMonolithic):
         published = False
         try:
             status = self._iterate_articulation(dt)
-            if status == self.Status.SUCCESS or (
-                self._publish_policy == "legacy" and status == self.Status.NONLINEAR_MAX_ITERATIONS
-            ):
-                # Re-evaluate the actual stored candidate against the original frozen stage.
-                energy, residual, _ = self._evaluate(self._accepted, dt, build_tangent=False)
-                scale = self._linear.scale.numpy().astype(float)
-                merit = float(np.linalg.norm(scale * residual) / math.sqrt(len(residual)))
-                reference = self._metrics["merit_reference"]
-                goals = (
-                    self._config.merit_absolute_global + self._config.merit_relative_global * reference,
-                    self._config.merit_absolute_q + self._config.merit_relative_q * reference,
-                )
-                self._metrics.update(
-                    merit_final=merit,
-                    merit_q_final=merit,
-                    convergence_ratio=merit / goals[0],
-                    convergence_ratio_q=merit / goals[1],
-                    raw_residual_q_norm=float(np.linalg.norm(residual)),
-                )
-                self._variational.update(objective_total=energy, residual=residual.tolist())
-                if status == self.Status.SUCCESS and merit > min(goals):
-                    raise _StepFailure(
-                        self.Status.NONLINEAR_STAGNATION, "Final articulation residual failed publication gates"
-                    )
-                if not self._domain(self._accepted):
-                    raise _StepFailure(self.Status.NONFINITE, "Final articulation candidate left the local domain")
+            if self._can_publish(status):
+                self._validate_final(dt, status)
                 # A PD-stabilized B cannot certify the candidate's physical inertia.
                 try:
                     k.validate_inertia()
                 except ValueError as error:
                     raise _StepFailure(self.Status.NONFINITE, str(error)) from error
-                final = self._accepted._monolithic_articulation
+                final = getattr(self._accepted, self._states.namespace)
                 wp.launch(
                     _recover_history,
                     k.bodies,
@@ -574,6 +447,7 @@ class _ArticulationSolver(SolverMonolithic):
                     device=self.model.device,
                 )
                 k.evaluate(self._accepted.joint_q, state=self._accepted)
+                self._finish_candidate(self._accepted, dt)
                 self._states.bind(self._accepted, dt=dt)
                 self._states.validate(self._accepted)
                 state_out.assign(self._accepted)
@@ -607,5 +481,6 @@ class _ArticulationSolver(SolverMonolithic):
                 wp.copy(getattr(state, name), value)
         for name in self._states.schema:
             wp.copy(
-                getattr(state._monolithic_articulation, name), getattr(self._original._monolithic_articulation, name)
+                getattr(getattr(state, self._states.namespace), name),
+                getattr(getattr(self._original, self._states.namespace), name),
             )

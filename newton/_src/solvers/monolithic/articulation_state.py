@@ -120,6 +120,7 @@ class ArticulationState:
     """Allocate and validate the complete version-one private State schema."""
 
     namespace = "_monolithic_articulation"
+    version = 1
 
     def __init__(self, kinematics):
         self.kinematics = kinematics
@@ -144,8 +145,7 @@ class ArticulationState:
         """Initialize from coordinates/rates, never silently inherit old history."""
         state = self.model.state()
         source = self.model if source is None else source
-        state.joint_q = wp.array(source.joint_q.numpy(), dtype=wp.float64, device=self.device)
-        state.joint_qd = wp.array(source.joint_qd.numpy(), dtype=wp.float64, device=self.device)
+        self._copy_coordinates(state, source)
         if getattr(source, "body_f", None) is not None:
             wp.copy(state.body_f, source.body_f)
         history = Model.AttributeNamespace(self.namespace)
@@ -159,14 +159,20 @@ class ArticulationState:
         """Allocate an exact continuation without applying initialization rules."""
         self.validate(source)
         state = self.model.state()
-        state.joint_q = wp.clone(source.joint_q)
-        state.joint_qd = wp.clone(source.joint_qd)
+        self._copy_coordinates(state, source)
         history = Model.AttributeNamespace(self.namespace)
         for name in self.schema:
             setattr(history, name, wp.clone(getattr(getattr(source, self.namespace), name)))
         setattr(state, self.namespace, history)
         state.assign(source)
         return state
+
+    def _copy_coordinates(self, state, source):
+        for name in ("joint_q", "joint_qd"):
+            setattr(state, name, wp.array(getattr(source, name).numpy(), dtype=wp.float64, device=self.device))
+
+    def _particle_schema(self):
+        return dict.fromkeys(("particle_q", "particle_qd", "particle_f"), ((0,), wp.vec3))
 
     def save_checkpoint(self, state, path):
         """Save standard arrays and the complete owned history without pickles."""
@@ -206,10 +212,10 @@ class ArticulationState:
         standard = {"joint_q", "joint_qd", "body_q", "body_qd", "body_f", "particle_q", "particle_qd", "particle_f"}
         for name, dtype in (("body_q", wp.transform), ("body_qd", wp.spatial_vector), ("body_f", wp.spatial_vector)):
             fields[name] = (getattr(state, name, None), (k.bodies,), dtype)
-        for name in ("particle_q", "particle_qd", "particle_f"):
+        for name, (shape, dtype) in self._particle_schema().items():
             value = getattr(state, name, None)
             if value is not None:
-                fields[name] = (value, (0,), wp.vec3)
+                fields[name] = (value, shape, dtype)
         for name, value in vars(state).items():
             if isinstance(value, wp.array) and name not in standard:
                 raise ValueError(f"Unsupported articulation state array: {name}")
@@ -225,7 +231,7 @@ class ArticulationState:
             if not np.isfinite(array.numpy()).all():
                 raise ValueError(f"Nonfinite articulation state: {name}")
         if bound:
-            if history.schema_version.numpy()[0] != 1 or history.valid.numpy()[0] != 1:
+            if history.schema_version.numpy()[0] != self.version or history.valid.numpy()[0] != 1:
                 raise ValueError("Invalid articulation state version/validity")
             if history.last_dt.numpy()[0] <= 0 or history.config_digest.numpy().tobytes() != k.digest:
                 raise ValueError("Incompatible articulation state configuration")
@@ -279,6 +285,6 @@ class ArticulationState:
         wp.copy(history.bound_q, state.joint_q)
         wp.copy(history.bound_qd, state.joint_qd)
         history.last_dt.fill_(dt)
-        history.schema_version.fill_(1)
+        history.schema_version.fill_(self.version)
         history.valid.fill_(1)
         history.config_digest.assign(np.frombuffer(self.kinematics.digest, dtype=np.uint8))

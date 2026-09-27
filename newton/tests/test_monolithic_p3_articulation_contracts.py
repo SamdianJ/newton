@@ -240,7 +240,7 @@ def test_trial_failure_rollback(test, device):
         state.body_f.assign([[1, 0, 0, 0, 0, 0]])
         original = snapshot(state)
         with patch(
-            "newton._src.solvers.monolithic.articulation_solver.acceptance", return_value=(False, False, False, False)
+            "newton._src.solvers.monolithic.variational_iteration.acceptance", return_value=(False, False, False, False)
         ):
             solver.step(state, out, model.control(), dt=0.001)
         test.assertEqual(solver.last_stats.status, solver.Status.REGULARIZATION_EXHAUSTED)

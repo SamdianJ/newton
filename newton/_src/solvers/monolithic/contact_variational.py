@@ -1,0 +1,700 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 The Newton Developers
+# SPDX-License-Identifier: Apache-2.0
+
+"""Private full-pair variational contact components; no step or publication policy."""
+
+import enum
+import math
+
+import numpy as np
+import warp as wp
+
+from ...geometry import GeoType, ShapeFlags
+from ...geometry.sdf_texture import TextureSDFData
+from .contact_geometry import _shape64
+from .linear import (
+    _append_monolithic_contact_factor_triplets,
+    _MonolithicContactFactors,
+    _MonolithicScalarTriplets,
+    _reserve_monolithic_contact_factor,
+)
+from .smooth_sdf import SmoothSDFData, smooth_query
+
+
+class ContactStatus(enum.IntEnum):
+    SUCCESS = 0
+    NONFINITE = 1
+    INVALID_GEOMETRY = 2
+    CAPACITY = 3
+    INVALID_ASSEMBLY = 4
+    UNCERTIFIED_BOUNDARY = 5
+
+
+@wp.struct
+class _Geometry:
+    y: wp.array[wp.vec3d]
+    gradient: wp.array[wp.vec3d]
+    distance: wp.array[wp.float64]
+    rotation: wp.array[wp.mat33d]
+    jacobian_q: wp.array2d[wp.vec3d]
+    soft_normal: wp.array[wp.vec3d]
+    uncertified: wp.array[int]
+
+
+@wp.func
+def _failure(flags: wp.array[int], key: int, status: int):
+    wp.atomic_max(flags, 0, status)
+    wp.atomic_min(flags, 1, key)
+
+
+@wp.func
+def _penalty64(gap: wp.float64, stiffness: wp.float64, smoothing: wp.float64):
+    u = -gap
+    if smoothing == wp.float64(0.0) and u <= wp.float64(0.0):
+        return wp.float64(0.0), wp.float64(0.0), wp.float64(0.0)
+    p, dp, ddp = wp.float64(0.0), wp.float64(0.0), wp.float64(0.0)
+    if u >= smoothing:
+        p, dp = u, wp.float64(1.0)
+    elif u > -smoothing:
+        t = (u + smoothing) / (wp.float64(2.0) * smoothing)
+        p = smoothing * t * t * t * (wp.float64(2.0) - t)
+        dp = t * t * (wp.float64(3.0) - wp.float64(2.0) * t)
+        ddp = wp.float64(3.0) * t * (wp.float64(1.0) - t) / smoothing
+    return stiffness * p * p / wp.float64(2.0), stiffness * p * dp, stiffness * (dp * dp + p * ddp)
+
+
+@wp.kernel
+def _reset_flags(flags: wp.array[int]):
+    flags[0] = 0
+    flags[1] = 2147483647
+
+
+@wp.kernel
+def _geometry(
+    x: wp.array[wp.vec3d],
+    poses: wp.array[wp.transformd],
+    com: wp.array[wp.vec3d],
+    jt: wp.array2d[wp.vec3d],
+    jw: wp.array2d[wp.vec3d],
+    triangles: wp.array2d[int],
+    shapes: wp.array[int],
+    bodies: wp.array[int],
+    transforms: wp.array[wp.transformd],
+    types: wp.array[int],
+    scales: wp.array[wp.vec3d],
+    sdf_indices: wp.array[int],
+    table: wp.array[TextureSDFData],
+    smooth_table: wp.array[SmoothSDFData],
+    out: _Geometry,
+    flags: wp.array[int],
+):
+    key = wp.tid()
+    shape = shapes[key % shapes.shape[0]]
+    face = key / (3 * shapes.shape[0])
+    slot = (key / shapes.shape[0]) % 3
+    a, b, c = x[triangles[face, 0]], x[triangles[face, 1]], x[triangles[face, 2]]
+    normal = wp.cross(b - a, c - a)
+    length = wp.length(normal)
+    if not wp.isfinite(length) or length == wp.float64(0.0):
+        _failure(flags, key, 2)
+        return
+    sample = wp.vec3d(0.0)
+    for node in range(3):
+        weight = wp.float64(1.0) / wp.float64(6.0)
+        if node == slot:
+            weight = wp.float64(2.0) / wp.float64(3.0)
+        sample += weight * x[triangles[face, node]]
+    transform = transforms[shape]
+    body = bodies[shape]
+    if body >= 0:
+        transform = poses[body] * transform
+    quaternion = wp.transform_get_rotation(transform)
+    norm = wp.length(quaternion)
+    if not wp.isfinite(norm) or wp.abs(norm - wp.float64(1.0)) > wp.float64(1e-10):
+        _failure(flags, key, 2)
+        return
+    rotation = wp.quat_to_matrix(wp.transform_get_rotation(transform))
+    y = wp.transpose(rotation) * (sample - wp.transform_get_translation(transform))
+    d, g = _shape64(types[shape], scales[shape], y, sdf_indices[shape], table)
+    out.uncertified[key] = 0
+    if types[shape] == GeoType.MESH and smooth_table.shape[0] > 0:
+        index = sdf_indices[shape]
+        field = smooth_table[index]
+        query = y
+        if not table[index].scale_baked:
+            query /= scales[shape][0]
+        d, g, _unused_hessian = smooth_query(field, query)
+        if not table[index].scale_baked:
+            d *= scales[shape][0]
+        for axis in range(3):
+            if query[axis] <= field.lower[axis] or query[axis] >= field.upper[axis]:
+                out.uncertified[key] = 1
+    if not wp.isfinite(d) or not wp.isfinite(wp.length(g)) or not wp.isfinite(wp.length(y)):
+        _failure(flags, key, 1)
+        return
+    out.y[key] = y
+    out.distance[key] = d
+    out.gradient[key] = g
+    out.rotation[key] = rotation
+    out.soft_normal[key] = wp.transpose(rotation) * normal / length
+    for j in range(out.jacobian_q.shape[1]):
+        jacobian = wp.vec3d(0.0)
+        if body >= 0:
+            jacobian = wp.transpose(rotation) * (-jt[body, j] - wp.cross(jw[body, j], sample - com[body]))
+        out.jacobian_q[key, j] = jacobian
+
+
+@wp.kernel
+def _validate_start(
+    geometry: _Geometry,
+    shapes: wp.array[int],
+    margins: wp.array[wp.float64],
+    radius: wp.float64,
+    smoothing: wp.float64,
+    alignment_mask: int,
+    flags: wp.array[int],
+):
+    key = wp.tid()
+    gap = geometry.distance[key] - radius - margins[shapes[key % shapes.shape[0]]]
+    g = geometry.gradient[key]
+    if gap < smoothing:
+        if geometry.uncertified[key] != 0:
+            _failure(flags, key, 5)
+        if wp.length(g) == wp.float64(0.0) or (
+            alignment_mask == 0 and gap < wp.float64(0.0) and wp.dot(geometry.soft_normal[key], g) > wp.float64(0.0)
+        ):
+            _failure(flags, key, 2)
+
+
+@wp.kernel
+def _law(
+    current: _Geometry,
+    start: _Geometry,
+    shapes: wp.array[int],
+    margins: wp.array[wp.float64],
+    triangles: wp.array2d[int],
+    area: wp.array[wp.float64],
+    mapping: wp.array[int],
+    radius: wp.float64,
+    stiffness: wp.float64,
+    smoothing: wp.float64,
+    mu: wp.float64,
+    falloff: wp.float64,
+    model: int,
+    alignment_mask: int,
+    flags: wp.array[int],
+    energy: wp.array2d[wp.float64],
+    residual: wp.array[wp.float64],
+    normal: wp.array[wp.vec3d],
+    tangent: wp.array[wp.vec3d],
+    weights: wp.array2d[wp.float64],
+    local_r: wp.array[wp.vec3d],
+    omitted: wp.array2d[wp.float64],
+    mask_seen: wp.array[int],
+):
+    key = wp.tid()
+    if flags[0] != 0:
+        return
+    face = key / (3 * shapes.shape[0])
+    slot = (key / shapes.shape[0]) % 3
+    shape = shapes[key % shapes.shape[0]]
+    k = stiffness * area[face] / wp.float64(3.0)
+    gap = current.distance[key] - radius - margins[shape]
+    old_gap = start.distance[key] - radius - margins[shape]
+    g = current.gradient[key]
+    u = current.y[key] - start.y[key]
+    en, load_normal, curvature = _penalty64(gap, k, smoothing)
+    load = load_normal
+    direction = g
+    if model == 0:
+        direction = start.gradient[key]
+        _unused, load, _unused_curvature = _penalty64(old_gap, k, smoothing)
+    elif model == 1:
+        _unused, load, _unused_curvature = _penalty64(gap - wp.dot(g, u), k, smoothing)
+    if mu == wp.float64(0.0):
+        load = wp.float64(0.0)
+    if load_normal > wp.float64(0.0) or load > wp.float64(0.0):
+        if current.uncertified[key] != 0 or (load > wp.float64(0.0) and start.uncertified[key] != 0):
+            _failure(flags, key, 5)
+            return
+        if wp.length(g) == wp.float64(0.0) or (load > wp.float64(0.0) and wp.length(direction) == wp.float64(0.0)):
+            _failure(flags, key, 2)
+            return
+        if alignment_mask == 0 and gap < wp.float64(0.0) and wp.dot(current.soft_normal[key], g) > wp.float64(0.0):
+            _failure(flags, key, 2)
+            return
+    n = wp.vec3d(0.0)
+    if wp.length(direction) > wp.float64(0.0):
+        n = wp.normalize(direction)
+    v = u - wp.dot(n, u) * n
+    rho = wp.length(v)
+    psi, factor, radial = wp.float64(0.0), wp.float64(0.0), wp.float64(0.0)
+    if load > wp.float64(0.0):
+        if rho < falloff:
+            psi = rho * rho / falloff - rho * rho * rho / (wp.float64(3.0) * falloff * falloff)
+            factor = wp.float64(2.0) / falloff - rho / (falloff * falloff)
+            # Evaluate the nonnegative radial curvature without cancellation.
+            radial = wp.float64(2.0) * mu * load * (falloff - rho) / (falloff * falloff)
+        else:
+            psi = rho - falloff / wp.float64(3.0)
+            factor = wp.float64(1.0) / rho
+    beta = mu * load * factor
+    r = -load_normal * g + beta * v
+    dissipative = mu * load * psi
+    if (
+        not wp.isfinite(en)
+        or not wp.isfinite(dissipative)
+        or not wp.isfinite(wp.length(r))
+        or not wp.isfinite(beta)
+        or not wp.isfinite(radial)
+        or not wp.isfinite(curvature)
+    ):
+        _failure(flags, key, 1)
+        return
+    if alignment_mask != 0:
+        # Select the entire contact term with the law's explicit/implicit collider normal.
+        masked = wp.dot(current.soft_normal[key], direction) > wp.float64(0.0)
+        if load_normal > wp.float64(0.0) or load > wp.float64(0.0):
+            bit = int(1)
+            if masked:
+                bit = 2
+            wp.atomic_or(mask_seen, key, bit)
+        if masked:
+            omitted[key, 0] = en
+            omitted[key, 1] = dissipative
+            omitted[key, 2] = load_normal
+            omitted[key, 3] = load
+            normal[key] = wp.vec3d(0.0)
+            tangent[key] = wp.vec3d(0.0)
+            return
+    energy[key, 0] = en
+    energy[key, 1] = dissipative
+    normal[key] = n
+    tangent[key] = wp.vec3d(0.0)
+    # Reproject before normalization: near zero slip, cancellation can leave
+    # a roundoff vector almost parallel to n instead of a tangent direction.
+    transverse = wp.cross(n, v)
+    transverse_length = wp.length(transverse)
+    if transverse_length > wp.float64(0.0):
+        tangent[key] = wp.cross(transverse / transverse_length, n)
+    local_r[key] = r
+    weights[key, 0] = curvature
+    weights[key, 1] = beta
+    weights[key, 2] = radial
+    nq = current.jacobian_q.shape[1]
+    for j in range(nq):
+        wp.atomic_add(residual, j, wp.dot(current.jacobian_q[key, j], r))
+    world_r = current.rotation[key] * r
+    for a in range(3):
+        node = mapping[triangles[face, a]]
+        if node >= 0:
+            weight = wp.float64(1.0) / wp.float64(6.0)
+            if a == slot:
+                weight = wp.float64(2.0) / wp.float64(3.0)
+            for j in range(3):
+                wp.atomic_add(residual, nq + 3 * node + j, weight * world_r[j])
+
+
+@wp.kernel
+def _factors(
+    current: _Geometry,
+    shapes: wp.array[int],
+    triangles: wp.array2d[int],
+    mapping: wp.array[int],
+    normal: wp.array[wp.vec3d],
+    tangent: wp.array[wp.vec3d],
+    weights: wp.array2d[wp.float64],
+    flags: wp.array[int],
+    factors: _MonolithicContactFactors,
+    triplets: _MonolithicScalarTriplets,
+):
+    key = wp.tid()
+    if flags[0] != 0:
+        return
+    face = key / (3 * shapes.shape[0])
+    quadrature = (key / shapes.shape[0]) % 3
+    n = normal[key]
+    axis = wp.vec3d(1.0, 0.0, 0.0)
+    if wp.abs(n[1]) < wp.abs(n[0]) and wp.abs(n[1]) <= wp.abs(n[2]):
+        axis = wp.vec3d(0.0, 1.0, 0.0)
+    elif wp.abs(n[2]) < wp.abs(n[0]):
+        axis = wp.vec3d(0.0, 0.0, 1.0)
+    t = tangent[key]
+    if weights[key, 1] > wp.float64(0.0) and wp.length(t) == wp.float64(0.0):
+        # At zero slip both tangent eigenvalues coincide; any basis is valid.
+        t = wp.normalize(wp.cross(n, axis))
+    for component in range(3):
+        direction = current.gradient[key]
+        weight = weights[key, 0]
+        if component > 0:
+            direction = t
+            weight = weights[key, 2]
+            if component == 2:
+                direction = wp.cross(n, t)
+                weight = weights[key, 1]
+        if weight > wp.float64(0.0):
+            slot = _reserve_monolithic_contact_factor(factors)
+            if slot < 0:
+                _failure(flags, key, 3)
+                return
+            nq = current.jacobian_q.shape[1]
+            factors.weights[slot] = float(weight)
+            factors.kind[slot] = 1
+            if component > 0:
+                factors.kind[slot] = 2
+            factors.candidate_tid[slot] = key
+            for j in range(nq):
+                factors.gq[slot, j] = float(wp.dot(current.jacobian_q[key, j], direction))
+            world = current.rotation[key] * direction
+            for a in range(3):
+                node = mapping[triangles[face, a]]
+                bary = wp.float64(1.0) / wp.float64(6.0)
+                if a == quadrature:
+                    bary = wp.float64(2.0) / wp.float64(3.0)
+                for j in range(3):
+                    column = int(-1)
+                    if node >= 0:
+                        column = 3 * node + j
+                    factors.gx_columns[slot, 3 * a + j] = column
+                    factors.gx_values[slot, 3 * a + j] = float(bary * world[j])
+            _append_monolithic_contact_factor_triplets(factors, slot, triplets, nq)
+
+
+@wp.kernel
+def _check_assembly(factors: _MonolithicContactFactors, triplets: _MonolithicScalarTriplets, flags: wp.array[int]):
+    if factors.active_token[0] != factors.token or triplets.active_token[0] != triplets.token:
+        _failure(flags, -1, 4)
+    elif factors.status[0] != 0 or triplets.status[0] != 0:
+        if factors.status[0] == 6 or triplets.status[0] == 4:
+            _failure(flags, -1, 3)
+        else:
+            _failure(flags, -1, 4)
+
+
+@wp.kernel
+def _check_residual(residual: wp.array[wp.float64], flags: wp.array[int]):
+    if not wp.isfinite(residual[wp.tid()]):
+        _failure(flags, -1, 1)
+
+
+class ContactObjective:
+    """Preallocate all face/slot/shape queries and separate frozen step geometry from trials."""
+
+    def __init__(
+        self,
+        model,
+        particle_to_dynamic,
+        *,
+        q_dof_count,
+        contact_model,
+        normal_stiffness,
+        friction_coefficient,
+        friction_velocity_scale,
+        smoothing_width,
+        particle_radius,
+        smooth_sdf=None,
+        alignment_policy="guard",
+    ):
+        if alignment_policy not in ("guard", "mask"):
+            raise ValueError("Unknown contact alignment policy")
+        self.alignment_policy = alignment_policy
+        self._alignment_policy = alignment_policy
+        if contact_model not in ("C-EE", "C-IE", "C-II"):
+            raise ValueError("An explicit C-EE, C-IE or C-II contact model is required")
+        parameters = (normal_stiffness, friction_coefficient, friction_velocity_scale, smoothing_width, particle_radius)
+        if (
+            not all(math.isfinite(v) for v in parameters)
+            or normal_stiffness <= 0
+            or friction_coefficient < 0
+            or smoothing_width < 0
+            or particle_radius < 0
+            or (friction_coefficient > 0 and friction_velocity_scale <= 0)
+        ):
+            raise ValueError("Invalid variational contact parameters")
+        if type(q_dof_count) is not int or q_dof_count < 0:
+            raise ValueError("Invalid joint layout")
+        mapping = np.asarray(particle_to_dynamic)
+        if (
+            mapping.shape != (model.particle_count,)
+            or not np.issubdtype(mapping.dtype, np.integer)
+            or np.any(mapping < -1)
+        ):
+            raise ValueError("Invalid particle map")
+        dynamic = mapping[mapping >= 0]
+        if not np.array_equal(np.sort(dynamic), np.arange(len(dynamic))):
+            raise ValueError("Particle map must be compact and bijective")
+        if not np.array_equal(mapping >= 0, model.particle_inv_mass.numpy() > 0):
+            raise ValueError("Particle map must preserve fixed nodes")
+        names = (
+            "particle_inv_mass",
+            "shape_flags",
+            "shape_type",
+            "shape_scale",
+            "shape_body",
+            "shape_transform",
+            "shape_margin",
+            "_shape_sdf_index",
+            "tri_indices",
+            "particle_q",
+        )
+        self.sources = {name: getattr(model, name) for name in names}
+        self.values = {name: array.numpy().copy() for name, array in self.sources.items()}
+        v = self.values
+        shapes = np.flatnonzero(v["shape_flags"] & int(ShapeFlags.COLLIDE_PARTICLES)).astype(np.int32)
+        if not np.isin(
+            v["shape_type"][shapes], [int(GeoType.PLANE), int(GeoType.SPHERE), int(GeoType.BOX), int(GeoType.MESH)]
+        ).all():
+            raise ValueError("Unsupported contact shape")
+        table = model._texture_sdf_data
+        descriptors = table.numpy() if table is not None else None
+        for i in shapes:
+            geo, scale = v["shape_type"][i], v["shape_scale"][i]
+            if not np.isfinite(scale).all() or not np.isfinite(v["shape_margin"][i]) or v["shape_margin"][i] < 0:
+                raise ValueError("Invalid shape scale or margin")
+            if geo == GeoType.PLANE and np.any(scale[:2] != 0):
+                raise ValueError("Only infinite planes are supported")
+            if (geo == GeoType.SPHERE and scale[0] <= 0) or (geo == GeoType.BOX and np.any(scale <= 0)):
+                raise ValueError("Analytic shape size must be positive")
+            if geo == GeoType.MESH:
+                index = int(v["_shape_sdf_index"][i])
+                if model.device.is_cpu or descriptors is None or index < 0 or index >= len(descriptors):
+                    raise ValueError("Mesh contact requires an existing CUDA texture SDF")
+                if not descriptors["scale_baked"][index] and (scale[0] <= 0 or not np.all(scale == scale[0])):
+                    raise ValueError("Unbaked mesh scale must be positive and uniform")
+        transforms = v["shape_transform"].astype(float)
+        norms = np.linalg.norm(transforms[:, 3:], axis=1)
+        if not np.isfinite(transforms).all() or np.any(abs(norms - 1) > 1e-5):
+            raise ValueError("Invalid static shape transform")
+        transforms[:, 3:] /= norms[:, None]
+        triangles = v["tri_indices"]
+        if (
+            triangles.ndim != 2
+            or triangles.shape[1] != 3
+            or np.any(triangles < 0)
+            or np.any(triangles >= model.particle_count)
+        ):
+            raise ValueError("Invalid surface topology")
+        points = v["particle_q"].astype(float)[triangles]
+        areas = np.linalg.norm(np.cross(points[:, 1] - points[:, 0], points[:, 2] - points[:, 0]), axis=1) / 2
+        if not np.isfinite(areas).all() or np.any(areas <= 0):
+            raise ValueError("Surface faces must have positive finite rest area")
+        if np.any(v["shape_body"][shapes] < -1) or np.any(v["shape_body"][shapes] >= model.body_count):
+            raise ValueError("Invalid shape body")
+        count = len(triangles) * 3 * len(shapes)
+        if count >= 2**31:
+            raise ValueError("Contact query capacity exceeds int32")
+        self.model, self.contact_model = model, contact_model
+        self.parameters, self.nq, self.count = parameters, q_dof_count, count
+        self._source_table = table
+        self._descriptors = descriptors.copy() if descriptors is not None else None
+        self.conservative_energy = contact_model == "C-EE" and alignment_policy == "guard"
+        self.table = table if table is not None else wp.empty(0, dtype=TextureSDFData, device=model.device)
+        self.smooth_sdf = smooth_sdf
+        self._smooth_sdf = smooth_sdf
+        if smooth_sdf is not None:
+            if table is None or smooth_sdf.table.size != table.size or smooth_sdf.table.device != model.device:
+                raise ValueError("Smooth SDF must match the complete original table and device")
+            smooth_sdf.validate_identity()
+        self.smooth_table = (
+            smooth_sdf.table if smooth_sdf is not None else wp.empty(0, dtype=SmoothSDFData, device=model.device)
+        )
+        self._smooth_table = self.smooth_table
+        self.shapes = wp.array(shapes, dtype=int, device=model.device)
+        self.mapping = wp.array(mapping.astype(np.int32), device=model.device)
+        self.triangles = wp.clone(model.tri_indices)
+        self.types = wp.clone(model.shape_type)
+        self.bodies = wp.clone(model.shape_body)
+        self.sdf_indices = wp.clone(model._shape_sdf_index)
+        self.transforms = wp.array(transforms, dtype=wp.transformd, device=model.device)
+        self.scales = wp.array(v["shape_scale"].astype(float), dtype=wp.vec3d, device=model.device)
+        self.margins = wp.array(v["shape_margin"].astype(float), dtype=wp.float64, device=model.device)
+        self.area = wp.array(areas, dtype=wp.float64, device=model.device)
+        self.current, self.start = self._geometry_storage(), self._geometry_storage()
+        self.flags = wp.zeros(2, dtype=int, device=model.device)
+        self.start_flags = wp.zeros_like(self.flags)
+        self.residual = wp.zeros(q_dof_count + 3 * len(dynamic), dtype=wp.float64, device=model.device)
+        self.energy = wp.zeros((count, 2), dtype=wp.float64, device=model.device)
+        self.normal = wp.zeros(count, dtype=wp.vec3d, device=model.device)
+        self.tangent = wp.zeros_like(self.normal)
+        self.local_residual = wp.zeros_like(self.normal)
+        self.weights = wp.zeros((count, 3), dtype=wp.float64, device=model.device)
+        self.omitted = wp.zeros((count, 4), dtype=wp.float64, device=model.device)
+        self.mask_seen = wp.zeros(count, dtype=int, device=model.device)
+        self._started, self._evaluated = False, False
+
+    def _geometry_storage(self):
+        value = _Geometry()
+        value.y = wp.zeros(self.count, dtype=wp.vec3d, device=self.model.device)
+        value.gradient = wp.zeros_like(value.y)
+        value.soft_normal = wp.zeros_like(value.y)
+        value.uncertified = wp.zeros(self.count, dtype=int, device=self.model.device)
+        value.distance = wp.zeros(self.count, dtype=wp.float64, device=self.model.device)
+        value.rotation = wp.zeros(self.count, dtype=wp.mat33d, device=self.model.device)
+        value.jacobian_q = wp.zeros((self.count, self.nq), dtype=wp.vec3d, device=self.model.device)
+        return value
+
+    def validate_identity(self):
+        """Validate immutable geometry at step boundaries, outside graph replay."""
+        if self.alignment_policy != self._alignment_policy:
+            raise ValueError("Contact alignment policy changed; rebuild contact component")
+        if self.smooth_sdf is not self._smooth_sdf or self.smooth_table is not self._smooth_table:
+            raise ValueError("Smooth SDF representation replaced; rebuild contact component")
+        if self.smooth_sdf is not None:
+            self.smooth_sdf.validate_identity()
+        if self.model._texture_sdf_data is not self._source_table:
+            raise ValueError("SDF table replaced; rebuild contact component")
+        if self._source_table is not None and not np.array_equal(self._source_table.numpy(), self._descriptors):
+            raise ValueError("SDF descriptors changed; rebuild contact component")
+        for name, source in self.sources.items():
+            if getattr(self.model, name) is not source or not np.array_equal(source.numpy(), self.values[name]):
+                raise ValueError(f"Contact geometry changed: {name}")
+
+    def _query(self, x, poses, com, jt, jw, output, flags):
+        if self.smooth_sdf is not self._smooth_sdf or self.smooth_table is not self._smooth_table:
+            raise ValueError("Cannot switch SDF representation during a step")
+        if self.smooth_sdf is not None:
+            self.smooth_sdf.validate_binding()
+        for array, dtype, shape in (
+            (x, wp.vec3d, (self.model.particle_count,)),
+            (poses, wp.transformd, (self.model.body_count,)),
+            (com, wp.vec3d, (self.model.body_count,)),
+            (jt, wp.vec3d, (self.model.body_count, self.nq)),
+            (jw, wp.vec3d, (self.model.body_count, self.nq)),
+        ):
+            if not isinstance(array, wp.array) or (array.dtype, array.shape, array.device) != (
+                dtype,
+                shape,
+                self.model.device,
+            ):
+                raise ValueError("Contact geometry requires FP64 state and Jacobians on the model device")
+        if self.count:
+            wp.launch(
+                _geometry,
+                self.count,
+                [
+                    x,
+                    poses,
+                    com,
+                    jt,
+                    jw,
+                    self.triangles,
+                    self.shapes,
+                    self.bodies,
+                    self.transforms,
+                    self.types,
+                    self.scales,
+                    self.sdf_indices,
+                    self.table,
+                    self.smooth_table,
+                    output,
+                    flags,
+                ],
+                device=self.model.device,
+            )
+
+    def begin_step(self, x, poses, com, jt, jw):
+        """Freeze geometry for the complete deterministic key set, including inactive pairs."""
+        self.validate_identity()
+        self.mask_seen.zero_()
+        wp.launch(_reset_flags, 1, [self.start_flags], device=self.model.device)
+        self._query(x, poses, com, jt, jw, self.start, self.start_flags)
+        if self.count:
+            wp.launch(
+                _validate_start,
+                self.count,
+                [
+                    self.start,
+                    self.shapes,
+                    self.margins,
+                    self.parameters[4],
+                    self.parameters[3],
+                    int(self._alignment_policy == "mask"),
+                    self.start_flags,
+                ],
+                device=self.model.device,
+            )
+        self._started, self._evaluated = True, False
+
+    def evaluate(self, x, poses, com, jt, jw, *, dt):
+        """Overwrite trial E/r without changing step-start geometry or tangent storage."""
+        if not self._started or not math.isfinite(dt) or dt <= 0:
+            raise ValueError("A frozen step and positive finite dt are required")
+        stiffness, mu, velocity, smoothing, radius = self.parameters
+        falloff = velocity * dt
+        if mu > 0 and (not math.isfinite(falloff) or falloff <= 0):
+            raise ValueError("Invalid friction displacement scale")
+        wp.copy(self.flags, self.start_flags)
+        self.energy.zero_()
+        self.residual.zero_()
+        self.weights.zero_()
+        self.local_residual.zero_()
+        self.omitted.zero_()
+        self._query(x, poses, com, jt, jw, self.current, self.flags)
+        if self.count:
+            wp.launch(
+                _law,
+                self.count,
+                [
+                    self.current,
+                    self.start,
+                    self.shapes,
+                    self.margins,
+                    self.triangles,
+                    self.area,
+                    self.mapping,
+                    radius,
+                    stiffness,
+                    smoothing,
+                    mu,
+                    falloff,
+                    ("C-EE", "C-IE", "C-II").index(self.contact_model),
+                    int(self._alignment_policy == "mask"),
+                    self.flags,
+                    self.energy,
+                    self.residual,
+                    self.normal,
+                    self.tangent,
+                    self.weights,
+                    self.local_residual,
+                    self.omitted,
+                    self.mask_seen,
+                ],
+                device=self.model.device,
+            )
+        if self.residual.size:
+            wp.launch(_check_residual, self.residual.size, [self.residual, self.flags], device=self.model.device)
+        self._evaluated = True
+
+    def assemble_tangent(self, assembly):
+        """Append normal/radial/transverse PSD factors with frozen load/normal; B is FP32."""
+        if (
+            not self._evaluated
+            or assembly.contact_factors.q_dof_count != self.nq
+            or assembly.contact_factors.dynamic_particle_count * 3 + self.nq != self.residual.size
+        ):
+            raise ValueError("Evaluate contact first and use the matching linear layout")
+        if self.count:
+            wp.launch(
+                _factors,
+                self.count,
+                [
+                    self.current,
+                    self.shapes,
+                    self.triangles,
+                    self.mapping,
+                    self.normal,
+                    self.tangent,
+                    self.weights,
+                    self.flags,
+                    assembly.contact_factors,
+                    assembly.global_scalar_triplets,
+                ],
+                device=self.model.device,
+            )
+
+        wp.launch(
+            _check_assembly,
+            1,
+            [assembly.contact_factors, assembly.global_scalar_triplets, self.flags],
+            device=self.model.device,
+        )

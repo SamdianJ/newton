@@ -1007,6 +1007,19 @@ class SolverMonolithic(SolverBase):
         )
 
     @classmethod
+    def _create_coupled_variational(cls, model, *, contact_model, globalization, friction_velocity_scale, **options):
+        """Create the private strict PR3 joint/particle path with an explicit law."""
+        from .coupled_solver import _CoupledSolver  # noqa: PLC0415 -- private subclass imports this base
+
+        return _CoupledSolver(
+            model,
+            contact_model=contact_model,
+            globalization=globalization,
+            friction_velocity_scale=friction_velocity_scale,
+            **options,
+        )
+
+    @classmethod
     def _create_joint_diagnostic(cls, model: Model, *, joint_terms: SolverMonolithic.JointTerms, **options):
         """Create the internal G1H test entry; not a supported rigid-only solver API."""
         solver = cls.__new__(cls)

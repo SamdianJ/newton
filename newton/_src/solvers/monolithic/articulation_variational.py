@@ -123,7 +123,7 @@ def _configuration_digest(fields):
     return digest.digest()
 
 
-class ArticulationKinematics:
+class _TreeKinematics:
     """Own the immutable geometry and FP64 scratch for one supported tree."""
 
     _fields = (
@@ -162,14 +162,12 @@ class ArticulationKinematics:
 
     def __init__(self, model, *, extra_config=None):
         _validate_joint_coordinate_layout(model)
-        if model.articulation_count != 1 or model.particle_count or model.tet_count or not model.joint_dof_count:
-            raise ValueError("P3 articulation requires one nonempty tree and no particles/tets")
+        if model.articulation_count != 1 or not model.joint_dof_count:
+            raise ValueError("P3 articulation requires one nonempty tree")
         if model.requires_grad or model.constraint_mimic_count or model.actuators:
             raise ValueError("P3 articulation does not support autograd, mimic constraints or model actuators")
         if model.muscle_count:
             raise ValueError("P3 articulation does not support muscle forces")
-        if np.any(model.shape_flags.numpy() & int(ShapeFlags.COLLIDE_SHAPES | ShapeFlags.COLLIDE_PARTICLES)):
-            raise ValueError("P3 articulation requires collision-disabled shapes")
         self.model, self.device = model, model.device
         self.counts = {
             name: getattr(model, name)
@@ -329,6 +327,17 @@ class ArticulationKinematics:
                 [self.poses, self.jt, self.jw, state.joint_qd, state.body_q, state.body_qd],
                 device=self.device,
             )
+
+
+class ArticulationKinematics(_TreeKinematics):
+    """Retain the q-only entrance contract while sharing supported-tree FK."""
+
+    def __init__(self, model, *, extra_config=None):
+        if model.particle_count or model.tet_count:
+            raise ValueError("P3 articulation requires one nonempty tree and no particles/tets")
+        if np.any(model.shape_flags.numpy() & int(ShapeFlags.COLLIDE_SHAPES | ShapeFlags.COLLIDE_PARTICLES)):
+            raise ValueError("P3 articulation requires collision-disabled shapes")
+        super().__init__(model, extra_config=extra_config)
 
 
 @wp.func
