@@ -11,7 +11,30 @@ have tiny-fixture validation; broader asset and trajectory calibration is pendin
 The collision pipeline can also detect tet-face contacts independently.
 """
 
-from .collision import MonolithicCollisionPipeline
-from .solver_monolithic import SolverMonolithic
+import importlib
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .collision import MonolithicCollisionPipeline
+    from .solver_monolithic import SolverMonolithic
 
 __all__ = ["MonolithicCollisionPipeline", "SolverMonolithic"]
+
+_LAZY_IMPORTS = {
+    "MonolithicCollisionPipeline": ".collision",
+    "SolverMonolithic": ".solver_monolithic",
+}
+
+
+def __getattr__(name: str):
+    try:
+        module_name = _LAZY_IMPORTS[name]
+    except KeyError:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}") from None
+    value = getattr(importlib.import_module(module_name, __name__), name)
+    globals()[name] = value
+    return value
+
+
+def __dir__() -> list[str]:
+    return sorted(set(globals()) | set(_LAZY_IMPORTS))

@@ -8,7 +8,7 @@ import math
 import numpy as np
 
 from .linear import MonolithicPcgConfig, MonolithicPcgWarmStart
-from .solver_monolithic import _StepFailure
+from .solver_types import _StepFailure
 from .tet_variational import acceptance
 
 

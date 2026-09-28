@@ -23,3 +23,23 @@ External evidence is relative to the workspace root containing `worktrees/`, `de
 | `agents/integration/artifacts/p4/t0-v1/t0c-receipt.json` | `98099618a289c9be2d376b2d41322d3c34b89b117c0e81f28894e6d66029ae94` |
 | `agents/integration/artifacts/p4/t0-v1/input-manifest.json` | `48d7d876e1d66989e85a58dc793d59297bcbd990c04bf479f336157d13200c69` |
 | `agents/integration/artifacts/p4/t0-v1/comparison-tolerances.json` | `a6ac690f0e8c1764f494ea8616ca2a1e65873754c62848476f6e3abc64604d6d` |
+
+## T1: neutral definitions and import isolation
+
+Extract unchanged enums, immutable stats/joint options, calibrated configuration,
+and the step exception into `solver_types.py`. Keep existing solver type access.
+Resolve the solver and independent collision pipeline lazily; neutral definitions
+and collision imports no longer load the historical solver. Move P3 exception
+imports to the neutral module. No kernels or solver methods change.
+
+Validation: 37 tests run, 36 passed, one existing CPU mesh-texture skip; the three
+new boundary tests fail on the frozen baseline. AST comparison preserves eight
+definitions after normalizing docstring indentation and the status annotation,
+and preserves every historical solver method/kernel unchanged.
+Full trajectories are deferred to the planned later gates.
+
+Remaining: shared joint/tet dependencies belong to T1a/T1b; the transitional
+parent chain and old public solver stay until T2. No source is retired yet.
+
+Evidence: `agents/integration/artifacts/p4/t1-v1/receipt.json`, SHA-256
+`a551d8e3c754cae5052384a0406630311a2d75a793725e9c2ae4cddf33239e56`.

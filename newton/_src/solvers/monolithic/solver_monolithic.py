@@ -1,15 +1,15 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 The Newton Developers
 # SPDX-License-Identifier: Apache-2.0
 
+"""Historical solver; retained as the transitional P3 parent until the T2 transaction merge."""
+
 from __future__ import annotations
 
-import enum
 import hashlib
 import logging
 import math
 import time
-from collections.abc import Mapping
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, replace
 from types import MappingProxyType
 
 import numpy as np
@@ -48,6 +48,16 @@ from .linear import (
     MonolithicPcgWarmStart,
 )
 from .segment_graph import _SegmentGraphCache
+from .solver_types import (
+    JointTerms,
+    MassMode,
+    MaterialModel,
+    PCGMode,
+    Stats,
+    Status,
+    _SolverMonolithicInternalConfig,
+    _StepFailure,
+)
 from .tet import (
     TetEvaluationStatus,
     TetPhysicsWorkspace,
@@ -63,32 +73,6 @@ from .tet_variational import TetObjectiveWorkspace, acceptance
 
 
 @dataclass(frozen=True, slots=True)
-class _SolverMonolithicInternalConfig:
-    """Portable CPU/CUDA settings from the versioned P0 component and trajectory calibration.
-
-    See ``scripts/monolithic_reference/calibrate_components.py`` for the
-    component, float32 reduction, coordinate-ULP, and trajectory gates.
-    """
-
-    epsilon_d: float = 1.0e-6
-    residual_floor_global: float = 1.7210128930635914e-4
-    residual_floor_q: float = 2.1090331703277343e-5
-    residual_floor_x: float = 1.7099733184977595e-4
-    merit_noise: float = 7.92642972091695e-9
-    merit_absolute_global: float = 6.763034882944481e-6
-    merit_absolute_q: float = 2.5e-7
-    merit_absolute_x: float = 7.3049125684417234e-6
-    merit_relative_global: float = 1.0e-4
-    merit_relative_q: float = 1.0e-4
-    merit_relative_x: float = 1.0e-4
-    step_tolerance_global: float = 1.6873759893848113e-6
-    step_tolerance_q: float = 9.100770221088748e-10
-    step_tolerance_x: float = 1.8225743746537296e-6
-    det_f_guard: float = 0.2
-    regularization_values: tuple[float, ...] = (0.0, 1.0e-4, 1.0e-3, 1.0e-2, 0.1, 1.0, 10.0)
-
-
-@dataclass(frozen=True, slots=True)
 class _TrialResult:
     status: int
     merit: float
@@ -98,12 +82,6 @@ class _TrialResult:
     maximum_penetration: float
     objective: tuple[float, ...] | None = None
     objective_abs_sum: float = 0.0
-
-
-class _StepFailure(RuntimeError):
-    def __init__(self, status: SolverMonolithic.Status, reason: str):
-        self.status = status
-        super().__init__(reason)
 
 
 @wp.kernel
@@ -714,213 +692,12 @@ class SolverMonolithic(SolverBase):
 
     supports_collision_pipeline = True
 
-    class Status(enum.Enum):
-        NOT_RUN = "not_run"
-        SUCCESS = "success"
-        CONTACT_OVERFLOW = "contact_overflow"
-        NONFINITE = "nonfinite"
-        TET_INVERSION = "tet_inversion"
-        TET_PROJECTION_FAILURE = "tet_projection_failure"
-        LINEAR_NON_POSITIVE_CURVATURE = "linear_non_positive_curvature"
-        LINEAR_PRECONDITIONER_NOT_SPD = "linear_preconditioner_not_spd"
-        PRECONDITIONER_FACTORIZATION_FAILED = "preconditioner_factorization_failed"
-        LINEAR_STAGNATION = "linear_stagnation"
-        LINEAR_MAX_ITERATIONS = "linear_max_iterations"
-        LINE_SEARCH_EXHAUSTED = "line_search_exhausted"
-        REGULARIZATION_EXHAUSTED = "regularization_exhausted"
-        NONLINEAR_STAGNATION = "nonlinear_stagnation"
-        NONLINEAR_MAX_ITERATIONS = "nonlinear_max_iterations"
-
-    class MaterialModel(str, enum.Enum):
-        """Experimental solver-wide P1 material selection."""
-
-        KIM_STABLE_NO_LOG = "kim_stable_no_log"
-        SMITH_LOG_STABILIZED = "smith_log_stabilized"
-
-    class MassMode(str, enum.Enum):
-        """Experimental solver-wide P1 mass discretization."""
-
-        LUMPED = "lumped"
-        CONSISTENT = "consistent"
-
-    class PCGMode(str, enum.Enum):
-        """Experimental PCG observation policy, fixed at construction."""
-
-        DIAGNOSTIC = "diagnostic"
-        PRODUCTION = "production"
-
-    @dataclass(frozen=True, slots=True)
-    class JointTerms:
-        """Opt in to scalar joint physics; omitted terms retain V0.1 rejection.
-
-        Gains, bounds, friction magnitudes and effort/velocity limits come from
-        Model and are copied at solver construction. Rebuild after changing
-        them. Position/velocity targets come from Control each step. Target
-        trajectory generation and speed limiting remain the caller's job.
-        """
-
-        implicit_pd: bool = False
-        """Use POSITION_VELOCITY targets and saturate the total PD output."""
-        limits: bool = False
-        """Enable lower/upper penalty and outward-only limit damping."""
-        friction: bool = False
-        """Enable regularized Coulomb joint friction."""
-        limit_width: tuple[float, ...] | None = None
-        """Positive activation widths per DOF [rad or m]; required for limits."""
-        friction_velocity_scale: tuple[float, ...] | None = None
-        """Positive smoothing speeds per DOF [rad/s or m/s]; required for friction."""
-
-    @dataclass(frozen=True, slots=True)
-    class Stats:
-        """Immutable diagnostics; unmeasured numerical fields contain NaN.
-
-        Linear residual ratios are measured by actual-operator post-checks;
-        they remain NaN if the step does not invoke a linear solve.
-        """
-
-        status: SolverMonolithic.Status
-        material_model: str | None = None
-        mass_mode: str | None = None
-        tet_config_identity: str | None = None
-        failure_reason: str | None = None
-        converged: bool = False
-        variational: Mapping | None = None
-        """Internal tet-only diagnostics; None on the legacy coupled path."""
-        rolled_back: bool = False
-        step_generation: int = 0
-        accepted_generation: int = 0
-        nonlinear_iterations: int = 0
-        line_search_iterations: int = 0
-        linear_iterations: int = 0
-        linear_scheduled_slots: int = 0
-        """Sum of scheduled production slots; conditional graphs stop after terminal batches."""
-        pcg_policy: str | None = None
-        """Most recent linear solve's numerical scheduling and restart policy."""
-        linear_converged_at_slot: int = -1
-        """Most recent production solve's acceptance slot, or -1."""
-        linear_last_checked_slot: int = -1
-        """Most recent production solve's last valid true-residual checkpoint."""
-        linear_failure_slot: int = -1
-        """Most recent production solve's first numerical failure slot, or -1."""
-        linear_output_valid: bool = False
-        """Whether the most recent production solve published a finite direction."""
-        regularization_retries: int = 0
-        matrix_assembly_count: int = 0
-        matrix_nnz: int = 0
-        triplet_count: int = 0
-        triplet_capacity: int = 0
-        owner_generation: int = -1
-        preconditioner_kind: str = "none"
-        factor_setup_count: int = 0
-        """Total actual factor attempts across all current assemblies in this step."""
-        factor_failure_count: int = 0
-        """Total failed factor attempts across all current assemblies in this step."""
-        q_block_count: int = 0
-        """Number of articulation Cholesky blocks in the selected preconditioner."""
-        particle_block_count: int = 0
-        """Number of dynamic-particle 3x3 blocks in the selected preconditioner."""
-        warm_start: str | None = None
-        """Most recent solve's initial-guess mode; None when no solve started."""
-        initial_guess_norm: float = math.nan
-        """Measured scaled L2 initial-guess norm for the most recent solve."""
-        recursive_true_residual_gap: float = math.nan
-        """Most recent solve's maximum global scaled L2 recursive-minus-true gap."""
-        recursive_true_residual_gap_q: float = math.nan
-        """Most recent solve's maximum joint scaled L2 recursive-minus-true gap."""
-        recursive_true_residual_gap_x: float = math.nan
-        """Most recent solve's maximum particle scaled L2 recursive-minus-true gap."""
-        stagnation_window: int | None = None
-        """Most recent solve's configured window in true-residual checks."""
-        linear_scale_generation: int = -1
-        """Assembly sequence of the most recent solve, which can precede the current scale."""
-        rho: float = math.nan
-        """Normalized global scaled residual [dimensionless]; NaN when unmeasured."""
-        rho_q: float = math.nan
-        """Normalized joint scaled residual [dimensionless]; NaN when unmeasured."""
-        rho_x: float = math.nan
-        """Normalized particle scaled residual [dimensionless]; NaN when unmeasured."""
-        merit_initial: float = math.nan
-        """First current merit using its initial scale; not a convergence denominator."""
-        merit_q_initial: float = math.nan
-        """Joint merit at the first current evaluation, using its initial scale."""
-        merit_x_initial: float = math.nan
-        """Particle merit at the first current evaluation, using its initial scale."""
-        merit_final: float = math.nan
-        """Last evaluated current merit; on rollback this can describe a discarded state."""
-        merit_q_final: float = math.nan
-        """Joint block of the last evaluated current merit."""
-        merit_x_final: float = math.nan
-        """Particle block of the last evaluated current merit."""
-        merit_reference: float = math.nan
-        """Initial residual RMS re-evaluated with the last current scale."""
-        merit_q_reference: float = math.nan
-        """Joint reference RMS using the last current scale."""
-        merit_x_reference: float = math.nan
-        """Particle reference RMS using the last current scale."""
-        convergence_ratio: float = math.nan
-        """Current merit / (absolute gate + relative gate * reference); must be <= 1."""
-        convergence_ratio_q: float = math.nan
-        """Joint convergence ratio; must be <= 1 independently of the global gate."""
-        convergence_ratio_x: float = math.nan
-        """Particle convergence ratio; must be <= 1 independently of the global gate."""
-        scale_generation: int = -1
-        """Current assembly sequence for the reported merit/reference/gates."""
-        raw_residual_q_norm: float = math.nan
-        """Unscaled joint L2 norm [mixed N, N*m]; diagnostic only."""
-        raw_residual_x_norm: float = math.nan
-        """Unscaled particle L2 norm [N]; diagnostic only."""
-        scaled_step: float = math.nan
-        """RMS of the last accepted alpha*y in its solve scale; NaN before acceptance."""
-        scaled_step_q: float = math.nan
-        """Joint RMS of the last accepted alpha*y in its solve scale."""
-        scaled_step_x: float = math.nan
-        """Particle RMS of the last accepted alpha*y in its solve scale."""
-        merit_noise: float = math.nan
-        """Actual absolute allowance in the trial merit decrease condition."""
-        residual_floor_global: float = math.nan
-        """Actual global scaled linear residual denominator floor."""
-        residual_floor_q: float = math.nan
-        """Actual joint scaled linear residual denominator floor."""
-        residual_floor_x: float = math.nan
-        """Actual particle scaled linear residual denominator floor."""
-        accepted_alpha: float = math.nan
-        lambda_value: float = math.nan
-        min_p_ap: float = math.nan
-        min_r_z: float = math.nan
-        true_residual_recomputations: int = 0
-        residual_replacements: int = 0
-        active_sample_count: int = 0
-        soft_contact_pair_count: int = 0
-        published_contact_generation: int = -1
-        max_penetration: float = math.nan
-        """Maximum contact penetration in the returned state [m]."""
-        min_det_f: float = math.nan
-        """Minimum evaluated tet deformation determinant [dimensionless]."""
-        contact_force_imbalance: float = math.nan
-        contact_moment_imbalance: float = math.nan
-        generalized_projection_error: float = math.nan
-        contact_sign_error: float = math.nan
-        contact_history: Mapping[str, float | int] | None = None
-        """Final per-step contact/history audit; None in the q-only diagnostic."""
-        joint_force_generation: int = -1
-        """Step generation of returned-state joint diagnostics; -1 when absent."""
-        joint_pd_force: tuple[float, ...] | None = None
-        """Actual saturated PD forces [N*m or N] per joint DOF."""
-        joint_limit_force: tuple[float, ...] | None = None
-        """Physical lower/upper limit forces in the returned state."""
-        joint_friction_force: tuple[float, ...] | None = None
-        """Physical joint friction forces in the returned state."""
-        joint_pd_saturated: tuple[bool, ...] | None = None
-        """Whether each returned-state PD output is at its effort bound."""
-        joint_limit_damping_power: tuple[float, ...] | None = None
-        """Limit damping mechanical power [W]; nonpositive."""
-        joint_friction_power: tuple[float, ...] | None = None
-        """Regularized joint friction mechanical power [W]; nonpositive."""
-        timings: Mapping[str, float | None] = field(default_factory=lambda: MappingProxyType({}))
-        """Measured durations [ms], or None for unmeasured entries."""
-
-        def __post_init__(self):
-            object.__setattr__(self, "timings", MappingProxyType(dict(self.timings)))
+    Status = Status
+    MaterialModel = MaterialModel
+    MassMode = MassMode
+    PCGMode = PCGMode
+    JointTerms = JointTerms
+    Stats = Stats
 
     def __init__(
         self,

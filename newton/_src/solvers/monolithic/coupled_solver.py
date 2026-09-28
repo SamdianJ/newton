@@ -22,7 +22,7 @@ from .linear import (
     MonolithicLinearLayout,
     MonolithicLinearWorkspace,
 )
-from .solver_monolithic import _StepFailure
+from .solver_types import _StepFailure
 from .tet import (
     TetScatterBuffers,
     assemble_tet_residual_tangent,
