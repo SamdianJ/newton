@@ -8,10 +8,42 @@ Experimental implicit articulated rigid/tet solver with P1Q3 contact.
 
 .. experimental::
 
-The solver advances supported single-articulation/tet models with normal-only
-contact, scaled PCG and transactional state/force publication. Numerical defaults
-have tiny-fixture validation; broader asset and trajectory calibration is pending.
+The solver advances one supported articulation and one connected tet body with
+explicit C-EE, C-IE or C-II contact, scaled PCG and transactional publication.
 The collision pipeline can also detect tet-face contacts independently.
+
+State and migration
+-------------------
+
+Construct ``SolverMonolithic(model, contact_model=..., globalization=...,
+friction_velocity_scale=..., ...)`` directly. The experimental q-only, tet-only
+and private coupled factories are no longer supported. Constructor options are
+explicit; historical spring friction and ``tangential_stiffness`` are rejected.
+The defaults remain strict publication, diagnostic PCG and CUDA graphs disabled.
+C-IE/C-II or masked contact with Armijo/ArmijoOrResNorm require the explicit
+``allow_nonconservative_energy=True`` opt-in.
+
+Use ``create_state(dt=..., source=None)`` for complete FP64 coordinates and P3
+integration history. An ordinary ``model.state()`` can supply initial coordinates
+and velocities via ``source``; it cannot be passed directly to ``step`` for
+continuation. ``reset_state(state, dt=...)`` rebuilds history and clears published
+forces. Generic ``reset`` is rejected because history initialization needs dt.
+
+``save_checkpoint(state, path)`` preserves the P3 NPZ schema and appends ``.npz``
+when absent. It writes a sibling temporary file and replaces the destination
+after success. ``load_checkpoint(state, path)`` validates in scratch before
+replacing the target. Both return None. Incompatible configurations or edited
+bound models are rejected; rebuild the solver after model changes.
+
+``get_contact_forces(state)`` returns an independent read-only FP64 NumPy snapshot.
+Later stepping, resetting or loading does not modify previously returned arrays.
+Fresh/reset states have invalid zero forces; published Stopped states can have
+valid forces without satisfying equilibrium. Hard failures retain the original
+state and its force generation. See :class:`MonolithicContactForces` for units.
+
+``supports_collision_pipeline`` is False and ``contacts`` returns None. External
+Contacts, contact updates and collision scheduling are rejected. Use
+:class:`MonolithicCollisionPipeline` separately when independent queries are needed.
 
 .. py:module:: newton.solvers.experimental.monolithic
 .. currentmodule:: newton.solvers.experimental.monolithic
@@ -22,3 +54,4 @@ The collision pipeline can also detect tet-face contacts independently.
 
 .. autoclass:: SolverMonolithic
 
+.. autoclass:: MonolithicContactForces

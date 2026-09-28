@@ -16,7 +16,6 @@ from pathlib import Path
 import numpy as np
 import warp as wp
 
-from scripts.monolithic_reference.calibrate_sharpa_contact import CONFIG, make_case
 from scripts.monolithic_reference.p3_coupled_fixtures import (
     DIRECTORY,
     NORMAL,
@@ -181,6 +180,8 @@ def run_case(
     output.mkdir(parents=True, exist_ok=False)
     load = None
     if case.startswith("cube"):
+        from scripts.monolithic_reference.calibrate_sharpa_contact import CONFIG, make_case  # noqa: PLC0415
+
         refinement = int(case[-1])
         asset = DIRECTORY / "soft_cube_40mm" / f"cube_r{refinement}.npz"
         model, old_solver, _, _, load = make_case(asset, 1e7, device, cube=True)
@@ -190,7 +191,7 @@ def run_case(
         model = make_tiny(case, device)
         duration = PROTOCOL["tiny_fixtures"][case]["duration"]
     solver = make_solver(model, case, law, mode=mode, graph=graph, globalization=globalization)
-    state = solver._create_coupled_state(dt=dt)
+    state = solver.create_state(dt=dt)
     control = model.control()
     expected = round(duration / dt)
     count = expected if steps is None else min(steps, expected)

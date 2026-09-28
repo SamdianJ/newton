@@ -126,3 +126,36 @@ call directly instead of the removed parent; assertions and tolerances unchanged
 Public entry and long dev trajectories remain T2-2.
 Evidence: `agents/integration/artifacts/p4/t2-1-v1/receipt.json`, SHA-256
 `68cd12e947d1fb0311edce5e0a2518631310f3b23e64b36aec941223c94d06e4`.
+
+## T2-2: public solver, lifecycle API and complete dev regression
+
+Expose the merged SolverMonolithic directly through the experimental namespace,
+with all 23 frozen constructor parameters and defaults. Remove private factories
+from the public solver; preserve the old source under solver_monolithic_legacy.py
+for later audited retirement. Existing 26 methods retain their T2-1 ASTs.
+
+Add complete-state creation/reset, scratch-validated load, atomic sibling-temp
+checkpoint save, and independent read-only FP64 MonolithicContactForces snapshots.
+Explicitly reject external Contacts, collision scheduling, generic reset and
+model-rebinding notifications. Keep public lazy loading and independent collision.
+
+Validation: 59 checks run, 58 pass, one existing CPU texture skip. Full pre-commit
+passes. A public construction/step process loads no historical solver/components.
+P3 checkpoint arrays restore exactly without schema/digest migration and resume.
+Franka completes 5250 converged steps and its 500-step grasp hold; Sharpa completes
+8667 steps (8637 converged, 30 Stopped, no hard failures; grasp NOT_CERTIFIED).
+Both full recordings pass the frozen T0 envelopes with identical discrete labels
+and identities. Franka replay checks all 5251 frames. These are dev results; the
+ten-case full remains T4. No equations, budgets or tolerances change.
+
+Required callers and fault injection sites use the public API. Contact-off checks
+now solve independent NumPy equations instead of retired single-physics entries.
+Extract only the original normal-loading model builder to retain input assertions.
+Historical test discovery and remaining legacy aliases are deferred to T3.
+
+An initial Sharpa invocation selected the script's unfrozen default trajectory.
+It was stopped, marked ABORTED_WRONG_INPUT and excluded. The accepted run uses
+`agents/integration/artifacts/p3/pr3/current-iterate-production-v1/sharpa-trajectory.json`
+explicitly; its raw hash, payload, SDF identity and all initial fields match T0.
+Evidence: `agents/integration/artifacts/p4/t2-2-v1/receipt.json`, SHA-256
+`b78077c554f894454b0482ba314b1ce2c32b8ea024677fefb9344e9a79f0ee90`.

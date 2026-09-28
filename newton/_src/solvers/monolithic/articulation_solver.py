@@ -22,7 +22,7 @@ from .linear import (
     MonolithicLinearWorkspace,
 )
 from .segment_graph import _SegmentGraphCache
-from .solver_monolithic import SolverMonolithic
+from .solver_monolithic_legacy import SolverMonolithic
 from .solver_types import _SolverMonolithicInternalConfig, _StepFailure
 from .variational_iteration import iterate
 

@@ -66,7 +66,7 @@ def scene(device, *, contact=True, fixed=False, particles=True, articulation=Tru
 
 
 def solver(model, law="C-EE", *, graph=False, mode="diagnostic", globalization="ResNorm", **kwargs):
-    return SolverMonolithic._create_coupled_variational(
+    return SolverMonolithic(
         model,
         contact_model=law,
         globalization=globalization,
@@ -99,7 +99,7 @@ def test_joint_particle_step(test, device):
     for law in ("C-EE", "C-IE", "C-II"):
         model = scene(device)
         run = solver(model, law)
-        before = run._create_coupled_state(dt=0.001)
+        before = run.create_state(dt=0.001)
         after = run._states.copy(before)
         for _ in range(3):
             old = snapshot(before)
@@ -134,7 +134,7 @@ def test_state_and_rollback(test, device):
     """Preserve distinct outputs and every history/force array on failed publication."""
     model = scene(device, fixed=True)
     run = solver(model)
-    before = run._create_coupled_state(dt=0.001)
+    before = run.create_state(dt=0.001)
     after = run._states.copy(before)
     run.step(before, after, model.control(), dt=0.001)
     test.assertTrue(run.last_stats.converged, run.last_stats)
@@ -151,9 +151,9 @@ def test_state_and_rollback(test, device):
     assert_snapshot(test, before, input_snapshot)
     with tempfile.TemporaryDirectory() as folder:
         path = Path(folder) / "state.npz"
-        run._states.save_checkpoint(after, path)
-        restored = run._create_coupled_state(dt=0.001)
-        run._states.load_checkpoint(restored, path)
+        run.save_checkpoint(after, path)
+        restored = run.create_state(dt=0.001)
+        run.load_checkpoint(restored, path)
         assert_snapshot(test, restored, output_snapshot)
     after.particle_qd.assign(after.particle_qd.numpy() + 0.01)
     with test.assertRaises(ValueError):
@@ -161,9 +161,7 @@ def test_state_and_rollback(test, device):
     with test.assertRaises(ValueError):
         ArticulationKinematics(model)
     with test.assertRaises(ValueError):
-        SolverMonolithic._create_coupled_variational(
-            model, contact_model="C-IE", globalization="Armijo", friction_velocity_scale=0.01
-        )
+        SolverMonolithic(model, contact_model="C-IE", globalization="Armijo", friction_velocity_scale=0.01)
 
 
 def test_modes_and_sparse_posterior(test, device):
@@ -176,7 +174,7 @@ def test_modes_and_sparse_posterior(test, device):
         ):
             model = scene(device)
             run = solver(model, law, mode=mode, graph=graph)
-            state = run._create_coupled_state(dt=0.001)
+            state = run.create_state(dt=0.001)
             for dt in (0.001, 0.001, 0.0005):
                 run.step(state, state, model.control(), dt=dt)
                 test.assertTrue(run.last_stats.converged, run.last_stats)
@@ -210,7 +208,7 @@ def test_modes_and_sparse_posterior(test, device):
     for globalization in ("Armijo", "ArmijoOrResNorm"):
         model = scene(device)
         run = solver(model, globalization=globalization)
-        state = run._create_coupled_state(dt=0.001)
+        state = run.create_state(dt=0.001)
         run.step(state, state, model.control(), dt=0.001)
         test.assertTrue(run.last_stats.converged, run.last_stats)
 
@@ -223,7 +221,7 @@ def test_failure_gates(test, device):
         if failure == "budget":
             options["newton_max_iterations"] = 1
         run = solver(model, **options)
-        state = run._create_coupled_state(dt=0.001)
+        state = run.create_state(dt=0.001)
         out = run._states.copy(state)
         expected, expected_out = snapshot(state), snapshot(out)
         if failure == "posterior":
@@ -281,7 +279,7 @@ def test_binding_and_resume(test, device):
     """Bind configuration and physics; resume force generations from the checkpoint."""
     model = scene(device)
     run = solver(model)
-    state = run._create_coupled_state(dt=0.001)
+    state = run.create_state(dt=0.001)
     for _ in range(3):
         run.step(state, state, model.control(), dt=0.001)
         test.assertTrue(run.last_stats.converged)
@@ -303,31 +301,27 @@ def test_binding_and_resume(test, device):
 
 
 def test_contact_off(test, device):
-    """Contact-off agrees with the independent PR1 and PR2 entries at fixed physics."""
+    """Contact-off agrees with independent q/x equations at fixed physics."""
+    from scipy.optimize import root
+
     model = scene(device, contact=False)
     run = solver(model)
-    state = run._create_coupled_state(dt=0.001)
-    qmodel = scene(device, contact=False, particles=False)
-    qsolver = SolverMonolithic._create_articulation_only(
-        qmodel, globalization="ResNorm", joint_terms=SolverMonolithic.JointTerms(limits=True, limit_width=(0.01, 0.01))
-    )
-    qs = qsolver._create_articulation_state(dt=0.001)
-    xmodel = scene(device, contact=False, articulation=False)
-    xsolver = SolverMonolithic._create_tet_only(
-        xmodel,
-        globalization="ResNorm",
-        mass_mode="consistent",
-        tet_rest_density=wp.full(1, 1000, dtype=float, device=device),
-    )
-    xs = xsolver._create_tet_state()
+    state = run.create_state(dt=0.001)
     for _ in range(3):
         run.step(state, state, model.control(), dt=0.001)
-        qsolver.step(qs, qs, qmodel.control(), dt=0.001)
-        xsolver.step(xs, xs, xmodel.control(), None, dt=0.001)
-        for item in (run, qsolver, xsolver):
-            test.assertTrue(item.last_stats.converged, item.last_stats)
-        np.testing.assert_allclose(state.joint_q.numpy(), qs.joint_q.numpy(), atol=5e-4, rtol=0)
-        np.testing.assert_allclose(state.particle_q.numpy(), xs.particle_q.numpy(), atol=5e-5, rtol=0)
+        test.assertTrue(run.last_stats.converged, run.last_stats)
+        # The contact-free system separates into independent q and x residuals.
+        # Solve the independent NumPy equations instead of invoking retired solvers.
+        initial = np.r_[run._original.joint_q.numpy(), run._original.particle_q.numpy().ravel()]
+        reference = root(
+            lambda z: independent_objective(run, z[:2], z[2:].reshape(-1, 3), 0.001)[1],
+            initial,
+            tol=1e-10,
+        )
+        test.assertTrue(reference.success, reference.message)
+        np.testing.assert_allclose(reference.fun, 0, atol=1e-7, rtol=0)
+        np.testing.assert_allclose(state.joint_q.numpy(), reference.x[:2], atol=5e-4, rtol=0)
+        np.testing.assert_allclose(state.particle_q.numpy(), reference.x[2:].reshape(-1, 3), atol=5e-5, rtol=0)
         matrix = run._linear.densify_for_test(generation=run._generation).raw_matrix
         test.assertEqual(np.count_nonzero(matrix[:2, 2:]), 0)
         test.assertEqual(np.count_nonzero(state._monolithic_coupled.contact_particle_force.numpy()), 0)
@@ -385,6 +379,8 @@ def independent_objective(run, q, x, dt):
         dofs = (3 * ids[:, None] + np.arange(3)).ravel()
         xb[np.ix_(dofs, dofs)] += nodal
     b[2:, 2:] = xb[np.ix_(tet.dofs, tet.dofs)]
+    if run._contact.count == 0:
+        return energy, residual, b
     rest = model.particle_q.numpy().astype(float)
     mapping = run._tet.mapping.numpy()
     # The plane is attached at the second body's COM with identity local pose.
@@ -424,7 +420,7 @@ def test_complete_oracle_and_noise(test, device):
     for law in ("C-EE", "C-IE", "C-II"):
         model = scene(device)
         run = solver(model, law)
-        state = run._create_coupled_state(dt=0.001)
+        state = run.create_state(dt=0.001)
         run.step(state, state, model.control(), dt=0.001)
         test.assertTrue(run.last_stats.converged)
         for kind in ("initial", "trial", "root"):
@@ -487,7 +483,7 @@ def test_mesh_binding_graph(test, device):
     model._texture_sdf_subgrid_textures = [fine]
     model._texture_sdf_subgrid_start_slots = [descriptor.subgrid_start_slots]
     run = solver(model, mode="production", graph=True)
-    state = run._create_coupled_state(dt=0.001)
+    state = run.create_state(dt=0.001)
     for _ in range(2):
         run.step(state, state, model.control(), dt=0.001)
         test.assertTrue(run.last_stats.converged, run.last_stats)

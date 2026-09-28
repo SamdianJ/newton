@@ -8,7 +8,7 @@ import sys
 import unittest
 from unittest.mock import patch
 
-from newton._src.solvers.monolithic import coupled_solver
+from newton._src.solvers.monolithic import solver_monolithic
 from newton.tests.test_monolithic_p3_coupled import scene, solver
 
 
@@ -19,11 +19,11 @@ class TestUnifiedSolver(unittest.TestCase):
                 sys.executable,
                 "-c",
                 "import sys; "
-                "from newton._src.solvers.monolithic.coupled_solver import _CoupledSolver; "
+                "from newton._src.solvers.monolithic.solver_monolithic import SolverMonolithic; "
                 "from newton._src.solvers.solver import SolverBase; "
-                "assert _CoupledSolver.__bases__ == (SolverBase,); "
+                "assert SolverMonolithic.__bases__ == (SolverBase,); "
                 "assert not any('newton._src.solvers.monolithic.' + name in sys.modules "
-                "for name in ('solver_monolithic', 'articulation_solver', 'articulation', 'tet', "
+                "for name in ('solver_monolithic_legacy', 'coupled_solver', 'articulation_solver', 'articulation', 'tet', "
                 "'tet_variational', 'contact'))",
             ],
             check=True,
@@ -32,7 +32,7 @@ class TestUnifiedSolver(unittest.TestCase):
     def test_single_linear_workspace(self):
         model = scene("cpu")
         with patch.object(
-            coupled_solver, "MonolithicLinearWorkspace", wraps=coupled_solver.MonolithicLinearWorkspace
+            solver_monolithic, "MonolithicLinearWorkspace", wraps=solver_monolithic.MonolithicLinearWorkspace
         ) as workspace:
             run = solver(model)
         self.assertEqual(workspace.call_count, 1)

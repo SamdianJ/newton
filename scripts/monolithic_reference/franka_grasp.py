@@ -237,7 +237,7 @@ class FrankaGrasp:
             duration=float(TIMES[-1]),
         )
         widths = (0.01,) * 7 + (0.001,) * 2
-        self.solver = SolverMonolithic._create_coupled_variational(
+        self.solver = SolverMonolithic(
             self.model,
             contact_model="C-IE",
             globalization="ArmijoOrResNorm",
@@ -262,7 +262,7 @@ class FrankaGrasp:
         source.joint_q.assign(self.high.astype(np.float32))
         source.joint_qd.zero_()
         newton.eval_fk(self.model, source.joint_q, source.joint_qd, source)
-        self.state = self.solver._create_coupled_state(dt=DT, source=source)
+        self.state = self.solver.create_state(dt=DT, source=source)
         self.control = self.model.control()
         self.steps = 0
         self.failed = False

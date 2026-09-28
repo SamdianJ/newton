@@ -48,8 +48,6 @@ class TestMonolithicTypes(unittest.TestCase):
         from dataclasses import FrozenInstanceError, replace  # noqa: PLC0415
 
         from newton._src.solvers.monolithic import (  # noqa: PLC0415
-            articulation_solver,
-            coupled_solver,
             solver_monolithic,
             solver_types,
             variational_iteration,
@@ -58,7 +56,7 @@ class TestMonolithicTypes(unittest.TestCase):
 
         for name in ("Status", "Stats", "JointTerms", "PCGMode", "MassMode", "MaterialModel"):
             self.assertIs(getattr(SolverMonolithic, name), getattr(solver_types, name))
-        for module in (solver_monolithic, articulation_solver, coupled_solver, variational_iteration):
+        for module in (solver_monolithic, variational_iteration):
             self.assertIs(module._StepFailure, solver_types._StepFailure)
         timings = {"solve": 1.0}
         stats = SolverMonolithic.Stats(SolverMonolithic.Status.NOT_RUN, timings=timings)

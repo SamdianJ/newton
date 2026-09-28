@@ -11,7 +11,7 @@ from unittest.mock import patch
 import numpy as np
 
 from newton.tests.unittest_utils import add_function_test, get_test_devices
-from scripts.monolithic_reference.normal_loading import build_scene
+from scripts.monolithic_reference.normal_loading import build_model
 from scripts.monolithic_reference.p3_coupled_fixtures import NORMAL, knots_at, make_solver, make_tiny, set_control
 from scripts.monolithic_reference.p3_coupled_oracle import CoupledOracle
 from scripts.monolithic_reference.summarize_p3_coupled import LIMITS, differences, errors, summarize
@@ -24,7 +24,7 @@ def test_reference_jacobian(test, device):
         for law in ("C-EE", "C-IE", "C-II"):
             model = make_tiny(case, device)
             run = make_solver(model, case, law)
-            state = run._create_coupled_state(dt=0.001)
+            state = run.create_state(dt=0.001)
             run.step(state, state, model.control(), dt=0.001)
             test.assertTrue(run.last_stats.converged)
             oracle = CoupledOracle(
@@ -69,7 +69,7 @@ def test_graph_after_early_convergence(test, device):
     for graph in (False, True):
         model = make_tiny("normal_loading", device)
         run = make_solver(model, "normal_loading", "C-EE", mode="production", graph=graph)
-        state = run._create_coupled_state(dt=0.001)
+        state = run.create_state(dt=0.001)
         control = model.control()
         for step in range(3):
             set_control(control, "normal_loading", (step + 1) * 0.001, state.joint_q.numpy(), state.joint_qd.numpy())
@@ -87,9 +87,9 @@ def test_invalid_geometry_rollback(test, device):
     for law in ("C-EE", "C-IE", "C-II"):
         model = make_tiny("curved_release", device)
         run = make_solver(model, "curved_release", law)
-        state = run._create_coupled_state(dt=0.001)
+        state = run.create_state(dt=0.001)
         state.joint_q.assign([0.03, 0.0])
-        run._reset_coupled_state(state, dt=0.001)
+        run.reset_state(state, dt=0.001)
         before = state_arrays(state)
         run.step(state, state, model.control(), dt=0.001)
         test.assertFalse(run.last_stats.converged)
@@ -101,7 +101,7 @@ def test_invalid_geometry_rollback(test, device):
 
 def test_normal_input(test, device):
     """Match every physical array of the original normal-loading builder."""
-    expected, _, _, _ = build_scene(NORMAL, device=device)
+    expected = build_model(NORMAL, device=device)
     actual = make_tiny("normal_loading", device)
     for name in (
         "particle_q",

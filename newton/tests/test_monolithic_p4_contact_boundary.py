@@ -29,13 +29,13 @@ def test_legacy_history(test, device):
     model = scene(device)
     run = solver(model)
     source = model.state()
-    state = run._create_coupled_state(dt=0.001, source=source)
+    state = run.create_state(dt=0.001, source=source)
     test.assertFalse(any("xi" in name for name in run._states.schema))
     test.assertEqual(state._monolithic_coupled.force_valid.numpy()[0], 0)
     source._monolithic = newton.Model.AttributeNamespace("_monolithic")
     source._monolithic.xi_local = wp.zeros(1, dtype=wp.vec3, device=device)
     with test.assertRaisesRegex(ValueError, "cannot import legacy history"):
-        run._create_coupled_state(dt=0.001, source=source)
+        run.create_state(dt=0.001, source=source)
     test.assertEqual(state._monolithic_coupled.force_valid.numpy()[0], 0)
 
 

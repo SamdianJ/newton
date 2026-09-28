@@ -1,51 +1,34 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 The Newton Developers
 # SPDX-License-Identifier: Apache-2.0
 
-"""Historical solver; retained as the transitional P3 parent until the T2 transaction merge."""
+"""Complete monolithic q+x solver with transactional state and force publication."""
 
-from __future__ import annotations
-
-import hashlib
-import logging
 import math
-import time
-from dataclasses import dataclass, replace
+import os
+import tempfile
+from dataclasses import replace
+from pathlib import Path
 from types import MappingProxyType
 
 import numpy as np
 import warp as wp
 
-from ...geometry import ShapeFlags
-from ...sim import Contacts, Control, JointType, Model, State, eval_fk
+from ...sim import JointType
 from ..solver import SolverBase
-from .articulation import (
-    MonolithicArticulationWorkspace,
-    MonolithicJointTermsWorkspace,
-    _validate_joint_coordinate_layout,
-    add_joint_term_residual,
-    eval_articulation_actor_residual,
-    eval_articulation_passive_candidate,
-    project_articulation_body_wrenches,
-    recover_articulation_candidate_rates,
-    scatter_articulation_actor_tangent,
-    scatter_joint_term_tangent,
-)
-from .collision import MonolithicCollisionPipeline
-from .contact import (
-    MonolithicContactWorkspace,
-    _MonolithicReturnedStateRole,
-    assemble_current_contacts,
-    evaluate_final_contacts,
-    evaluate_trial_contacts,
-)
+from . import coupled_kernels as kernels
+from .articulation_state import _predict, _recover_history
+from .articulation_variational import ArticulationObjective, _TreeKinematics
+from .collision import _validate_and_collect_boundary_faces
+from .contact_forces import MonolithicContactForces
+from .contact_variational import ContactObjective, ContactStatus
+from .coupled_state import CoupledState
+from .joint_parameters import JointParameters
 from .linear import (
     MonolithicLinearCapacities,
     MonolithicLinearGeneration,
     MonolithicLinearLayout,
     MonolithicLinearStatus,
     MonolithicLinearWorkspace,
-    MonolithicPcgConfig,
-    MonolithicPcgWarmStart,
 )
 from .segment_graph import _SegmentGraphCache
 from .solver_types import (
@@ -58,1535 +41,908 @@ from .solver_types import (
     _SolverMonolithicInternalConfig,
     _StepFailure,
 )
-from .tet import (
-    TetEvaluationStatus,
-    TetPhysicsWorkspace,
+from .tet_assembly import (
     TetScatterBuffers,
-    _validate_evaluation,
     assemble_tet_residual_tangent,
     build_tet_triplet_pattern,
     create_tet_assembly_workspace,
-    evaluate_tet_residual,
-    validate_tet_scope,
 )
-from .tet_variational import TetObjectiveWorkspace, acceptance
-
-
-@dataclass(frozen=True, slots=True)
-class _TrialResult:
-    status: int
-    merit: float
-    merit_q: float
-    merit_x: float
-    min_det_f: float
-    maximum_penetration: float
-    objective: tuple[float, ...] | None = None
-    objective_abs_sum: float = 0.0
-
-
-@wp.kernel
-def _scale_vector(values: wp.array[float], scale: wp.array[float], sign: float, out: wp.array[float]):
-    i = wp.tid()
-    out[i] = sign * scale[i] * values[i]
-
-
-@wp.kernel
-def _copy_particle_residual(values: wp.array[wp.vec3], offset: int, out: wp.array[float]):
-    i = wp.tid()
-    for axis in range(3):
-        out[offset + 3 * i + axis] = values[i][axis]
-
-
-@wp.kernel
-def _raw_residual_sums(values: wp.array[float], nq: int, out: wp.array[wp.float64]):
-    i = wp.tid()
-    value = wp.float64(values[i])
-    block = int(i >= nq)
-    wp.atomic_add(out, block, value * value)
-
-
-@wp.kernel
-def _build_dynamic_diagonal(
-    mass: wp.array3d[float],
-    particle_mass: wp.array[float],
-    particle_ids: wp.array[int],
-    nq: int,
-    inv_dt_sq: float,
-    out: wp.array[float],
-):
-    i = wp.tid()
-    if i < nq:
-        out[i] = mass[0, i, i] * inv_dt_sq
-    else:
-        out[i] = particle_mass[particle_ids[(i - nq) // 3]] * inv_dt_sq
-
-
-@dataclass(frozen=True, slots=True)
-class _MonolithicLayout:
-    q_dof_count: int
-    dynamic_particle_count: int
-    scalar_dof_count: int
-    q_dof_to_joint_q: wp.array[int]
-    q_dof_to_joint_qd: wp.array[int]
-    dynamic_particle_ids: wp.array[int]
-    particle_to_dynamic: wp.array[int]
-    body_to_articulation: wp.array[int]
-    body_to_link_index: wp.array[int]
-
-
-def _build_layout(model: Model, *, joint_diagnostic: bool = False, tet_only: bool = False) -> _MonolithicLayout:
-    if tet_only and (model.articulation_count or model.joint_count or model.body_count or model.shape_count):
-        raise ValueError("Tet-only requires zero articulations, joints, bodies and shapes")
-    if joint_diagnostic:
-        flags = model.shape_flags.numpy()
-        if (
-            model.particle_count
-            or model.tet_count
-            or np.any(flags & int(ShapeFlags.COLLIDE_SHAPES | ShapeFlags.COLLIDE_PARTICLES))
-        ):
-            raise ValueError("Joint diagnostic requires zero particles/tets and collision-disabled shapes")
-    if (not tet_only and model.articulation_count != 1) or (model.tet_count == 0 and not joint_diagnostic):
-        raise ValueError("Monolithic requires one articulation and one connected tet body")
-    starts = model.articulation_start.numpy()
-    ends = model.articulation_end.numpy()
-    if not tet_only and (starts.tolist() != [0, model.joint_count] or ends.tolist() != [model.joint_count]):
-        raise ValueError("Monolithic does not support unowned joints or loop closures")
-    types = model.joint_type.numpy()
-    if not np.isin(types, [JointType.FIXED, JointType.REVOLUTE, JointType.PRISMATIC]).all():
-        raise ValueError("Monolithic supports only FIXED, REVOLUTE and PRISMATIC joints")
-    children, parents = model.joint_child.numpy(), model.joint_parent.numpy()
-    seen = set()
-    roots = 0
-    body_to_link = np.full(model.body_count, -1, dtype=np.int32)
-    for link, (parent, child) in enumerate(zip(parents, children, strict=True)):
-        if child < 0 or child >= model.body_count or child in seen or (parent != -1 and parent not in seen):
-            raise ValueError("Monolithic requires a world-anchored articulation tree")
-        roots += int(parent == -1)
-        seen.add(int(child))
-        body_to_link[child] = link
-    if not tet_only and (roots != 1 or len(seen) != model.body_count):
-        raise ValueError("Monolithic requires one world-anchored tree owning all bodies")
-    tets = model.tet_indices.numpy() if model.tet_count else np.empty((0, 4), dtype=np.int32)
-    if np.any(tets < 0) or np.any(tets >= model.particle_count) or any(len(set(t)) != 4 for t in tets):
-        raise ValueError("Invalid tet topology")
-    target = np.unique(tets)
-    connected = set(tets[0]) if len(tets) else set()
-    remaining = list(tets[1:])
-    while remaining:
-        pending = []
-        for tet in remaining:
-            if connected.intersection(tet):
-                connected.update(tet)
-            else:
-                pending.append(tet)
-        if len(pending) == len(remaining):
-            raise ValueError("Monolithic requires one connected tet body")
-        remaining = pending
-    inv_mass = model.particle_inv_mass.numpy()
-    if not np.isfinite(inv_mass[target]).all() or np.any(inv_mass[target] < 0.0):
-        raise ValueError("Target inverse masses must be finite and nonnegative")
-    dynamic = target[inv_mass[target] > 0.0]
-    if tet_only and (not len(dynamic) or len(target) != model.particle_count):
-        raise ValueError("Tet-only requires dynamic nodes and all particles owned by the connected tet body")
-    particle_to_dynamic = np.full(model.particle_count, -1, dtype=np.int32)
-    particle_to_dynamic[dynamic] = np.arange(len(dynamic), dtype=np.int32)
-    moving = types != JointType.FIXED
-    q_map = np.empty(0, dtype=np.int32) if tet_only else _validate_joint_coordinate_layout(model)
-    qd_map = model.joint_qd_start.numpy()[:-1][moving]
-    nq = len(q_map)
-
-    def array(values):
-        return wp.array(values, dtype=wp.int32, device=model.device)
-
-    layout = _MonolithicLayout(
-        nq,
-        len(dynamic),
-        nq + 3 * len(dynamic),
-        array(q_map),
-        array(qd_map),
-        array(dynamic),
-        array(particle_to_dynamic),
-        array(np.where(body_to_link >= 0, 0, -1)),
-        array(body_to_link),
-    )
-    _validate_scope(model, layout)
-    return layout
-
-
-def _validate_scope(model: Model, layout: _MonolithicLayout) -> None:
-    """Validate participating world labels; collision asset gates belong to PR-4A."""
-    bodies = np.flatnonzero(layout.body_to_articulation.numpy() >= 0)
-    shapes = np.isin(model.shape_body.numpy(), bodies)
-    target = np.unique(model.tet_indices.numpy()) if model.tet_count else np.empty(0, dtype=np.int32)
-    labels = np.concatenate(
-        (model.body_world.numpy()[bodies], model.shape_world.numpy()[shapes], model.particle_world.numpy()[target])
-    )
-    if len(np.unique(labels)) != 1 or np.any(labels < -1) or np.any(labels >= model.world_count):
-        raise ValueError("Monolithic requires exactly one participating world label")
-
-
-def _validate_dt(dt: float) -> None:
-    if not math.isfinite(dt) or dt <= 0.0 or dt > np.finfo(np.float32).max or np.float32(dt) <= 0.0:
-        raise ValueError("dt must be finite and positive in float32")
-
-
-def _validate_state(model: Model, state: State, *, tet_only: bool = False) -> None:
-    """Reject optional/custom state arrays until their transaction semantics exist."""
-    attributes = (
-        ("joint_q", model.joint_coord_count, wp.float32),
-        ("joint_qd", model.joint_dof_count, wp.float32),
-        ("body_q", model.body_count, wp.transform),
-        ("body_qd", model.body_count, wp.spatial_vector),
-        ("body_f", model.body_count, wp.spatial_vector),
-        ("particle_q", model.particle_count, wp.vec3d if tet_only else wp.vec3),
-        ("particle_qd", model.particle_count, wp.vec3d if tet_only else wp.vec3),
-        ("particle_f", model.particle_count, wp.vec3),
-    )
-    for name, count, dtype in attributes:
-        value = getattr(state, name)
-        if count == 0 and value is None:
-            continue
-        if value is None or value.shape != (count,) or value.dtype != dtype or value.device != model.device:
-            raise ValueError(f"Invalid state array shape, dtype or device: {name}")
-    supported = {name for name, _, _ in attributes}
-    for name, value in vars(state).items():
-        if isinstance(value, wp.array) and name not in supported:
-            raise ValueError(f"Unsupported PR-0 state array: {name}")
-        if isinstance(value, Model.AttributeNamespace) and any(
-            isinstance(attribute, wp.array) for attribute in vars(value).values()
-        ):
-            raise ValueError(f"Unsupported PR-0 state array namespace: {name}")
-
-
-def _validate_dirichlet(model: Model, layout: _MonolithicLayout, state: State, *, tet_only: bool = False) -> None:
-    if not model.tet_count:
-        return
-    target = np.arange(model.particle_count) if tet_only else np.unique(model.tet_indices.numpy())
-    fixed = target[layout.particle_to_dynamic.numpy()[target] < 0]
-    if np.any(state.particle_qd.numpy()[fixed] != 0.0):
-        raise ValueError("Static Dirichlet particles require exactly zero input velocity")
-
-
-class _FrozenStepInputs:
-    def __init__(self, model: Model):
-        self.joint_f = wp.zeros(model.joint_dof_count, dtype=float, device=model.device) if model.joint_count else None
-        self.body_f = (
-            wp.zeros(model.body_count, dtype=wp.spatial_vector, device=model.device) if model.body_count else None
-        )
-        self.gravity = wp.clone(model.gravity)
-        self._model = model
-        self.particle_f = (
-            wp.zeros(model.particle_count, dtype=wp.vec3, device=model.device) if model.particle_count else None
-        )
-
-    def snapshot(self, state_in: State, control: Control) -> None:
-        for target, source in (
-            (self.joint_f, control.joint_f),
-            (self.body_f, state_in.body_f),
-            (self.particle_f, state_in.particle_f),
-        ):
-            if target is None and (source is None or source.size == 0):
-                continue
-            if (
-                target is None
-                or source is None
-                or target.shape != source.shape
-                or target.dtype != source.dtype
-                or target.device != source.device
-            ):
-                raise ValueError("Invalid frozen input shape, dtype or device")
-        if self.joint_f is not None:
-            wp.copy(self.joint_f, control.joint_f)
-        if self.body_f is not None:
-            wp.copy(self.body_f, state_in.body_f)
-        if self.particle_f is not None:
-            wp.copy(self.particle_f, state_in.particle_f)
-        wp.copy(self.gravity, self._model.gravity)
-
-
-@wp.kernel
-def _pack_monolithic_unknowns(
-    joint_q: wp.array[float],
-    particle_q: wp.array[wp.vec3],
-    q_dof_to_joint_q: wp.array[int],
-    dynamic_particle_ids: wp.array[int],
-    q_dof_count: int,
-    out_z: wp.array[float],
-):
-    i = wp.tid()
-    if i < q_dof_count:
-        out_z[i] = joint_q[q_dof_to_joint_q[i]]
-    else:
-        p = (i - q_dof_count) // 3
-        a = (i - q_dof_count) % 3
-        out_z[i] = particle_q[dynamic_particle_ids[p]][a]
-
-
-@wp.kernel
-def _unpack_monolithic_unknowns(
-    z: wp.array[float],
-    q_dof_to_joint_q: wp.array[int],
-    dynamic_particle_ids: wp.array[int],
-    q_dof_count: int,
-    out_joint_q: wp.array[float],
-    out_particle_q: wp.array[wp.vec3],
-):
-    i = wp.tid()
-    if i < q_dof_count:
-        out_joint_q[q_dof_to_joint_q[i]] = z[i]
-    else:
-        p = i - q_dof_count
-        offset = q_dof_count + 3 * p
-        out_particle_q[dynamic_particle_ids[p]] = wp.vec3(z[offset], z[offset + 1], z[offset + 2])
-
-
-@wp.kernel
-def _form_monolithic_trial(
-    accepted_z: wp.array[float], delta_z: wp.array[float], alpha: float, out_trial_z: wp.array[float]
-):
-    i = wp.tid()
-    out_trial_z[i] = accepted_z[i] + alpha * delta_z[i]
-
-
-@wp.kernel
-def _predict_coordinates(
-    joint_qd: wp.array[float],
-    particle_qd: wp.array[wp.vec3],
-    q_map: wp.array[int],
-    particle_ids: wp.array[int],
-    nq: int,
-    dt: float,
-    z: wp.array[float],
-):
-    i = wp.tid()
-    if i < nq:
-        z[i] += dt * joint_qd[q_map[i]]
-    else:
-        z[i] += dt * particle_qd[particle_ids[(i - nq) // 3]][(i - nq) % 3]
-
-
-@wp.kernel
-def _initialize_joint_displacement(
-    velocity: wp.array[float],
-    qd_map: wp.array[int],
-    dt: float,
-    displacement: wp.array[float],
-):
-    i = wp.tid()
-    displacement[i] = dt * velocity[qd_map[i]]
-
-
-@wp.kernel
-def _recover_joint_displacement(
-    displacement: wp.array[float],
-    q_map: wp.array[int],
-    qd_map: wp.array[int],
-    q_n: wp.array[float],
-    v_n: wp.array[float],
-    dt: float,
-    q: wp.array[float],
-    v: wp.array[float],
-    acceleration: wp.array[float],
-    z: wp.array[float],
-):
-    i = wp.tid()
-    # Rebase BE at q_n: subtracting rounded absolute angles loses sub-ULP updates.
-    velocity = displacement[i] / dt
-    position = q_n[q_map[i]] + displacement[i]
-    q[q_map[i]] = position
-    z[i] = position
-    v[qd_map[i]] = velocity
-    acceleration[i] = (velocity - v_n[qd_map[i]]) / dt
-
-
-@wp.kernel
-def _recover_particle_kinematics(
-    x: wp.array[wp.vec3],
-    x0: wp.array[wp.vec3],
-    v0: wp.array[wp.vec3],
-    particle_ids: wp.array[int],
-    dt: float,
-    velocity: wp.array[wp.vec3],
-    acceleration: wp.array[wp.vec3],
-):
-    i = wp.tid()
-    p = particle_ids[i]
-    v = (x[p] - x0[p]) / dt
-    velocity[p] = v
-    acceleration[p] = (v - v0[p]) / dt
-
-
-def _new_candidate_state(model: Model, tet_only: bool) -> State:
-    state = model.state()
-    if tet_only:
-        for name in ("particle_q", "particle_qd"):
-            setattr(
-                state,
-                name,
-                wp.array(getattr(model, name).numpy().astype(np.float64), dtype=wp.vec3d, device=model.device),
-            )
-    return state
-
-
-@wp.kernel
-def _predict_tet_coordinates(
-    x: wp.array[wp.vec3d], v: wp.array[wp.vec3d], ids: wp.array[int], dt: wp.float64, z: wp.array[wp.float64]
-):
-    i = wp.tid()
-    z[i] = x[ids[i // 3]][i % 3] + dt * v[ids[i // 3]][i % 3]
-
-
-@wp.kernel
-def _form_tet_trial(x: wp.array[wp.float64], p: wp.array[float], alpha: wp.float64, out: wp.array[wp.float64]):
-    i = wp.tid()
-    out[i] = x[i] + alpha * wp.float64(p[i])
-
-
-@wp.kernel
-def _recover_tet_candidate(
-    z: wp.array[wp.float64],
-    xn: wp.array[wp.vec3d],
-    vn: wp.array[wp.vec3d],
-    ids: wp.array[int],
-    dt: wp.float64,
-    x: wp.array[wp.vec3d],
-    v: wp.array[wp.vec3d],
-    acceleration: wp.array[wp.vec3d],
-):
-    i = wp.tid()
-    p = ids[i]
-    position = wp.vec3d(z[3 * i], z[3 * i + 1], z[3 * i + 2])
-    velocity = (position - xn[p]) / dt
-    x[p] = position
-    v[p] = velocity
-    acceleration[p] = (velocity - vn[p]) / dt
-
-
-class _Candidate:
-    def __init__(self, model: Model, layout: _MonolithicLayout, *, tet_only: bool = False):
-        self._model = model
-        self._layout = layout
-        self._tet_only = tet_only
-        self._origin = _new_candidate_state(model, tet_only)
-        self._dt = None
-        self._trial_source = None
-        self._trial_source_generation = -1
-        self.state = _new_candidate_state(model, tet_only)
-        _validate_state(model, self.state, tet_only=tet_only)
-        self.z = wp.zeros(layout.scalar_dof_count, dtype=wp.float64 if tet_only else float, device=model.device)
-        self.qdd = wp.zeros(layout.q_dof_count, device=model.device)
-        self.joint_displacement = wp.zeros(layout.q_dof_count, device=model.device)
-        self.particle_acceleration = (
-            wp.zeros(model.particle_count, dtype=wp.vec3d if tet_only else wp.vec3, device=model.device)
-            if model.particle_count
-            else None
-        )
-        self.residual = wp.zeros(layout.scalar_dof_count, device=model.device)
-        self.generation = 0
-
-    def load_predictor(self, state_in: State, dt: float) -> None:
-        _validate_dt(dt)
-        _validate_state(self._model, state_in, tet_only=self._tet_only)
-        _validate_dirichlet(self._model, self._layout, state_in, tet_only=self._tet_only)
-        self._origin.assign(state_in)
-        self.state.assign(state_in)
-        self._dt = dt
-        layout = self._layout
-        if self._tet_only:
-            wp.launch(
-                _predict_tet_coordinates,
-                layout.scalar_dof_count,
-                [state_in.particle_q, state_in.particle_qd, layout.dynamic_particle_ids, dt, self.z],
-                device=self._model.device,
-            )
-            self._recover(dt)
-            self.generation = 0
-            self._trial_source = None
-            return
-        wp.launch(
-            _pack_monolithic_unknowns,
-            layout.scalar_dof_count,
-            inputs=[
-                state_in.joint_q,
-                state_in.particle_q,
-                layout.q_dof_to_joint_q,
-                layout.dynamic_particle_ids,
-                layout.q_dof_count,
-                self.z,
-            ],
-            device=self._model.device,
-        )
-        wp.launch(
-            _predict_coordinates,
-            layout.scalar_dof_count,
-            inputs=[
-                state_in.joint_qd,
-                state_in.particle_qd,
-                layout.q_dof_to_joint_qd,
-                layout.dynamic_particle_ids,
-                layout.q_dof_count,
-                dt,
-                self.z,
-            ],
-            device=self._model.device,
-        )
-        wp.launch(
-            _initialize_joint_displacement,
-            layout.q_dof_count,
-            [state_in.joint_qd, layout.q_dof_to_joint_qd, dt, self.joint_displacement],
-            device=self._model.device,
-        )
-        self._recover(dt, from_displacement=True)
-        self.generation = 0
-        self._trial_source = None
-
-    def form_trial(self, accepted: _Candidate, delta: wp.array[float], alpha: float, dt: float) -> None:
-        _validate_dt(dt)
-        if accepted is self or accepted._model is not self._model or accepted._layout is not self._layout:
-            raise ValueError("Trial requires a distinct candidate with the same model and layout")
-        if accepted._dt != dt:
-            raise ValueError("Trial dt must equal the frozen predictor dt")
-        if delta.shape != self.z.shape or delta.dtype != wp.float32 or delta.device != self.z.device:
-            raise ValueError("Invalid trial delta shape, dtype or device")
-        if not math.isfinite(alpha) or not 0.0 < alpha <= 1.0:
-            raise ValueError("Trial alpha must be finite and in (0, 1]")
-        self._origin.assign(accepted._origin)
-        self.state.assign(accepted.state)
-        self._dt = dt
-        if self._tet_only:
-            wp.launch(_form_tet_trial, self.z.size, [accepted.z, delta, alpha, self.z], device=self._model.device)
-            self._recover(dt)
-            self.generation += 1
-            self._trial_source = accepted
-            self._trial_source_generation = accepted.generation
-            return
-        wp.launch(
-            _form_monolithic_trial,
-            self._layout.scalar_dof_count,
-            inputs=[accepted.z, delta, alpha, self.z],
-            device=self._model.device,
-        )
-        wp.launch(
-            _form_monolithic_trial,
-            self._layout.q_dof_count,
-            [accepted.joint_displacement, delta, alpha, self.joint_displacement],
-            device=self._model.device,
-        )
-        self._recover(dt, from_displacement=True)
-        self.generation += 1
-        self._trial_source = accepted
-        self._trial_source_generation = accepted.generation
-
-    def _recover(self, dt: float, *, from_displacement: bool = False) -> None:
-        layout, state, origin = self._layout, self.state, self._origin
-        if self._tet_only:
-            self.particle_acceleration.zero_()
-            wp.launch(
-                _recover_tet_candidate,
-                layout.dynamic_particle_count,
-                [
-                    self.z,
-                    origin.particle_q,
-                    origin.particle_qd,
-                    layout.dynamic_particle_ids,
-                    dt,
-                    state.particle_q,
-                    state.particle_qd,
-                    self.particle_acceleration,
-                ],
-                device=self._model.device,
-            )
-            self.residual.zero_()
-            return
-        wp.launch(
-            _unpack_monolithic_unknowns,
-            layout.q_dof_count + layout.dynamic_particle_count,
-            inputs=[
-                self.z,
-                layout.q_dof_to_joint_q,
-                layout.dynamic_particle_ids,
-                layout.q_dof_count,
-                state.joint_q,
-                state.particle_q,
-            ],
-            device=self._model.device,
-        )
-        if from_displacement:
-            wp.launch(
-                _recover_joint_displacement,
-                layout.q_dof_count,
-                [
-                    self.joint_displacement,
-                    layout.q_dof_to_joint_q,
-                    layout.q_dof_to_joint_qd,
-                    origin.joint_q,
-                    origin.joint_qd,
-                    dt,
-                    state.joint_q,
-                    state.joint_qd,
-                    self.qdd,
-                    self.z,
-                ],
-                device=self._model.device,
-            )
-        else:
-            # Offline absolute-coordinate probes intentionally measure stored-q quantization.
-            wp.launch(
-                recover_articulation_candidate_rates,
-                layout.q_dof_count,
-                [
-                    layout.q_dof_to_joint_q,
-                    0,
-                    layout.q_dof_count,
-                    1.0 / dt,
-                    state.joint_q,
-                    origin.joint_q,
-                    origin.joint_qd,
-                    state.joint_qd,
-                    self.qdd,
-                ],
-                device=self._model.device,
-            )
-            wp.launch(
-                _initialize_joint_displacement,
-                layout.q_dof_count,
-                [state.joint_qd, layout.q_dof_to_joint_qd, dt, self.joint_displacement],
-                device=self._model.device,
-            )
-        if layout.dynamic_particle_count:
-            self.particle_acceleration.zero_()
-            wp.launch(
-                _recover_particle_kinematics,
-                layout.dynamic_particle_count,
-                inputs=[
-                    state.particle_q,
-                    origin.particle_q,
-                    origin.particle_qd,
-                    layout.dynamic_particle_ids,
-                    dt,
-                    state.particle_qd,
-                    self.particle_acceleration,
-                ],
-                device=self._model.device,
-            )
-        self.residual.zero_()
-        if self._model.body_count:
-            eval_fk(self._model, state.joint_q, state.joint_qd, state)
-
-    def commit(self, state_out: State) -> None:
-        _validate_state(self._model, self.state, tet_only=self._tet_only)
-        _validate_state(self._model, state_out, tet_only=self._tet_only)
-        state_out.assign(self.state)
+from .tet_precision import TetObjective64
+from .variational_iteration import iterate, measure
 
 
 class SolverMonolithic(SolverBase):
-    """Solve articulated rigid/tet motion with a common implicit position update.
+    """Keep strict defaults; opt in to masked contact and stopped publication.
 
-    This experimental implementation supports bilateral P1Q3 contact and
-    static fixed particles. Numerical defaults are calibrated on the declared
-    component and normal-loading fixtures; other asset ranges are not certified.
-
-    .. experimental::
-        This class may change without the normal deprecation period.
+    Nonconservative energy acceptance is heuristic, not a variational guarantee.
+    Stopped publication retains all physical/state gates except the residual goal.
+    ``last_accepted`` requires an accepted Newton update; ``current_iterate``
+    also permits the initialized predictor when no update was accepted. Neither
+    policy publishes rejected trials. Force validity is not equilibrium.
     """
 
-    supports_collision_pipeline = True
-
+    supports_collision_pipeline = False
     Status = Status
+    Stats = Stats
+    JointTerms = JointTerms
+    PCGMode = PCGMode
     MaterialModel = MaterialModel
     MassMode = MassMode
-    PCGMode = PCGMode
-    JointTerms = JointTerms
-    Stats = Stats
 
     def __init__(
         self,
-        model: Model,
-        *,
-        collision_pipeline: MonolithicCollisionPipeline,
-        contact_stiffness: float,
-        joint_terms: SolverMonolithic.JointTerms | None = None,
-        material_model: SolverMonolithic.MaterialModel | str = MaterialModel.KIM_STABLE_NO_LOG,
-        mass_mode: SolverMonolithic.MassMode | str = MassMode.LUMPED,
-        tet_rest_density: wp.array[float] | None = None,
-        normal_smoothing_width: float = 0.0,
-        friction_coefficient: float = 0.0,
-        tangential_stiffness: float | None = None,
-        newton_max_iterations: int = 10,
-        line_search_max_iterations: int = 8,
-        linear_max_iterations: int = 200,
-        linear_tolerance: float = 1.0e-4,
-        linear_absolute_tolerance: float = 1.0e-6,
-        use_optimized_articulation_mass_matrix: bool = False,
-        pcg_mode: SolverMonolithic.PCGMode | str = PCGMode.DIAGNOSTIC,
-        use_cuda_graph: bool = False,
-    ) -> None:
-        """Validate the model and allocate solver-owned candidate/contact buffers.
-
-        Args:
-            model: Model containing one articulation and one connected tet body.
-            collision_pipeline: Fixed P1Q3 pipeline constructed for this model.
-            contact_stiffness: Normal penalty stiffness [N/m^3].
-            joint_terms: Optional scalar joint physics. None keeps V0.1 behavior.
-            material_model: Experimental Kim no-log or Smith log-stabilized material.
-            mass_mode: Experimental lumped or consistent P1 mass.
-            tet_rest_density: Same-device float32 per-tet density [kg/m^3], required
-                for consistent mass and copied at construction; otherwise None.
-            normal_smoothing_width: Experimental PolyReLU half-width [m]; zero retains quadratic contact.
-            friction_coefficient: Experimental isotropic contact friction coefficient; defaults to zero.
-            tangential_stiffness: Experimental tangential penalty [N/m^3]; required for friction.
-            newton_max_iterations: Positive nonlinear iteration limit.
-            line_search_max_iterations: Positive backtracking iteration limit.
-            linear_max_iterations: Positive linear iteration limit.
-            linear_tolerance: Positive relative linear residual tolerance.
-            linear_absolute_tolerance: Nonnegative absolute scaled linear residual
-                norm tolerance, applied to global/q/x blocks. Provisional default
-                1e-6 pending calibration; zero restores relative-with-floor acceptance.
-                Both tolerance branches are capped at half of each current outer
-                Newton residual goal, converted from RMS to L2.
-            use_optimized_articulation_mass_matrix: Experimental private parallel
-                articulation mass evaluation; fixed at construction, defaults to False.
-            pcg_mode: Experimental dynamic diagnostic or fixed masked production PCG policy.
-            use_cuda_graph: Capture production PCG and stable device segments on CUDA; default False.
-                Production retains mandatory numerical checks and final force publication.
-        """
-        self._initialize(
-            model,
-            collision_pipeline=collision_pipeline,
-            contact_stiffness=contact_stiffness,
-            joint_terms=joint_terms,
-            material_model=material_model,
-            mass_mode=mass_mode,
-            tet_rest_density=tet_rest_density,
-            normal_smoothing_width=normal_smoothing_width,
-            friction_coefficient=friction_coefficient,
-            tangential_stiffness=tangential_stiffness,
-            newton_max_iterations=newton_max_iterations,
-            line_search_max_iterations=line_search_max_iterations,
-            linear_max_iterations=linear_max_iterations,
-            linear_tolerance=linear_tolerance,
-            linear_absolute_tolerance=linear_absolute_tolerance,
-            use_optimized_articulation_mass_matrix=use_optimized_articulation_mass_matrix,
-            pcg_mode=pcg_mode,
-            use_cuda_graph=use_cuda_graph,
-            joint_diagnostic=False,
-        )
-
-    @classmethod
-    def _create_articulation_only(
-        cls, model: Model, *, globalization, joint_terms=None, publish_policy="strict", **options
-    ):
-        """Create the private FP64 PR2 articulation validation path."""
-        from .articulation_solver import _ArticulationSolver  # noqa: PLC0415 -- private subclass imports this base
-
-        return _ArticulationSolver(
-            model, globalization=globalization, joint_terms=joint_terms, publish_policy=publish_policy, **options
-        )
-
-    @classmethod
-    def _create_coupled_variational(cls, model, *, contact_model, globalization, friction_velocity_scale, **options):
-        """Create the private strict PR3 joint/particle path with an explicit law."""
-        from .coupled_solver import _CoupledSolver  # noqa: PLC0415 -- private subclass imports this base
-
-        return _CoupledSolver(
-            model,
-            contact_model=contact_model,
-            globalization=globalization,
-            friction_velocity_scale=friction_velocity_scale,
-            **options,
-        )
-
-    @classmethod
-    def _create_joint_diagnostic(cls, model: Model, *, joint_terms: SolverMonolithic.JointTerms, **options):
-        """Create the internal G1H test entry; not a supported rigid-only solver API."""
-        solver = cls.__new__(cls)
-        solver._initialize(
-            model,
-            collision_pipeline=None,
-            contact_stiffness=1.0,
-            joint_terms=joint_terms,
-            joint_diagnostic=True,
-            **options,
-        )
-        return solver
-
-    @classmethod
-    def _create_tet_only(cls, model: Model, *, globalization, publish_policy="strict", **options):
-        """Create the internal P3 validation path with an explicit acceptance policy."""
-        if globalization not in ("Armijo", "ResNorm", "ArmijoOrResNorm"):
-            raise ValueError("Unknown tet globalization mode")
-        if publish_policy not in ("strict", "legacy"):
-            raise ValueError("Unknown tet publish policy")
-        solver = cls.__new__(cls)
-        solver._initialize(
-            model,
-            collision_pipeline=None,
-            contact_stiffness=1.0,
-            joint_terms=None,
-            joint_diagnostic=False,
-            tet_only=True,
-            **options,
-        )
-        solver._globalization = globalization
-        solver._publish_policy = publish_policy
-        return solver
-
-    def _create_tet_state(self) -> State:
-        """Create the internal FP64 position/velocity State required by the P3 path.
-
-        The returned arrays are the physical solve and publication state, not
-        display copies. A float32 State is rejected rather than silently rounded.
-        """
-        if not self._tet_only:
-            raise ValueError("FP64 tet states belong only to the private P3 path")
-        return _new_candidate_state(self.model, True)
-
-    @property
-    def tet_config_identity(self) -> str | None:
-        """SHA-256 of construction tet configuration; None for the joint diagnostic."""
-        return self._tet_physics.identity if self._tet_physics is not None else None
-
-    @property
-    def use_optimized_articulation_mass_matrix(self) -> bool:
-        """Return the immutable experimental articulation execution policy."""
-        return self._use_optimized_articulation_mass_matrix
-
-    @property
-    def use_cuda_graph(self) -> bool:
-        """Return the immutable experimental PCG and stable-segment capture option."""
-        return self._use_cuda_graph
-
-    @property
-    def pcg_mode(self) -> SolverMonolithic.PCGMode:
-        """Return the immutable experimental PCG observation policy."""
-        return self._pcg_mode
-
-    def _initialize(
-        self,
         model,
         *,
-        collision_pipeline,
-        contact_stiffness,
-        joint_terms,
-        joint_diagnostic,
-        tet_only=False,
-        material_model=MaterialModel.KIM_STABLE_NO_LOG,
-        mass_mode=MassMode.LUMPED,
+        contact_model,
+        globalization,
+        friction_velocity_scale,
+        contact_stiffness=1e7,
+        friction_coefficient=0.5,
+        normal_smoothing=1e-4,
+        material_model="smith_log_stabilized",
+        mass_mode="consistent",
         tet_rest_density=None,
-        normal_smoothing_width=0.0,
-        friction_coefficient=0.0,
-        tangential_stiffness=None,
+        min_det_f_guard=0.2,
+        contact_factor_capacity=None,
+        publish_policy="strict",
+        smooth_sdf=None,
+        alignment_policy="guard",
+        allow_nonconservative_energy=False,
+        joint_terms=None,
         newton_max_iterations=10,
         line_search_max_iterations=8,
         linear_max_iterations=200,
-        linear_tolerance=1.0e-4,
-        linear_absolute_tolerance=1.0e-6,
-        use_optimized_articulation_mass_matrix=False,
+        linear_tolerance=1e-4,
+        linear_absolute_tolerance=1e-6,
         pcg_mode=PCGMode.DIAGNOSTIC,
         use_cuda_graph=False,
     ):
-        # Freeze names now; accepting an option must never silently run different physics.
+        if publish_policy not in ("strict", "last_accepted", "current_iterate"):
+            raise ValueError("Unknown coupled publication policy")
+        if contact_model not in ("C-EE", "C-IE", "C-II"):
+            raise ValueError("An explicit supported contact law is required")
+        if type(allow_nonconservative_energy) is not bool:
+            raise ValueError("Nonconservative energy opt-in must be boolean")
         if (
-            isinstance(linear_absolute_tolerance, (bool, np.bool_))
-            or not isinstance(linear_absolute_tolerance, (int, float, np.integer, np.floating))
-            or not math.isfinite(linear_absolute_tolerance)
-            or linear_absolute_tolerance < 0
-            or linear_absolute_tolerance > float(np.finfo(np.float32).max)
-            or (0 < linear_absolute_tolerance < np.finfo(np.float32).smallest_subnormal)
+            (contact_model != "C-EE" or alignment_policy == "mask")
+            and globalization != "ResNorm"
+            and not allow_nonconservative_energy
         ):
-            raise ValueError("linear_absolute_tolerance must be nonnegative and representable in float32")
-        if type(use_optimized_articulation_mass_matrix) is not bool:
-            raise ValueError("use_optimized_articulation_mass_matrix must be a bool")
-        self._use_optimized_articulation_mass_matrix = use_optimized_articulation_mass_matrix
-        self._pcg_mode = self.PCGMode(pcg_mode)
-        if type(use_cuda_graph) is not bool or (use_cuda_graph and self._pcg_mode != self.PCGMode.PRODUCTION):
-            raise ValueError("use_cuda_graph requires production PCG and a bool")
-        if use_cuda_graph and not model.device.is_cuda:
-            raise ValueError("use_cuda_graph requires a CUDA device")
-        self._use_cuda_graph = use_cuda_graph
-        material_model = self.MaterialModel(material_model)
-        mass_mode = self.MassMode(mass_mode)
-        for name, value in (
-            ("normal_smoothing_width", normal_smoothing_width),
-            ("friction_coefficient", friction_coefficient),
-            ("tangential_stiffness", tangential_stiffness),
-        ):
-            if value is None and name == "tangential_stiffness":
-                continue
-            if (
-                isinstance(value, (bool, np.bool_))
-                or not isinstance(value, (int, float, np.integer, np.floating))
-                or not math.isfinite(value)
-                or value < 0
-                or value > np.finfo(np.float32).max
-            ):
-                raise ValueError(f"{name} must be nonnegative finite float32")
-        if joint_diagnostic and (
-            material_model != self.MaterialModel.KIM_STABLE_NO_LOG
-            or mass_mode != self.MassMode.LUMPED
-            or tet_rest_density is not None
-        ):
-            raise ValueError("Tet options do not apply to the q-only diagnostic")
-        if mass_mode == self.MassMode.LUMPED and tet_rest_density is not None:
-            raise ValueError("tet_rest_density requires consistent mass")
-        if normal_smoothing_width != 0 or friction_coefficient != 0 or tangential_stiffness is not None:
-            if joint_diagnostic:
-                raise ValueError("Contact options do not apply to the q-only diagnostic")
-        if friction_coefficient > 0 and (tangential_stiffness is None or tangential_stiffness <= 0):
-            raise ValueError("Contact friction requires positive tangential_stiffness")
-        if tangential_stiffness is not None and (tangential_stiffness <= 0 or np.float32(tangential_stiffness) <= 0):
-            raise ValueError("tangential_stiffness must be positive in float32")
-        if friction_coefficient > 0 and np.float32(friction_coefficient) <= 0:
-            raise ValueError("friction_coefficient must be positive in float32")
-        if normal_smoothing_width > 0 and np.float32(normal_smoothing_width) <= 0:
-            raise ValueError("normal_smoothing_width must be positive in float32")
-        self._config_generation = 0  # Immutable per solver; rebuild instead of reconfiguring.
-        self._history_epoch = 0
-        self._joint_diagnostic = joint_diagnostic
-        self._tet_only = tet_only
-        self._globalization = None
-        self._publish_policy = "legacy"
-        has_contact = not joint_diagnostic and not tet_only
-        if tet_only and (
-            joint_terms is not None or normal_smoothing_width or friction_coefficient or tangential_stiffness
-        ):
-            raise ValueError("Tet-only does not support joint or contact physics")
-        if has_contact:
-            if not isinstance(collision_pipeline, MonolithicCollisionPipeline):
-                raise ValueError("Monolithic requires a MonolithicCollisionPipeline")
-            if normal_smoothing_width + collision_pipeline._sdf_query_error > collision_pipeline._soft_contact_gap:
-                raise ValueError("Detection gap must cover normal_smoothing_width and SDF query error")
-            if collision_pipeline.model is not model:
-                raise ValueError("collision_pipeline and solver must use the same model")
-        for name, value in (("contact_stiffness", contact_stiffness), ("linear_tolerance", linear_tolerance)):
-            if (
-                not math.isfinite(value)
-                or value <= 0.0
-                or value > float(np.finfo(np.float32).max)
-                or np.float32(value) <= 0.0
-            ):
-                raise ValueError(f"{name} must be finite and positive in float32")
-        for name, value in (
-            ("newton_max_iterations", newton_max_iterations),
-            ("line_search_max_iterations", line_search_max_iterations),
-            ("linear_max_iterations", linear_max_iterations),
-        ):
-            if isinstance(value, bool) or not isinstance(value, (int, np.integer)) or value <= 0:
-                raise ValueError(f"{name} must be a positive integer")
-        self._layout = _build_layout(model, joint_diagnostic=joint_diagnostic, tet_only=tet_only)
-        if not joint_diagnostic:
-            validate_tet_scope(
-                model,
-                dynamic_particle_ids=self._layout.dynamic_particle_ids.numpy(),
-                particle_to_dynamic=self._layout.particle_to_dynamic.numpy(),
-            )
-        self._tet_physics = (
-            TetPhysicsWorkspace(
-                model, material_model=material_model.value, mass_mode=mass_mode.value, density=tet_rest_density
-            )
-            if not joint_diagnostic
-            else None
-        )
-        if joint_terms is not None and not isinstance(joint_terms, self.JointTerms):
-            raise ValueError("joint_terms must be SolverMonolithic.JointTerms or None")
-        self._joint_terms = (
-            MonolithicJointTermsWorkspace(
-                model,
-                implicit_pd=joint_terms.implicit_pd,
-                limits=joint_terms.limits,
-                friction=joint_terms.friction,
-                limit_width=joint_terms.limit_width,
-                friction_velocity_scale=joint_terms.friction_velocity_scale,
-            )
-            if joint_terms is not None
-            else None
-        )
-        self._articulation = (
-            None
-            if tet_only
-            else MonolithicArticulationWorkspace(
-                model,
-                joint_terms=self._joint_terms,
-                use_optimized_articulation_mass_matrix=self.use_optimized_articulation_mass_matrix,
-            )
-        )
-        super().__init__(
+            raise ValueError("Nonconservative energy acceptance requires explicit opt-in")
+        self._coupled_publish_policy = publish_policy
+        self._allow_nonconservative_energy = allow_nonconservative_energy
+        self._policy_identity = (globalization, publish_policy, alignment_policy, allow_nonconservative_energy)
+        self._stopped_failure = None
+        if not np.isfinite(min_det_f_guard) or min_det_f_guard <= 0:
+            raise ValueError("Invalid detF guard")
+        _validate_and_collect_boundary_faces(model)
+        if not model.particle_count or not model.tet_count:
+            raise ValueError("Coupled entry requires one tet body")
+        if not np.all(model.particle_world.numpy() == model.body_world.numpy()[0]):
+            raise ValueError("Articulation and tet must share one world")
+        radius = model.particle_radius.numpy()
+        if not np.isfinite(radius).all() or np.any(radius < 0) or not np.all(radius == radius[0]):
+            raise ValueError("Coupled particles require one finite nonnegative radius")
+        self._tet = TetObjective64(model, material_model=material_model, mass_mode=mass_mode, density=tet_rest_density)
+        self._contact = ContactObjective(
             model,
-            collision_pipeline=collision_pipeline,
-            collision_frequency_type=dict.fromkeys(self.CollisionSlot, self.CollisionFrequencyType.NONE),
+            self._tet.mapping.numpy(),
+            q_dof_count=model.joint_dof_count,
+            contact_model=contact_model,
+            normal_stiffness=contact_stiffness,
+            friction_coefficient=friction_coefficient,
+            friction_velocity_scale=friction_velocity_scale,
+            smoothing_width=normal_smoothing,
+            particle_radius=float(radius[0]),
+            smooth_sdf=smooth_sdf,
+            alignment_policy=alignment_policy,
         )
-        self._trial_contacts = collision_pipeline.contacts() if has_contact else None
-        self._transaction = _StepTransaction(model, self._layout, tet_only=tet_only)
-        self.contact_stiffness = contact_stiffness
-        self.newton_max_iterations = newton_max_iterations
-        self.line_search_max_iterations = line_search_max_iterations
-        self.linear_max_iterations = linear_max_iterations
-        self.linear_tolerance = linear_tolerance
-        self.linear_absolute_tolerance = linear_absolute_tolerance
-        self._config = _SolverMonolithicInternalConfig()
-        if tet_only:
-            # The private FP64 path resolves corrections below the legacy stopping floor.
-            # See the fixed-physics study in scripts/monolithic_reference/study_p3_tet_stopping.py.
-            self._config = replace(
-                self._config,
-                merit_absolute_global=1.0e-7,
-                merit_absolute_x=1.0e-7,
-                merit_relative_global=1.0e-6,
-                merit_relative_x=1.0e-6,
-                step_tolerance_global=1.0e-10,
-                step_tolerance_x=1.0e-10,
-            )
-        layout = self._layout
-        nq, nx, size = layout.q_dof_count, layout.dynamic_particle_count, layout.scalar_dof_count
-        pattern = build_tet_triplet_pattern(
-            model.tet_indices.numpy() if model.tet_count else np.empty((0, 4), dtype=np.int32),
-            layout.particle_to_dynamic.numpy(),
-            x_dof_start=nq,
-        )
-        contact_capacity = (
-            collision_pipeline.soft_contact_max * (3 if friction_coefficient > 0 else 1) if has_contact else 0
-        )
-        # Include triplets, BSR build scratch and factors before requesting device storage.
-        self._contact_storage_bound_bytes = contact_capacity * ((nq + 9) ** 2 * 64 + (nq + 32) * 4)
-        if (
-            friction_coefficient > 0
-            and model.device.is_cuda
-            and self._contact_storage_bound_bytes > model.device.free_memory
+        capacity = 3 * self._contact.count if contact_factor_capacity is None else contact_factor_capacity
+        if type(capacity) is not int or capacity < 0:
+            raise ValueError("Contact factor capacity must be a nonnegative integer")
+        self._guard = min_det_f_guard
+        self._physics_sources = dict(self._tet.physics.sources)
+        for name in (
+            "particle_radius",
+            "particle_flags",
+            "tet_activations",
+            "tri_materials",
+            "edge_bending_properties",
         ):
-            raise ValueError("Contact capacity exceeds available device memory")
-        self._linear = MonolithicLinearWorkspace(
-            MonolithicLinearLayout(nq, nx),
-            MonolithicLinearCapacities(
-                nq * nq + len(pattern.global_rows) + contact_capacity * (nq + 9) ** 2,
-                len(pattern.ax_rows),
-                contact_capacity,
+            if getattr(model, name) is not None:
+                self._physics_sources[name] = getattr(model, name)
+        self._physics_values = {name: value.numpy().copy() for name, value in self._physics_sources.items()}
+        self._textures = []
+        self._sdf_slots = tuple(model._texture_sdf_subgrid_start_slots)
+        self._sdf_fields = self._freeze_sdf(model)
+        self._coupled_config = {
+            "contact_parameters": np.asarray(self._contact.parameters, dtype=float),
+            "contact_model": np.frombuffer(contact_model.encode(), dtype=np.uint8),
+            "globalization": np.frombuffer(globalization.encode(), dtype=np.uint8),
+            "material": np.frombuffer(material_model.encode(), dtype=np.uint8),
+            "mass": np.frombuffer(mass_mode.encode(), dtype=np.uint8),
+            "guard_capacity": np.array([min_det_f_guard, capacity]),
+            "physics_digest": np.frombuffer(bytes.fromhex(self._tet.physics.identity), dtype=np.uint8),
+            "publication_policy": np.frombuffer(publish_policy.encode(), dtype=np.uint8),
+            "alignment_policy": np.frombuffer(alignment_policy.encode(), dtype=np.uint8),
+            "heuristic_energy": np.array([allow_nonconservative_energy], dtype=np.uint8),
+        }
+        if smooth_sdf is not None:
+            self._coupled_config["smooth_sdf_digest"] = np.frombuffer(bytes.fromhex(smooth_sdf.digest), dtype=np.uint8)
+        # Include effective numeric policy in checkpoint identity; device execution
+        # mode is deliberately excluded so CPU/CUDA checkpoints remain portable.
+        self._coupled_config["iteration_policy"] = np.array(
+            [
+                newton_max_iterations,
+                line_search_max_iterations,
                 linear_max_iterations,
-                linear_max_iterations + 2,
+                linear_tolerance,
+                linear_absolute_tolerance,
+            ]
+        )
+        self._scope_counts = tuple(getattr(model, name) for name in ("spring_count", "tri_count", "edge_count"))
+        if globalization not in ("Armijo", "ResNorm", "ArmijoOrResNorm"):
+            raise ValueError("Unknown articulation globalization/publication policy")
+        for value in (newton_max_iterations, line_search_max_iterations, linear_max_iterations):
+            if type(value) is not int or value <= 0:
+                raise ValueError("Iteration budgets must be positive integers")
+        for value in (linear_tolerance, linear_absolute_tolerance):
+            if isinstance(value, bool) or not np.isfinite(value) or value < 0:
+                raise ValueError("Invalid linear tolerance")
+        if joint_terms is None:
+            joint_terms = self.JointTerms()
+        if not isinstance(joint_terms, self.JointTerms):
+            raise ValueError("joint_terms must be SolverMonolithic.JointTerms")
+        options = {name: getattr(joint_terms, name) for name in joint_terms.__dataclass_fields__}
+        self._joint_terms = JointParameters(model, **options)
+        for name in ("joint_target_ke", "joint_target_kd", "joint_limit_ke", "joint_limit_kd", "joint_friction"):
+            if name not in self._joint_terms.allowed_properties and np.any(getattr(model, name).numpy() != 0):
+                raise ValueError(f"Disabled joint term has nonzero parameters: {name}")
+        parameters = self._joint_terms.params.numpy()
+        self._kinematics = self._make_kinematics(
+            model,
+            extra_config={
+                "joint_terms": parameters,
+                "joint_switches": np.array(
+                    [joint_terms.implicit_pd, joint_terms.limits, joint_terms.friction], dtype=np.uint8
+                ),
+            },
+        )
+        SolverBase.__init__(self, model)
+        self._states = self._make_states()
+        self._objective = ArticulationObjective(self._kinematics, parameters)
+        self._config = _SolverMonolithicInternalConfig()
+        # Sharpa refinement certifies these tighter goals within the existing budgets.
+        self._config = replace(
+            self._config,
+            merit_absolute_global=self._config.merit_absolute_global * 0.1,
+            merit_absolute_q=self._config.merit_absolute_q * 0.1,
+            merit_relative_global=self._config.merit_relative_global * 0.1,
+            merit_relative_q=self._config.merit_relative_q * 0.1,
+        )
+        self._globalization = globalization
+        self.newton_max_iterations, self.line_search_max_iterations = newton_max_iterations, line_search_max_iterations
+        self.linear_max_iterations = linear_max_iterations
+        self.linear_tolerance, self.linear_absolute_tolerance = linear_tolerance, linear_absolute_tolerance
+        self._pcg_mode = self.PCGMode(pcg_mode)
+        self._use_cuda_graph = use_cuda_graph
+        device = model.device
+        self._graphs = _SegmentGraphCache(device, enabled=use_cuda_graph)
+        # Scratch states are allocated on first use, with the caller's legal initial dt.
+        self._original = self._accepted = self._trial = None
+        self._step_generation = self._assembly_sequence = 0
+        self._last_stats = self.Stats(self.Status.NOT_RUN)
+        self._old_joint_t = wp.empty_like(self._kinematics.joint_translations)
+        self._old_joint_r = wp.empty_like(self._kinematics.joint_rotations)
+
+        self._config = replace(
+            self._config,
+            merit_absolute_global=1e-7,
+            merit_absolute_q=2.5e-8,
+            merit_absolute_x=1e-7,
+            merit_relative_global=1e-6,
+            merit_relative_q=1e-5,
+            merit_relative_x=1e-6,
+            step_tolerance_global=1e-10,
+            step_tolerance_x=1e-10,
+        )
+        n, nq, device = self._tet.ids.size, model.joint_dof_count, model.device
+        pattern = build_tet_triplet_pattern(model.tet_indices.numpy(), self._tet.mapping.numpy(), x_dof_start=nq)
+        self._tet_assembly = create_tet_assembly_workspace(
+            pattern, tet_count=model.tet_count, device=device, physics=self._tet.physics
+        )
+        self._linear = MonolithicLinearWorkspace(
+            MonolithicLinearLayout(nq, n),
+            MonolithicLinearCapacities(
+                nq * nq + len(pattern.global_rows) + capacity * (nq + 9) ** 2,
+                len(pattern.ax_rows),
+                capacity,
+                self.linear_max_iterations,
+                self.linear_max_iterations + 2,
             ),
-            layout.particle_to_dynamic,
-            device=model.device,
+            self._tet.mapping,
+            device=device,
             pcg_mode=self.pcg_mode.value,
-            use_cuda_graph=self.use_cuda_graph,
+            use_cuda_graph=self._use_cuda_graph,
         )
         self._linear._set_fixed_triplet_pattern(
-            global_rows=np.concatenate((np.repeat(np.arange(nq), nq), pattern.global_rows)).astype(np.int32),
-            global_columns=np.concatenate((np.tile(np.arange(nq), nq), pattern.global_columns)).astype(np.int32),
+            global_rows=np.r_[np.repeat(np.arange(nq, dtype=np.int32), nq), pattern.global_rows],
+            global_columns=np.r_[np.tile(np.arange(nq, dtype=np.int32), nq), pattern.global_columns],
             internal_rows=pattern.ax_rows,
             internal_columns=pattern.ax_columns,
         )
-        self._tet_workspace = (
-            create_tet_assembly_workspace(
-                pattern, tet_count=model.tet_count, device=model.device, physics=self._tet_physics
-            )
-            if not joint_diagnostic
-            else None
+        for name in ("_rhs", "_y", "_delta", "_diagonal"):
+            setattr(self, name, wp.zeros(nq + 3 * n, dtype=float, device=device))
+        self._complete_r = wp.zeros(nq + 3 * n, dtype=wp.float64, device=device)
+        self._post_r, self._post_error = wp.zeros_like(self._complete_r), wp.zeros_like(self._complete_r)
+        self._tet_r32 = wp.zeros(n, dtype=wp.vec3, device=device)
+        self._frozen_force = wp.zeros(model.particle_count, dtype=wp.vec3, device=device)
+        self._frozen_gravity = wp.zeros_like(model.gravity)
+        self._out_backup = None
+        self._dt = None
+
+    def _freeze_sdf(self, model):
+        """Bind actual texels and indirection, excluding process-specific GPU handles."""
+        fields = {}
+        table = model._texture_sdf_data
+        if table is None or not table.size:
+            return fields
+        values = table.numpy()
+        for name in values.dtype.names:
+            if name not in ("coarse_texture", "subgrid_texture", "subgrid_start_slots"):
+                fields["sdf." + name] = values[name].copy()
+        for name in ("_texture_sdf_coarse_textures", "_texture_sdf_subgrid_textures"):
+            textures = getattr(model, name)
+            if len(textures) != table.size:
+                raise ValueError("Mesh SDF requires owned texture assets")
+            for i, texture in enumerate(textures):
+                shape = (texture.depth, texture.height, texture.width)
+                if texture.num_channels != 1:
+                    shape += (texture.num_channels,)
+                pixels = np.empty(shape, dtype=np.float32)
+                texture.copy_to(pixels)
+                self._textures.append((name, i, texture, pixels))
+                fields[f"{name}.{i}"] = pixels
+        for i, slots in enumerate(model._texture_sdf_subgrid_start_slots):
+            fields[f"sdf.slots.{i}"] = slots.numpy().copy()
+        return fields
+
+    def _make_kinematics(self, model, *, extra_config):
+        fields = dict(extra_config)
+        fields.update(self._physics_values)
+        fields.update(self._contact.values)
+        fields.update(self._coupled_config)
+        fields.update(self._sdf_fields)
+        return _TreeKinematics(model, extra_config=fields)
+
+    def _make_states(self):
+        return CoupledState(self._kinematics)
+
+    def create_state(self, *, dt, source=None):
+        """Initialize full P3 history with positive dt, optionally from ordinary model state."""
+        self._validate_components()
+        self._kinematics.validate_identity()
+        return self._states.create(dt=dt, source=source)
+
+    def reset_state(self, state, *, dt):
+        """Reinitialize history at current coordinates and clear published contact forces."""
+        self._validate_components()
+        self._kinematics.validate_identity()
+        self._states.reset(state, dt=dt)
+
+    def save_checkpoint(self, state, path):
+        """Atomically save complete NPZ state, appending .npz as in NumPy's path API."""
+        self._validate_components()
+        self._kinematics.validate_identity()
+        path = Path(path)
+        if not str(path).endswith(".npz"):
+            path = Path(str(path) + ".npz")
+        temporary = None
+        try:
+            with tempfile.NamedTemporaryFile(dir=path.parent, prefix=path.name + ".", suffix=".npz", delete=False) as f:
+                temporary = Path(f.name)
+            self._states.save_checkpoint(state, temporary)
+            os.replace(temporary, path)
+        finally:
+            if temporary is not None:
+                temporary.unlink(missing_ok=True)
+
+    def load_checkpoint(self, state, path):
+        """Validate a checkpoint in scratch before replacing the target state."""
+        self._validate_components()
+        self._kinematics.validate_identity()
+        self._states.load_checkpoint(state, path)
+
+    def get_contact_forces(self, state):
+        """Return an independent, read-only snapshot of this state's final contact forces."""
+        self._validate_components()
+        self._kinematics.validate_identity()
+        history = self._states.validate(state)
+        return MonolithicContactForces(
+            history.contact_particle_force.numpy(),
+            history.contact_body_force.numpy(),
+            history.contact_joint_force.numpy(),
+            bool(history.force_valid.numpy()[0]),
+            int(history.force_generation.numpy()[0]),
         )
-        self._tet_objective = TetObjectiveWorkspace(model, layout, self._tet_physics) if tet_only else None
-        self._variational = None
-        self._tet_triplet_count = len(pattern.global_rows)
-        self._contact = (
-            None
-            if not has_contact
-            else MonolithicContactWorkspace(
-                model,
-                collision_pipeline,
-                self._linear,
-                contact_stiffness=contact_stiffness,
-                normal_smoothing_width=normal_smoothing_width,
-                friction_coefficient=friction_coefficient,
-                tangential_stiffness=tangential_stiffness,
-                physics_identity=self._tet_physics.identity
-                + (
-                    hashlib.sha256(self._joint_terms.params.numpy().tobytes()).hexdigest()
-                    if self._joint_terms is not None
-                    else ""
-                ),
-            )
-        )
-        self._final_evaluation_state = model.state()
-        self._particle_residual = wp.zeros(nx, dtype=wp.vec3, device=model.device) if not joint_diagnostic else None
-        self._dynamic_diagonal = wp.zeros(size, dtype=float, device=model.device)
-        self._residual_ref = wp.zeros(size, dtype=float, device=model.device)
-        self._metric_vector = wp.zeros(size, dtype=float, device=model.device)
-        self._metric_slices = (
-            self._metric_vector,
-            self._metric_vector[:nq] if nq else wp.empty(0, dtype=float, device=model.device),
-            self._metric_vector[nq:] if nx else wp.empty(0, dtype=float, device=model.device),
-        )
-        self._norm_values = wp.zeros(3, dtype=float, device=model.device)
-        self._raw_norm_sums = wp.zeros(2, dtype=wp.float64, device=model.device)
-        self._norm_outputs = tuple(self._norm_values[i : i + 1] for i in range(3))
-        self._rhs_hat = wp.zeros(size, dtype=float, device=model.device)
-        self._y = wp.zeros(size, dtype=float, device=model.device)
-        self._delta = wp.zeros(size, dtype=float, device=model.device)
-        self._final_residual = wp.zeros(size, dtype=float, device=model.device)
-        self._contact_status = wp.zeros(1, dtype=int, device=model.device)
-        self._segment_graphs = _SegmentGraphCache(model.device, enabled=use_cuda_graph)
-        if self._articulation is not None:
-            self._articulation._segment_graphs = self._segment_graphs
-        self._linear._segment_graphs = self._segment_graphs
-        self._default_control = model.control(clone_variables=False)
-        self._generation = None
-        self._assembly_sequence = 0
 
     @property
-    def last_stats(self) -> SolverMonolithic.Stats:
-        """Return diagnostics from the last completed step."""
-        return self._transaction.last_stats
+    def contacts(self):
+        """Return None; monolithic contact geometry is evaluated internally."""
+        return None
 
-    def step(
-        self, state_in: State, state_out: State, control: Control | None, contacts: Contacts | None, dt: float
-    ) -> None:
-        """Advance by ``dt`` [s], or restore the input on a hard numerical failure.
+    @contacts.setter
+    def contacts(self, value):
+        if value is not None:
+            raise ValueError("SolverMonolithic does not accept external Contacts")
 
-        Exhausting nonlinear iterations commits the last safe accepted state
-        with an unconverged status. If contact publication also fails on the
-        rollback state, restore the input, invalidate forces and raise RuntimeError.
-        """
-        if self._contact is None and contacts is not None:
-            raise ValueError("Contact-free solver does not accept contacts")
-        self._resolve_step_contacts(contacts)
-        _validate_dt(dt)
-        _validate_state(self.model, state_in, tet_only=self._tet_only)
-        _validate_state(self.model, state_out, tet_only=self._tet_only)
-        _validate_dirichlet(self.model, self._layout, state_in, tet_only=self._tet_only)
-        if self._tet_physics is not None:
-            self._tet_physics.validate_identity()
-        pipeline = self.collision_pipeline
-        if pipeline is not None:
-            pipeline.validate_contacts(self.contacts)
-            pipeline.validate_contacts(self._trial_contacts)
-            self._contact.validate_contract(self.model, pipeline, self.contacts)
-        control = self._default_control if control is None else control
-        if self._articulation is not None:
-            self._articulation.validate_candidate(
-                self.model,
-                state_in,
-                self._transaction.accepted.qdd,
-                control.joint_f,
-                state_in.body_f,
-            )
-        if self._joint_terms is not None:
-            self._joint_terms.snapshot_targets(control)
-        start = time.perf_counter()
-        self._transaction.begin(state_in, state_out, control, dt)
-        self._variational = (
-            {
-                "mode": self._globalization,
-                "publish_policy": self._publish_policy,
-                "objective_evaluations": 0,
-                "residual_evaluations": 0,
-                "trials": [],
-            }
-            if self._tet_only
-            else None
-        )
-        if self._joint_terms is not None:
-            self._joint_terms.final_generation = -1
-        if self._contact is not None:
-            self._contact.invalidate_final_force()
-            self._contact.begin_step(self._transaction._original, dt)
-        self._assembly_sequence = 0
+    def update_contacts(self, contacts, state=None):
+        """Reject external contact updates; use the independent collision pipeline separately."""
+        raise ValueError("SolverMonolithic does not accept external Contacts")
+
+    def set_collision_frequency(self, *, collision_frequency=None, collision_frequency_type=None):
+        """Reject collision scheduling; no configuration is needed for internal contact."""
+        if collision_frequency is not None or collision_frequency_type is not None:
+            raise ValueError("SolverMonolithic does not support collision scheduling")
+
+    def reset(self, state, world_mask=None, flags=None):
+        """Require explicit dt when resetting the complete integration history."""
+        raise NotImplementedError("Use reset_state(state, dt=...) for SolverMonolithic")
+
+    def notify_model_changed(self, flags):
+        """Require reconstruction after changes to the bound model."""
+        raise NotImplementedError("Rebuild SolverMonolithic after model changes")
+
+    def _validate_components(self):
+        if self._policy_identity != (
+            self._globalization,
+            self._coupled_publish_policy,
+            self._contact.alignment_policy,
+            self._allow_nonconservative_energy,
+        ):
+            raise ValueError("Coupled policies changed; rebuild solver and rebind state")
+        self._contact.validate_identity()
+        if (
+            tuple(getattr(self.model, name) for name in ("spring_count", "tri_count", "edge_count"))
+            != self._scope_counts
+        ):
+            raise ValueError("Coupled model scope changed")
+        for name, source in self._physics_sources.items():
+            if getattr(self.model, name) is not source or not np.array_equal(
+                source.numpy(), self._physics_values[name]
+            ):
+                raise ValueError(f"Coupled physics changed: {name}")
+        for name, i, texture, pixels in self._textures:
+            if getattr(self.model, name)[i] is not texture:
+                raise ValueError("SDF texture replaced")
+            actual = np.empty_like(pixels)
+            texture.copy_to(actual)
+            if not np.array_equal(actual, pixels):
+                raise ValueError("SDF texels changed")
+        if len(self.model._texture_sdf_subgrid_start_slots) != len(self._sdf_slots):
+            raise ValueError("SDF indirection layout changed")
+        for i, slots in enumerate(self.model._texture_sdf_subgrid_start_slots):
+            if slots is not self._sdf_slots[i]:
+                raise ValueError("SDF indirection replaced")
+            if not np.array_equal(slots.numpy(), self._sdf_fields[f"sdf.slots.{i}"]):
+                raise ValueError("SDF indirection changed")
+
+    def step(self, state_in, state_out, control, contacts=None, dt=0.0):
+        self._validate_components()
+        self._stopped_failure = None
+        if contacts is not None or not math.isfinite(dt) or dt <= 0:
+            raise ValueError("Articulation step requires no contacts and finite positive dt")
+        self._kinematics.validate_identity()
+        self._states.validate(state_in)
+        self._states.validate(state_out)
+        for name in ("joint_f", "joint_target_q", "joint_target_qd"):
+            array = getattr(control, name, None)
+            if (
+                not isinstance(array, wp.array)
+                or (array.shape, array.dtype, array.device)
+                != ((self._kinematics.count,), wp.float32, self.model.device)
+                or not np.isfinite(array.numpy()).all()
+            ):
+                raise ValueError(f"Invalid articulation control: {name}")
+        self._joint_terms.snapshot_targets(control)
+        force = state_in.body_f.numpy().astype(float)
+        joint_force = control.joint_f.numpy().astype(float)
+        gravity = self.model.gravity.numpy().astype(float)
+        if (
+            not np.isfinite(force).all()
+            or not np.isfinite(joint_force).all()
+            or not np.isfinite(gravity).all()
+            or np.any(force[:, 3:] != 0)
+        ):
+            raise ValueError("Articulation requires finite forces and zero spatial torque")
+        if self._original is None:
+            self._original = self._states.copy(state_in)
+            self._accepted = self._states.copy(state_in)
+            self._trial = self._states.copy(state_in)
+        for state in (self._original, self._accepted, self._trial):
+            state.assign(state_in)
+        self._prepare_step(state_in, state_out, dt)
+        self._step_generation += 1
         self._metrics = {
-            "nonlinear_iterations": 0,
-            "line_search_iterations": 0,
+            "matrix_assembly_count": 0,
+            "regularization_retries": 0,
             "linear_iterations": 0,
             "linear_scheduled_slots": 0,
-            "regularization_retries": 0,
-            "matrix_assembly_count": 0,
-            "true_residual_recomputations": 0,
-            "residual_replacements": 0,
-            "preconditioner_kind": "actor_block",
-            "factor_setup_count": 0,
-            "factor_failure_count": 0,
-            "q_block_count": int(self._layout.q_dof_count > 0),
-            "particle_block_count": self._layout.dynamic_particle_count,
-            "triplet_capacity": self._linear.capacities.global_scalar_triplet_count,
-            "merit_noise": self._config.merit_noise,
-            "residual_floor_global": self._config.residual_floor_global,
-            "residual_floor_q": self._config.residual_floor_q,
-            "residual_floor_x": self._config.residual_floor_x,
+            "line_search_iterations": 0,
         }
-        reason = None
-        try:
-            try:
-                status = self._iterate(dt)
-            except _StepFailure as error:
-                status, reason = error.status, str(error)
-            self._finish_step(state_out, status, reason, start)
-        except Exception:
-            # A programming/configuration exception must not leave a reusable
-            # solver in an open transaction or retain a partially published state.
-            state_out.assign(self._transaction._original)
-            if self._contact is not None:
-                self._contact.discard_history()
-                self._history_epoch = self._contact.history_epoch
-                self._contact.invalidate_final_force()
-            if self._joint_terms is not None:
-                self._joint_terms.final_generation = -1
-            if self._contact is not None and self._contact.friction_coefficient > 0:
-                try:
-                    self._publish_final(state_out, self.Status.NONFINITE)
-                except Exception:
-                    self._contact.invalidate_final_force()
-                    if self._joint_terms is not None:
-                        self._joint_terms.final_generation = -1
-            self._transaction._finished = True
-            raise
-
-    def update_contacts(self, contacts: Contacts, state: State | None = None) -> None:
-        """Idempotently publish cached forces for the last returned state."""
-        if self._contact is None:
-            raise ValueError("Contact-free solver has no contact publication")
-        if contacts is not self.contacts:
-            raise ValueError("update_contacts requires solver.contacts")
-        generation = self._contact.final_force_generation
-        if generation is None:
-            raise ValueError("No valid final contact publication")
-        state = generation.returned_state if state is None else state
-        self._contact._publish_final_forces(
-            state,
-            contacts,
-            step_generation=self._transaction.step_generation,
-            returned_state_role=generation.returned_state_role,
-        )
-
-    def _rms(self, values: wp.array[float], *, scaled: bool = True) -> tuple[float, float, float]:
-        self._segment_graphs.run(
-            "norms",
-            (scaled,),
-            (
-                values,
-                self._linear.scale,
-                self._metric_vector,
-                *self._metric_slices,
-                self._norm_values,
-                *self._norm_outputs,
-            ),
-            lambda: self._reduce_norms(values, scaled=scaled),
-        )
-        norms = self._norm_values.numpy()
-        if not np.isfinite(norms).all() or np.any(norms < 0):
-            raise _StepFailure(self.Status.NONFINITE, "Nonfinite scaled reduction")
-        return tuple(
-            math.sqrt(float(value) / max(vector.size, 1))
-            for value, vector in zip(norms, self._metric_slices, strict=True)
-        )
-
-    def _reduce_norms(self, values, *, scaled):
-        if scaled:
-            wp.launch(
-                _scale_vector,
-                values.size,
-                [values, self._linear.scale, 1.0, self._metric_vector],
-                device=self.model.device,
-            )
-        else:
-            wp.copy(self._metric_vector, values)
-        self._norm_values.zero_()
-        for vector, output in zip(self._metric_slices, self._norm_outputs, strict=True):
-            if vector.size:
-                wp.utils.array_inner(vector, vector, out=output)
-
-    def _converged(self, merit: tuple[float, float, float], reference: tuple[float, float, float]) -> bool:
-        config = self._config
-        return all(
-            value <= getattr(config, f"merit_absolute_{block}") + getattr(config, f"merit_relative_{block}") * ref
-            for block, value, ref in zip(("global", "q", "x"), merit, reference, strict=True)
-            if not (self._tet_only and block == "q")
-        )
-
-    def _collide(self, state: State, contacts: Contacts) -> None:
-        try:
-            self.collision_pipeline.collide(state, contacts, dt=0.0)
-        except MonolithicCollisionPipeline.Error as error:
-            if error.status == self.collision_pipeline.Status.CONTACT_CAPACITY_OVERFLOW:
-                raise _StepFailure(self.Status.CONTACT_OVERFLOW, str(error)) from error
-            if error.status == self.collision_pipeline.Status.INVALID_SDF_GRADIENT:
-                raise _StepFailure(self.Status.NONFINITE, str(error)) from error
-            raise
-
-    def _actor_residual(self, candidate: _Candidate) -> None:
-        if self._articulation is None:
-            return
-        model, articulation, inputs = self.model, self._articulation, self._transaction.inputs
-        eval_articulation_passive_candidate(model, candidate.state, articulation)
-        nq = self._layout.q_dof_count
-        wp.launch(
-            project_articulation_body_wrenches,
-            nq,
-            [
-                0,
-                nq,
-                model.articulation_start,
-                model.articulation_end,
-                model.joint_child,
-                articulation.scratch.J,
-                inputs.body_f,
-                articulation.generalized_body_force,
-            ],
-            device=model.device,
-        )
-        wp.launch(
-            eval_articulation_actor_residual,
-            nq,
-            [
-                0,
-                0,
-                nq,
-                articulation.M,
-                candidate.qdd,
-                articulation.C,
-                articulation.g,
-                inputs.joint_f,
-                articulation.generalized_body_force,
-                candidate.residual,
-            ],
-            device=model.device,
-        )
-
-        if self._joint_terms is not None:
-            self._evaluate_joint_terms(candidate.state, candidate._dt)
-            wp.launch(
-                add_joint_term_residual, nq, [self._joint_terms.residual, candidate.residual], device=model.device
-            )
-
-    def _evaluate_joint_terms(self, state: State, dt: float) -> None:
-        self._joint_terms.evaluate(state, dt)
-        if int(self._joint_terms.status.numpy()[0]):
-            raise _StepFailure(self.Status.NONFINITE, "Nonfinite joint term evaluation")
-
-    def _tet_arguments(self, candidate: _Candidate, dt: float) -> dict:
-        return {
-            "candidate_particle_q": candidate.state.particle_q,
-            "particle_q_n": self._transaction._original.particle_q,
-            "particle_qd_n": self._transaction._original.particle_qd,
-            "frozen_particle_f": self._transaction.inputs.particle_f,
-            "dynamic_particle_ids": self._layout.dynamic_particle_ids,
-            "particle_to_dynamic": self._layout.particle_to_dynamic,
-            "residual_x": self._particle_residual,
-            "dt": dt,
-            "min_det_f_guard": self._config.det_f_guard,
-            "workspace": self._tet_workspace,
-            "frozen_gravity": self._transaction.inputs.gravity if self._tet_only else None,
+        self._variational = {
+            "globalization": self._globalization,
+            "trials": [],
+            "linear_postchecks": [],
+            "configuration": self._kinematics.digest.hex(),
         }
-
-    def _evaluate_objective(self, candidate: _Candidate, dt: float):
-        if self._tet_objective is None or self._transaction._finished or candidate._dt != dt:
-            raise ValueError("Objective requires a live tet-only step and its frozen dt")
-        if candidate is not self._transaction.accepted and (
-            candidate is not self._transaction.trial
-            or candidate._trial_source is not self._transaction.accepted
-            or candidate._trial_source_generation != self._transaction.accepted.generation
-        ):
-            raise ValueError("Objective candidate generation is stale")
-        status, parts, absolute_sum = self._tet_objective.evaluate(
-            candidate,
-            self._transaction._original,
-            self._transaction.inputs,
-            dt,
-            self._config.det_f_guard,
-            self._segment_graphs,
-        )
-        if status:
-            raise _StepFailure(
-                self.Status.TET_INVERSION if status == 1 else self.Status.NONFINITE, "Invalid tet objective"
-            )
-        if self._variational is not None:
-            self._variational["objective_evaluations"] += 1
-        return parts, absolute_sum
-
-    def _evaluation_result(self, candidate, dt, min_det, penetration):
-        parts, absolute_sum = (None, 0.0)
-        if self._tet_only:
-            parts, absolute_sum = self._evaluate_objective(candidate, dt)
-            if self._variational is not None:
-                self._variational["residual_evaluations"] += 1
-        return _TrialResult(0, *self._rms(candidate.residual), min_det, penetration, parts, absolute_sum)
-
-    def _check_tet(self) -> float:
-        code = TetEvaluationStatus(int(self._tet_workspace.failure_flags.numpy()[0]))
-        if code == TetEvaluationStatus.DET_F_GUARD:
-            raise _StepFailure(self.Status.TET_INVERSION, "Tet determinant guard")
-        if code == TetEvaluationStatus.NONFINITE:
-            raise _StepFailure(self.Status.NONFINITE, "Nonfinite tet evaluation")
-        if code == TetEvaluationStatus.PSD_PROJECTION_FAILURE:
-            raise _StepFailure(self.Status.TET_PROJECTION_FAILURE, "Element spectral projection did not converge")
-        if code != TetEvaluationStatus.SUCCESS:
-            raise ValueError(f"Invalid tet evaluation contract: {code.name}")
-        return float(self._tet_workspace.min_det_f.numpy()[0])
-
-    def _check_contact(self) -> None:
-        code = int(self._contact_status.numpy()[0])
-        if code == int(MonolithicLinearStatus.CONTACT_FACTOR_OVERFLOW):
-            raise _StepFailure(self.Status.CONTACT_OVERFLOW, "Contact factor capacity")
-        if code == int(MonolithicLinearStatus.NONFINITE_CONTRIBUTION):
-            raise _StepFailure(self.Status.NONFINITE, "Nonfinite contact evaluation")
-        if code:
-            raise ValueError(f"Invalid contact evaluation contract: {code}")
-
-    def _evaluate_current(self, candidate: _Candidate, dt: float) -> _TrialResult:
-        self._actor_residual(candidate)
-        if self._contact is not None:
-            self._collide(candidate.state, self._trial_contacts)
-        self._assembly_sequence += 1
-        generation = MonolithicLinearGeneration(
-            self._transaction.step_generation,
-            self._metrics["nonlinear_iterations"],
-            int(self._trial_contacts.contact_generation.numpy()[0]) if self._contact is not None else 0,
-            self._assembly_sequence,
-            config_generation=self._config_generation,
-            history_epoch=self._history_epoch,
-        )
-        self._generation = generation
-        assembly = self._linear.begin_assembly(generation)
-        nq, model = self._layout.q_dof_count, self.model
-        triplets = assembly.global_scalar_triplets
+        k, obj = self._kinematics, self._objective
+        k.evaluate(state_in.joint_q)
+        wp.copy(obj.tn, k.com)
+        wp.copy(obj.rn, k.rotations)
+        wp.copy(self._old_joint_t, k.joint_translations)
+        wp.copy(self._old_joint_r, k.joint_rotations)
+        wp.copy(obj.qn, state_in.joint_q)
+        wp.copy(obj.vn, state_in.joint_qd)
+        history = getattr(state_in, self._states.namespace)
         wp.launch(
-            scatter_articulation_actor_tangent,
-            (nq, nq),
+            _predict,
+            k.bodies,
             [
-                0,
-                nq,
-                0,
-                0,
-                1.0 / dt**2,
-                self._articulation.M if self._articulation is not None else None,
-                assembly.aq_actor_dense,
-                triplets.rows,
-                triplets.columns,
-                triplets.values,
+                obj.tn,
+                obj.rn,
+                history.link_v_com,
+                history.link_omega,
+                history.link_vsym,
+                wp.float64(dt),
+                obj.predicted_t,
+                obj.predicted_r,
             ],
-            device=model.device,
-        )
-        if self._joint_terms is not None:
-            wp.launch(
-                scatter_joint_term_tangent,
-                nq,
-                [self._joint_terms.tangent, assembly.aq_actor_dense, triplets.values, nq],
-                device=model.device,
-            )
-        min_det = math.nan
-        if not self._joint_diagnostic:
-            assemble_tet_residual_tangent(
-                model,
-                **self._tet_arguments(candidate, dt),
-                scatter=TetScatterBuffers(
-                    assembly.ax_internal_triplets.values,
-                    triplets.values[nq * nq : nq * nq + self._tet_triplet_count]
-                    if self._tet_triplet_count
-                    else self._metric_slices[2],
-                ),
-            )
-            min_det = self._check_tet()
-            wp.launch(
-                _copy_particle_residual,
-                self._layout.dynamic_particle_count,
-                [self._particle_residual, nq, candidate.residual],
-                device=model.device,
-            )
-        if self._contact is not None:
-            assemble_current_contacts(
-                model,
-                candidate.state,
-                self._trial_contacts,
-                self.collision_pipeline,
-                self._articulation,
-                self._contact,
-                assembly,
-                candidate.residual,
-                generation=generation,
-            )
-        result = self._linear.finalize_assembly(generation=generation)
-        self._metrics["matrix_assembly_count"] += 1
-        self._metrics.update(
-            matrix_nnz=result.global_nnz,
-            triplet_count=result.global_triplet_count,
-            owner_generation=self._assembly_sequence,
-        )
-        self._require_linear(result.status)
-        wp.launch(
-            _build_dynamic_diagonal,
-            self._layout.scalar_dof_count,
-            [
-                self._articulation.M if self._articulation is not None else None,
-                self._tet_physics.dynamic_mass_diagonal if self._tet_physics is not None else model.particle_mass,
-                self._layout.dynamic_particle_ids,
-                nq,
-                1.0 / dt**2,
-                self._dynamic_diagonal,
-            ],
-            device=model.device,
-        )
-        self._require_linear(
-            self._linear.build_scaling(self._dynamic_diagonal, epsilon_d=self._config.epsilon_d, generation=generation)
-        )
-        return self._evaluation_result(
-            candidate,
-            dt,
-            min_det,
-            self._contact._diagnostics(0)["max_penetration"] if self._contact is not None else math.nan,
-        )
-
-    def _evaluate_trial(self, candidate: _Candidate, dt: float) -> _TrialResult:
-        self._actor_residual(candidate)
-        if self._joint_diagnostic:
-            return _TrialResult(0, *self._rms(candidate.residual), math.nan, math.nan)
-        if self._contact is not None:
-            self._collide(candidate.state, self._trial_contacts)
-        args = self._tet_arguments(candidate, dt)
-        if self._segment_graphs.enabled and self._tet_workspace.physics is not None:
-            _validate_evaluation(self.model, args)
-            physics, workspace = self._tet_workspace.physics, self._tet_workspace
-            buffers = [value for value in args.values() if isinstance(value, wp.array)]
-            buffers += [
-                physics.indices,
-                self.model.gravity,
-                physics.worlds,
-                physics.poses,
-                physics.materials,
-                physics.mass,
-                physics.row_mass,
-                physics.coefficients,
-                workspace.elastic_block_slots,
-                workspace.tet_energy,
-                workspace.min_det_f,
-                workspace.failure_flags,
-            ]
-            self._segment_graphs.run(
-                "tet_residual",
-                (dt, self._config.det_f_guard, physics.material_model, physics.mass_mode),
-                buffers,
-                lambda: evaluate_tet_residual(self.model, **args),
-            )
-        else:
-            evaluate_tet_residual(self.model, **args)
-        min_det = self._check_tet()
-        wp.launch(
-            _copy_particle_residual,
-            self._layout.dynamic_particle_count,
-            [self._particle_residual, self._layout.q_dof_count, candidate.residual],
             device=self.model.device,
         )
-        if self._contact is None:
-            return self._evaluation_result(candidate, dt, min_det, math.nan)
-        self._contact_status.zero_()
-        evaluate_trial_contacts(
+        obj.force.assign(force[:, :3] + k.values["body_mass"][:, None] * gravity[k.values["body_world"]])
+        obj.joint_force.assign(joint_force)
+        obj.qt.assign(self._joint_terms.target_q.numpy().astype(float))
+        obj.vt.assign(self._joint_terms.target_qd.numpy().astype(float))
+        wp.launch(
+            kernels._coordinate_predictor,
+            k.count,
+            [obj.qn, obj.vn, wp.float64(dt), self._accepted.joint_q, self._accepted.joint_qd],
+            device=self.model.device,
+        )
+        k.evaluate(self._accepted.joint_q)
+        if not self._domain(self._accepted):
+            wp.copy(self._accepted.joint_q, obj.qn)
+            self._accepted.joint_qd.zero_()
+        failure = None
+        status = self.Status.NONFINITE
+        published = False
+        try:
+            status = self._iterate_articulation(dt)
+            if self._can_publish(status):
+                self._validate_final(dt, status)
+                # A PD-stabilized B cannot certify the candidate's physical inertia.
+                try:
+                    k.validate_inertia()
+                except ValueError as error:
+                    raise _StepFailure(self.Status.NONFINITE, str(error)) from error
+                final = getattr(self._accepted, self._states.namespace)
+                wp.launch(
+                    _recover_history,
+                    k.bodies,
+                    [
+                        obj.tn,
+                        obj.rn,
+                        k.com,
+                        k.rotations,
+                        wp.float64(dt),
+                        final.link_v_com,
+                        final.link_omega,
+                        final.link_vsym,
+                    ],
+                    device=self.model.device,
+                )
+                wp.launch(
+                    _recover_history,
+                    k.joints,
+                    [
+                        self._old_joint_t,
+                        self._old_joint_r,
+                        k.joint_translations,
+                        k.joint_rotations,
+                        wp.float64(dt),
+                        final.joint_v,
+                        final.joint_omega,
+                        final.joint_vsym,
+                    ],
+                    device=self.model.device,
+                )
+                k.evaluate(self._accepted.joint_q, state=self._accepted)
+                self._finish_candidate(self._accepted, dt)
+                self._states.bind(self._accepted, dt=dt)
+                self._states.validate(self._accepted)
+                state_out.assign(self._accepted)
+                self._metrics.update(self._joint_force_metrics(state_out))
+                published = True
+        except _StepFailure as error:
+            status, failure = error.status, str(error)
+        except Exception as error:
+            status, failure = self.Status.NONFINITE, str(error)
+            raise
+        finally:
+            if not published:
+                self._restore(state_out)
+            self._variational["graphs"] = self._graphs.summary()
+            self._last_stats = self.Stats(
+                status=status,
+                failure_reason=failure,
+                converged=status == self.Status.SUCCESS and published,
+                rolled_back=not published,
+                step_generation=self._step_generation,
+                preconditioner_kind="actor_block",
+                q_block_count=1,
+                variational=MappingProxyType(self._variational.copy()),
+                **self._metrics,
+            )
+        stats = self._last_stats
+        stopped = not stats.converged and not stats.rolled_back
+        detail = dict(stats.variational)
+        detail.update(
+            publication_status="STOPPED_ACCEPTED" if stopped else "CONVERGED" if stats.converged else "HARD_FAILURE",
+            publish_policy=self._coupled_publish_policy,
+            alignment_policy=self._contact.alignment_policy,
+            energy_acceptance="variational"
+            if self._conservative_energy()
+            else "heuristic"
+            if self._globalization != "ResNorm"
+            else "unused",
+            accepted_count=sum(bool(t.get("accepted")) for t in detail["trials"]),
+        )
+        detail["zero_accepted_publication"] = stopped and detail["accepted_count"] == 0
+        if stopped:
+            detail["stopped_candidate"] = {
+                "original_status": stats.status.value,
+                "original_failure": self._stopped_failure,
+                "accepted_count": detail["accepted_count"],
+                "final_ratios": {
+                    name: self._metrics["convergence_ratio" + suffix]
+                    for name, suffix in (("global", ""), ("q", "_q"), ("x", "_x"))
+                },
+            }
+        self._last_stats = replace(
+            stats,
+            variational=MappingProxyType(detail),
+            failure_reason=(self._stopped_failure or stats.status.value) if stopped else stats.failure_reason,
+        )
+        return state_out
+
+    def _can_publish(self, status):
+        return status == self.Status.SUCCESS or (
+            self._coupled_publish_policy in ("last_accepted", "current_iterate")
+            and status
+            in (
+                self.Status.NONLINEAR_MAX_ITERATIONS,
+                self.Status.NONLINEAR_STAGNATION,
+                self.Status.REGULARIZATION_EXHAUSTED,
+            )
+            and (
+                self._coupled_publish_policy == "current_iterate"
+                or any(t.get("accepted") for t in self._variational["trials"])
+            )
+        )
+
+    def _iterate_articulation(self, dt):
+        try:
+            return iterate(self, dt)
+        except _StepFailure as error:
+            if not self._can_publish(error.status):
+                raise
+            self._stopped_failure = str(error)
+            return error.status
+
+    def _prepare_step(self, state_in, state_out, dt):
+        self._dt = dt
+        self._step_generation = max(
+            self._step_generation,
+            int(state_in._monolithic_coupled.force_generation.numpy()[0]),
+            int(state_out._monolithic_coupled.force_generation.numpy()[0]),
+        )
+        if self._out_backup is None:
+            self._out_backup = self._states.copy(state_out)
+        else:
+            self._out_backup.assign(state_out)
+        wp.copy(self._frozen_force, state_in.particle_f)
+        wp.copy(self._frozen_gravity, self.model.gravity)
+        k = self._kinematics
+        k.evaluate(state_in.joint_q)
+        self._contact.begin_step(state_in.particle_q, k.poses, k.com, k.jt, k.jw)
+        wp.launch(
+            kernels.particle_predict,
+            self.model.particle_count,
+            [
+                state_in.particle_q,
+                state_in.particle_qd,
+                self._tet.mapping,
+                wp.float64(dt),
+                self._accepted.particle_q,
+                self._accepted.particle_qd,
+            ],
+            device=self.model.device,
+        )
+
+    def _evaluate(self, state, dt, *, build_tangent=True):
+        k, contact, tet = self._kinematics, self._contact, self._tet
+        buffers = [
+            state.joint_q,
+            state.particle_q,
+            self._original.particle_q,
+            self._original.particle_qd,
+            self._frozen_force,
+            self._frozen_gravity,
+            self._complete_r,
+        ]
+        for owner in (self._objective, k, tet, contact, contact.start, contact.current):
+            buffers.extend(value for value in vars(owner).values() if isinstance(value, wp.array))
+
+        def evaluate():
+            self._objective.evaluate(state.joint_q, dt, build_tangent=build_tangent)
+            tet.evaluate(
+                state.particle_q,
+                self._original.particle_q,
+                self._original.particle_qd,
+                self._frozen_force,
+                self._frozen_gravity,
+                dt=dt,
+                min_det_f_guard=self._guard,
+            )
+            contact.evaluate(state.particle_q, k.poses, k.com, k.jt, k.jw, dt=dt)
+            wp.launch(
+                kernels.combine,
+                self._complete_r.size,
+                [self._objective.residual, tet.residual, contact.residual, self._complete_r],
+                device=self.model.device,
+            )
+
+        self._graphs.run("coupled_objective", (dt, build_tangent), buffers, evaluate)
+        self._current_state = state
+        if tet.flags.numpy()[0]:
+            status = self.Status.TET_INVERSION if tet.flags.numpy()[0] == 1 else self.Status.NONFINITE
+            raise _StepFailure(status, "Invalid tet candidate")
+        if contact.flags.numpy()[0]:
+            raise _StepFailure(self.Status.NONFINITE, f"Invalid contact geometry: {contact.flags.numpy().tolist()}")
+        # Graph replay executes device work, not evaluate()'s host-side marker.
+        contact._evaluated = True
+        residual = self._complete_r.numpy().copy()
+        parts = np.r_[
+            self._objective.link_energy.numpy(),
+            self._objective.joint_energy.numpy(),
+            tet.parts.numpy(),
+            contact.energy.numpy().ravel(),
+        ]
+        if not np.isfinite(residual).all() or not np.isfinite(parts).all() or not np.isfinite(parts.sum()):
+            raise _StepFailure(self.Status.NONFINITE, "Nonfinite coupled E/r")
+        self._metrics["min_det_f"] = float(tet.min_det_f.numpy()[0])
+        return float(parts.sum()), residual, float(abs(parts).sum())
+
+    def _initial_reference(self, dt):
+        return self._evaluate(self._original, dt, build_tangent=False)[1]
+
+    def _conservative_energy(self):
+        return self._contact.conservative_energy
+
+    def _trial_evaluation(self, dt):
+        try:
+            return self._evaluate(self._trial, dt, build_tangent=False)
+        except _StepFailure as error:
+            self._variational["trials"].append({"accepted": False, "domain_failure": str(error)})
+            return None
+
+    def _take_trial(self, alpha, dt):
+        wp.launch(
+            kernels._coordinate_trial,
+            self._kinematics.count,
+            [
+                self._accepted.joint_q,
+                self._delta,
+                wp.float64(alpha),
+                self._objective.qn,
+                wp.float64(dt),
+                self._trial.joint_q,
+                self._trial.joint_qd,
+            ],
+            device=self.model.device,
+        )
+        wp.launch(
+            kernels.particle_trial,
+            self.model.particle_count,
+            [
+                self._accepted.particle_q,
+                self._original.particle_q,
+                self._tet.mapping,
+                self._delta,
+                self._kinematics.count,
+                wp.float64(alpha),
+                wp.float64(dt),
+                self._trial.particle_q,
+                self._trial.particle_qd,
+            ],
+            device=self.model.device,
+        )
+
+    def _effective_displacement(self):
+        ids = self._tet.ids.numpy()
+        return np.r_[
+            self._trial.joint_q.numpy() - self._accepted.joint_q.numpy(),
+            (self._trial.particle_q.numpy()[ids] - self._accepted.particle_q.numpy()[ids]).ravel(),
+        ]
+
+    def _assemble(self, iteration):
+        k, linear, obj = self._kinematics, self._linear, self._objective
+        self._assembly_sequence += 1
+        self._generation = MonolithicLinearGeneration(
+            self._step_generation,
+            iteration,
+            self._step_generation,
+            self._assembly_sequence,
+            history_epoch=self._step_generation,
+        )
+        assembly = linear.begin_assembly(self._generation)
+        nq = k.count
+        wp.launch(
+            kernels._scatter,
+            (nq, nq),
+            [obj.tangent32, assembly.aq_actor_dense, assembly.global_scalar_triplets.values, self._diagonal],
+            device=self.model.device,
+        )
+        scatter = TetScatterBuffers(
+            assembly.ax_internal_triplets.values,
+            assembly.global_scalar_triplets.values[nq * nq : nq * nq + 9 * assembly.ax_internal_triplets.capacity],
+        )
+        assemble_tet_residual_tangent(
             self.model,
-            candidate.state,
-            self._trial_contacts,
-            self.collision_pipeline,
-            self._articulation,
-            self._contact,
-            candidate.residual,
-            self._contact_status,
-            owner_generation=self._generation,
-            trial_generation=candidate.generation,
+            candidate_particle_q=self._current_state.particle_q,
+            particle_q_n=self._original.particle_q,
+            particle_qd_n=self._original.particle_qd,
+            frozen_particle_f=self._frozen_force,
+            dynamic_particle_ids=self._tet.ids,
+            particle_to_dynamic=self._tet.mapping,
+            residual_x=self._tet_r32,
+            dt=self._dt,
+            min_det_f_guard=self._guard,
+            workspace=self._tet_assembly,
+            scatter=scatter,
+            frozen_gravity=self._frozen_gravity,
         )
-        self._check_contact()
-        return _TrialResult(
-            0, *self._rms(candidate.residual), min_det, self._contact._diagnostics(1)["max_penetration"]
+        if self._tet_assembly.failure_flags.numpy()[0]:
+            raise _StepFailure(self.Status.TET_PROJECTION_FAILURE, "Invalid tet tangent")
+        self._contact.assemble_tangent(assembly)
+        if self._contact.flags.numpy()[0]:
+            status = (
+                self.Status.CONTACT_OVERFLOW
+                if self._contact.flags.numpy()[0] == ContactStatus.CAPACITY
+                else self.Status.NONFINITE
+            )
+            raise _StepFailure(status, "Invalid contact tangent or capacity")
+        self._require_linear(linear.finalize_assembly(generation=self._generation).status)
+        wp.launch(
+            kernels.dynamic_diagonal,
+            self._diagonal.size,
+            [
+                k.jt,
+                k.jw,
+                k.rotations,
+                k.mass,
+                k.second,
+                obj.armature,
+                self._tet.ids,
+                self._tet.physics.dynamic_mass_diagonal,
+                wp.float64(self._dt),
+                self._diagonal,
+            ],
+            device=self.model.device,
         )
+        self._require_linear(
+            linear.build_scaling(self._diagonal, epsilon_d=self._config.epsilon_d, generation=self._generation)
+        )
+        self._metrics["matrix_assembly_count"] += 1
+        return None, linear.scale.numpy().astype(float)
+
+    def _physical_linear_error(self, matrix, direction, residual, scale):
+        self._post_r.assign(residual)
+        b = self._linear.k_global_scalar_bsr
+        buffers = [b.offsets, b.columns, b.values, self._delta, self._post_r, self._linear.scale, self._post_error]
+        self._graphs.run(
+            "coupled_posterior",
+            (),
+            buffers,
+            lambda: wp.launch(kernels.sparse_posterior, self._post_error.size, buffers, device=self.model.device),
+        )
+        return self._post_error.numpy().copy()
+
+    def _validate_final(self, dt, status):
+        energy, residual, _ = self._evaluate(self._accepted, dt)
+        _, scale = self._assemble(self._metrics["nonlinear_iterations"])
+        values = measure(self, residual, self._reference_residual, scale)
+        self._variational.update(objective_total=energy, residual=residual.tolist())
+        if not np.isfinite(energy) or not np.isfinite(residual).all() or not np.isfinite(scale).all():
+            raise _StepFailure(self.Status.NONFINITE, "Final coupled candidate contains nonfinite E/r/scale")
+        if not self._domain(self._accepted):
+            raise _StepFailure(self.Status.NONFINITE, "Final coupled candidate left the local domain")
+        if not self._can_publish(status) or (
+            status == self.Status.SUCCESS and any(m > goal for m, _, goal, _ in values.values())
+        ):
+            raise _StepFailure(self.Status.NONLINEAR_STAGNATION, "Final coupled candidate failed strict physical gates")
+
+    def _finish_candidate(self, state, dt):
+        contact, k = self._contact, self._kinematics
+        history = getattr(state, self._states.namespace)
+        arrays = [history.contact_joint_force, history.contact_particle_force, history.contact_body_force]
+        for array in arrays:
+            array.zero_()
+        if contact.count:
+            wp.launch(
+                kernels.contact_forces,
+                contact.count,
+                [
+                    contact.current,
+                    contact.local_residual,
+                    contact.shapes,
+                    contact.bodies,
+                    contact.triangles,
+                    state.particle_q,
+                    k.com,
+                    *arrays,
+                ],
+                device=self.model.device,
+            )
+        if any(not np.isfinite(array.numpy()).all() for array in arrays):
+            raise _StepFailure(self.Status.NONFINITE, "Final contact force is nonfinite")
+        history.force_generation.fill_(self._step_generation)
+        history.force_valid.fill_(1)
+        self._variational["contact_model"] = contact.contact_model
+        self._variational["contact_force_generation"] = self._step_generation
+        self._variational["contact_keys"] = contact.count
+
+    def _restore(self, state):
+        state.assign(self._out_backup)
+
+    def _domain(self, state):
+        k, obj = self._kinematics, self._objective
+        delta = state.joint_q.numpy() - obj.qn.numpy()
+        moving_types = k.values["joint_type"][k.dof_joint.numpy()]
+        if np.any(abs(delta[moving_types == JointType.REVOLUTE]) >= math.pi / 2):
+            return False
+        # The caller has evaluated this candidate's private FK.
+        return bool(np.all(np.einsum("bij,bij->b", k.rotations.numpy(), obj.rn.numpy()) > 1.0))
+
+    def _joint_force_metrics(self, state):
+        """Bind scalar force diagnostics to the successfully published state."""
+        p = self._objective.params.numpy()
+        q, v = state.joint_q.numpy(), state.joint_qd.numpy()
+        raw = p[:, 0] * (q - self._objective.qt.numpy()) + p[:, 1] * (v - self._objective.vt.numpy())
+        pd = -np.clip(raw, -p[:, 2], p[:, 2])
+        limit, power = np.zeros(len(q)), np.zeros(len(q))
+        for sign, bound in ((1.0, p[:, 4]), (-1.0, p[:, 3])):
+            d = sign * (q - bound)
+            z = np.clip(d / p[:, 7], 0.0, 1.0)
+            activation = z * z * (3.0 - 2.0 * z)
+            damper = p[:, 6] * activation * np.maximum(sign * v, 0.0)
+            limit -= sign * (p[:, 5] * np.maximum(d, 0.0) + damper)
+            power -= damper * sign * v
+        friction = -p[:, 8] * v / np.hypot(v, p[:, 9])
+        return {
+            "joint_force_generation": self._step_generation,
+            "joint_pd_force": tuple(pd.tolist()),
+            "joint_limit_force": tuple(limit.tolist()),
+            "joint_friction_force": tuple(friction.tolist()),
+            "joint_pd_saturated": tuple(((p[:, 0] + p[:, 1] > 0) & (abs(raw) >= p[:, 2])).tolist()),
+            "joint_limit_damping_power": tuple(power.tolist()),
+            "joint_friction_power": tuple((friction * v).tolist()),
+        }
+
+    @property
+    def last_stats(self):
+        return self._last_stats
 
     def _require_linear(self, status: MonolithicLinearStatus) -> None:
         if status == MonolithicLinearStatus.SUCCESS:
@@ -1605,496 +961,12 @@ class SolverMonolithic(SolverBase):
             raise ValueError(f"Invalid linear workspace contract: {status.name}")
         raise _StepFailure(mapped.get(status.name, self.Status.NONFINITE), status.name)
 
-    def _iterate(self, dt: float) -> SolverMonolithic.Status:
-        config, transaction = self._config, self._transaction
-        small_step = False
-        for iteration in range(self.newton_max_iterations + 1):
-            self._metrics["nonlinear_iterations"] = iteration
-            current = self._evaluate_current(transaction.accepted, dt)
-            if self._tet_only:
-                self._variational.update(
-                    objective=current.objective,
-                    objective_total=sum(current.objective),
-                    iterate_generation=transaction.accepted.generation,
-                )
-            if iteration == 0:
-                wp.copy(self._residual_ref, transaction.accepted.residual)
-                self._metrics.update(
-                    merit_initial=current.merit, merit_q_initial=current.merit_q, merit_x_initial=current.merit_x
-                )
-            merit = (current.merit, current.merit_q, current.merit_x)
-            reference = self._rms(self._residual_ref)
-            self._raw_norm_sums.zero_()
-            wp.launch(
-                _raw_residual_sums,
-                self._layout.scalar_dof_count,
-                [transaction.accepted.residual, self._layout.q_dof_count, self._raw_norm_sums],
-                device=self.model.device,
-            )
-            raw_norms = np.sqrt(self._raw_norm_sums.numpy())
-            ratios = tuple(
-                value / (getattr(config, f"merit_absolute_{block}") + getattr(config, f"merit_relative_{block}") * ref)
-                for block, value, ref in zip(("global", "q", "x"), merit, reference, strict=True)
-            )
-            self._metrics.update(
-                merit_final=merit[0],
-                merit_q_final=merit[1],
-                merit_x_final=merit[2],
-                min_det_f=current.min_det_f,
-                merit_reference=reference[0],
-                merit_q_reference=reference[1],
-                merit_x_reference=reference[2],
-                convergence_ratio=ratios[0],
-                convergence_ratio_q=ratios[1],
-                convergence_ratio_x=ratios[2],
-                scale_generation=self._generation.assembly_sequence,
-                raw_residual_q_norm=float(raw_norms[0]),
-                raw_residual_x_norm=float(raw_norms[1]),
-            )
-            if self._converged(merit, reference):
-                return self.Status.SUCCESS
-            if small_step:
-                raise _StepFailure(self.Status.NONLINEAR_STAGNATION, "Small scaled step with unresolved residual")
-            if iteration == self.newton_max_iterations:
-                return self.Status.NONLINEAR_MAX_ITERATIONS
-            wp.launch(
-                _scale_vector,
-                self._layout.scalar_dof_count,
-                [transaction.accepted.residual, self._linear.scale, -1.0, self._rhs_hat],
-                device=self.model.device,
-            )
-            pcg_config = MonolithicPcgConfig(
-                maximum_iterations=self.linear_max_iterations,
-                true_residual_interval=10,
-                linear_tolerance=self.linear_tolerance,
-                linear_absolute_tolerance=self.linear_absolute_tolerance,
-                # Leave half the outer residual budget for nonlinear error. Convert
-                # each block's RMS goal to L2 in the current scaling, including q-only.
-                residual_norm_limits=tuple(
-                    0.5
-                    * math.sqrt(max(vector.size, 1))
-                    * (getattr(config, f"merit_absolute_{block}") + getattr(config, f"merit_relative_{block}") * ref)
-                    for block, ref, vector in zip(("global", "q", "x"), reference, self._metric_slices, strict=True)
-                ),
-                residual_floor_global=config.residual_floor_global,
-                residual_floor_q=config.residual_floor_q,
-                residual_floor_x=config.residual_floor_x,
-                curvature_absolute_tolerance=0.0,
-                curvature_relative_tolerance=1.0e-12,
-                preconditioner_positive_tolerance=0.0,
-                stagnation_window=10,
-                stagnation_minimum_reduction=1.0e-3,
-            )
-            accepted = False
-            last_reason = "No acceptable trial"
-            last_error = None
-            evaluated_trial = False
-            for retry, lambda_value in enumerate(config.regularization_values):
-                self._metrics["regularization_retries"] += int(retry > 0)
-                self._metrics["lambda_value"] = lambda_value
-                try:
-                    self._require_linear(self._linear.set_regularization(lambda_value, generation=self._generation))
-                    setups, failures = self._linear.factor_setup_count, self._linear.factor_failure_count
-                    factor_status = self._linear.factor_actor_preconditioner(
-                        generation=self._generation, pivot_tolerance=0.0
-                    )
-                    self._metrics["factor_setup_count"] += self._linear.factor_setup_count - setups
-                    self._metrics["factor_failure_count"] += self._linear.factor_failure_count - failures
-                    self._require_linear(factor_status)
-                    result = self._linear.solve_pcg(
-                        self._rhs_hat,
-                        self._y,
-                        generation=self._generation,
-                        warm_start=MonolithicPcgWarmStart.ZERO,
-                        config=pcg_config,
-                        delta=self._delta,
-                    )
-                    self._metrics["linear_iterations"] += result.iterations
-                    self._metrics["linear_scheduled_slots"] += result.scheduled_slots
-                    self._metrics.update(
-                        pcg_policy=result.pcg_policy,
-                        linear_converged_at_slot=result.converged_at_slot,
-                        linear_last_checked_slot=result.last_checked_slot,
-                        linear_failure_slot=result.failure_slot,
-                        linear_output_valid=result.output_valid,
-                    )
-                    self._metrics["true_residual_recomputations"] += result.true_residual_checks
-                    self._metrics["residual_replacements"] += result.residual_replacements
-                    self._metrics.update(
-                        rho=result.rho,
-                        rho_q=result.rho_q,
-                        rho_x=result.rho_x,
-                        min_p_ap=result.min_p_ap,
-                        min_r_z=result.min_r_z,
-                        warm_start=result.warm_start.name.lower() if result.warm_start is not None else None,
-                        initial_guess_norm=result.initial_guess_norm,
-                        recursive_true_residual_gap=result.recursive_true_residual_gap[0],
-                        recursive_true_residual_gap_q=result.recursive_true_residual_gap[1],
-                        recursive_true_residual_gap_x=result.recursive_true_residual_gap[2],
-                        stagnation_window=result.stagnation_window,
-                        linear_scale_generation=result.generation.assembly_sequence,
-                    )
-                    self._require_linear(result.status)
-                    if self.pcg_mode == self.PCGMode.PRODUCTION:
-                        if not result.output_valid:
-                            raise _StepFailure(self.Status.NONFINITE, "PCG returned an invalid direction")
-                    else:
-                        self._require_linear(
-                            self._linear.recover_delta(self._y, self._delta, generation=self._generation)
-                        )
-                except _StepFailure as error:
-                    last_reason = str(error)
-                    last_error = error
-                    continue
-                step_rms = self._rms(self._y, scaled=False)
-                slope, slope_abs = (math.nan, 0.0)
-                if self._tet_only:
-                    slope, slope_abs = self._tet_objective.slope(transaction.accepted.residual, self._delta)
-                    if not math.isfinite(slope):
-                        raise _StepFailure(self.Status.NONFINITE, "Nonfinite objective slope")
-                for search in range(self.line_search_max_iterations):
-                    alpha = 0.5**search
-                    self._metrics["line_search_iterations"] += 1
-                    transaction.trial.form_trial(transaction.accepted, self._delta, alpha, dt)
-                    try:
-                        trial = self._evaluate_trial(transaction.trial, dt)
-                    except _StepFailure as error:
-                        last_reason = str(error)
-                        last_error = error
-                        continue
-                    evaluated_trial = True
-                    passes = trial.merit <= (1.0 - 1.0e-4 * alpha) * merit[0] + config.merit_noise
-                    if self._tet_only:
-                        # FP64 reduction bound is distinct from the calibrated FP32 residual noise.
-                        energy_noise = (
-                            32 * np.finfo(np.float64).eps * (current.objective_abs_sum + trial.objective_abs_sum)
-                        )
-                        # The dot uses FP64, but its residual input is assembled in FP32.
-                        slope_noise = 32 * np.finfo(np.float32).eps * slope_abs
-                        residual_noise = max(
-                            config.merit_noise, 32 * np.finfo(np.float32).eps * (merit[0] + trial.merit)
-                        )
-                        passes, a, r, improved = acceptance(
-                            self._globalization,
-                            sum(current.objective),
-                            sum(trial.objective),
-                            slope,
-                            alpha,
-                            merit[0],
-                            trial.merit,
-                            energy_noise=energy_noise,
-                            residual_noise=residual_noise,
-                            slope_noise=slope_noise,
-                        )
-                        self._variational["trials"].append(
-                            {
-                                "iteration": iteration,
-                                "retry": retry,
-                                "alpha": alpha,
-                                "slope": slope,
-                                "current_objective": current.objective,
-                                "trial_objective": trial.objective,
-                                "current_merit": merit[0],
-                                "trial_merit": trial.merit,
-                                "A": a,
-                                "R": r,
-                                "accepted": passes,
-                                "improved": improved,
-                                "accepted_by": tuple(
-                                    name
-                                    for name, enabled in (
-                                        ("Armijo", a and self._globalization != "ResNorm"),
-                                        ("ResNorm", r and self._globalization != "Armijo"),
-                                    )
-                                    if passes and enabled
-                                ),
-                                "energy_noise": energy_noise,
-                                "residual_noise": residual_noise,
-                                "slope_noise": slope_noise,
-                            }
-                        )
-                    if passes:
-                        transaction.accept_trial()
-                        self._metrics["accepted_alpha"] = alpha
-                        self._metrics.update(
-                            scaled_step=alpha * step_rms[0],
-                            scaled_step_q=alpha * step_rms[1],
-                            scaled_step_x=alpha * step_rms[2],
-                        )
-                        small_step = all(
-                            alpha * value <= getattr(config, f"step_tolerance_{block}")
-                            for block, value in zip(("global", "q", "x"), step_rms, strict=True)
-                        )
-                        accepted = True
-                        break
-                    last_reason = "Actual trial merit failed the decrease condition"
-                if accepted:
-                    break
-            if not accepted:
-                if self._tet_only and not evaluated_trial and last_error is not None:
-                    raise last_error
-                raise _StepFailure(self.Status.REGULARIZATION_EXHAUSTED, last_reason)
-        raise AssertionError("Unreachable nonlinear loop exit")
+    @property
+    def use_cuda_graph(self) -> bool:
+        """Return the immutable experimental PCG and stable-segment capture option."""
+        return self._use_cuda_graph
 
-    def _publish_final(self, state: State, status: SolverMonolithic.Status) -> None:
-        if self._tet_only:
-            _validate_state(self.model, state, tet_only=True)
-            return
-        if self._joint_terms is not None:
-            self._joint_terms.final_generation = -1
-        roles = {
-            self.Status.SUCCESS: _MonolithicReturnedStateRole.STATE_OUT_CONVERGED,
-            self.Status.NONLINEAR_MAX_ITERATIONS: _MonolithicReturnedStateRole.STATE_OUT_SOFT_STOP,
-        }
-        role = roles.get(status, _MonolithicReturnedStateRole.STATE_IN_ROLLBACK)
-        # FK refresh must not overwrite the original body caches on rollback.
-        self._final_evaluation_state.assign(state)
-        eval_articulation_passive_candidate(self.model, self._final_evaluation_state, self._articulation)
-        if not self._joint_diagnostic:
-            self._collide(state, self.contacts)
-            self._final_residual.zero_()
-            self._contact_status.zero_()
-            evaluate_final_contacts(
-                self.model,
-                self._final_evaluation_state,
-                self.contacts,
-                self.collision_pipeline,
-                self._articulation,
-                self._contact,
-                self._final_residual,
-                self._contact_status,
-                step_generation=self._transaction.step_generation,
-                returned_state_role=role,
-            )
-            self._check_contact()
-            self._contact.bind_returned_state(state)
-            if self.contacts.force is not None:
-                self._contact._publish_final_forces(
-                    state, self.contacts, step_generation=self._transaction.step_generation, returned_state_role=role
-                )
-
-        if self._joint_terms is not None:
-            self._evaluate_joint_terms(state, self._transaction.accepted._dt)
-            self._joint_terms.publish(self._transaction.step_generation)
-
-    def _finish_step(self, state_out: State, status: SolverMonolithic.Status, reason: str | None, start: float) -> None:
-        transaction = self._transaction
-        commit = status == self.Status.SUCCESS or (
-            self._publish_policy == "legacy" and status == self.Status.NONLINEAR_MAX_ITERATIONS
-        )
-        if commit:
-            transaction.accepted.commit(state_out)
-        else:
-            state_out.assign(transaction._original)
-        publication_error = None
-        try:
-            self._publish_final(state_out, status)
-        except _StepFailure as error:
-            status, reason, commit = error.status, str(error), False
-            state_out.assign(transaction._original)
-            if self._contact is not None:
-                self._contact.discard_history()
-            try:
-                self._publish_final(state_out, status)
-            except _StepFailure as second_error:
-                publication_error = second_error
-                if self._contact is not None:
-                    self._contact.invalidate_final_force()
-        diagnostics = self._contact._diagnostics(2) if publication_error is None and self._contact is not None else {}
-        joint_diagnostics = {}
-        terms = self._joint_terms
-        if publication_error is None and terms is not None and terms.final_generation == transaction.step_generation:
-            # One final-state readback, never in the candidate kernel loop.
-            forces, power = terms.final_force.numpy(), terms.final_power.numpy()
-            joint_diagnostics = {
-                "joint_force_generation": terms.final_generation,
-                "joint_pd_force": tuple(float(x) for x in forces[:, 0]),
-                "joint_limit_force": tuple(float(x) for x in forces[:, 1]),
-                "joint_friction_force": tuple(float(x) for x in forces[:, 2]),
-                "joint_pd_saturated": tuple(bool(x) for x in terms.final_saturated.numpy()),
-                "joint_limit_damping_power": tuple(float(x) for x in power[:, 1]),
-                "joint_friction_power": tuple(float(x) for x in power[:, 2]),
-            }
-        if self._joint_diagnostic:
-            # Empty blocks are not measured or certified; report N/A as NaN.
-            for key in tuple(self._metrics):
-                if key.startswith(("merit_x", "raw_residual_x")) or key.endswith("_x"):
-                    self._metrics[key] = math.nan
-        if self._tet_only:
-            for key in tuple(self._metrics):
-                if key.startswith(("merit_q", "raw_residual_q")) or key.endswith("_q"):
-                    self._metrics[key] = math.nan
-            self._variational.update(
-                tangent_evaluations=self._metrics["matrix_assembly_count"],
-                returned_state="accepted" if commit else "step_input",
-                published=commit,
-                termination={
-                    self.Status.SUCCESS: "CONVERGED",
-                    self.Status.NONLINEAR_MAX_ITERATIONS: "STOPPED_MAX_ITERS",
-                    self.Status.NONLINEAR_STAGNATION: "STOPPED_SMALL_STEP",
-                    self.Status.REGULARIZATION_EXHAUSTED: "GLOBALIZATION_FAILED",
-                    self.Status.LINE_SEARCH_EXHAUSTED: "GLOBALIZATION_FAILED",
-                    self.Status.NONFINITE: "DIVERGED",
-                    self.Status.TET_INVERSION: "DIVERGED",
-                    self.Status.TET_PROJECTION_FAILURE: "DIVERGED",
-                }.get(status, "LINEAR_FAILED"),
-            )
-        transaction.last_stats = self.Stats(
-            status=status,
-            material_model=self._tet_physics.material_model if self._tet_physics is not None else None,
-            mass_mode=self._tet_physics.mass_mode if self._tet_physics is not None else None,
-            tet_config_identity=self._tet_physics.identity if self._tet_physics is not None else None,
-            failure_reason=reason,
-            converged=status == self.Status.SUCCESS,
-            variational=MappingProxyType(self._variational) if self._variational is not None else None,
-            rolled_back=not commit,
-            step_generation=transaction.step_generation,
-            accepted_generation=transaction.accepted.generation,
-            soft_contact_pair_count=self.collision_pipeline.soft_contact_pair_count if self._contact is not None else 0,
-            published_contact_generation=int(self.contacts.contact_generation.numpy()[0])
-            if publication_error is None and self._contact is not None
-            else -1,
-            active_sample_count=diagnostics.get("active_sample_count", 0),
-            max_penetration=diagnostics.get("max_penetration", math.nan),
-            contact_force_imbalance=diagnostics.get("force_imbalance", math.nan),
-            contact_moment_imbalance=diagnostics.get("moment_imbalance", math.nan),
-            generalized_projection_error=diagnostics.get("generalized_projection_error", math.nan),
-            contact_sign_error=diagnostics.get("contact_sign_error", math.nan),
-            contact_history=MappingProxyType(
-                {
-                    **self._contact.history_diagnostics(),
-                    "history_epoch": self._history_epoch + int(commit and self._contact.friction_coefficient > 0),
-                    "history_commit_count": int(commit and self._contact.friction_coefficient > 0),
-                    "history_rollback_count": int(not commit and self._contact.friction_coefficient > 0),
-                }
-            )
-            if self._contact is not None and publication_error is None
-            else None,
-            timings={"step": 1000.0 * (time.perf_counter() - start)},
-            **self._metrics,
-            **joint_diagnostics,
-        )
-        if self._contact is not None:
-            if commit:
-                self._contact.commit_history()
-            else:
-                self._contact.discard_history()
-            self._history_epoch = self._contact.history_epoch
-        transaction._finished = True
-        if status != self.Status.SUCCESS:
-            stats = transaction.last_stats
-            logging.getLogger(__name__).warning(
-                "Monolithic status=%s failure_reason=%s converged=%s rolled_back=%s step_generation=%d nonlinear_iterations=%d linear_iterations=%d rho=%s",
-                status.value,
-                reason,
-                stats.converged,
-                stats.rolled_back,
-                stats.step_generation,
-                stats.nonlinear_iterations,
-                stats.linear_iterations,
-                stats.rho,
-            )
-        if publication_error is not None:
-            raise RuntimeError(
-                "Contact publication failed on the rollback state; forces are invalid"
-            ) from publication_error
-
-
-class _StepTransaction:
-    """Stage candidate state and frozen inputs for physical evaluation.
-
-    This helper does not collide or publish final forces. Its caller supplies
-    evaluated safety and terminal diagnostics. The solver owns physical
-    evaluation and the final contact transaction.
-    Optional and custom state arrays are unsupported.
-    Input/output schemas are validated before copying, including at terminal
-    publication in case the caller changed the destination after ``begin``.
-    """
-
-    def __init__(self, model: Model, layout: _MonolithicLayout, *, tet_only: bool = False):
-        self._model, self._layout = model, layout
-        self._tet_only = tet_only
-        self.accepted = _Candidate(model, layout, tet_only=tet_only)
-        self.trial = _Candidate(model, layout, tet_only=tet_only)
-        self.inputs = _FrozenStepInputs(model)
-        self._original = _new_candidate_state(model, tet_only)
-        self._state_out = None
-        self._finished = True
-        self.step_generation = 0
-        self.last_stats = SolverMonolithic.Stats(SolverMonolithic.Status.NOT_RUN)
-
-    def begin(self, state_in: State, state_out: State, control: Control | None, dt: float) -> None:
-        if not self._finished:
-            raise RuntimeError("The previous transaction has not finished")
-        _validate_dt(dt)
-        _validate_state(self._model, state_in, tet_only=self._tet_only)
-        _validate_state(self._model, state_out, tet_only=self._tet_only)
-        _validate_dirichlet(self._model, self._layout, state_in, tet_only=self._tet_only)
-        self.inputs.snapshot(state_in, self._model.control() if control is None else control)
-        self._original.assign(state_in)
-        self.accepted.load_predictor(state_in, dt)
-        self.trial.generation = 0
-        self.trial._trial_source = None
-        self._state_out = state_out
-        self.step_generation += 1
-        self._finished = False
-
-    def accept_trial(self) -> None:
-        if (
-            self._finished
-            or self.trial._trial_source is not self.accepted
-            or self.trial._trial_source_generation != self.accepted.generation
-        ):
-            raise RuntimeError("No current trial to accept")
-        generation = self.accepted.generation + 1
-        self.accepted, self.trial = self.trial, self.accepted
-        self.accepted.generation = generation
-
-    def finish_state(
-        self,
-        status: SolverMonolithic.Status,
-        *,
-        accepted_safe: bool,
-        failure_reason: str | None = None,
-        rho: float = math.nan,
-        nonlinear_iterations: int = 0,
-        linear_iterations: int = 0,
-    ) -> SolverMonolithic.Stats:
-        if self._finished:
-            raise RuntimeError("Transaction has already finished")
-        if not isinstance(status, SolverMonolithic.Status) or status == SolverMonolithic.Status.NOT_RUN:
-            raise ValueError("A terminal status is required")
-        commit = status in (SolverMonolithic.Status.SUCCESS, SolverMonolithic.Status.NONLINEAR_MAX_ITERATIONS)
-        if commit and not accepted_safe:
-            raise ValueError("Committing a candidate requires a safe accepted evaluation")
-        _validate_state(self._model, self._state_out, tet_only=self._tet_only)
-        if commit:
-            self.accepted.commit(self._state_out)
-        else:
-            _validate_state(self._model, self._original, tet_only=self._tet_only)
-            self._state_out.assign(self._original)
-        self.last_stats = SolverMonolithic.Stats(
-            status=status,
-            failure_reason=failure_reason,
-            converged=status == SolverMonolithic.Status.SUCCESS,
-            rolled_back=not commit,
-            step_generation=self.step_generation,
-            accepted_generation=self.accepted.generation,
-            nonlinear_iterations=nonlinear_iterations,
-            linear_iterations=linear_iterations,
-            rho=rho,
-        )
-        self._finished = True
-        if status != SolverMonolithic.Status.SUCCESS:
-            logging.getLogger(__name__).warning(
-                "Monolithic status=%s failure_reason=%s converged=%s rolled_back=%s step_generation=%d nonlinear_iterations=%d linear_iterations=%d rho=%s",
-                status.value,
-                failure_reason,
-                self.last_stats.converged,
-                self.last_stats.rolled_back,
-                self.step_generation,
-                nonlinear_iterations,
-                linear_iterations,
-                rho,
-            )
-        return self.last_stats
+    @property
+    def pcg_mode(self) -> PCGMode:
+        """Return the immutable experimental PCG observation policy."""
+        return self._pcg_mode

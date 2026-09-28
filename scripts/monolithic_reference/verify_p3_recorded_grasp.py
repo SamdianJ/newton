@@ -77,7 +77,7 @@ def run(args):
     payload = json.loads(args.trajectory.read_text())
     model, scene, mapping, curve, terms, trajectory, palm = build_recorded(payload)
     smooth = load_qualified_fields(model, ARTIFACTS / "p3/pr3/smooth-sdf-v1/geometry", "c2-bspline")
-    solver = SolverMonolithic._create_coupled_variational(
+    solver = SolverMonolithic(
         model,
         contact_model="C-IE",
         globalization="ArmijoOrResNorm",
@@ -104,7 +104,7 @@ def run(args):
     source.joint_q.assign(initial)
     source.joint_qd.zero_()
     newton.eval_fk(model, source.joint_q, source.joint_qd, source)
-    state = solver._create_coupled_state(dt=trajectory.dt, source=source)
+    state = solver.create_state(dt=trajectory.dt, source=source)
     pose = solver._kinematics.poses.numpy()[palm]
     np.testing.assert_allclose(pose[:3], trajectory.position[0], atol=1e-8, rtol=0)
     if abs(abs(np.dot(pose[3:], trajectory.quaternion)) - 1) > 1e-12:

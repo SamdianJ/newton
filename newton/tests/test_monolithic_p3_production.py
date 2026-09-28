@@ -11,7 +11,7 @@ from unittest.mock import patch
 import numpy as np
 import warp as wp
 
-from newton._src.solvers.monolithic import coupled_solver
+from newton._src.solvers.monolithic import solver_monolithic
 from newton._src.solvers.monolithic.contact_variational import ContactObjective, ContactStatus
 from newton._src.solvers.monolithic.solver_monolithic import _StepFailure
 from newton.tests.test_monolithic_p3_contact_components import fixture, state, tangent
@@ -35,12 +35,12 @@ def test_policy_binding(test, device):
     """Require explicit heuristic energy and bind all policies into state identity."""
     model = scene(device)
     strict = solver(model)
-    original = strict._create_coupled_state(dt=0.001)
+    original = strict.create_state(dt=0.001)
     for law in ("C-EE", "C-IE", "C-II"):
         run = candidate(model, law)
         with test.assertRaises(ValueError):
             run._states.validate(original)
-        before = run._create_coupled_state(dt=0.001)
+        before = run.create_state(dt=0.001)
         with test.assertRaises(ValueError):
             strict._states.validate(before)
         run.step(before, before, model.control(), dt=0.001)
@@ -55,7 +55,7 @@ def test_policy_binding(test, device):
         with test.assertRaises(ValueError):
             solver(model, **options)
     run = candidate(model)
-    before = run._create_coupled_state(dt=0.001)
+    before = run.create_state(dt=0.001)
     expected = snapshot(before)
     run._globalization = "ResNorm"
     with test.assertRaises(ValueError):
@@ -108,7 +108,7 @@ def test_mask_contact(test, device):
 
 def test_last_accepted_publication(test, device):
     """Publish the accepted state after eligible stops and retain exact failure labels."""
-    original_iterate = coupled_solver.iterate
+    original_iterate = solver_monolithic.iterate
     for policy in ("last_accepted", "current_iterate"):
         for mode, graph in [("diagnostic", False), ("production", False)] + (
             [("production", True)] if device.is_cuda else []
@@ -116,7 +116,7 @@ def test_last_accepted_publication(test, device):
             for reason in ("nonlinear_max_iterations", "nonlinear_stagnation", "regularization_exhausted"):
                 model = scene(device)
                 run = candidate(model, publish_policy=policy, newton_max_iterations=1, mode=mode, graph=graph)
-                before = run._create_coupled_state(dt=0.001)
+                before = run.create_state(dt=0.001)
                 after = run._states.copy(before)
                 expected = snapshot(before)
                 accepted = {}
@@ -128,7 +128,7 @@ def test_last_accepted_publication(test, device):
                     current._trial.particle_q.fill_(wp.vec3d(float("nan")))
                     raise _StepFailure(current.Status(reason), "eligible stop injection")
 
-                with patch.object(coupled_solver, "iterate", stop):
+                with patch.object(solver_monolithic, "iterate", stop):
                     run.step(before, after, model.control(), dt=0.001)
                 stats = run.last_stats
                 test.assertFalse(stats.converged)
@@ -146,14 +146,14 @@ def test_last_accepted_publication(test, device):
 
 def test_stopped_hard_gates(test, device):
     """Reject zero-accepted stops and invalid final states with complete output rollback."""
-    original_iterate = coupled_solver.iterate
+    original_iterate = solver_monolithic.iterate
     for policy in ("strict", "last_accepted", "current_iterate"):
         for failure in ("zero", "nan", "tet", "capacity", "force", "binding"):
             if failure == "zero" and policy == "current_iterate":
                 continue
             model = scene(device)
             run = candidate(model, publish_policy=policy, newton_max_iterations=1)
-            before = run._create_coupled_state(dt=0.001)
+            before = run.create_state(dt=0.001)
             after = run._states.copy(before)
             after.particle_f.fill_(wp.vec3(2.0))
             expected, expected_out = snapshot(before), snapshot(after)
@@ -169,7 +169,7 @@ def test_stopped_hard_gates(test, device):
                     raise _StepFailure(current.Status.CONTACT_OVERFLOW, "capacity injection")
                 raise _StepFailure(current.Status.REGULARIZATION_EXHAUSTED, "stop injection")
 
-            with patch.object(coupled_solver, "iterate", stop):
+            with patch.object(solver_monolithic, "iterate", stop):
                 if failure in ("force", "binding"):
                     with patch.object(
                         run if failure == "force" else run._states,
@@ -195,7 +195,7 @@ def test_current_iterate_publication(test, device):
         for reason in ("nonlinear_max_iterations", "nonlinear_stagnation", "regularization_exhausted"):
             model = scene(device)
             run = candidate(model, publish_policy="current_iterate", mode=mode, graph=graph)
-            before = run._create_coupled_state(dt=0.001)
+            before = run.create_state(dt=0.001)
             after = run._states.copy(before)
             expected = snapshot(before)
             predictor = {}
@@ -222,9 +222,9 @@ def test_current_iterate_publication(test, device):
             assert_snapshot(test, before, expected)
             with tempfile.TemporaryDirectory() as directory:
                 path = Path(directory) / "state.npz"
-                run._states.save_checkpoint(after, path)
-                restored = run._create_coupled_state(dt=0.001)
-                run._states.load_checkpoint(restored, path)
+                run.save_checkpoint(after, path)
+                restored = run.create_state(dt=0.001)
+                run.load_checkpoint(restored, path)
                 assert_snapshot(test, restored, snapshot(after))
 
             final_check = run._validate_final
@@ -249,17 +249,17 @@ def test_publication_checkpoint_identity(test, device):
         policy: candidate(model, publish_policy=policy) for policy in ("strict", "last_accepted", "current_iterate")
     }
     for policy, run in runs.items():
-        state = run._create_coupled_state(dt=0.001)
+        state = run.create_state(dt=0.001)
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "state.npz"
-            run._states.save_checkpoint(state, path)
+            run.save_checkpoint(state, path)
             for other_policy, other in runs.items():
                 if other_policy == policy:
                     continue
-                output = other._create_coupled_state(dt=0.001)
+                output = other.create_state(dt=0.001)
                 expected = snapshot(output)
                 with test.assertRaises(ValueError):
-                    other._states.load_checkpoint(output, path)
+                    other.load_checkpoint(output, path)
                 assert_snapshot(test, output, expected)
                 with test.assertRaises(ValueError):
                     other._states.validate(state)

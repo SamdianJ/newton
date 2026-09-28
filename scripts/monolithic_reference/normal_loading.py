@@ -217,7 +217,7 @@ def command_at(time_s, fixture):
     return q0 + (q1 - q0) * position, (q1 - q0) * velocity, phase
 
 
-def build_scene(fixture, *, device):
+def build_model(fixture, *, device):
     """Build the declared single-finger articulation and anchored tetrahedron."""
     _validate_fixture(fixture)
     rigid, soft, contact = fixture["rigid"], fixture["soft"], fixture["contact"]
@@ -266,6 +266,13 @@ def build_scene(fixture, *, device):
             builder.particle_mass[particle] = 0.0
     model = builder.finalize(device=device)
     model.request_contact_attributes("force")
+    return model
+
+
+def build_scene(fixture, *, device):
+    """Attach the historical solver to the frozen normal-loading model."""
+    model = build_model(fixture, device=device)
+    contact = fixture["contact"]
     state = model.state()
     newton.eval_fk(model, state.joint_q, state.joint_qd, state)
     pipeline = MonolithicCollisionPipeline(model, soft_contact_gap=contact["soft_contact_gap_m"])

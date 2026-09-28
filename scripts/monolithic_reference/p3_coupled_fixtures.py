@@ -108,7 +108,7 @@ def make_tiny(case, device):
 def make_solver(model, case, law, *, mode="diagnostic", graph=False, globalization="ResNorm"):
     """Select a law explicitly without modifying frozen physical or stopping parameters."""
     cube = case.startswith("cube")
-    return SolverMonolithic._create_coupled_variational(
+    return SolverMonolithic(
         model,
         contact_model=law,
         globalization=globalization,
