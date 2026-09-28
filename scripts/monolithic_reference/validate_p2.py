@@ -25,14 +25,12 @@ DEV_MODULES = (
     "test_monolithic_pcg_tolerances",
     "test_monolithic_pcg_backends",
     "test_monolithic_pcg_benchmark",
-    "test_monolithic_p2_measurement",
     "test_monolithic_owned_mass_matrix",
     "test_solver_monolithic_linear",
     "test_monolithic_pcg_restart",
     "test_monolithic_pcg_production",
     "test_monolithic_pcg_production_graph",
     "test_monolithic_execution_options",
-    "test_monolithic_p2_8bc_runner",
     "test_monolithic_validation_workflow",
 )
 

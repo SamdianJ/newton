@@ -283,3 +283,28 @@ no long trajectory qualification is claimed for this test/helper batch.
 
 Evidence: `agents/integration/artifacts/p4/t3-3b-v1/receipt.json`.
 SHA-256: `afd45d55398a9f0cd484d13f883d0d6745637e1f65df917dae044a8c410655ae`.
+
+
+## T3-3c: retire five historical test modules by explicit scope decision
+
+The user explicitly confirmed that the five remaining import-failing test
+modules guard retired development functionality and should themselves retire.
+Snapshot all five original files before removal, record SHA-256 and their 79
+fixed-baseline test IDs, and remove their active test files. This supersedes the
+earlier plan to migrate their individual assertions; no old solver compatibility
+symbols are restored. Keep independent supported checks migrated in prior batches.
+
+Remove the two explicit registrations from the historical P2 development list
+and replace the obsolete README measurement-test command with the archive note.
+A repository-wide search including hidden configuration found no importing
+modules or public exports; other references are chronological stage evidence.
+No production solver, scenario, asset or Newton-wide nightly changes.
+
+Validation: full unittest discovery has zero import errors (8,113 IDs); 20 P2 scheduling
+and formal P4 runner tests pass, as does full pre-commit. Discovery does not
+imply that all retained tests pass. Legacy source/driver and example scheduling
+cleanup still remain, so T3-3 overall and T4 acceptance are not complete.
+
+Evidence: `agents/integration/artifacts/p4/t3-3c-v1/retirement-manifest.json`
+and `agents/integration/artifacts/p4/t3-3c-v1/receipt.json`.
+Receipt SHA-256: `b3f8971ca1a73b9f5377046e1ebdc534a19dcab244438abeac5e154d4e166c9c`.

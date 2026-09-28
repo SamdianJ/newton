@@ -206,8 +206,10 @@ retained. Sharpa common 10 ms samples preserve joint q/qd for timestep compariso
 Matrix jobs capture the first actual solve inside each declared bounded window
 and record its time; exported inputs own their storage across later solver steps.
 
-The regression command is
-`uv run --extra dev -m unittest newton.tests.test_monolithic_p2_measurement`.
+The P2 measurement regression tests were retired during P4 by explicit scope
+decision. Their source, test IDs and hashes are preserved in the external
+`agents/integration/artifacts/p4/legacy-archive/39f80c48/` archive; the obsolete
+unittest command is no longer an active entry point.
 The old P2-0 files remain historical evidence. New measurements use schema v2
 and cannot restore missing historical source/check logs. The 2026-09-10 scoped
 delivery is recorded in `fixtures/p2_8a_closeout_v1.json`: 30 valid CUDA repeats,
