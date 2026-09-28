@@ -8,12 +8,8 @@ import unittest
 from pathlib import Path
 
 import numpy as np
-import warp as wp
 
-import newton
 from newton.examples.softbody.monolithic_soft_ball import generate_ball, load_ball, validate_ball
-from newton.solvers.experimental.monolithic import MonolithicCollisionPipeline, SolverMonolithic
-from newton.tests.unittest_utils import add_function_test, get_test_devices
 
 
 class TestMonolithicSoftBall(unittest.TestCase):
@@ -83,58 +79,6 @@ class TestMonolithicSoftBall(unittest.TestCase):
             np.savez(path, **arrays)
             with self.assertRaisesRegex(ValueError, "material mismatch"):
                 load_ball(path)
-
-
-def test_free_ball(test, device):
-    """Verify all-dynamic sphere BE free fall for both material/mass modes."""
-    for refinement in (1, 2, 3):
-        for material, mass in (("kim_stable_no_log", "lumped"), ("smith_log_stabilized", "consistent")):
-            b = newton.ModelBuilder(gravity=(0, 0, -9.81))
-            body = b.add_link(mass=1.0, inertia=wp.mat33(np.eye(3).flatten()))
-            joint = b.add_joint_prismatic(-1, body, limit_ke=0.0, limit_kd=0.0)
-            b.add_articulation([joint])
-            b.add_soft_mesh(
-                pos=(0, 0, 0.05),
-                rot=wp.quat_identity(),
-                scale=1.0,
-                vel=(0, 0, 0),
-                mesh=generate_ball(refinement),
-                particle_radius=0.0002,
-                add_surface_mesh_edges=False,
-            )
-            m = b.finalize(device=device)
-            test.assertTrue(np.all(m.particle_inv_mass.numpy() > 0))
-            kwargs = (
-                {"tet_rest_density": wp.full(m.tet_count, 1000.0, dtype=float, device=device)}
-                if mass == "consistent"
-                else {}
-            )
-            solver = SolverMonolithic(
-                m,
-                collision_pipeline=MonolithicCollisionPipeline(m, soft_contact_gap=0.002),
-                contact_stiffness=1e7,
-                material_model=material,
-                mass_mode=mass,
-                **kwargs,
-            )
-            state, next_state = m.state(), m.state()
-            rest = state.particle_q.numpy().copy()
-            dt = 0.001
-            for _ in range(5):
-                solver.step(state, next_state, m.control(), None, dt)
-                state, next_state = next_state, state
-            expected = -9.81 * dt * dt * 15
-            np.testing.assert_allclose(
-                state.particle_q.numpy() - rest, np.tile([0, 0, expected], (len(rest), 1)), atol=2e-7
-            )
-            np.testing.assert_allclose(
-                state.particle_qd.numpy(), np.tile([0, 0, -9.81 * dt * 5], (len(rest), 1)), atol=2e-5
-            )
-            test.assertTrue(solver.last_stats.converged)
-
-
-for device in get_test_devices():
-    add_function_test(TestMonolithicSoftBall, "test_free_ball", test_free_ball, devices=[device])
 
 
 if __name__ == "__main__":

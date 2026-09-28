@@ -1039,6 +1039,12 @@ def test_offline_diagonal_profile(test, device):
 class TestMonolithicLinear(unittest.TestCase):
     """Exercise assembly independently on each available device."""
 
+    def test_capacity_overflow(self):
+        """Reject noninteger and int32-overflow capacities before device allocation."""
+        for count in (True, -1, 1.5, 2**31):
+            with self.subTest(count=count), self.assertRaises(ValueError):
+                MonolithicLinearCapacities(count, 0, 0, 1, 2)
+
 
 for device in get_test_devices():
     for test_function in [

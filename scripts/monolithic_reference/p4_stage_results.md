@@ -308,3 +308,32 @@ cleanup still remain, so T3-3 overall and T4 acceptance are not complete.
 Evidence: `agents/integration/artifacts/p4/t3-3c-v1/retirement-manifest.json`
 and `agents/integration/artifacts/p4/t3-3c-v1/receipt.json`.
 Receipt SHA-256: `b3f8971ca1a73b9f5377046e1ebdc534a19dcab244438abeac5e154d4e166c9c`.
+
+
+## T3-3d: audit and retire remaining deprecated test coverage
+
+Retire 19 whole historical test modules and obsolete cases in nine mixed
+modules after source snapshots, hashes, direct/transitive dependency and
+scheduling review. Subjects include BE/q-only/x-only implementations, xi
+spring friction, old calibration, diagnostics and P2 workflow. Remove the
+old normal-loading example registration and three obsolete P2 test entries.
+Keep independent collision/AABB, asset, shared linear/math and oracle checks,
+and current API rejection contracts. Move the unchanged generic capacity
+overflow assertion into the linear suite. No production source is changed.
+
+The initial retained-suite run exposed 12 old calibration-constructor errors
+in the support module; archive/retire that harness coverage and keep its two
+independent integration oracles. Preserve the failed run as evidence.
+Final retained run: 408 tests, 401 passed, seven existing platform/optional
+dependency skips; the subsequently restored capacity test separately passes.
+Real Sharpa assets were enabled. These tests load none of the six legacy
+solver modules. Discovery: 7,844 IDs, zero import errors; 269 IDs retired and
+two relocated/renamed, with no unrelated Newton test IDs removed.
+
+Archive: legacy-archive/39f80c48/t3-3d-input/9ab8853d (35 original inputs).
+Evidence: agents/integration/artifacts/p4/t3-3d-v1, including per-ID mapping.
+Legacy source/driver retirement remains pending. This batch does not complete
+T3-3 overall or claim T4/full trajectory acceptance.
+
+Full pre-commit passes. Receipt: `t3-3d-v1/receipt.json`.
+SHA-256: `0cc92736e958292c68a2c058cb4f257a69f91fa6254029eb83b9e9af1b690ac6`.

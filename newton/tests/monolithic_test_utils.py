@@ -127,3 +127,21 @@ def build_contact_free_coupled_fixture(device, *, gravity=(0.0, 0.0, 0.0), **opt
     state = solver.create_state(dt=0.001, source=fixture.state)
     out = solver.create_state(dt=0.001, source=fixture.state)
     return TinyFixture(fixture.model, state, out, fixture.control, fixture.spec), solver
+
+
+SHARPA_TEST_MOUNT = {
+    "support_height": 0.1698,
+    "carriage": {
+        "target_ke": 10000.0,
+        "target_kd": 250.0,
+        "limit_ke": 100000.0,
+        "limit_kd": 250.0,
+        "lower": -0.01,
+        "upper": 0.07,
+        "effort": 100.0,
+        "velocity": 0.1,
+        "friction": 0.1,
+        "limit_width": 0.001,
+        "friction_velocity_scale": 0.001,
+    },
+}

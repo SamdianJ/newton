@@ -1,5 +1,7 @@
 # P3-PR1：私有 tet-only 变分基线
 
+> P4退役说明：本文记录历史tet-only实现，下面的旧驱动与测试命令已退役，不是当前执行入口。当前共享tet检查为 `test_solver_monolithic_tet`、`test_solver_monolithic_material_mass`、`test_monolithic_p4_tet_components`；正式场景回归使用 `scripts.monolithic_reference.run_p4`。
+
 PR1 为无接触、单连通 tet 模型提供真实时间推进，支持 Kim/Smith 材料、lumped/consistent mass，以及显式选择的 Armijo、ResNorm、ArmijoOrResNorm。没有新增公开构造模式或生产 globalization 默认；PR2 articulation 与 PR3 contact/grasp 不在本交付内。
 
 ## 状态与数值契约
@@ -27,7 +29,7 @@ PR1 为无接触、单连通 tet 模型提供真实时间推进，支持 Kim/Smi
 
 ## 复现
 
-在本仓库运行以下独立进程：
+历史验证命令（仅留作证据索引，不再执行）：
 
 ```bash
 uv run --no-sync -m unittest newton.tests.test_monolithic_p3_tet newton.tests.test_monolithic_p3_accuracy_diagnostic

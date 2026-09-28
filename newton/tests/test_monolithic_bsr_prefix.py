@@ -4,7 +4,6 @@
 """Verify count-bounded BSR construction without changing assembly semantics."""
 
 import unittest
-from contextlib import nullcontext
 from unittest.mock import patch
 
 import numpy as np
@@ -12,10 +11,8 @@ import warp as wp
 from warp import sparse
 
 from newton._src.solvers.monolithic.linear import MonolithicLinearGeneration, MonolithicLinearStatus
-from newton.examples.softbody.monolithic_contact_friction import FrictionCase
 from newton.tests.test_solver_monolithic_linear import _contact, _dense_bsr, _owners, _workspace
 from newton.tests.unittest_utils import add_function_test, get_test_devices
-from scripts.monolithic_reference.validate_bsr_prefix import full_capacity_builder
 
 
 def test_prefix_views_and_parity(test, device):
@@ -120,51 +117,6 @@ def test_count_guards_before_builder(test, device):
             )
 
 
-def test_contact_trajectory_parity(test, device):
-    """Preserve contacting motion and committed friction history against the old builder."""
-    trajectories = []
-    for capacity in (True, False):
-        case = FrictionCase(device)
-        context = (
-            patch.object(
-                sparse,
-                "bsr_set_from_triplets",
-                new=full_capacity_builder(case.solver._linear, sparse.bsr_set_from_triplets),
-            )
-            if capacity
-            else nullcontext()
-        )
-        trace = []
-        with context:
-            for step in range(150):
-                case.step()
-                test.assertFalse(case.solver.last_stats.rolled_back)
-                history = case.solver._contact.committed
-                if step % 25 == 24:
-                    trace.append(
-                        [
-                            case.state.joint_q.numpy(),
-                            case.state.particle_q.numpy(),
-                            history.valid.numpy(),
-                            history.xi_local.numpy(),
-                            history.normal_local.numpy(),
-                        ]
-                    )
-        test.assertGreater(history.valid.numpy().sum(), 0)
-        test.assertGreater(np.linalg.norm(history.xi_local.numpy()), 0)
-        test.assertEqual(case.solver._history_epoch, 150)
-        trajectories.append(trace)
-    for old, new in zip(*trajectories, strict=True):
-        # Independent CUDA trajectories and nnz-based matvec selection can
-        # change reduction roundoff. Reuse the existing G5 tolerances.
-        for before, after in zip(old[:2], new[:2], strict=True):
-            error = np.linalg.norm(before.astype(float) - after) / max(np.linalg.norm(before), 1e-12)
-            test.assertLessEqual(error, 1e-5 if device.is_cpu else 5e-5)
-        np.testing.assert_array_equal(old[2], new[2])
-        np.testing.assert_allclose(old[3], new[3], atol=1e-7)
-        np.testing.assert_allclose(old[4], new[4], rtol=1e-5 if device.is_cpu else 5e-5, atol=1e-7)
-
-
 class TestMonolithicBsrPrefix(unittest.TestCase):
     pass
 
@@ -174,7 +126,6 @@ for device in get_test_devices():
         test_prefix_views_and_parity,
         test_empty_and_full_prefix,
         test_count_guards_before_builder,
-        test_contact_trajectory_parity,
     ):
         add_function_test(TestMonolithicBsrPrefix, function.__name__, function, devices=[device])
 

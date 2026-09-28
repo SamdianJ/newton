@@ -6,6 +6,13 @@
 Monolithic P1 contract
 ==============================
 
+.. note::
+
+   This is a historical P1 contract. Its BE, q-only and xi-history solver
+   tests were archived and retired during P4. Current solver boundary checks
+   live in ``test_monolithic_p4_api`` and ``test_monolithic_p3_coupled``;
+   independent collision and shared component checks remain active.
+
 This supplement freezes ``monolithic-p1-contract/v1`` against the implemented
 PR-6C joints and PR-6D hand adapter at base commit
 ``299f43ceab1d6647f12a4c13dab6100893878be1``. It also reserves the interfaces
@@ -313,10 +320,10 @@ Verification ownership and completion
   the SDF/soft-ball portion of PR-6D/G5, G6 grasp and
   G7 scale/performance are not completed by this contract subcommit.
 
-Portable contract tests live in ``test_solver_monolithic_p1_contract`` and
-``test_sharpa_trajectory``; CPU/CUDA joint, contact and q-only lifecycle tests
-exercise the corresponding production paths. Future enablement must add its
-own physical acceptance evidence and preserve the existing tolerances.
+The old ``test_solver_monolithic_p1_contract`` has been archived. Its generic
+capacity-overflow check is retained in ``test_solver_monolithic_linear``.
+``test_sharpa_trajectory`` continues to cover the shared trajectory reader.
+Historical q-only and xi-history paths have no active regression obligation.
 
 PR-6A implementation details
 ------------------------------------
