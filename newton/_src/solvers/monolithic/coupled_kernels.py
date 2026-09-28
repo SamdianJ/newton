@@ -140,3 +140,40 @@ def contact_forces(
     if body >= 0:
         torque = wp.cross(point - com[body], world)
         wp.atomic_add(bforce, body, wp.spatial_vectord(world[0], world[1], world[2], torque[0], torque[1], torque[2]))
+
+
+@wp.kernel
+def _scatter(matrix: wp.array2d[float], actor: wp.array2d[float], values: wp.array[float], diagonal: wp.array[float]):
+    i, j = wp.tid()
+    actor[i, j] = matrix[i, j]
+    values[i * matrix.shape[0] + j] = matrix[i, j]
+    if i == j:
+        diagonal[i] = matrix[i, i]
+
+
+@wp.kernel
+def _coordinate_trial(
+    q: wp.array[wp.float64],
+    direction: wp.array[float],
+    alpha: wp.float64,
+    qn: wp.array[wp.float64],
+    h: wp.float64,
+    out: wp.array[wp.float64],
+    vout: wp.array[wp.float64],
+):
+    i = wp.tid()
+    out[i] = q[i] + alpha * wp.float64(direction[i])
+    vout[i] = (out[i] - qn[i]) / h
+
+
+@wp.kernel
+def _coordinate_predictor(
+    q: wp.array[wp.float64],
+    v: wp.array[wp.float64],
+    h: wp.float64,
+    out: wp.array[wp.float64],
+    vout: wp.array[wp.float64],
+):
+    i = wp.tid()
+    out[i] = q[i] + h * v[i]
+    vout[i] = (out[i] - q[i]) / h

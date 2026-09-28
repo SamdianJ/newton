@@ -108,3 +108,21 @@ The historical parent still introduces a transitive contact import until T2.
 No files are retired at this stage.
 Evidence: `agents/integration/artifacts/p4/t1c-v1/receipt.json`, SHA-256
 `7cdb761a9a586ed841a68f30a7d03c1ce3b2452935277c38602cc8cbb0a62959`.
+
+## T2-1: merged q+x transaction
+
+The complete private solver now directly inherits SolverBase. Inline the former
+parent's initialization and transaction, retaining predictor/trial/history and
+publication order; allocate only the q+x linear workspace. Move unchanged scalar
+kernels into coupled_kernels and retain the exact linear failure mapping.
+
+Validation: 30 tests, 29 passed, one existing CPU texture skip; full pre-commit
+passes. CPU/CUDA three-law three-step comparison against 39f80c48 is bitwise
+identical for all captured arrays, including identity/history. Both trees pass
+final-force failure rollback injection. The new inheritance check fails on the
+baseline as expected. Existing failure injections now patch the same iterate
+call directly instead of the removed parent; assertions and tolerances unchanged.
+
+Public entry and long dev trajectories remain T2-2.
+Evidence: `agents/integration/artifacts/p4/t2-1-v1/receipt.json`, SHA-256
+`68cd12e947d1fb0311edce5e0a2518631310f3b23e64b36aec941223c94d06e4`.

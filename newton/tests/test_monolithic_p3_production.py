@@ -11,7 +11,7 @@ from unittest.mock import patch
 import numpy as np
 import warp as wp
 
-from newton._src.solvers.monolithic.articulation_solver import _ArticulationSolver
+from newton._src.solvers.monolithic import coupled_solver
 from newton._src.solvers.monolithic.contact_variational import ContactObjective, ContactStatus
 from newton._src.solvers.monolithic.solver_monolithic import _StepFailure
 from newton.tests.test_monolithic_p3_contact_components import fixture, state, tangent
@@ -108,7 +108,7 @@ def test_mask_contact(test, device):
 
 def test_last_accepted_publication(test, device):
     """Publish the accepted state after eligible stops and retain exact failure labels."""
-    original_iterate = _ArticulationSolver._iterate_articulation
+    original_iterate = coupled_solver.iterate
     for policy in ("last_accepted", "current_iterate"):
         for mode, graph in [("diagnostic", False), ("production", False)] + (
             [("production", True)] if device.is_cuda else []
@@ -128,7 +128,7 @@ def test_last_accepted_publication(test, device):
                     current._trial.particle_q.fill_(wp.vec3d(float("nan")))
                     raise _StepFailure(current.Status(reason), "eligible stop injection")
 
-                with patch.object(_ArticulationSolver, "_iterate_articulation", stop):
+                with patch.object(coupled_solver, "iterate", stop):
                     run.step(before, after, model.control(), dt=0.001)
                 stats = run.last_stats
                 test.assertFalse(stats.converged)
@@ -146,7 +146,7 @@ def test_last_accepted_publication(test, device):
 
 def test_stopped_hard_gates(test, device):
     """Reject zero-accepted stops and invalid final states with complete output rollback."""
-    original_iterate = _ArticulationSolver._iterate_articulation
+    original_iterate = coupled_solver.iterate
     for policy in ("strict", "last_accepted", "current_iterate"):
         for failure in ("zero", "nan", "tet", "capacity", "force", "binding"):
             if failure == "zero" and policy == "current_iterate":
@@ -169,7 +169,7 @@ def test_stopped_hard_gates(test, device):
                     raise _StepFailure(current.Status.CONTACT_OVERFLOW, "capacity injection")
                 raise _StepFailure(current.Status.REGULARIZATION_EXHAUSTED, "stop injection")
 
-            with patch.object(_ArticulationSolver, "_iterate_articulation", stop):
+            with patch.object(coupled_solver, "iterate", stop):
                 if failure in ("force", "binding"):
                     with patch.object(
                         run if failure == "force" else run._states,

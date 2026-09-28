@@ -3,26 +3,40 @@
 
 """Private PR3 q/x path, using the shared PR2 iteration and bounded sparse linear system."""
 
-import inspect
+import math
 from dataclasses import replace
 from types import MappingProxyType
 
 import numpy as np
 import warp as wp
 
+from ...sim import JointType
+from ..solver import SolverBase
 from . import coupled_kernels as kernels
-from .articulation_solver import _ArticulationSolver, _scatter
-from .articulation_variational import _TreeKinematics
+from .articulation_state import _predict, _recover_history
+from .articulation_variational import ArticulationObjective, _TreeKinematics
 from .collision import _validate_and_collect_boundary_faces
 from .contact_variational import ContactObjective, ContactStatus
 from .coupled_state import CoupledState
+from .joint_parameters import JointParameters
 from .linear import (
     MonolithicLinearCapacities,
     MonolithicLinearGeneration,
     MonolithicLinearLayout,
+    MonolithicLinearStatus,
     MonolithicLinearWorkspace,
 )
-from .solver_types import _StepFailure
+from .segment_graph import _SegmentGraphCache
+from .solver_types import (
+    JointTerms,
+    MassMode,
+    MaterialModel,
+    PCGMode,
+    Stats,
+    Status,
+    _SolverMonolithicInternalConfig,
+    _StepFailure,
+)
 from .tet_assembly import (
     TetScatterBuffers,
     assemble_tet_residual_tangent,
@@ -30,10 +44,10 @@ from .tet_assembly import (
     create_tet_assembly_workspace,
 )
 from .tet_precision import TetObjective64
-from .variational_iteration import measure
+from .variational_iteration import iterate, measure
 
 
-class _CoupledSolver(_ArticulationSolver):
+class _CoupledSolver(SolverBase):
     """Keep strict defaults; opt in to masked contact and stopped publication.
 
     Nonconservative energy acceptance is heuristic, not a variational guarantee.
@@ -42,6 +56,14 @@ class _CoupledSolver(_ArticulationSolver):
     also permits the initialized predictor when no update was accepted. Neither
     policy publishes rejected trials. Force validity is not equilibrium.
     """
+
+    supports_collision_pipeline = False
+    Status = Status
+    Stats = Stats
+    JointTerms = JointTerms
+    PCGMode = PCGMode
+    MaterialModel = MaterialModel
+    MassMode = MassMode
 
     def __init__(
         self,
@@ -62,7 +84,14 @@ class _CoupledSolver(_ArticulationSolver):
         smooth_sdf=None,
         alignment_policy="guard",
         allow_nonconservative_energy=False,
-        **options,
+        joint_terms=None,
+        newton_max_iterations=10,
+        line_search_max_iterations=8,
+        linear_max_iterations=200,
+        linear_tolerance=1e-4,
+        linear_absolute_tolerance=1e-6,
+        pcg_mode=PCGMode.DIAGNOSTIC,
+        use_cuda_graph=False,
     ):
         if publish_policy not in ("strict", "last_accepted", "current_iterate"):
             raise ValueError("Unknown coupled publication policy")
@@ -138,19 +167,70 @@ class _CoupledSolver(_ArticulationSolver):
             self._coupled_config["smooth_sdf_digest"] = np.frombuffer(bytes.fromhex(smooth_sdf.digest), dtype=np.uint8)
         # Include effective numeric policy in checkpoint identity; device execution
         # mode is deliberately excluded so CPU/CUDA checkpoints remain portable.
-        defaults = inspect.signature(_ArticulationSolver.__init__).parameters
-        names = (
-            "newton_max_iterations",
-            "line_search_max_iterations",
-            "linear_max_iterations",
-            "linear_tolerance",
-            "linear_absolute_tolerance",
-        )
         self._coupled_config["iteration_policy"] = np.array(
-            [options.get(name, defaults[name].default) for name in names]
+            [
+                newton_max_iterations,
+                line_search_max_iterations,
+                linear_max_iterations,
+                linear_tolerance,
+                linear_absolute_tolerance,
+            ]
         )
         self._scope_counts = tuple(getattr(model, name) for name in ("spring_count", "tri_count", "edge_count"))
-        super().__init__(model, globalization=globalization, publish_policy="strict", **options)
+        if globalization not in ("Armijo", "ResNorm", "ArmijoOrResNorm"):
+            raise ValueError("Unknown articulation globalization/publication policy")
+        for value in (newton_max_iterations, line_search_max_iterations, linear_max_iterations):
+            if type(value) is not int or value <= 0:
+                raise ValueError("Iteration budgets must be positive integers")
+        for value in (linear_tolerance, linear_absolute_tolerance):
+            if isinstance(value, bool) or not np.isfinite(value) or value < 0:
+                raise ValueError("Invalid linear tolerance")
+        if joint_terms is None:
+            joint_terms = self.JointTerms()
+        if not isinstance(joint_terms, self.JointTerms):
+            raise ValueError("joint_terms must be SolverMonolithic.JointTerms")
+        options = {name: getattr(joint_terms, name) for name in joint_terms.__dataclass_fields__}
+        self._joint_terms = JointParameters(model, **options)
+        for name in ("joint_target_ke", "joint_target_kd", "joint_limit_ke", "joint_limit_kd", "joint_friction"):
+            if name not in self._joint_terms.allowed_properties and np.any(getattr(model, name).numpy() != 0):
+                raise ValueError(f"Disabled joint term has nonzero parameters: {name}")
+        parameters = self._joint_terms.params.numpy()
+        self._kinematics = self._make_kinematics(
+            model,
+            extra_config={
+                "joint_terms": parameters,
+                "joint_switches": np.array(
+                    [joint_terms.implicit_pd, joint_terms.limits, joint_terms.friction], dtype=np.uint8
+                ),
+            },
+        )
+        SolverBase.__init__(self, model)
+        self._states = self._make_states()
+        self._objective = ArticulationObjective(self._kinematics, parameters)
+        self._config = _SolverMonolithicInternalConfig()
+        # Sharpa refinement certifies these tighter goals within the existing budgets.
+        self._config = replace(
+            self._config,
+            merit_absolute_global=self._config.merit_absolute_global * 0.1,
+            merit_absolute_q=self._config.merit_absolute_q * 0.1,
+            merit_relative_global=self._config.merit_relative_global * 0.1,
+            merit_relative_q=self._config.merit_relative_q * 0.1,
+        )
+        self._globalization = globalization
+        self.newton_max_iterations, self.line_search_max_iterations = newton_max_iterations, line_search_max_iterations
+        self.linear_max_iterations = linear_max_iterations
+        self.linear_tolerance, self.linear_absolute_tolerance = linear_tolerance, linear_absolute_tolerance
+        self._pcg_mode = self.PCGMode(pcg_mode)
+        self._use_cuda_graph = use_cuda_graph
+        device = model.device
+        self._graphs = _SegmentGraphCache(device, enabled=use_cuda_graph)
+        # Scratch states are allocated on first use, with the caller's legal initial dt.
+        self._original = self._accepted = self._trial = None
+        self._step_generation = self._assembly_sequence = 0
+        self._last_stats = self.Stats(self.Status.NOT_RUN)
+        self._old_joint_t = wp.empty_like(self._kinematics.joint_translations)
+        self._old_joint_r = wp.empty_like(self._kinematics.joint_rotations)
+
         self._config = replace(
             self._config,
             merit_absolute_global=1e-7,
@@ -278,7 +358,160 @@ class _CoupledSolver(_ArticulationSolver):
     def step(self, state_in, state_out, control, contacts=None, dt=0.0):
         self._validate_components()
         self._stopped_failure = None
-        result = super().step(state_in, state_out, control, contacts, dt)
+        if contacts is not None or not math.isfinite(dt) or dt <= 0:
+            raise ValueError("Articulation step requires no contacts and finite positive dt")
+        self._kinematics.validate_identity()
+        self._states.validate(state_in)
+        self._states.validate(state_out)
+        for name in ("joint_f", "joint_target_q", "joint_target_qd"):
+            array = getattr(control, name, None)
+            if (
+                not isinstance(array, wp.array)
+                or (array.shape, array.dtype, array.device)
+                != ((self._kinematics.count,), wp.float32, self.model.device)
+                or not np.isfinite(array.numpy()).all()
+            ):
+                raise ValueError(f"Invalid articulation control: {name}")
+        self._joint_terms.snapshot_targets(control)
+        force = state_in.body_f.numpy().astype(float)
+        joint_force = control.joint_f.numpy().astype(float)
+        gravity = self.model.gravity.numpy().astype(float)
+        if (
+            not np.isfinite(force).all()
+            or not np.isfinite(joint_force).all()
+            or not np.isfinite(gravity).all()
+            or np.any(force[:, 3:] != 0)
+        ):
+            raise ValueError("Articulation requires finite forces and zero spatial torque")
+        if self._original is None:
+            self._original = self._states.copy(state_in)
+            self._accepted = self._states.copy(state_in)
+            self._trial = self._states.copy(state_in)
+        for state in (self._original, self._accepted, self._trial):
+            state.assign(state_in)
+        self._prepare_step(state_in, state_out, dt)
+        self._step_generation += 1
+        self._metrics = {
+            "matrix_assembly_count": 0,
+            "regularization_retries": 0,
+            "linear_iterations": 0,
+            "linear_scheduled_slots": 0,
+            "line_search_iterations": 0,
+        }
+        self._variational = {
+            "globalization": self._globalization,
+            "trials": [],
+            "linear_postchecks": [],
+            "configuration": self._kinematics.digest.hex(),
+        }
+        k, obj = self._kinematics, self._objective
+        k.evaluate(state_in.joint_q)
+        wp.copy(obj.tn, k.com)
+        wp.copy(obj.rn, k.rotations)
+        wp.copy(self._old_joint_t, k.joint_translations)
+        wp.copy(self._old_joint_r, k.joint_rotations)
+        wp.copy(obj.qn, state_in.joint_q)
+        wp.copy(obj.vn, state_in.joint_qd)
+        history = getattr(state_in, self._states.namespace)
+        wp.launch(
+            _predict,
+            k.bodies,
+            [
+                obj.tn,
+                obj.rn,
+                history.link_v_com,
+                history.link_omega,
+                history.link_vsym,
+                wp.float64(dt),
+                obj.predicted_t,
+                obj.predicted_r,
+            ],
+            device=self.model.device,
+        )
+        obj.force.assign(force[:, :3] + k.values["body_mass"][:, None] * gravity[k.values["body_world"]])
+        obj.joint_force.assign(joint_force)
+        obj.qt.assign(self._joint_terms.target_q.numpy().astype(float))
+        obj.vt.assign(self._joint_terms.target_qd.numpy().astype(float))
+        wp.launch(
+            kernels._coordinate_predictor,
+            k.count,
+            [obj.qn, obj.vn, wp.float64(dt), self._accepted.joint_q, self._accepted.joint_qd],
+            device=self.model.device,
+        )
+        k.evaluate(self._accepted.joint_q)
+        if not self._domain(self._accepted):
+            wp.copy(self._accepted.joint_q, obj.qn)
+            self._accepted.joint_qd.zero_()
+        failure = None
+        status = self.Status.NONFINITE
+        published = False
+        try:
+            status = self._iterate_articulation(dt)
+            if self._can_publish(status):
+                self._validate_final(dt, status)
+                # A PD-stabilized B cannot certify the candidate's physical inertia.
+                try:
+                    k.validate_inertia()
+                except ValueError as error:
+                    raise _StepFailure(self.Status.NONFINITE, str(error)) from error
+                final = getattr(self._accepted, self._states.namespace)
+                wp.launch(
+                    _recover_history,
+                    k.bodies,
+                    [
+                        obj.tn,
+                        obj.rn,
+                        k.com,
+                        k.rotations,
+                        wp.float64(dt),
+                        final.link_v_com,
+                        final.link_omega,
+                        final.link_vsym,
+                    ],
+                    device=self.model.device,
+                )
+                wp.launch(
+                    _recover_history,
+                    k.joints,
+                    [
+                        self._old_joint_t,
+                        self._old_joint_r,
+                        k.joint_translations,
+                        k.joint_rotations,
+                        wp.float64(dt),
+                        final.joint_v,
+                        final.joint_omega,
+                        final.joint_vsym,
+                    ],
+                    device=self.model.device,
+                )
+                k.evaluate(self._accepted.joint_q, state=self._accepted)
+                self._finish_candidate(self._accepted, dt)
+                self._states.bind(self._accepted, dt=dt)
+                self._states.validate(self._accepted)
+                state_out.assign(self._accepted)
+                self._metrics.update(self._joint_force_metrics(state_out))
+                published = True
+        except _StepFailure as error:
+            status, failure = error.status, str(error)
+        except Exception as error:
+            status, failure = self.Status.NONFINITE, str(error)
+            raise
+        finally:
+            if not published:
+                self._restore(state_out)
+            self._variational["graphs"] = self._graphs.summary()
+            self._last_stats = self.Stats(
+                status=status,
+                failure_reason=failure,
+                converged=status == self.Status.SUCCESS and published,
+                rolled_back=not published,
+                step_generation=self._step_generation,
+                preconditioner_kind="actor_block",
+                q_block_count=1,
+                variational=MappingProxyType(self._variational.copy()),
+                **self._metrics,
+            )
         stats = self._last_stats
         stopped = not stats.converged and not stats.rolled_back
         detail = dict(stats.variational)
@@ -309,7 +542,7 @@ class _CoupledSolver(_ArticulationSolver):
             variational=MappingProxyType(detail),
             failure_reason=(self._stopped_failure or stats.status.value) if stopped else stats.failure_reason,
         )
-        return result
+        return state_out
 
     def _can_publish(self, status):
         return status == self.Status.SUCCESS or (
@@ -328,7 +561,7 @@ class _CoupledSolver(_ArticulationSolver):
 
     def _iterate_articulation(self, dt):
         try:
-            return super()._iterate_articulation(dt)
+            return iterate(self, dt)
         except _StepFailure as error:
             if not self._can_publish(error.status):
                 raise
@@ -433,7 +666,20 @@ class _CoupledSolver(_ArticulationSolver):
             return None
 
     def _take_trial(self, alpha, dt):
-        super()._take_trial(alpha, dt)
+        wp.launch(
+            kernels._coordinate_trial,
+            self._kinematics.count,
+            [
+                self._accepted.joint_q,
+                self._delta,
+                wp.float64(alpha),
+                self._objective.qn,
+                wp.float64(dt),
+                self._trial.joint_q,
+                self._trial.joint_qd,
+            ],
+            device=self.model.device,
+        )
         wp.launch(
             kernels.particle_trial,
             self.model.particle_count,
@@ -454,7 +700,7 @@ class _CoupledSolver(_ArticulationSolver):
     def _effective_displacement(self):
         ids = self._tet.ids.numpy()
         return np.r_[
-            super()._effective_displacement(),
+            self._trial.joint_q.numpy() - self._accepted.joint_q.numpy(),
             (self._trial.particle_q.numpy()[ids] - self._accepted.particle_q.numpy()[ids]).ravel(),
         ]
 
@@ -471,7 +717,7 @@ class _CoupledSolver(_ArticulationSolver):
         assembly = linear.begin_assembly(self._generation)
         nq = k.count
         wp.launch(
-            _scatter,
+            kernels._scatter,
             (nq, nq),
             [obj.tangent32, assembly.aq_actor_dense, assembly.global_scalar_triplets.values, self._diagonal],
             device=self.model.device,
@@ -587,3 +833,68 @@ class _CoupledSolver(_ArticulationSolver):
 
     def _restore(self, state):
         state.assign(self._out_backup)
+
+    def _domain(self, state):
+        k, obj = self._kinematics, self._objective
+        delta = state.joint_q.numpy() - obj.qn.numpy()
+        moving_types = k.values["joint_type"][k.dof_joint.numpy()]
+        if np.any(abs(delta[moving_types == JointType.REVOLUTE]) >= math.pi / 2):
+            return False
+        # The caller has evaluated this candidate's private FK.
+        return bool(np.all(np.einsum("bij,bij->b", k.rotations.numpy(), obj.rn.numpy()) > 1.0))
+
+    def _joint_force_metrics(self, state):
+        """Bind scalar force diagnostics to the successfully published state."""
+        p = self._objective.params.numpy()
+        q, v = state.joint_q.numpy(), state.joint_qd.numpy()
+        raw = p[:, 0] * (q - self._objective.qt.numpy()) + p[:, 1] * (v - self._objective.vt.numpy())
+        pd = -np.clip(raw, -p[:, 2], p[:, 2])
+        limit, power = np.zeros(len(q)), np.zeros(len(q))
+        for sign, bound in ((1.0, p[:, 4]), (-1.0, p[:, 3])):
+            d = sign * (q - bound)
+            z = np.clip(d / p[:, 7], 0.0, 1.0)
+            activation = z * z * (3.0 - 2.0 * z)
+            damper = p[:, 6] * activation * np.maximum(sign * v, 0.0)
+            limit -= sign * (p[:, 5] * np.maximum(d, 0.0) + damper)
+            power -= damper * sign * v
+        friction = -p[:, 8] * v / np.hypot(v, p[:, 9])
+        return {
+            "joint_force_generation": self._step_generation,
+            "joint_pd_force": tuple(pd.tolist()),
+            "joint_limit_force": tuple(limit.tolist()),
+            "joint_friction_force": tuple(friction.tolist()),
+            "joint_pd_saturated": tuple(((p[:, 0] + p[:, 1] > 0) & (abs(raw) >= p[:, 2])).tolist()),
+            "joint_limit_damping_power": tuple(power.tolist()),
+            "joint_friction_power": tuple((friction * v).tolist()),
+        }
+
+    @property
+    def last_stats(self):
+        return self._last_stats
+
+    def _require_linear(self, status: MonolithicLinearStatus) -> None:
+        if status == MonolithicLinearStatus.SUCCESS:
+            return
+        mapped = {
+            "NON_POSITIVE_PIVOT": self.Status.PRECONDITIONER_FACTORIZATION_FAILED,
+            "NON_POSITIVE_CURVATURE": self.Status.LINEAR_NON_POSITIVE_CURVATURE,
+            "NEAR_ZERO_CURVATURE": self.Status.LINEAR_NON_POSITIVE_CURVATURE,
+            "NON_POSITIVE_PRECONDITIONED_RESIDUAL": self.Status.LINEAR_PRECONDITIONER_NOT_SPD,
+            "STAGNATION": self.Status.LINEAR_STAGNATION,
+            "MAX_ITERATIONS": self.Status.LINEAR_MAX_ITERATIONS,
+            "GLOBAL_TRIPLET_OVERFLOW": self.Status.CONTACT_OVERFLOW,
+            "CONTACT_FACTOR_OVERFLOW": self.Status.CONTACT_OVERFLOW,
+        }
+        if status.name in ("STALE_GENERATION", "INVALID_ARGUMENT", "PRECONDITIONER_NOT_FACTORED"):
+            raise ValueError(f"Invalid linear workspace contract: {status.name}")
+        raise _StepFailure(mapped.get(status.name, self.Status.NONFINITE), status.name)
+
+    @property
+    def use_cuda_graph(self) -> bool:
+        """Return the immutable experimental PCG and stable-segment capture option."""
+        return self._use_cuda_graph
+
+    @property
+    def pcg_mode(self) -> PCGMode:
+        """Return the immutable experimental PCG observation policy."""
+        return self._pcg_mode
