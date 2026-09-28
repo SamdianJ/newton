@@ -177,7 +177,14 @@ def _check_coefficients(actual: wp.array[wp.float64], frozen: wp.array[wp.float6
 
 
 class SmoothSDFSet:
-    """Bind diagnostic fields to original SDF indices and reject graph-invalidating edits."""
+    """Bind smooth fields to original SDF indices and reject buffer edits.
+
+    .. experimental::
+
+    Construct through :func:`~newton.solvers.experimental.monolithic.build_smooth_sdf`.
+    Its ``build_metadata`` describes provenance and checks without affecting the
+    physical identity. Field descriptors and coefficients must remain unchanged.
+    """
 
     def __init__(self, fields, *, source_identity):
         if not fields or any(field.device != fields[0].device for field in fields):

@@ -17,21 +17,11 @@ import warp as wp
 
 from newton._src.geometry.sdf_texture import TextureSDFData
 from newton._src.solvers.monolithic.contact_geometry import _mesh64
-from newton._src.solvers.monolithic.smooth_sdf import SmoothSDF, sample_smooth
+from newton._src.solvers.monolithic.smooth_sdf import SmoothSDF
+from newton._src.solvers.monolithic.smooth_sdf_builder import _nodes, sample
 from scripts.monolithic_reference.build_p3_smooth_sdf import build_coefficients
 from scripts.monolithic_reference.verify_p3_close import ARTIFACTS, build
 from scripts.monolithic_reference.verify_p3_coupled import save
-
-
-@wp.kernel
-def _nodes(table: wp.array[TextureSDFData], sdf_index: int, dims: wp.vec3i, output: wp.array[wp.float64]):
-    i = wp.tid()
-    index = wp.vec3d(wp.float64(i % dims[0]), wp.float64((i / dims[0]) % dims[1]), wp.float64(i / (dims[0] * dims[1])))
-    sdf = table[sdf_index]
-    lower, upper = wp.vec3d(sdf.sdf_box_lower), wp.vec3d(sdf.sdf_box_upper)
-    dx = wp.cw_div(upper - lower, wp.vec3d(dims - wp.vec3i(1)))
-    value, _gradient = _mesh64(sdf, lower + wp.cw_mul(index, dx))
-    output[i] = value
 
 
 @wp.kernel
@@ -47,13 +37,6 @@ def sha256(path):
     """Hash large evidence without retaining another full buffer."""
     with Path(path).open("rb") as stream:
         return hashlib.file_digest(stream, "sha256").hexdigest()
-
-
-def sample(field, points):
-    points = wp.array(points, dtype=wp.vec3d, device=field.device)
-    output = wp.empty((len(points), 13), dtype=wp.float64, device=field.device)
-    wp.launch(sample_smooth, len(points), [field.data, points, output], device=field.device)
-    return output.numpy()
 
 
 def measure(values, reference):

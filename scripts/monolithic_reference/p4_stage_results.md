@@ -159,3 +159,25 @@ It was stopped, marked ABORTED_WRONG_INPUT and excluded. The accepted run uses
 explicitly; its raw hash, payload, SDF identity and all initial fields match T0.
 Evidence: `agents/integration/artifacts/p4/t2-2-v1/receipt.json`, SHA-256
 `b78077c554f894454b0482ba314b1ce2c32b8ea024677fefb9344e9a79f0ee90`.
+
+## T3-1 — Share smooth SDF construction
+
+Expose build_smooth_sdf and SmoothSDFSet through the experimental namespace.
+Move existing coefficient construction, source texture identity, node sampling
+and frozen qualification into the library; the production builder imports no
+scene or diagnostic drivers. Franka and recorded Sharpa use the public entry.
+Reference drivers temporarily retain import aliases pending T3-3 retirement.
+Source/check/qualification metadata does not enter the physical identity.
+
+Validation: both scene construction identities, coefficient hashes and Franka
+component reports are byte-identical before/after. Coefficient, texture identity,
+node kernel and sampling function ASTs are unchanged. Qualification rejection
+checks cover certificate, textures, geometry status, table size, node hashes,
+coordinates and coefficient identity, with no sampling fallback. Public imports
+load no reference or legacy solver modules. 23 tests: 21 pass, two existing CPU
+skips. Full pre-commit passes. Independent spline/contact oracle remains unchanged.
+
+Evidence: agents/integration/artifacts/p4/t3-1-v1/receipt.json, SHA-256
+4c9de8a010f581e36fa69c562f3657b30e518c160337cdd344f47fb5c851ec70.
+T3-2 runner/scenes, T3-3 retirement and post-migration dev remain outstanding;
+this component result is not full trajectory qualification.

@@ -55,3 +55,23 @@ Contacts, contact updates and collision scheduling are rejected. Use
 .. autoclass:: SolverMonolithic
 
 .. autoclass:: MonolithicContactForces
+
+.. autoclass:: SmoothSDFSet
+
+.. autofunction:: build_smooth_sdf
+
+Smooth SDF construction
+-----------------------
+
+Pass ``build_smooth_sdf(model)`` to the solver's ``smooth_sdf`` argument. It
+samples existing attached mesh SDF textures and constructs FP64 C2 B-splines;
+it does not bake meshes again. ``representation="c1-hermite"`` selects Hermite
+interpolation. Sampling performs node and gradient checks, without certifying
+geometry. ``qualified_directory=...`` instead requires frozen nodes, matching
+source textures, geometry certificates and exactly reproduced coefficients.
+Failed qualification raises and never falls back to sampling.
+
+The returned ``SmoothSDFSet.build_metadata`` records the source, checks and
+qualification separately from its physical ``identity`` and ``digest``.
+Coefficient buffers and descriptors remain bound for the solver lifetime;
+changes require rebuilding the fields and solver.

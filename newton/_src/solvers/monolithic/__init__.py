@@ -16,14 +16,24 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from .collision import MonolithicCollisionPipeline
     from .contact_forces import MonolithicContactForces
+    from .smooth_sdf import SmoothSDFSet
+    from .smooth_sdf_builder import build_smooth_sdf
     from .solver_monolithic import SolverMonolithic
 
-__all__ = ["MonolithicCollisionPipeline", "MonolithicContactForces", "SolverMonolithic"]
+__all__ = [
+    "MonolithicCollisionPipeline",
+    "MonolithicContactForces",
+    "SmoothSDFSet",
+    "SolverMonolithic",
+    "build_smooth_sdf",
+]
 
 _LAZY_IMPORTS = {
     "MonolithicCollisionPipeline": ".collision",
     "MonolithicContactForces": ".contact_forces",
     "SolverMonolithic": ".solver_monolithic",
+    "SmoothSDFSet": ".smooth_sdf",
+    "build_smooth_sdf": ".smooth_sdf_builder",
 }
 
 

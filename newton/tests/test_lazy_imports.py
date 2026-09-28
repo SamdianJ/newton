@@ -79,7 +79,7 @@ class TestLazySolverImports(unittest.TestCase):
             "from newton.solvers import SolverBase; "
             "assert monolithic.SolverMonolithic is SolverMonolithic; "
             "assert monolithic.MonolithicCollisionPipeline is MonolithicCollisionPipeline; "
-            "assert monolithic.__all__ == ['MonolithicCollisionPipeline', 'MonolithicContactForces', 'SolverMonolithic']; "
+            "assert monolithic.__all__ == ['MonolithicCollisionPipeline', 'MonolithicContactForces', 'SmoothSDFSet', 'SolverMonolithic', 'build_smooth_sdf']; "
             "assert issubclass(SolverMonolithic, SolverBase); "
             "assert not SolverMonolithic.supports_collision_pipeline; "
             "assert 'SolverMonolithic' in dir(monolithic); "

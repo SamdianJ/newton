@@ -14,10 +14,9 @@ from pathlib import Path
 
 import numpy as np
 import warp as wp
-from newton.solvers.experimental.monolithic import SolverMonolithic
+from newton.solvers.experimental.monolithic import SolverMonolithic, build_smooth_sdf
 
 import newton
-from scripts.monolithic_reference.build_p3_smooth_sdf import load_qualified_fields
 from scripts.monolithic_reference.p3_grasp_trajectory import RecordedGrasp
 from scripts.monolithic_reference.verify_p3_close import ARTIFACTS, REPO, WORKSPACE, build, mask_statistics
 from scripts.monolithic_reference.verify_p3_coupled import measure, save, serial, state_arrays
@@ -76,7 +75,7 @@ def run(args):
     output = args.output
     payload = json.loads(args.trajectory.read_text())
     model, scene, mapping, curve, terms, trajectory, palm = build_recorded(payload)
-    smooth = load_qualified_fields(model, ARTIFACTS / "p3/pr3/smooth-sdf-v1/geometry", "c2-bspline")
+    smooth = build_smooth_sdf(model, qualified_directory=ARTIFACTS / "p3/pr3/smooth-sdf-v1/geometry")
     solver = SolverMonolithic(
         model,
         contact_model="C-IE",

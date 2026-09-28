@@ -8,15 +8,12 @@ from pathlib import Path
 
 import numpy as np
 import warp as wp
-from newton.solvers.experimental.monolithic import SolverMonolithic
+from newton.solvers.experimental.monolithic import SolverMonolithic, build_smooth_sdf
 
 import newton
 import newton.ik as ik
 import newton.utils
-from newton._src.solvers.monolithic.smooth_sdf import SmoothSDFSet
 from newton.examples.softbody.monolithic_soft_cube import load_cube
-from scripts.monolithic_reference.build_p3_smooth_sdf import build_coefficients, texture_identity
-from scripts.monolithic_reference.verify_p3_smooth_sdf import SmoothSDF, _nodes, sample
 
 REPO = Path(__file__).resolve().parents[2]
 DT = 0.001
@@ -119,41 +116,9 @@ def build_model(cache, device="cuda:0"):
 
 
 def smooth_fields(model):
-    """Reconstruct C2 fields from the actual source nodes; report component checks, not certification."""
-    table = model._texture_sdf_data.numpy()
-    fields, reports = [], []
-    for i, sdf in enumerate(table):
-        dims = np.array(model._texture_sdf_subgrid_start_slots[i].shape) * sdf["subgrid_size"] + 1
-        lower, upper = sdf["sdf_box_lower"].astype(float), sdf["sdf_box_upper"].astype(float)
-        nodes = wp.empty(int(np.prod(dims)), dtype=wp.float64, device=model.device)
-        wp.launch(_nodes, nodes.size, [model._texture_sdf_data, i, wp.vec3i(dims), nodes], device=model.device)
-        values = nodes.numpy().reshape(tuple(dims[::-1]))
-        dx = (upper - lower) / (dims - 1)
-        coefficients = build_coefficients(values, dx, "c2-bspline")
-        field = SmoothSDF(coefficients, lower, upper, dims, "c2-bspline", device=model.device)
-        rng = np.random.default_rng(1701 + i)
-        indices = np.column_stack([rng.integers(2, int(d) - 2, 32) for d in dims])
-        points = lower + indices * dx
-        got = sample(field, points)
-        expected = values[indices[:, 2], indices[:, 1], indices[:, 0]]
-        node_error = float(abs(got[:, 0] - expected).max())
-        fd = []
-        for axis in range(3):
-            offset = np.zeros(3)
-            offset[axis] = dx[axis] * 1e-4
-            numerical = (sample(field, points + offset)[:, 0] - sample(field, points - offset)[:, 0]) / (
-                2 * offset[axis]
-            )
-            fd.append(float(abs(numerical - got[:, axis + 1]).max()))
-        if node_error > 1e-10 or max(fd) > 1e-5 or not np.isfinite(got).all():
-            raise ValueError("Franka C2 node/gradient check failed")
-        reports.append({"index": i, "identity": field.identity, "node_error": node_error, "gradient_fd_error": fd})
-        fields.append(field)
-    result = SmoothSDFSet(
-        fields,
-        source_identity={"source_textures": texture_identity(model), "scale": model.shape_scale.numpy().tolist()},
-    )
-    return result, reports
+    """Return the shared builder result with the existing recorder check layout."""
+    result = build_smooth_sdf(model)
+    return result, result.build_metadata["checks"]
 
 
 def plan_poses(model):
