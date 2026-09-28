@@ -932,6 +932,15 @@ If you run the examples from a source checkout with uv, use
     </td>
   </tr>
   <tr>
+    <td align="center" width="33%">
+      <a href="newton/examples/softbody/example_monolithic_franka_grasp.py">
+        <img width="320" src="docs/images/examples/example_monolithic_franka_grasp.jpg" alt="Experimental monolithic Franka soft-cube grasp">
+      </a>
+      <br><code>python -m newton.examples monolithic_franka_grasp</code>
+      <br><a href="docs/guide/monolithic_franka_grasp.rst">Recording, replay and experimental scope</a>
+    </td>
+  </tr>
+  <tr>
     <td colspan="3"><h3>Kamino Examples</h3></td>
   </tr>
   <tr>

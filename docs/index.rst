@@ -26,6 +26,7 @@ Newton Physics
    guide/monolithic_contact_friction
    guide/monolithic_sharpa_assets
    guide/monolithic_sharpa_grasp
+   guide/monolithic_franka_grasp
    Development <guide/development>
    Source Code Guidelines <guide/source_code_guidelines>
    Review Guidelines <guide/review_guidelines>

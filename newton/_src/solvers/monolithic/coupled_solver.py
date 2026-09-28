@@ -34,11 +34,13 @@ from .variational_iteration import measure
 
 
 class _CoupledSolver(_ArticulationSolver):
-    """Keep strict defaults; opt in to masked contact and last-accepted publication.
+    """Keep strict defaults; opt in to masked contact and stopped publication.
 
     Nonconservative energy acceptance is heuristic, not a variational guarantee.
     Stopped publication retains all physical/state gates except the residual goal.
-    Force validity describes state/generation consistency, not equilibrium.
+    ``last_accepted`` requires an accepted Newton update; ``current_iterate``
+    also permits the initialized predictor when no update was accepted. Neither
+    policy publishes rejected trials. Force validity is not equilibrium.
     """
 
     def __init__(
@@ -62,7 +64,7 @@ class _CoupledSolver(_ArticulationSolver):
         allow_nonconservative_energy=False,
         **options,
     ):
-        if publish_policy not in ("strict", "last_accepted"):
+        if publish_policy not in ("strict", "last_accepted", "current_iterate"):
             raise ValueError("Unknown coupled publication policy")
         if contact_model not in ("C-EE", "C-IE", "C-II"):
             raise ValueError("An explicit supported contact law is required")
@@ -291,6 +293,7 @@ class _CoupledSolver(_ArticulationSolver):
             else "unused",
             accepted_count=sum(bool(t.get("accepted")) for t in detail["trials"]),
         )
+        detail["zero_accepted_publication"] = stopped and detail["accepted_count"] == 0
         if stopped:
             detail["stopped_candidate"] = {
                 "original_status": stats.status.value,
@@ -310,14 +313,17 @@ class _CoupledSolver(_ArticulationSolver):
 
     def _can_publish(self, status):
         return status == self.Status.SUCCESS or (
-            self._coupled_publish_policy == "last_accepted"
+            self._coupled_publish_policy in ("last_accepted", "current_iterate")
             and status
             in (
                 self.Status.NONLINEAR_MAX_ITERATIONS,
                 self.Status.NONLINEAR_STAGNATION,
                 self.Status.REGULARIZATION_EXHAUSTED,
             )
-            and any(t.get("accepted") for t in self._variational["trials"])
+            and (
+                self._coupled_publish_policy == "current_iterate"
+                or any(t.get("accepted") for t in self._variational["trials"])
+            )
         )
 
     def _iterate_articulation(self, dt):
