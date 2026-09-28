@@ -12,7 +12,7 @@ import warp as wp
 
 from ...geometry import ShapeFlags
 from ...sim import BodyFlags, JointType
-from .articulation import _validate_joint_coordinate_layout
+from .joint_parameters import _validate_joint_coordinate_layout
 
 
 @wp.kernel

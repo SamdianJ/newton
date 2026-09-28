@@ -12,9 +12,9 @@ import warp as wp
 
 from ...sim import JointType
 from ..solver import SolverBase
-from .articulation import MonolithicJointTermsWorkspace
 from .articulation_state import ArticulationState, _predict, _recover_history
 from .articulation_variational import ArticulationKinematics, ArticulationObjective
+from .joint_parameters import JointParameters
 from .linear import (
     MonolithicLinearCapacities,
     MonolithicLinearGeneration,
@@ -95,7 +95,7 @@ class _ArticulationSolver(SolverMonolithic):
         if not isinstance(joint_terms, self.JointTerms):
             raise ValueError("joint_terms must be SolverMonolithic.JointTerms")
         options = {name: getattr(joint_terms, name) for name in joint_terms.__dataclass_fields__}
-        self._joint_terms = MonolithicJointTermsWorkspace(model, **options)
+        self._joint_terms = JointParameters(model, **options)
         for name in ("joint_target_ke", "joint_target_kd", "joint_limit_ke", "joint_limit_kd", "joint_friction"):
             if name not in self._joint_terms.allowed_properties and np.any(getattr(model, name).numpy() != 0):
                 raise ValueError(f"Disabled joint term has nonzero parameters: {name}")

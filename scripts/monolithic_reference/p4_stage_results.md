@@ -43,3 +43,24 @@ parent chain and old public solver stay until T2. No source is retired yet.
 
 Evidence: `agents/integration/artifacts/p4/t1-v1/receipt.json`, SHA-256
 `a551d8e3c754cae5052384a0406630311a2d75a793725e9c2ae4cddf33239e56`.
+
+## T1a: shared joint parameters and target snapshots
+
+Extract scalar layout validation, model parameter freezing, allowed properties,
+target mapping/snapshots and the control-validation kernel into
+`joint_parameters.py`. P3 uses `JointParameters` without old evaluation buffers.
+The historical workspace shares these parameters and retains its own evaluation
+and publication methods. FP64 kinematics now imports only the shared validator.
+No FK, target arithmetic, E/r/B, or history formula changes.
+
+Validation: 48 tests run, 47 passed, one existing CPU texture skip. Cover CPU/CUDA
+parameter and layout rejection, target snapshots, duplicate force rejection,
+FK/history/configuration, independent E/r/B and coupled transactions/graphs.
+AST checks confirm identical validation, constructor parameter prefix, target
+snapshots and input kernel. Two initial test-only CPU shared-view mistakes were
+corrected; their failure log is retained.
+
+The component import boundary passes. The historical solver parent chain remains
+explicitly deferred to T2; no source files have been retired.
+Evidence: `agents/integration/artifacts/p4/t1a-v1/receipt.json`, SHA-256
+`7e69db7d0563195a079c0007ea93bbcb5606f39287ccb1733ba4fde51a8ae8fe`.
