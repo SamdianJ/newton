@@ -110,3 +110,12 @@ def array_fingerprint(arrays):
         digest.update(str((array.shape, array.dtype.str)).encode())
         digest.update(array.tobytes())
     return digest.hexdigest()
+
+
+def _rss_bytes():
+    values = {}
+    for line in Path("/proc/self/status").read_text().splitlines():
+        if line.startswith(("VmRSS:", "VmHWM:")):
+            name, value, _unit = line.split()
+            values[name.removesuffix(":").lower() + "_bytes"] = int(value) * 1024
+    return values

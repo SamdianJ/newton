@@ -16,7 +16,7 @@ import newton
 from newton.examples.softbody.monolithic_soft_ball import load_ball
 from newton.examples.softbody.monolithic_soft_cube import load_cube
 from newton.examples.softbody.sharpa_close import sha256
-from scripts.monolithic_reference.p2_measurement import pcg_call_record
+from scripts.monolithic_reference.linear_evidence import pcg_call_record
 
 CONFIG = {
     "schema": "sharpa-contact-calibration/v1",

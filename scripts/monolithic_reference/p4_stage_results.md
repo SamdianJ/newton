@@ -248,3 +248,38 @@ T3-3b mapping and verification. Do not declare T3-3 complete from this batch.
 
 Evidence: `agents/integration/artifacts/p4/t3-3-v1/receipt-migration.json`.
 SHA-256: `69ccfc7767b9ebdb9fef09114a203a65dc7ff001249585a44bbc88148bfbdf2a`. Final follow-up: 44 tests passed.
+
+
+## T3-3b: graph coverage and evidence import chains
+
+Preserve the independent segment cache and linear assembly/scaling/factor tests,
+using complete public q+x states for transaction checks. Verify changing buffer
+values, scalar parameters, allocation bindings, streams, bounded graph retention,
+stale assembly tokens and pivot failure. Keep PCG-only versus optional linear
+segment comparisons; this does not enable old segment dispatch in production.
+Map all ten historical graph test IDs: seven migrate, three old BE-dispatch /
+mutable-residual-guard / cold-profiler-specific tests retire after snapshots.
+Current joint inertia and tet guard oracles remain and are run in this batch.
+
+Point cube tooling at the previously extracted evidence helpers; move the
+unchanged process RSS helper out of the old profiler. Cube calibration, asset
+and scan tests can now import without the obsolete profiler chain. This is not
+qualification of the old GraspCase solver path. No production code or frozen
+input changes; no source files or research assets are deleted.
+
+Validation: 116 tests, 113 passed, three skips (two optional real-asset tests
+without their environment variables and the existing CPU mesh-texture skip).
+The graph module imports no six legacy solver modules. The RSS helper and
+assembly-token test retain identical ASTs. Six pre-edit sources have archived
+snapshots and SHA-256 records. Full pre-commit passes.
+
+Discovery: 8,118 IDs and five remaining import errors, down from eight. Remaining
+modules are test_monolithic_p2_8bc_runner, test_monolithic_p2_measurement,
+test_solver_monolithic, test_solver_monolithic_calibration and
+test_solver_monolithic_release_profile. T3-3 remains incomplete: their supported
+assertions must be mapped before retirement, then source/driver archival and
+actual scheduling cleanup can finish. Discovery is not a full execution result;
+no long trajectory qualification is claimed for this test/helper batch.
+
+Evidence: `agents/integration/artifacts/p4/t3-3b-v1/receipt.json`.
+SHA-256: `afd45d55398a9f0cd484d13f883d0d6745637e1f65df917dae044a8c410655ae`.

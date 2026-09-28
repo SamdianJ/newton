@@ -11,7 +11,7 @@ from pathlib import Path
 from newton.examples.softbody.monolithic_soft_cube import generate_cube, load_cube, validate_cube
 from newton.examples.softbody.sharpa_close import sha256
 from scripts.monolithic_reference.calibrate_sharpa_contact import CONFIG, run_case
-from scripts.monolithic_reference.p2_measurement import evidence_index, snapshot_sources
+from scripts.monolithic_reference.linear_evidence import evidence_index, snapshot_sources
 
 ASSETS = Path(__file__).with_name("fixtures") / "soft_cube_40mm"
 

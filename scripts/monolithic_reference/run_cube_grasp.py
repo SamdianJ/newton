@@ -17,8 +17,7 @@ import warp as wp
 
 from newton.examples.softbody.monolithic_sharpa_grasp import GraspCase, load_calibration
 from newton.examples.softbody.monolithic_soft_cube import load_cube, validate_cube, validate_cube_calibration
-from scripts.monolithic_reference.p2_measurement import evidence_index, snapshot_sources
-from scripts.monolithic_reference.profile_release import _rss_bytes
+from scripts.monolithic_reference.linear_evidence import _rss_bytes, evidence_index, snapshot_sources
 
 
 def offsets():

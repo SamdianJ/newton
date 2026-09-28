@@ -1,5 +1,7 @@
 # P8D 稳定计算段
 
+> P4 T3-3b 更新：下文为 P2 历史实现记录。当前 `test_monolithic_segment_graphs` 保留缓存、线性装配/缩放/分解与公开 q+x 事务检查；旧 owned/reference articulation、可变 tet residual guard 和冷图 profiling 专属断言已保存快照后退役。共享关节惯性与 tet guard 检查分别保留在 `test_solver_monolithic_articulation_variational` 和 `test_solver_monolithic_tet`。当前生产 solver 不默认启用旧 segment 调度；测试显式为独立 linear workspace 绑定缓存。
+
 `SolverMonolithic(..., pcg_mode="production", use_cuda_graph=True)` 在已有完整 PCG 图之外启用以下六个设备段。默认仍为 diagnostic / graph=false，CPU 保持非图路径。该选项是运行时执行配置，不是模型或 USD 物理参数。
 
 | 段 | 图内 | 图外保留 |

@@ -35,6 +35,7 @@ from newton._src.solvers.monolithic import linear
 from newton._src.solvers.monolithic.collision import create_monolithic_p1q3_face_contacts
 from scripts.monolithic_reference.calibrate_p1q3 import _build_scene as build_refined_scene
 from scripts.monolithic_reference.internal_envelope import FROZEN_FIXTURE
+from scripts.monolithic_reference.linear_evidence import _rss_bytes
 from scripts.monolithic_reference.normal_loading import (
     DEFAULT_FIXTURE,
     _json_value,
@@ -124,15 +125,6 @@ def _save_trajectories(report, output):
 
     visit(report)
     return hashes
-
-
-def _rss_bytes():
-    values = {}
-    for line in Path("/proc/self/status").read_text().splitlines():
-        if line.startswith(("VmRSS:", "VmHWM:")):
-            name, value, _unit = line.split()
-            values[name.removesuffix(":").lower() + "_bytes"] = int(value) * 1024
-    return values
 
 
 def _cuda_process_memory_bytes():
