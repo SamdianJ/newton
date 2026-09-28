@@ -23,7 +23,7 @@ from .linear import (
     MonolithicLinearWorkspace,
 )
 from .solver_types import _StepFailure
-from .tet import (
+from .tet_assembly import (
     TetScatterBuffers,
     assemble_tet_residual_tangent,
     build_tet_triplet_pattern,

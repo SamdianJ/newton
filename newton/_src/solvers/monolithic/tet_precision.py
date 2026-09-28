@@ -8,7 +8,8 @@ import math
 import numpy as np
 import warp as wp
 
-from .tet import TetPhysicsWorkspace, _evaluate_energy_stress64, _validate_candidate_particles, validate_tet_scope
+from .tet_common import TetPhysicsWorkspace, _validate_candidate_particles, validate_tet_scope
+from .tet_material import _evaluate_energy_stress64
 
 
 @wp.kernel

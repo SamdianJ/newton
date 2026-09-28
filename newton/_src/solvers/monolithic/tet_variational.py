@@ -3,12 +3,12 @@
 
 """Complete x-only incremental objective; no production Hessian assembly."""
 
-import math
-
 import numpy as np
 import warp as wp
 
-from .tet import _compute_rest_volume, _evaluate_energy_stress64, _validate_candidate_particles
+from .tet_common import _validate_candidate_particles
+from .tet_material import _compute_rest_volume, _evaluate_energy_stress64
+from .variational_iteration import acceptance  # noqa: F401 - historical import path until retirement
 
 
 @wp.kernel
@@ -209,21 +209,3 @@ class TetObjectiveWorkspace:
         wp.launch(_directional_product, residual.size, [residual, delta, self.products], device=self.model.device)
         values = self.products.numpy()
         return float(values[0]), float(values[1])
-
-
-def acceptance(mode, current, trial, slope, alpha, merit, trial_merit, *, energy_noise, residual_noise, slope_noise):
-    """Apply independent A/R predicates after the caller's geometry/context checks."""
-    if mode not in ("Armijo", "ResNorm", "ArmijoOrResNorm"):
-        raise ValueError("Unknown variational acceptance mode")
-    if not all(math.isfinite(v) for v in (current, trial, slope, merit, trial_merit)):
-        raise ValueError("Nonfinite variational trial")
-    if not 0 < alpha <= 1 or not all(math.isfinite(v) and v >= 0 for v in (energy_noise, residual_noise, slope_noise)):
-        raise ValueError("Invalid variational acceptance parameters")
-    a = slope < -slope_noise and trial <= current + 1.0e-4 * alpha * slope + energy_noise
-    r = trial_merit <= merit + residual_noise
-    accepted = a if mode == "Armijo" else r if mode == "ResNorm" else a or r
-    improved = accepted and (
-        (mode != "ResNorm" and a and trial < current - energy_noise)
-        or (mode != "Armijo" and r and trial_merit < merit - residual_noise)
-    )
-    return bool(accepted), bool(a), bool(r), bool(improved)

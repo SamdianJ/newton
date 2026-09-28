@@ -64,3 +64,25 @@ The component import boundary passes. The historical solver parent chain remains
 explicitly deferred to T2; no source files have been retired.
 Evidence: `agents/integration/artifacts/p4/t1a-v1/receipt.json`, SHA-256
 `7e69db7d0563195a079c0007ea93bbcb5606f39287ccb1733ba4fde51a8ae8fe`.
+
+## T1b: shared tet configuration, material and assembly
+
+Split the existing tet definitions into `tet_common.py` (configuration/mass and
+validation), `tet_material.py` (Kim/Smith physics and PSD projection), and
+`tet_assembly.py` (production B, scatter and required scratch). P3 FP64 E/r and
+coupled assembly import these components directly. Move unchanged acceptance
+predicates into `variational_iteration.py`. Keep historical residual-only
+code and transitional aliases until parent removal and archival.
+
+All 38 original definitions/type aliases and the acceptance function retain
+identical ASTs. Validation runs 61 tests: 60 pass and one existing CPU texture
+skip. Direct CPU/CUDA tests cover eight material/mass/fixed-node combinations,
+independent E/r and declared projected B, PSD and owner/scalar scatter. Existing
+tests cover shared nodes, failures, checkpoint/rollback and execution graphs.
+New import checks exclude both historical tet modules from shared components.
+
+An initial oracle-input mismatch used Python gravity instead of the stored
+FP32 model value; the test input was corrected without relaxing tolerances.
+Full trajectories remain deferred to T2/T3 dev and T4 full.
+Evidence: `agents/integration/artifacts/p4/t1b-v1/receipt.json`, SHA-256
+`b15f068826bc020c861008a6fbec33401b8625f409d2dcd7f2b368f5241d33b6`.

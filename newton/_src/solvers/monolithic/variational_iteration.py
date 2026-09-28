@@ -9,7 +9,24 @@ import numpy as np
 
 from .linear import MonolithicPcgConfig, MonolithicPcgWarmStart
 from .solver_types import _StepFailure
-from .tet_variational import acceptance
+
+
+def acceptance(mode, current, trial, slope, alpha, merit, trial_merit, *, energy_noise, residual_noise, slope_noise):
+    """Apply independent A/R predicates after the caller's geometry/context checks."""
+    if mode not in ("Armijo", "ResNorm", "ArmijoOrResNorm"):
+        raise ValueError("Unknown variational acceptance mode")
+    if not all(math.isfinite(v) for v in (current, trial, slope, merit, trial_merit)):
+        raise ValueError("Nonfinite variational trial")
+    if not 0 < alpha <= 1 or not all(math.isfinite(v) and v >= 0 for v in (energy_noise, residual_noise, slope_noise)):
+        raise ValueError("Invalid variational acceptance parameters")
+    a = slope < -slope_noise and trial <= current + 1.0e-4 * alpha * slope + energy_noise
+    r = trial_merit <= merit + residual_noise
+    accepted = a if mode == "Armijo" else r if mode == "ResNorm" else a or r
+    improved = accepted and (
+        (mode != "ResNorm" and a and trial < current - energy_noise)
+        or (mode != "Armijo" and r and trial_merit < merit - residual_noise)
+    )
+    return bool(accepted), bool(a), bool(r), bool(improved)
 
 
 def blocks(solver):
