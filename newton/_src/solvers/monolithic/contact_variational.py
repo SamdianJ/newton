@@ -1,7 +1,12 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 The Newton Developers
 # SPDX-License-Identifier: Apache-2.0
 
-"""Private full-pair variational contact components; no step or publication policy."""
+"""Private full-pair P3 contact components; no step or publication policy.
+
+C-EE/C-IE/C-II use current and frozen start geometry, not historical spring/Huber
+xi state. Contact factors are shared through linear; geometry and smooth SDF
+queries do not depend on the historical contact module.
+"""
 
 import enum
 import math

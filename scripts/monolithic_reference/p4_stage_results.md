@@ -86,3 +86,25 @@ FP32 model value; the test input was corrected without relaxing tolerances.
 Full trajectories remain deferred to T2/T3 dev and T4 full.
 Evidence: `agents/integration/artifacts/p4/t1b-v1/receipt.json`, SHA-256
 `b15f068826bc020c861008a6fbec33401b8625f409d2dcd7f2b368f5241d33b6`.
+
+## T1c: contact boundary and historical friction isolation
+
+P3 contact already shares factors through linear and geometry through its own
+query components. Mark historical spring/Huber and xi code as deprecated; add
+no new abstraction or runtime warnings. Fresh-process imports confirm contact,
+state and collision components exclude the historical solver/contact modules.
+CPU/CUDA checks reject spring parameters, unsupported laws and old xi namespaces
+while allowing ordinary model state initialization. Production ASTs are unchanged.
+
+The predefined P3 and independent collision/AABB gate runs 101 tests: 95 pass,
+six existing CPU texture/graph skips. Full pre-commit passes. An initial broader
+run also executed two historical spring trajectory checks: CUDA physics_parity
+failed (scalar error 2.96831131e-05); its fixed-baseline rerun passed. This remains
+an unresolved legacy-only observation, not a claimed pre-existing failure and
+not part of the planned compatibility scope. Logs retain both outcomes; no
+test or tolerance is changed. Full trajectories remain deferred.
+
+The historical parent still introduces a transitive contact import until T2.
+No files are retired at this stage.
+Evidence: `agents/integration/artifacts/p4/t1c-v1/receipt.json`, SHA-256
+`7cdb761a9a586ed841a68f30a7d03c1ce3b2452935277c38602cc8cbb0a62959`.

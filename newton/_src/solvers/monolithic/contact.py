@@ -1,7 +1,13 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 The Newton Developers
 # SPDX-License-Identifier: Apache-2.0
 
-"""Bilateral P1Q3 quadratic-hinge contact and final force publication."""
+"""Historical spring/Huber contact with committed and pending xi history.
+
+Deprecated for P3 q+x: use contact_variational.ContactObjective, whose three laws
+do not consume this history or tangential_stiffness. This module remains only
+for the historical solver parent until P4 removes that dependency and archives
+its callers; it is not a supported alternative P3 contact model.
+"""
 
 import enum
 import hashlib
