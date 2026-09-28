@@ -337,3 +337,35 @@ T3-3 overall or claim T4/full trajectory acceptance.
 
 Full pre-commit passes. Receipt: `t3-3d-v1/receipt.json`.
 SHA-256: `0cc92736e958292c68a2c058cb4f257a69f91fa6254029eb83b9e9af1b690ac6`.
+
+
+## T4: FP64 numerical acceptance on 9ff616c5
+
+Run the complete temporary ten-case matrix, unchanged inputs, budgets and
+frozen tolerances, serially on CUDA production/graph. All ten pass original
+scene gates and same-configuration frozen-envelope comparisons. Franka:
+47,193 converged plus 57 Stopped over nine complete grasps; Sharpa: 8,637
+converged plus 30 Stopped, with zero-acceptance publication only at step 3470.
+Total: 55,917 steps, no hard failures. Sharpa grasp remains NOT_CERTIFIED;
+the other 44 long cases remain deferred. No production code is changed.
+
+The default two full-run recordings supply dev qualification by receipt hash
+without duplicate storage. Replays validate 5,251/8,668 frames. The explicit
+retained suite runs 409 tests: 402 pass, seven existing skips (six CPU
+CUDA-feature restrictions and one optional research pyamg dependency).
+An additional 27-case law/globalization/CUDA-mode matrix passes three actual
+q+x steps per case, including real graph captures and replays. Checkpoint,
+force ownership, rejection and rollback contracts pass in the component suite.
+
+All case runtime origins and hashes bind to this development tree; no old
+solver is loaded. Exact SDF/source/coefficient identity, actual configuration
+and physical digest match the respective baseline. Full discovery finds
+7,844 IDs with zero import errors. Full source pre-commit passes.
+
+Report equivalence, dev and temporary full numerical qualification as PASS.
+T3 legacy source/driver physical retirement is still pending: this is not
+completion of all P4 cleanup, and T5 has not started. The scene runner's
+PASS is combined with separate component and lifecycle evidence here.
+
+Evidence: `agents/integration/artifacts/p4/t4-v1/RESULTS.md` and `receipt.json`.
+Receipt SHA-256: `811dff9bf95b3e936f579ab21242e6f234f1d827c226edb82f16053af748aa79`.
