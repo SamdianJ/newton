@@ -178,6 +178,38 @@ load no reference or legacy solver modules. 23 tests: 21 pass, two existing CPU
 skips. Full pre-commit passes. Independent spline/contact oracle remains unchanged.
 
 Evidence: agents/integration/artifacts/p4/t3-1-v1/receipt.json, SHA-256
-4c9de8a010f581e36fa69c562f3657b30e518c160337cdd344f47fb5c851ec70.
+50db6d41dbdcc1582c4f022e79d822cdcbfab173b16dee353bad424ff23241f5.
 T3-2 runner/scenes, T3-3 retirement and post-migration dev remain outstanding;
 this component result is not full trajectory qualification.
+
+
+## T3-2 — Migrate scenes and deliver dev/full runner
+
+Move unchanged Franka/Sharpa scene, control and recording helpers into examples;
+retain temporary reference import wrappers until T3-3. The supported scenes
+import no diagnostic drivers. Parameterize only Franka law/globalization with
+unchanged defaults. The serial process-isolated run_p4 runner shares the T0
+matrix, checks frozen inputs and real module origins, verifies every recorded
+field against frozen case envelopes, and labels filtered runs PARTIAL. Dev has
+two complete scenes; the temporary full matrix has ten cases. Bring recorded
+Sharpa replay into the repository and remove its hard-coded integration import.
+
+Validation: 35 targeted tests pass, full pre-commit passes, and 17 extracted
+definitions have identical ASTs. Dev PASS: Franka 5250 converged steps and grasp
+hold pass; Sharpa 8667 steps, 8637 converged and 30 Stopped, no hard failures.
+Both complete recordings pass frozen T0 envelopes with unchanged physical digest.
+Real module origins (234 Franka / 227 Sharpa) point into the development tree;
+none imports the six historical solver/component modules. Source hashes still
+match after validation. Replay checks 5251 and 8668 frames respectively. Sharpa
+grasp remains NOT_CERTIFIED; T4 full was not run.
+
+Evidence: agents/integration/artifacts/p4/t3-2-v1/receipt.json, SHA-256
+47c513cf08bc16d7b910f9e3463d3d8fc1cc1608f332ae8f51c707c9c8f4ca3f.
+The T3-1 receipt now records an explicit development-tree reconstruction repeat:
+initial /tmp invocation had resolved the shared integration editable install.
+The corrected check confirms identical fields and coefficients with the new
+builder; no acceptance envelope changed.
+
+T3-3 dependency audit is recorded separately in t3-3-v1/dependency-audit.json and
+RETIREMENT_GATE.md. No legacy retirement occurred in this extraction commit;
+per-test-ID migration, archive hashes and final discovery remain required.

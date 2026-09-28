@@ -17,8 +17,8 @@ import numpy as np
 import warp as wp
 
 import newton.examples
-from scripts.monolithic_reference.franka_grasp import DT, REPO, TIMES, FrankaGrasp, sha
-from scripts.monolithic_reference.verify_p3_coupled import save, serial, state_arrays
+from newton.examples.softbody.monolithic_franka import DT, REPO, TIMES, FrankaGrasp, sha
+from newton.examples.softbody.monolithic_recording import save, serial, state_arrays
 
 
 class Example:
@@ -28,7 +28,7 @@ class Example:
         self.output = Path(args.output) if args.output else None
         if self.output:
             self.output.mkdir(parents=True, exist_ok=False)
-        self.case = FrankaGrasp(args.asset_cache, device=args.device)
+        self.case = FrankaGrasp(args.asset_cache, device=args.device, law=args.law, globalization=args.globalization)
         self.viewer = viewer
         self.viewer.set_model(self.case.model)
         self.viewer.set_camera(pos=wp.vec3(1.35, -1.2, 0.8), pitch=-22.0, yaw=135.0)
@@ -73,6 +73,10 @@ class Example:
             default=REPO.parents[1] / "agents/integration/artifacts/p3/pr3/franka-grasp-v1/cache",
         )
         parser.add_argument("--output", type=Path, help="New directory for complete trajectory and diagnostics")
+        parser.add_argument("--law", choices=("C-IE", "C-EE", "C-II"), default="C-IE")
+        parser.add_argument(
+            "--globalization", choices=("ArmijoOrResNorm", "Armijo", "ResNorm"), default="ArmijoOrResNorm"
+        )
         parser.set_defaults(device="cuda:0", num_frames=525)
         return parser
 

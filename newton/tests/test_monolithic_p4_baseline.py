@@ -7,6 +7,7 @@ import ast
 import copy
 import gzip
 import json
+import subprocess
 import tempfile
 import types
 import unittest
@@ -21,8 +22,13 @@ from scripts.monolithic_reference import run_p3_baseline as baseline
 ROOT = Path(__file__).resolve().parents[2]
 
 
-def constructor(path, name):
-    module = ast.parse((ROOT / path).read_text())
+def constructor(path, name, *, frozen=False):
+    source = (
+        subprocess.check_output(["git", "show", f"{baseline.BASELINE}:{path}"], cwd=ROOT, text=True)
+        if frozen
+        else (ROOT / path).read_text()
+    )
+    module = ast.parse(source)
     cls = next(n for n in module.body if isinstance(n, ast.ClassDef) and n.name == name)
     return copy.deepcopy(next(n for n in cls.body if isinstance(n, ast.FunctionDef) and n.name == "__init__"))
 
@@ -128,7 +134,7 @@ class TestP4Baseline(unittest.TestCase):
 
     def test_franka_constructor_seam(self):
         """Permit only explicit law/globalization and extra observational metadata."""
-        original = constructor("scripts/monolithic_reference/franka_grasp.py", "FrankaGrasp")
+        original = constructor("scripts/monolithic_reference/franka_grasp.py", "FrankaGrasp", frozen=True)
         actual = constructor("scripts/monolithic_reference/p3_baseline_franka.py", "BaselineFranka")
         expected = copy.deepcopy(original)
         expected.args.kwonlyargs = [ast.arg(arg="law"), ast.arg(arg="globalization")]
@@ -147,7 +153,7 @@ class TestP4Baseline(unittest.TestCase):
 
     def test_recording_constructor_seam(self):
         """Keep the original recorder setup except for the parameterized case constructor."""
-        expected = constructor("newton/examples/softbody/example_monolithic_franka_grasp.py", "Example")
+        expected = constructor("newton/examples/softbody/example_monolithic_franka_grasp.py", "Example", frozen=True)
         actual = constructor("scripts/monolithic_reference/p3_baseline_franka.py", "BaselineFrankaExample")
         calls = [
             n

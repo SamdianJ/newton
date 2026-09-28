@@ -75,3 +75,24 @@ The returned ``SmoothSDFSet.build_metadata`` records the source, checks and
 qualification separately from its physical ``identity`` and ``digest``.
 Coefficient buffers and descriptors remain bound for the solver lifetime;
 changes require rebuilding the fields and solver.
+
+Repository regression runner
+----------------------------
+
+From the development checkout, list the frozen profiles without loading CUDA::
+
+    uv run --no-sync python -m scripts.monolithic_reference.run_p4 --profile dev --list
+    uv run --no-sync python -m scripts.monolithic_reference.run_p4 --profile full --list
+
+Run with ``--output <new-directory>``. Each case executes serially in its own
+process and binds source paths/hashes, frozen inputs and comparison tolerances.
+Dev includes complete default Franka and recorded Sharpa trajectories. The
+current full profile has nine Franka law/globalization combinations and one
+Sharpa OR/C-IE case, all CUDA production with graphs. ``--case <id>`` filters
+within the chosen profile and reports PARTIAL instead of profile qualification.
+Missing frozen external inputs block execution; the runner does not fetch or
+replace them. Sharpa completion does not certify grasp success.
+
+Use ``scripts.monolithic_reference.replay_franka_grasp`` or
+``scripts.monolithic_reference.replay_sharpa_grasp`` with a recording directory
+and ``--check-only`` to verify display frames without simulating again.

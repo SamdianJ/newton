@@ -12,8 +12,8 @@ import numpy as np
 import warp as wp
 
 import newton
+from newton.examples.softbody.monolithic_franka import REPO, sha
 from newton.examples.softbody.monolithic_soft_cube import load_cube
-from scripts.monolithic_reference.franka_grasp import REPO, sha
 
 
 def main():
