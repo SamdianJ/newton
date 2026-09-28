@@ -10,17 +10,17 @@ import numpy as np
 import warp as wp
 
 import newton
-from newton._src.solvers.monolithic.tet import (
-    TetEvaluationStatus,
+from newton._src.solvers.monolithic.tet_assembly import (
     TetScatterBuffers,
-    _compute_cofactor_derivative,
-    _evaluate_stable_neo_hookean,
     assemble_tet_residual_tangent,
     build_tet_triplet_pattern,
     create_tet_assembly_workspace,
-    evaluate_tet_residual,
+)
+from newton._src.solvers.monolithic.tet_common import TetEvaluationStatus, validate_tet_scope
+from newton._src.solvers.monolithic.tet_material import (
+    _compute_cofactor_derivative,
+    _evaluate_stable_neo_hookean,
     mat99,
-    validate_tet_scope,
 )
 from newton.tests.monolithic_test_utils import build_tiny_cpu_fixture
 from newton.tests.unittest_utils import add_function_test, get_test_devices
@@ -177,14 +177,14 @@ def test_assembly_sign_psd_and_owner_parity(test, device):
             plus[node, axis] += h
             minus[node, axis] -= h
             args["candidate_particle_q"].assign(plus)
-            evaluate_tet_residual(model, **args)
+            assemble_tet_residual_tangent(model, **args, scatter=scatter)
             e_plus = args["workspace"].tet_energy.numpy()[0]
             args["candidate_particle_q"].assign(minus)
-            evaluate_tet_residual(model, **args)
+            assemble_tet_residual_tangent(model, **args, scatter=scatter)
             gradient[node, axis] = (e_plus - args["workspace"].tet_energy.numpy()[0]) / (2 * h)
     test.assertLess(np.linalg.norm(gradient - elastic_residual) / np.linalg.norm(gradient), 5.0e-3)
     args["candidate_particle_q"].assign(positions)
-    evaluate_tet_residual(model, **args)
+    assemble_tet_residual_tangent(model, **args, scatter=scatter)
     np.testing.assert_array_equal(args["residual_x"].numpy(), residual)
     np.testing.assert_array_equal(_dense(pattern, scatter, 12)[0], owner)
 
@@ -200,7 +200,7 @@ def test_fixed_and_failures(test, device):
     velocity = args["particle_qd_n"].numpy()
     velocity[0, 0] = 1.0e-30
     args["particle_qd_n"].assign(velocity)
-    evaluate_tet_residual(fixture.model, **args)
+    assemble_tet_residual_tangent(fixture.model, **args, scatter=scatter)
     test.assertEqual(args["workspace"].failure_flags.numpy()[0], TetEvaluationStatus.INVALID_FIXED_PARTICLE)
     np.testing.assert_array_equal(args["candidate_particle_q"].numpy(), before)
     args["particle_qd_n"].zero_()
@@ -211,12 +211,12 @@ def test_fixed_and_failures(test, device):
         assemble_tet_residual_tangent(fixture.model, **args, scatter=scatter)
         test.assertEqual(args["workspace"].failure_flags.numpy()[0], expected)
     args["candidate_particle_q"].assign(before)
-    evaluate_tet_residual(fixture.model, **args)
+    assemble_tet_residual_tangent(fixture.model, **args, scatter=scatter)
     test.assertEqual(args["workspace"].failure_flags.numpy()[0], TetEvaluationStatus.SUCCESS)
     test.assertAlmostEqual(args["workspace"].min_det_f.numpy()[0], 1.0)
     for invalid in (0.0, -1.0, np.nan, np.inf, 1.0e-200, 1.0e200):
         with test.assertRaises(ValueError):
-            evaluate_tet_residual(fixture.model, **dict(args, dt=invalid))
+            assemble_tet_residual_tangent(fixture.model, **dict(args, dt=invalid), scatter=scatter)
     short_scatter = TetScatterBuffers(
         wp.empty(3, dtype=wp.mat33, device=device), wp.empty(27, dtype=float, device=device)
     )
@@ -249,10 +249,10 @@ def test_full_element_raw_derivative(test, device):
         delta = np.zeros((4, 3), dtype=np.float32)
         delta[index // 3, index % 3] = 2.0e-5
         args["candidate_particle_q"].assign(positions + delta)
-        evaluate_tet_residual(model, **args)
+        assemble_tet_residual_tangent(model, **args, scatter=scatter)
         plus = args["residual_x"].numpy().copy()
         args["candidate_particle_q"].assign(positions - delta)
-        evaluate_tet_residual(model, **args)
+        assemble_tet_residual_tangent(model, **args, scatter=scatter)
         minus = args["residual_x"].numpy().copy()
         hessian[:, index] = ((plus - minus) / 4.0e-5).flatten()
     test.assertLess(np.linalg.norm(hessian - inertia - raw) / np.linalg.norm(raw), 5.0e-3)
@@ -268,10 +268,8 @@ def test_guard_runtime_precision(test, device):
     positions = args["candidate_particle_q"].numpy().copy()
     positions[3] = positions[0]
     args["candidate_particle_q"].assign(positions)
-    for evaluate in (evaluate_tet_residual, assemble_tet_residual_tangent):
-        with test.subTest(evaluate=evaluate.__name__), test.assertRaisesRegex(ValueError, "min_det_f_guard"):
-            extra = {"scatter": scatter} if evaluate is assemble_tet_residual_tangent else {}
-            evaluate(fixture.model, **dict(args, min_det_f_guard=1.0e-100), **extra)
+    with test.assertRaisesRegex(ValueError, "min_det_f_guard"):
+        assemble_tet_residual_tangent(fixture.model, **dict(args, min_det_f_guard=1.0e-100), scatter=scatter)
 
 
 def test_rest_volume_runtime_precision(test, device):
@@ -290,11 +288,8 @@ def test_rest_volume_runtime_precision(test, device):
         validate_tet_scope(
             model, dynamic_particle_ids=np.arange(4, dtype=np.int32), particle_to_dynamic=np.arange(4, dtype=np.int32)
         )
-    for evaluate in (evaluate_tet_residual, assemble_tet_residual_tangent):
-        extra = {"scatter": scatter} if evaluate is assemble_tet_residual_tangent else {}
-        evaluate(model, **args, **extra)
-        with test.subTest(stage=evaluate.__name__):
-            test.assertEqual(args["workspace"].failure_flags.numpy()[0], TetEvaluationStatus.NONFINITE)
+    assemble_tet_residual_tangent(model, **args, scatter=scatter)
+    test.assertEqual(args["workspace"].failure_flags.numpy()[0], TetEvaluationStatus.NONFINITE)
     # Float32 determinant rounding can flip the orientation of a near-singular
     # matrix; accepting a positive runtime volume alone loses the rest-data gate.
     for inverse_rest in np.array(

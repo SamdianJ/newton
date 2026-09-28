@@ -17,10 +17,9 @@ from newton._src.solvers.monolithic.linear import (
 )
 from newton._src.solvers.monolithic.pcg_common import decide_restart
 from newton.solvers.experimental.monolithic import SolverMonolithic
-from newton.tests import test_monolithic_execution_options as execution
 from newton.tests import test_solver_monolithic_linear as fixtures
-from newton.tests import test_solver_monolithic_step as stepping
 from newton.tests.monolithic_pcg_oracle import solve_fixed
+from newton.tests.monolithic_test_utils import build_contact_free_coupled_fixture, build_tiny_cpu_fixture
 from newton.tests.unittest_utils import add_function_test, get_test_devices
 
 
@@ -334,36 +333,50 @@ def test_same_policy_oracle(test, device):
 
 
 def test_solver_production_transactions(test, device):
-    """Exercise actual new dispatch, q-only, retries, rollback and history publication."""
+    """Use production PCG without host fallback and preserve complete rollback."""
+    for graph in (False, True) if device.is_cuda else (False,):
+        fixture, solver = build_contact_free_coupled_fixture(
+            device,
+            gravity=(0, 0, -9.81),
+            pcg_mode="production",
+            use_cuda_graph=graph,
+        )
+        calls = []
+        solve = solver._linear.solve_pcg
 
-    options = [
-        {"pcg_mode": "production", "use_optimized_articulation_mass_matrix": owned, "use_cuda_graph": graph}
-        for owned in (False, True)
-        for graph in ((False, True) if device.is_cuda else (False,))
-    ]
-    for choice in options:
-        fixture, solver = stepping._free_scene(device, gravity=(0, 0, -9.81), **choice)
+        def observed(*args, solve=solve, calls=calls, **kwargs):
+            result = solve(*args, **kwargs)
+            calls.append(result)
+            return result
+
         with (
             patch.object(
                 MonolithicLinearWorkspace, "_solve_pcg_diagnostic", side_effect=AssertionError("host fallback")
             ),
             patch.object(solver._linear, "recover_delta", side_effect=AssertionError("duplicate recovery")),
+            patch.object(solver._linear, "solve_pcg", side_effect=observed),
         ):
-            solver.step(fixture.state, fixture.state_next, fixture.control, None, 0.001)
-        test.assertEqual(solver.last_stats.status, solver.Status.SUCCESS)
+            solver.step(fixture.state, fixture.state_next, fixture.control, dt=0.001)
+        test.assertTrue(solver.last_stats.converged)
+        test.assertTrue(calls)
         test.assertGreater(solver.last_stats.linear_iterations, 0)
         test.assertGreaterEqual(solver.last_stats.linear_scheduled_slots, solver.last_stats.linear_iterations)
-        test.assertTrue(solver.last_stats.linear_output_valid)
-        test.assertEqual(solver.last_stats.pcg_policy, impl.PCG_POLICY)
-        for name in ("min_p_ap", "min_r_z", "initial_guess_norm", "recursive_true_residual_gap"):
-            test.assertTrue(np.isnan(getattr(solver.last_stats, name)))
-        with patch.object(execution, "_options", return_value=iter([choice])):
-            execution.test_q_only_policies(test, device)
-    # The shared transaction assertions describe physical invariants, not old iteration parity.
-    for graph in (False, True) if device.is_cuda else (False,):
-        choice = {"pcg_mode": "production", "use_optimized_articulation_mass_matrix": False, "use_cuda_graph": graph}
-        with patch.object(execution, "_options", return_value=iter([choice])):
-            execution.test_shared_transactions(test, device)
+        for result in calls:
+            test.assertTrue(result.output_valid)
+            test.assertEqual(result.pcg_policy, impl.PCG_POLICY)
+        state = fixture.state_next
+        history = state._monolithic_coupled
+        original = {name: value.numpy().copy() for name, value in vars(state).items() if isinstance(value, wp.array)}
+        saved = {name: value.numpy().copy() for name, value in vars(history).items() if isinstance(value, wp.array)}
+        test.assertEqual(int(history.force_generation.numpy()[0]), 1)
+        with patch.object(solver._linear, "solve_pcg", side_effect=ValueError("injected solve failure")):
+            with test.assertRaisesRegex(ValueError, "injected"):
+                solver.step(state, state, fixture.control, dt=0.001)
+        test.assertTrue(solver.last_stats.rolled_back)
+        for name, value in original.items():
+            np.testing.assert_array_equal(getattr(state, name).numpy(), value)
+        for name, value in saved.items():
+            np.testing.assert_array_equal(getattr(history, name).numpy(), value)
 
 
 def test_scalar_failures_and_first_slot(test, device):
@@ -443,11 +456,26 @@ def test_binding_rejections(test, device):
     with test.assertRaises(ValueError):
         plan.set_solve_parameters(regularization=0)
 
+    model = build_tiny_cpu_fixture(device=device).model
     for value in (0, 1, None, "true", np.bool_(True)):
         with test.assertRaises(ValueError):
-            SolverMonolithic(None, collision_pipeline=None, contact_stiffness=1, use_cuda_graph=value)
+            SolverMonolithic(
+                model,
+                contact_model="C-EE",
+                globalization="Armijo",
+                friction_velocity_scale=0.01,
+                mass_mode="lumped",
+                use_cuda_graph=value,
+            )
     with test.assertRaises(ValueError):
-        SolverMonolithic(None, collision_pipeline=None, contact_stiffness=1, use_cuda_graph=True)
+        SolverMonolithic(
+            model,
+            contact_model="C-EE",
+            globalization="Armijo",
+            friction_velocity_scale=0.01,
+            mass_mode="lumped",
+            use_cuda_graph=True,
+        )
 
 
 class TestMonolithicPcgProduction(unittest.TestCase):

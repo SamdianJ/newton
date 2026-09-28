@@ -213,3 +213,38 @@ builder; no acceptance envelope changed.
 T3-3 dependency audit is recorded separately in t3-3-v1/dependency-audit.json and
 RETIREMENT_GATE.md. No legacy retirement occurred in this extraction commit;
 per-test-ID migration, archive hashes and final discovery remain required.
+
+
+## T3-3a: preserve supported assertions before retirement
+
+Migrate eight mixed test modules to the public complete q+x state and shared
+joint/tet/contact components. Preserve independent FK/E/r/B, constitutive FD,
+mass, PSD/scatter, input validation, checkpoint, publication and rollback
+assertions. Keep pure PCG and preconditioner oracles. Extract seven unchanged
+linear reference/evidence definitions from historical profiling drivers so
+retained benchmarks no longer import those drivers.
+
+The ID map preserves 177 baseline test IDs (two device-specific budget test IDs
+are renamed from `budget_and_legacy` to `budget_and_last_accepted`). Document the
+retired q-only/owned-mass dispatch combinations, duplicate historical residual
+calls and old trajectory-profiler telemetry tail explicitly. Complete-state
+rollback preserves each original buffer; tests now exercise that P3 contract.
+Constructor tolerance rejection timing remains identical to the fixed baseline.
+No production solver source, formula, budget or trajectory input changes.
+
+Validation: 196 tests, 195 passed and one existing CPU graph skip. Re-run the
+joint-contract and tet modules after the final test-name/singleton-loop cleanup.
+Seven extracted definitions have identical ASTs; independent imports of all
+11 exercised test modules resolve 217 local modules and load none of the six
+legacy solver modules. Full pre-commit passes. No full trajectories are rerun
+for this test/helper-only batch; T4 acceptance is still pending.
+
+Preserve 13 originals with SHA-256 and source commit in the external archive;
+all active files remain present. Discovery improves from 7,954 IDs / 22 import
+errors to 8,105 IDs / 8 import errors. Discovery is not execution, and this is
+not a repository-wide test pass. Remaining historical tests/drivers, mixed
+x-only coverage, examples scheduling and physical retirement still require
+T3-3b mapping and verification. Do not declare T3-3 complete from this batch.
+
+Evidence: `agents/integration/artifacts/p4/t3-3-v1/receipt-migration.json`.
+SHA-256: `69ccfc7767b9ebdb9fef09114a203a65dc7ff001249585a44bbc88148bfbdf2a`. Final follow-up: 44 tests passed.

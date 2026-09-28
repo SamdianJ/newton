@@ -15,7 +15,7 @@ from newton._src.solvers.monolithic.linear import (
     MonolithicLinearLayout,
     MonolithicLinearWorkspace,
 )
-from newton._src.solvers.monolithic.tet import (
+from newton._src.solvers.monolithic.tet_assembly import (
     TetScatterBuffers,
     assemble_tet_residual_tangent,
     build_tet_triplet_pattern,

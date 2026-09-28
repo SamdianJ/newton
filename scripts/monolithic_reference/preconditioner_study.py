@@ -12,7 +12,7 @@ from pathlib import Path
 import numpy as np
 
 from scripts.monolithic_reference import benchmark_pcg as benchmark
-from scripts.monolithic_reference.p2_measurement import array_fingerprint, evidence_index
+from scripts.monolithic_reference.linear_evidence import array_fingerprint, evidence_index
 
 CANDIDATES = ("actor_block", "local_block_4", "local_block_8", "mas_16", "mas_32")
 

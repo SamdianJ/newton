@@ -5,10 +5,12 @@
 
 from dataclasses import dataclass
 
+import numpy as np
 import warp as wp
 
 import newton
 from newton._src.usd.utils import _deformable_lame_parameters
+from newton.solvers.experimental.monolithic import SolverMonolithic
 
 
 @dataclass(frozen=True, slots=True)
@@ -86,3 +88,42 @@ def build_tiny_cpu_fixture(*, device="cpu") -> TinyFixture:
     for initial in (state, state_next):
         newton.eval_fk(model, initial.joint_q, initial.joint_qd, initial)
     return TinyFixture(model, state, state_next, model.control(), spec)
+
+
+def add_contact_free_tet(builder):
+    """Add a disconnected-from-contact tet for supported joint lifecycle checks."""
+    builder.add_soft_mesh(
+        pos=(2.0, 0.0, 0.0),
+        rot=wp.quat_identity(),
+        scale=1.0,
+        vel=(0.0, 0.0, 0.0),
+        vertices=[(0.0, 0.0, 0.0), (0.04, 0.0, 0.0), (0.0, 0.03, 0.0), (0.0, 0.0, 0.02)],
+        indices=[0, 1, 2, 3],
+        density=1000.0,
+        k_mu=3846.1538,
+        k_lambda=5769.231,
+        k_damp=0.0,
+        tri_ke=0.0,
+        tri_ka=0.0,
+        tri_kd=0.0,
+    )
+
+
+def build_contact_free_coupled_fixture(device, *, gravity=(0.0, 0.0, 0.0), **options):
+    """Initialize the tiny fixture through the supported complete-state API."""
+    fixture = build_tiny_cpu_fixture(device=device)
+    fixture.model.gravity.assign(np.asarray([gravity], dtype=np.float32))
+    fixture.state.joint_qd.zero_()
+    fixture.state.body_qd.zero_()
+    fixture.state.particle_qd.zero_()
+    solver = SolverMonolithic(
+        fixture.model,
+        contact_model="C-EE",
+        globalization="ArmijoOrResNorm",
+        friction_velocity_scale=0.01,
+        mass_mode="lumped",
+        **options,
+    )
+    state = solver.create_state(dt=0.001, source=fixture.state)
+    out = solver.create_state(dt=0.001, source=fixture.state)
+    return TinyFixture(fixture.model, state, out, fixture.control, fixture.spec), solver

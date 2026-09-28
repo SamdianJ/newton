@@ -10,11 +10,10 @@ from unittest.mock import patch
 import numpy as np
 import warp as wp
 
-import newton
 from newton._src.solvers.monolithic import linear, pcg_production
 from newton._src.solvers.monolithic.pcg_production import MaskedPcgConfig
 from newton.solvers.experimental.monolithic import SolverMonolithic
-from newton.tests import test_solver_monolithic_step as stepping
+from newton.tests.monolithic_test_utils import build_contact_free_coupled_fixture, build_tiny_cpu_fixture
 from newton.tests.test_monolithic_pcg_production import make_plan
 from newton.tests.unittest_utils import add_function_test, get_test_devices
 from scripts.monolithic_reference import benchmark_pcg as benchmark
@@ -86,7 +85,9 @@ def test_block_acceptance(test, device):
 def test_solver_option(test, device):
     """Pass the public provisional default and explicit overrides into actual linear solves."""
     for atol in (1e-6, 0.0, 2e-6):
-        fixture, solver = stepping._free_scene(device, gravity=(0, 0, -9.81), linear_absolute_tolerance=atol)
+        fixture, solver = build_contact_free_coupled_fixture(
+            device, gravity=(0, 0, -9.81), linear_absolute_tolerance=atol
+        )
         test.assertEqual(solver.linear_absolute_tolerance, atol)
         original = solver._linear.solve_pcg
         values = []
@@ -99,7 +100,10 @@ def test_solver_option(test, device):
             metrics = solver._metrics
             for i, block in enumerate(("global", "q", "x")):
                 ref = metrics["merit_reference" if i == 0 else f"merit_{block}_reference"]
-                goal = getattr(solver._config, f"merit_absolute_{block}") + 1e-4 * ref
+                goal = (
+                    getattr(solver._config, f"merit_absolute_{block}")
+                    + getattr(solver._config, f"merit_relative_{block}") * ref
+                )
                 count = (14, 2, 12)[i]  # TinyFixture's scalar global/q/x counts.
                 np.testing.assert_allclose(limits[i] / np.sqrt(count), 0.5 * goal, rtol=1e-12, atol=0)
             return original(*args, **kwargs)
@@ -114,14 +118,13 @@ def test_solver_option(test, device):
 def test_unresolved_q_small_rhs(test, device):
     """Advance a small joint load that passes PCG atol but fails outer q acceptance."""
     for mode in ("diagnostic", "production"):
-        fixture, solver = stepping._free_scene(
+        fixture, solver = build_contact_free_coupled_fixture(
             device,
             pcg_mode=mode,
             use_cuda_graph=device.is_cuda and mode == "production",
-            use_optimized_articulation_mass_matrix=True,
         )
         fixture.state.joint_q.zero_()
-        newton.eval_fk(fixture.model, fixture.state.joint_q, fixture.state.joint_qd, fixture.state)
+        solver.reset_state(fixture.state, dt=0.001)
         fixture.control.joint_f.assign([0, 5e-4])
         solver.step(fixture.state, fixture.state_next, fixture.control, None, 0.001)
         test.assertEqual(solver.last_stats.status, SolverMonolithic.Status.SUCCESS)
@@ -180,12 +183,34 @@ class TestMonolithicPcgTolerances(unittest.TestCase):
 
     def test_invalid_absolute_tolerances(self):
         """Reject malformed, negative and unrepresentable tolerances."""
+        model = build_tiny_cpu_fixture(device="cpu").model
         for value in (-1.0, float("nan"), float("inf"), True, "1e-6", None, 1e40, 1e-100):
             for config in (benchmark.pcg_config(), MaskedPcgConfig()):
                 with self.subTest(value=value, config=type(config).__name__), self.assertRaises(ValueError):
                     replace(config, linear_absolute_tolerance=value)
-            with self.subTest(public=value), self.assertRaisesRegex(ValueError, "linear_absolute_tolerance"):
-                SolverMonolithic(None, collision_pipeline=None, contact_stiffness=1, linear_absolute_tolerance=value)
+            if value in (1e40, 1e-100):
+                # P3 keeps host-finite values at construction; the FP32 PCG
+                # configuration above rejects values it cannot represent.
+                solver = SolverMonolithic(
+                    model,
+                    contact_model="C-EE",
+                    globalization="Armijo",
+                    friction_velocity_scale=0.01,
+                    mass_mode="lumped",
+                    linear_absolute_tolerance=value,
+                )
+                self.assertEqual(solver.linear_absolute_tolerance, value)
+            else:
+                expected = TypeError if value is None or isinstance(value, str) else ValueError
+                with self.subTest(public=value), self.assertRaises(expected):
+                    SolverMonolithic(
+                        model,
+                        contact_model="C-EE",
+                        globalization="Armijo",
+                        friction_velocity_scale=0.01,
+                        mass_mode="lumped",
+                        linear_absolute_tolerance=value,
+                    )
 
     def test_invalid_outer_limits(self):
         """Reject malformed or unrepresentable per-block residual caps."""

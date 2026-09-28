@@ -30,7 +30,7 @@ from newton._src.solvers.monolithic.linear import (
 )
 from newton.tests.monolithic_test_utils import build_tiny_cpu_fixture
 from newton.tests.unittest_utils import add_function_test, get_test_devices
-from scripts.monolithic_reference.profile_linear import _DiagonalInverse, profile_case
+from scripts.monolithic_reference.linear_reference import _DiagonalInverse
 
 
 @wp.kernel
@@ -1023,7 +1023,7 @@ def test_factor_diagnostics(test, device):
 
 
 def test_offline_diagonal_profile(test, device):
-    """Apply the offline inverse of the production diagonal and profile actual contact contributions."""
+    """Apply the offline inverse of the same scaled production diagonal."""
 
     workspace, generation = _ready_system(device, heterogeneous=True)
     workspace.set_regularization(0.03, generation=generation)
@@ -1034,19 +1034,6 @@ def test_offline_diagonal_profile(test, device):
     inverse.operator.matvec(x, out, out, 1.0, 0.0)
     expected = vector / workspace.densify_for_test(generation=generation).scaled_matrix.diagonal()
     np.testing.assert_allclose(out.numpy(), expected, rtol=2e-6, atol=1e-7)
-    report = profile_case(
-        device, active=True, dt=0.001, young_modulus=1e4, poisson_ratio=0.3, contact_stiffness=2e5, repeats=2
-    )
-    test.assertGreater(report["active_samples"], 0)
-    test.assertFalse(report["dense_oracle_used"])
-    test.assertIsNone(report["total_step_ms"])
-    test.assertIsNone(report["memory"]["peak_device_bytes"])
-    for method in report["methods"].values():
-        test.assertEqual(method["success_count"], 2)
-        test.assertEqual([sample["count"] for sample in method["solve_allocator_samples"]], [0, 0])
-        test.assertTrue(
-            all(max(result["rho"], result["rho_q"], result["rho_x"]) <= 1e-4 for result in method["results"])
-        )
 
 
 class TestMonolithicLinear(unittest.TestCase):

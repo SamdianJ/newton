@@ -12,19 +12,20 @@ import numpy as np
 import warp as wp
 
 import newton
-from newton._src.solvers.monolithic.articulation_solver import _coordinate_trial
 from newton._src.solvers.monolithic.articulation_state import ArticulationState, _predict, _recover_history
 from newton._src.solvers.monolithic.articulation_variational import (
     ArticulationKinematics,
     ArticulationObjective,
     _joint_variation,
 )
+from newton._src.solvers.monolithic.coupled_kernels import _coordinate_trial
 from newton.solvers.experimental.monolithic import SolverMonolithic
+from newton.tests.monolithic_test_utils import add_contact_free_tet
 from newton.tests.unittest_utils import add_function_test, get_test_devices
 from scripts.monolithic_reference.p3_articulation_oracle import Kinematics, joint_terms, skew
 
 
-def make_tree(device):
+def make_tree(device, *, coupled=False):
     builder = newton.ModelBuilder()
     links = [
         builder.add_link(
@@ -42,6 +43,8 @@ def make_tree(device):
     builder.add_articulation(joints)
     builder.joint_q[:] = [0.2, -0.15, 0.03]
     builder.joint_qd[:] = [0.1, -0.05, 0.02]
+    if coupled:
+        add_contact_free_tet(builder)
     return builder.finalize(device=device)
 
 
@@ -300,16 +303,20 @@ def test_force_step(test, device):
     body = builder.add_link(mass=1.0, inertia=wp.mat33(0.01, 0.0, 0.0, 0.0, 0.01, 0.0, 0.0, 0.0, 0.01))
     joint = builder.add_joint_prismatic(-1, body, axis=newton.Axis.X, limit_ke=0.0, limit_kd=0.0)
     builder.add_articulation([joint])
+    add_contact_free_tet(builder)
     model = builder.finalize(device=device)
     for mode in ("Armijo", "ResNorm", "ArmijoOrResNorm"):
-        solver = SolverMonolithic._create_articulation_only(
+        solver = SolverMonolithic(
             model,
+            contact_model="C-EE",
+            friction_velocity_scale=0.01,
+            mass_mode="lumped",
             globalization=mode,
             pcg_mode="production" if device.is_cuda else "diagnostic",
             use_cuda_graph=device.is_cuda,
         )
-        source = solver._create_articulation_state(dt=0.001)
-        target = solver._create_articulation_state(dt=0.001)
+        source = solver.create_state(dt=0.001)
+        target = solver.create_state(dt=0.001)
         source.body_f.assign([[1.0, 0.0, 0.0, 0.0, 0.0, 0.0]])
         with patch.object(solver._states, "create", side_effect=AssertionError("continuation must not reinitialize")):
             solver.step(source, target, model.control(), dt=0.001)
@@ -325,13 +332,15 @@ def test_force_step(test, device):
 
 def test_schema_and_publication(test, device):
     """Reject malformed standard arrays and restore a partially published state."""
-    model = make_tree(device)
+    model = make_tree(device, coupled=True)
     for name in ("joint_target_ke", "joint_target_kd", "joint_limit_ke", "joint_limit_kd", "joint_friction"):
         getattr(model, name).zero_()
     model.gravity.zero_()
-    solver = SolverMonolithic._create_articulation_only(model, globalization="ArmijoOrResNorm")
-    source = solver._create_articulation_state(dt=0.001)
-    target = solver._create_articulation_state(dt=0.001)
+    solver = SolverMonolithic(
+        model, contact_model="C-EE", friction_velocity_scale=0.01, mass_mode="lumped", globalization="ArmijoOrResNorm"
+    )
+    source = solver.create_state(dt=0.001)
+    target = solver.create_state(dt=0.001)
     body = target.body_q
     target.body_q = wp.zeros(1, dtype=wp.transform, device=device)
     with test.assertRaisesRegex(ValueError, "body_q"):
@@ -343,12 +352,16 @@ def test_schema_and_publication(test, device):
     del target.extra
     original_q = source.joint_q.numpy().copy()
     original_history = {
-        name: getattr(source._monolithic_articulation, name).numpy().copy() for name in solver._states.schema
+        name: getattr(source._monolithic_coupled, name).numpy().copy() for name in solver._states.schema
     }
 
+    assign = target.assign
+
     def broken_publish(other):
+        if other is not solver._accepted:
+            return assign(other)
         wp.copy(target.joint_q, other.joint_q)
-        target._monolithic_articulation.link_vsym.fill_(123.0)
+        target._monolithic_coupled.link_vsym.fill_(123.0)
         raise RuntimeError("injected publication failure")
 
     with patch.object(target, "assign", side_effect=broken_publish):
@@ -359,13 +372,13 @@ def test_schema_and_publication(test, device):
     for state in (source, target):
         np.testing.assert_array_equal(state.joint_q.numpy(), original_q)
         for name, values in original_history.items():
-            np.testing.assert_array_equal(getattr(state._monolithic_articulation, name).numpy(), values)
+            np.testing.assert_array_equal(getattr(state._monolithic_coupled, name).numpy(), values)
         solver._states.validate(state)
 
 
 def test_fork_alias_and_variable_dt(test, device):
     """Continue complete copied histories across alias steps and changing dt."""
-    model = make_tree(device)
+    model = make_tree(device, coupled=True)
     for name in ("joint_target_ke", "joint_target_kd", "joint_limit_ke", "joint_limit_kd", "joint_friction"):
         getattr(model, name).zero_()
     model.gravity.zero_()
@@ -374,12 +387,12 @@ def test_fork_alias_and_variable_dt(test, device):
         "pcg_mode": "production" if device.is_cuda else "diagnostic",
         "use_cuda_graph": device.is_cuda,
     }
-    solver = SolverMonolithic._create_articulation_only(model, **options)
-    other = SolverMonolithic._create_articulation_only(model, **options)
-    state = solver._create_articulation_state(dt=0.001)
-    alias = other._create_articulation_state(dt=0.001)
+    solver = SolverMonolithic(model, contact_model="C-EE", friction_velocity_scale=0.01, mass_mode="lumped", **options)
+    other = SolverMonolithic(model, contact_model="C-EE", friction_velocity_scale=0.01, mass_mode="lumped", **options)
+    state = solver.create_state(dt=0.001)
+    alias = other.create_state(dt=0.001)
     alias.assign(state)
-    out = solver._create_articulation_state(dt=0.001)
+    out = solver.create_state(dt=0.001)
     control = model.control()
     for dt in (0.001, 0.0005, 0.00025, 0.001):
         solver.step(state, out, control, dt=dt)
@@ -390,32 +403,30 @@ def test_fork_alias_and_variable_dt(test, device):
         np.testing.assert_array_equal(out.joint_qd.numpy(), alias.joint_qd.numpy())
         for name in solver._states.schema:
             np.testing.assert_array_equal(
-                getattr(out._monolithic_articulation, name).numpy(),
-                getattr(alias._monolithic_articulation, name).numpy(),
+                getattr(out._monolithic_coupled, name).numpy(),
+                getattr(alias._monolithic_coupled, name).numpy(),
             )
         state, out = out, state
     with tempfile.TemporaryDirectory() as directory:
         path = Path(directory) / "checkpoint.npz"
-        solver._states.save_checkpoint(state, path)
-        restored = solver._create_articulation_state(dt=0.001)
-        solver._states.load_checkpoint(restored, path)
+        solver.save_checkpoint(state, path)
+        restored = solver.create_state(dt=0.001)
+        solver.load_checkpoint(restored, path)
         for name in solver._states.schema:
             np.testing.assert_array_equal(
-                getattr(restored._monolithic_articulation, name).numpy(),
-                getattr(state._monolithic_articulation, name).numpy(),
+                getattr(restored._monolithic_coupled, name).numpy(),
+                getattr(state._monolithic_coupled, name).numpy(),
             )
         np.savez(path, joint_q=state.joint_q.numpy(), joint_qd=state.joint_qd.numpy())
         with test.assertRaisesRegex(ValueError, "complete articulation"):
-            solver._states.load_checkpoint(restored, path)
+            solver.load_checkpoint(restored, path)
     # A factory source is initialization; assign is the exact continuation operation.
-    reset = solver._create_articulation_state(dt=0.001, source=state)
+    reset = solver.create_state(dt=0.001, source=state)
     test.assertGreater(
-        np.linalg.norm(
-            reset._monolithic_articulation.link_vsym.numpy() - state._monolithic_articulation.link_vsym.numpy()
-        ),
+        np.linalg.norm(reset._monolithic_coupled.link_vsym.numpy() - state._monolithic_coupled.link_vsym.numpy()),
         0.0,
     )
-    saved = {name: getattr(alias._monolithic_articulation, name).numpy().copy() for name in solver._states.schema}
+    saved = {name: getattr(alias._monolithic_coupled, name).numpy().copy() for name in solver._states.schema}
     q = alias.joint_q.numpy().copy()
     with patch.object(other, "_iterate_articulation", return_value=other.Status.NONLINEAR_MAX_ITERATIONS):
         other.step(alias, alias, control, dt=0.001)
@@ -423,7 +434,7 @@ def test_fork_alias_and_variable_dt(test, device):
     test.assertFalse(other.last_stats.converged)
     np.testing.assert_array_equal(alias.joint_q.numpy(), q)
     for name, value in saved.items():
-        np.testing.assert_array_equal(getattr(alias._monolithic_articulation, name).numpy(), value)
+        np.testing.assert_array_equal(getattr(alias._monolithic_coupled, name).numpy(), value)
 
 
 def test_continuous_inertia(test, device):

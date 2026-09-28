@@ -14,17 +14,16 @@ import warp as wp
 import newton
 from newton._src.solvers.monolithic import solver_monolithic as impl
 from newton._src.solvers.monolithic.linear import MonolithicLinearStatus, MonolithicPcgWarmStart
-from newton._src.solvers.monolithic.tet import (
-    TetPhysicsWorkspace,
+from newton._src.solvers.monolithic.tet_assembly import assemble_tet_residual_tangent
+from newton._src.solvers.monolithic.tet_common import TetPhysicsWorkspace
+from newton._src.solvers.monolithic.tet_material import (
     _evaluate_smith,
     _nodal_hessian,
     _project_element_psd,
-    assemble_tet_residual_tangent,
-    evaluate_tet_residual,
     mat99,
     mat1212,
 )
-from newton.solvers.experimental.monolithic import MonolithicCollisionPipeline, SolverMonolithic
+from newton.solvers.experimental.monolithic import SolverMonolithic
 from newton.tests.monolithic_test_utils import build_tiny_cpu_fixture
 from newton.tests.test_solver_monolithic_linear import _pcg_config
 from newton.tests.test_solver_monolithic_tet import _setup
@@ -185,7 +184,7 @@ def test_consistent_mass(test, device):
         )
         np.testing.assert_array_equal(scatter.global_values.numpy().reshape(-1, 3, 3), scatter.ax_values.numpy())
         before = scatter.global_values.numpy().copy()
-        evaluate_tet_residual(model, **args)
+        assemble_tet_residual_tangent(model, **args, scatter=scatter)
         np.testing.assert_array_equal(scatter.global_values.numpy(), before)
 
 
@@ -198,20 +197,24 @@ def test_modes_integration(test, device):
             density = wp.full(model.tet_count, 1000, dtype=float, device=device) if mass == "consistent" else None
             solver = SolverMonolithic(
                 model,
-                collision_pipeline=MonolithicCollisionPipeline(model),
+                contact_model="C-EE",
+                globalization="ArmijoOrResNorm",
+                friction_velocity_scale=0.01,
                 contact_stiffness=1e5,
                 material_model=material,
                 mass_mode=mass,
                 tet_rest_density=density,
             )
-            solver.step(fixture.state, fixture.state_next, fixture.control, None, 0.01)
+            state = solver.create_state(dt=0.01, source=fixture.state)
+            out = solver.create_state(dt=0.01, source=fixture.state)
+            solver.step(state, out, fixture.control, dt=0.01)
             test.assertTrue(solver.last_stats.converged)
-            test.assertEqual(solver.last_stats.material_model, material)
-            test.assertEqual(solver.last_stats.mass_mode, mass)
-            test.assertEqual(len(solver.last_stats.tet_config_identity), 64)
-            expected = solver._tet_workspace.physics.dynamic_mass_diagonal.numpy()
+            test.assertEqual(solver._tet.physics.material_model, material)
+            test.assertEqual(solver._tet.physics.mass_mode, mass)
+            test.assertEqual(len(solver._tet.physics.identity), 64)
+            expected = solver._tet.physics.dynamic_mass_diagonal.numpy()
             np.testing.assert_allclose(
-                solver._dynamic_diagonal.numpy()[2:].reshape(-1, 3),
+                solver._diagonal.numpy()[2:].reshape(-1, 3),
                 np.repeat((expected / 0.01**2)[:, None], 3, axis=1),
                 rtol=2e-6,
             )
@@ -245,7 +248,7 @@ def test_modes_integration(test, device):
             old = model.tet_materials
             model.tet_materials = wp.clone(old)
             with test.assertRaises(ValueError):
-                solver.step(fixture.state, fixture.state_next, fixture.control, None, 0.01)
+                solver.step(state, out, fixture.control, dt=0.01)
             model.tet_materials = old
 
 
@@ -253,12 +256,13 @@ def test_density_and_lifecycle(test, device):
     """Reject invalid density, preserve snapshots, freeze trial assembly and roll back in place."""
     fixture = build_tiny_cpu_fixture(device=device)
     model = fixture.model
-    pipeline = MonolithicCollisionPipeline(model)
 
     def create(density):
         return SolverMonolithic(
             model,
-            collision_pipeline=pipeline,
+            contact_model="C-EE",
+            globalization="ArmijoOrResNorm",
+            friction_velocity_scale=0.01,
             contact_stiffness=1e5,
             material_model="smith_log_stabilized",
             mass_mode="consistent",
@@ -277,29 +281,31 @@ def test_density_and_lifecycle(test, device):
             create(density)
     rho = wp.full(1, 1000, dtype=float, device=device)
     solver = create(rho)
-    identity = solver.tet_config_identity
+    identity = solver._tet.physics.identity
     rho.fill_(2000)
-    np.testing.assert_array_equal(solver._tet_physics.density.numpy(), 1000)
-    test.assertEqual(solver.tet_config_identity, identity)
-    solver.step(fixture.state, fixture.state_next, fixture.control, None, 0.01)
-    candidate = solver._transaction.accepted
+    np.testing.assert_array_equal(solver._tet.physics.density.numpy(), 1000)
+    test.assertEqual(solver._tet.physics.identity, identity)
+    state = solver.create_state(dt=0.01, source=fixture.state)
+    out = solver.create_state(dt=0.01, source=fixture.state)
+    solver.step(state, out, fixture.control, dt=0.01)
+    candidate = solver._accepted
     matrix = solver._linear.k_global_scalar_bsr.values.numpy().copy()
-    solver._evaluate_trial(candidate, 0.01)
-    baseline = candidate.residual.numpy().copy()
+    solver._evaluate(candidate, 0.01, build_tangent=False)
+    baseline = solver._complete_r.numpy().copy()
     allocator = model.device.get_allocator()
     with patch.object(allocator, "allocate", wraps=allocator.allocate) as alloc:
         for _ in range(100):
-            solver._evaluate_trial(candidate, 0.01)
+            solver._evaluate(candidate, 0.01, build_tangent=False)
     test.assertEqual(alloc.call_count, 0)
-    np.testing.assert_array_equal(candidate.residual.numpy(), baseline)
+    np.testing.assert_array_equal(solver._complete_r.numpy(), baseline)
     np.testing.assert_array_equal(solver._linear.k_global_scalar_bsr.values.numpy(), matrix)
-    before = fixture.state.particle_q.numpy().copy()
+    before = state.particle_q.numpy().copy()
     with patch.object(
-        solver, "_iterate", side_effect=impl._StepFailure(SolverMonolithic.Status.NONFINITE, "G2 injected")
+        solver, "_iterate_articulation", side_effect=impl._StepFailure(SolverMonolithic.Status.NONFINITE, "G2 injected")
     ):
-        solver.step(fixture.state, fixture.state, fixture.control, None, 0.01)
+        solver.step(state, state, fixture.control, dt=0.01)
     test.assertTrue(solver.last_stats.rolled_back)
-    np.testing.assert_array_equal(fixture.state.particle_q.numpy(), before)
+    np.testing.assert_array_equal(state.particle_q.numpy(), before)
 
 
 class TestMaterialMass(unittest.TestCase):
