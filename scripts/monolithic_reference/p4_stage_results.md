@@ -699,3 +699,22 @@ Regression reproduced before implementation; 20 interface/precision/contact
 checks pass after implementation. All ten production/graph configurations
 complete ten-step smoke prefixes without hard failure. Full trajectories are
 pending. Evidence: agents/integration/artifacts/p4/precision-comparison/fp32-relaxed-v1/.
+
+## FP32 relaxed full trajectory experiment completed
+
+At cd9a84c4, all ten FP32 production/graph cases complete their original lengths
+with explicit absolute global/q/x goals of 1e-6. Total 55,917 steps: 8,624 native
+convergence reports, 47,293 Stopped, zero hard failures. Franka's nine cases have
+four converged steps and 47,246 Stopped; Sharpa has 8,620 converged and 47 Stopped.
+Trial acceptance, relative goals, physical gates, budgets and defaults unchanged.
+
+All stored states are finite; history bindings and force validity/generations
+pass. Same-time full trajectory comparison uses nine retained Franka references
+and the rebuilt-asset Sharpa reference. Max particle coordinate-component error:
+Franka 0.237–0.878 mm across cases; Sharpa 0.294 mm. No FP64 reruns.
+Complete advancement is not convergence or accuracy certification. Independent
+full residual auditing and grasp certification remain unperformed; qualification
+is NOT_AUDITED. Stopped is never counted as converged. T5-D remains unperformed.
+
+Evidence: agents/integration/artifacts/p4/precision-comparison/fp32-relaxed-v1/RESULTS.md,
+analysis.json and receipt.json. Twenty affected tests passed before execution.
