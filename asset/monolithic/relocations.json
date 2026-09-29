@@ -1,0 +1,158 @@
+[
+  {
+    "old_path": "/home/lightwheel/Desktop/newton/SamiulJ/agents/integration/artifacts/p1/pr6d-assets/hand",
+    "asset_path": "data/inputs/sharpa/hand",
+    "files": 89,
+    "byte_identity": "UNCHANGED"
+  },
+  {
+    "old_path": "/home/lightwheel/Desktop/newton/SamiulJ/agents/integration/artifacts/p3/pr3/franka-grasp-v1/cache",
+    "asset_path": "data/inputs/franka/sdf-cache",
+    "files": 9,
+    "byte_identity": "UNCHANGED"
+  },
+  {
+    "old_path": "/home/lightwheel/Desktop/newton/SamiulJ/agents/integration/artifacts/p3/pr3/current-iterate-production-v1/sharpa-trajectory.json",
+    "asset_path": "data/inputs/sharpa/recorded-control.json",
+    "files": 1,
+    "byte_identity": "UNCHANGED"
+  },
+  {
+    "old_path": "/home/lightwheel/Desktop/newton/SamiulJ/agents/integration/artifacts/p3/pr3/smooth-sdf-v1/geometry",
+    "asset_path": "data/inputs/sharpa/geometry-original",
+    "files": 69,
+    "byte_identity": "UNCHANGED"
+  },
+  {
+    "old_path": "/home/lightwheel/Desktop/newton/SamiulJ/agents/integration/artifacts/p4/sharpa-asset-recovery-v1/geometry",
+    "asset_path": "data/inputs/sharpa/geometry-rebuilt",
+    "files": 69,
+    "byte_identity": "UNCHANGED"
+  },
+  {
+    "old_path": "/home/lightwheel/Desktop/newton/SamiulJ/agents/integration/artifacts/p4/sharpa-asset-recovery-v1/qualification",
+    "asset_path": "data/inputs/sharpa/qualification-rebuilt",
+    "files": 25,
+    "byte_identity": "UNCHANGED"
+  },
+  {
+    "old_path": "/home/lightwheel/Desktop/newton/SamiulJ/agents/integration/artifacts/p4/sharpa-asset-recovery-v1/controls",
+    "asset_path": "data/inputs/controls",
+    "files": 5,
+    "byte_identity": "UNCHANGED"
+  },
+  {
+    "old_path": "/home/lightwheel/Desktop/newton/SamiulJ/agents/integration/artifacts/p4/sharpa-asset-recovery-v1/frozen-inputs.json",
+    "asset_path": "data/inputs/frozen-inputs-rebuilt.json",
+    "files": 1,
+    "byte_identity": "UNCHANGED"
+  },
+  {
+    "old_path": "/home/lightwheel/Desktop/newton/SamiulJ/agents/integration/artifacts/p4/precision-comparison/t5-a-v1/frozen-inputs.json",
+    "asset_path": "data/inputs/frozen-inputs-original.json",
+    "files": 1,
+    "byte_identity": "UNCHANGED"
+  },
+  {
+    "old_path": "/home/lightwheel/Desktop/newton/SamiulJ/agents/integration/artifacts/p4/t0-v1/input-manifest.json",
+    "asset_path": "data/inputs/t0-input-manifest.json",
+    "files": 1,
+    "byte_identity": "UNCHANGED"
+  },
+  {
+    "old_path": "/home/lightwheel/Desktop/newton/SamiulJ/agents/integration/artifacts/p4/t0-v1/comparison-tolerances.json",
+    "asset_path": "data/inputs/comparison-tolerances.json",
+    "files": 1,
+    "byte_identity": "UNCHANGED"
+  },
+  {
+    "old_path": "/home/lightwheel/Desktop/newton/SamiulJ/agents/integration/artifacts/p2/close-p0-capture-20260915-18/manifest.json",
+    "asset_path": "data/inputs/sharpa/close-18/manifest.json",
+    "files": 1,
+    "byte_identity": "UNCHANGED"
+  },
+  {
+    "old_path": "/home/lightwheel/Desktop/newton/SamiulJ/agents/integration/artifacts/p2/close-p0-capture-20260915-24/manifest.json",
+    "asset_path": "data/inputs/sharpa/close-24/manifest.json",
+    "files": 1,
+    "byte_identity": "UNCHANGED"
+  },
+  {
+    "old_path": "/home/lightwheel/Desktop/newton/SamiulJ/assets/left_sharpa_wave",
+    "asset_path": "data/inputs/sharpa/left_sharpa_wave",
+    "files": 80,
+    "byte_identity": "UNCHANGED"
+  },
+  {
+    "old_path": "/home/lightwheel/Desktop/newton/SamiulJ/assets/trajectory/Ball_catch - Left_hand_motion_rad.csv",
+    "asset_path": "data/inputs/sharpa/Ball_catch - Left_hand_motion_rad.csv",
+    "files": 1,
+    "byte_identity": "UNCHANGED"
+  },
+  {
+    "old_path": "/home/lightwheel/.cache/newton/newton-assets_franka_emika_panda_6653f28a_f8fb7abc/franka_emika_panda",
+    "asset_path": "data/inputs/franka/franka_emika_panda",
+    "files": 64,
+    "byte_identity": "UNCHANGED"
+  },
+  {
+    "old_path": "/home/lightwheel/Desktop/newton/SamiulJ/agents/integration/artifacts/p4/precision-comparison/t5-b-v1/full/franka-cube--ArmijoOrResNorm--C-IE--production--graph1",
+    "asset_path": "data/reference/franka-cube--ArmijoOrResNorm--C-IE--production--graph1--fp64",
+    "files": 63,
+    "byte_identity": "UNCHANGED"
+  },
+  {
+    "old_path": "/home/lightwheel/Desktop/newton/SamiulJ/agents/integration/artifacts/p4/precision-comparison/t5-b-v1/full/franka-cube--ArmijoOrResNorm--C-EE--production--graph1",
+    "asset_path": "data/reference/franka-cube--ArmijoOrResNorm--C-EE--production--graph1--fp64",
+    "files": 63,
+    "byte_identity": "UNCHANGED"
+  },
+  {
+    "old_path": "/home/lightwheel/Desktop/newton/SamiulJ/agents/integration/artifacts/p4/precision-comparison/t5-b-v1/full/franka-cube--ArmijoOrResNorm--C-II--production--graph1",
+    "asset_path": "data/reference/franka-cube--ArmijoOrResNorm--C-II--production--graph1--fp64",
+    "files": 63,
+    "byte_identity": "UNCHANGED"
+  },
+  {
+    "old_path": "/home/lightwheel/Desktop/newton/SamiulJ/agents/integration/artifacts/p4/precision-comparison/t5-b-v1/full/franka-cube--Armijo--C-IE--production--graph1",
+    "asset_path": "data/reference/franka-cube--Armijo--C-IE--production--graph1--fp64",
+    "files": 63,
+    "byte_identity": "UNCHANGED"
+  },
+  {
+    "old_path": "/home/lightwheel/Desktop/newton/SamiulJ/agents/integration/artifacts/p4/precision-comparison/t5-b-v1/full/franka-cube--Armijo--C-EE--production--graph1",
+    "asset_path": "data/reference/franka-cube--Armijo--C-EE--production--graph1--fp64",
+    "files": 63,
+    "byte_identity": "UNCHANGED"
+  },
+  {
+    "old_path": "/home/lightwheel/Desktop/newton/SamiulJ/agents/integration/artifacts/p4/precision-comparison/t5-b-v1/full/franka-cube--Armijo--C-II--production--graph1",
+    "asset_path": "data/reference/franka-cube--Armijo--C-II--production--graph1--fp64",
+    "files": 63,
+    "byte_identity": "UNCHANGED"
+  },
+  {
+    "old_path": "/home/lightwheel/Desktop/newton/SamiulJ/agents/integration/artifacts/p4/precision-comparison/t5-b-v1/full/franka-cube--ResNorm--C-IE--production--graph1",
+    "asset_path": "data/reference/franka-cube--ResNorm--C-IE--production--graph1--fp64",
+    "files": 63,
+    "byte_identity": "UNCHANGED"
+  },
+  {
+    "old_path": "/home/lightwheel/Desktop/newton/SamiulJ/agents/integration/artifacts/p4/precision-comparison/t5-b-v1/full/franka-cube--ResNorm--C-EE--production--graph1",
+    "asset_path": "data/reference/franka-cube--ResNorm--C-EE--production--graph1--fp64",
+    "files": 63,
+    "byte_identity": "UNCHANGED"
+  },
+  {
+    "old_path": "/home/lightwheel/Desktop/newton/SamiulJ/agents/integration/artifacts/p4/precision-comparison/t5-b-v1/full/franka-cube--ResNorm--C-II--production--graph1",
+    "asset_path": "data/reference/franka-cube--ResNorm--C-II--production--graph1--fp64",
+    "files": 63,
+    "byte_identity": "UNCHANGED"
+  },
+  {
+    "old_path": "/home/lightwheel/Desktop/newton/SamiulJ/agents/integration/artifacts/p4/sharpa-asset-recovery-v1/fp64-reference/sharpa-recorded-10mm--ArmijoOrResNorm--C-IE--production--graph1--fp64",
+    "asset_path": "data/reference/sharpa-recorded-10mm--ArmijoOrResNorm--C-IE--production--graph1--fp64",
+    "files": 91,
+    "byte_identity": "UNCHANGED"
+  }
+]

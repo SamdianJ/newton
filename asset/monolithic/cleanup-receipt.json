@@ -1,0 +1,19 @@
+{
+  "date": "2026-09-30",
+  "source_commit": "82a9295961a93ad991f16298cf63beb5652241e6",
+  "tests": "NOT_RUN_USER_REQUEST",
+  "reference_count": 10,
+  "original_files_pruned": 20481,
+  "original_bytes_pruned": 21095028157,
+  "archived_small_files": 8285,
+  "evidence_archive_sha256": "51cdc500f281df01c3f0ef604d223e16d319533678f74601324a6b6b68fd0a88",
+  "retention": "Ten FP64 references, runtime inputs and qualified assets relocated with byte checks; full step logs compacted; original small evidence archived; detailed other trajectories discarded; historical PASS not reassigned.",
+  "retained_files_verified": 1086,
+  "frozen_inputs_verified": 409,
+  "relocation_links_verified": 26,
+  "retired_worktrees": 7,
+  "free_bytes_after_cleanup": 25142239232,
+  "integrity": "PASS_FILE_HASHES_ONLY",
+  "pre_commit": "PASS",
+  "simulation_tests": "NOT_RUN"
+}

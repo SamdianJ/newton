@@ -1,5 +1,7 @@
 # P4 stage results and commit policy
 
+> 2026-09-30 存储整理：保留九条Franka＋一条Sharpa完整FP64参考；其余大录制和日志按用户要求清理。下文是历史记录，部分原证据路径已归档，定位见[开发历史](development_history.md)。本次不关闭R1，也不产生新的测试通过结论。
+
 Current acceptance: [P4 acceptance record](p4_acceptance.md). Historical entries
 below retain their original tested-source labels and time-specific status.
 Documentation closeout is complete; current formal-runner asset binding R1
