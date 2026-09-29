@@ -634,3 +634,18 @@ its runner is currently also blocked by the shared all-input validation.
 No long trajectories have been rerun.
 
 Evidence: agents/integration/artifacts/p4/sharpa-asset-recovery-v1/.
+
+## Rebuilt Sharpa qualification and runner binding — 2026-09-29
+
+User authorized reconstruction, new smooth SDF certification and one replacement
+Sharpa FP64 reference. Restore the rebuilt hand at its runtime path, preserving
+old frozen manifests. Eleven fields pass both C1/C2 geometry checks and all
+independent oracle, continuity and expanded frozen-probe checks. Create a new
+409-file manifest and rebind unchanged control bytes with parent provenance.
+
+Add --input-manifest to the precision runner; preserve fail-closed hash checks,
+record the selected manifest and resolve its qualified SDF directory. Propagate
+the manifest into subprocesses and observer replay. Two new tests fail before
+the change; eight runner/audit tests pass afterward. Production code is unchanged.
+The single Sharpa FP64 baseline is pending; no Franka FP64 trajectories rerun.
+Evidence: agents/integration/artifacts/p4/sharpa-asset-recovery-v1/.

@@ -5,8 +5,10 @@
 
 import io
 import json
+import tempfile
 import unittest
 from contextlib import redirect_stdout
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -15,7 +17,7 @@ import numpy as np
 from newton._src.solvers.monolithic.solver_types import _SolverMonolithicInternalConfig
 from newton._src.solvers.monolithic.variational_iteration import measure
 from scripts.monolithic_reference.run_p3_baseline import cases as baseline_cases
-from scripts.monolithic_reference.run_p5_precision import cases, main
+from scripts.monolithic_reference.run_p5_precision import cases, main, sha, validate_inputs
 
 
 class TestPrecisionRunner(unittest.TestCase):
@@ -43,6 +45,44 @@ class TestPrecisionRunner(unittest.TestCase):
         rows = json.loads(output.getvalue())
         self.assertEqual(len(rows), 10)
         self.assertTrue(all(r["precision"] == "fp32" for r in rows))
+
+    def test_explicit_input_manifest(self):
+        """A new asset generation must have its own checked manifest."""
+        with tempfile.TemporaryDirectory() as directory:
+            asset = Path(directory) / "asset.bin"
+            manifest = Path(directory) / "inputs.json"
+            asset.write_bytes(b"new qualified asset")
+            manifest.write_text(json.dumps({"input_hashes": {str(asset): sha(asset)}}))
+            self.assertEqual(validate_inputs(manifest), sha(manifest))
+            asset.write_bytes(b"changed")
+            with self.assertRaises(ValueError):
+                validate_inputs(manifest)
+            asset.unlink()
+            with self.assertRaises(FileNotFoundError):
+                validate_inputs(manifest)
+
+    def test_worker_manifest_forwarding(self):
+        case = next(c for c in cases() if c["precision"] == "fp32")
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            args = [
+                "runner",
+                "--worker",
+                "--case",
+                case["id"],
+                "--controls",
+                str(root),
+                "--output",
+                str(root / "run"),
+                "--input-manifest",
+                str(root / "inputs.json"),
+            ]
+            with (
+                patch("sys.argv", args),
+                patch("scripts.monolithic_reference.run_p5_precision.worker", return_value=0) as worker,
+            ):
+                self.assertEqual(main(), 0)
+            self.assertEqual(worker.call_args.kwargs["input_manifest"], root / "inputs.json")
 
     def test_native_host_targets(self):
         for dtype in (np.float32, np.float64):

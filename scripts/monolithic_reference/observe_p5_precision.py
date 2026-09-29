@@ -174,13 +174,19 @@ def main():
     case = prior["case"]
     observed = []
 
-    def build(case):
-        result = original_build(case)
+    def build(case, *, input_manifest=runner.FROZEN):
+        result = original_build(case, input_manifest=input_manifest)
         observed.append(Observer(result[1], args.output))
         return result
 
     runner.build = build
-    result = runner.worker(case, args.controls.resolve(), args.output.resolve(), prior["first_failure_step"])
+    result = runner.worker(
+        case,
+        args.controls.resolve(),
+        args.output.resolve(),
+        prior["first_failure_step"],
+        input_manifest=Path(prior.get("input_manifest", runner.FROZEN)),
+    )
     receipt = json.loads((args.output / "receipt.json").read_text())
     assert receipt.get("exception") is None, receipt.get("exception")
     assert receipt["first_failure_step"] == prior["first_failure_step"]

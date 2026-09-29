@@ -199,3 +199,23 @@ Observers record the guard in physics metadata. Auditing older archives without
 this field retains their historical 1e-10 policy, including FP32 archives.
 The prior T5-C FAIL remains a result of its original source and policy; short
 prefix verification of this adjustment does not establish full qualification.
+
+## Rebuilt Sharpa inputs (2026-09-29)
+
+After deletion of the original hand assets, the user authorized new asset
+qualification and exactly one new Sharpa FP64 reference. Franka's nine FP64
+trajectories remain reused. Both geometry representations passed new geometry,
+independent derivative and continuity checks on all eleven source fields.
+
+Use run_p5_precision with --input-manifest pointing to
+agents/integration/artifacts/p4/sharpa-asset-recovery-v1/frozen-inputs.json
+and --controls pointing to its sibling controls directory. This explicit
+manifest binds the rebuilt hand, new qualified smooth_sdf_directory, unchanged
+remaining inputs and byte-identical control streams. The original manifest is
+retained and must continue rejecting changed/missing original assets. The new
+manifest hash and path are recorded in receipts and passed to child workers.
+Historical observations default to their original input manifest.
+
+The new Sharpa reference cannot establish byte equivalence to the deleted
+assets. It supports comparison between precisions on the new physical inputs.
+Sharpa grasp success remains uncertified.

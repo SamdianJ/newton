@@ -47,14 +47,14 @@ def cases():
     ]
 
 
-def validate_inputs():
-    for name, digest in json.loads(FROZEN.read_text())["input_hashes"].items():
+def validate_inputs(input_manifest=FROZEN):
+    for name, digest in json.loads(input_manifest.read_text())["input_hashes"].items():
         if sha(name) != digest:
             raise ValueError(f"Frozen input changed: {name}")
-    return sha(FROZEN)
+    return sha(input_manifest)
 
 
-def build(case):
+def build(case, *, input_manifest=FROZEN):
     """Reuse frozen scene construction and sample the original FP32 controls."""
     import warp as wp  # noqa: PLC0415
     from newton.solvers.experimental.monolithic import SolverMonolithic, build_smooth_sdf  # noqa: PLC0415
@@ -82,7 +82,10 @@ def build(case):
         raise ValueError("Frozen recorded schedule changed")
     samples = [targets(trajectory, curve, mapping, i * case["dt"])[:2] for i in range(case["steps"] + 1)]
     samples = np.asarray(samples, dtype=np.float32)
-    smooth = build_smooth_sdf(model, qualified_directory=ARTIFACTS / "p3/pr3/smooth-sdf-v1/geometry")
+    directory = json.loads(input_manifest.read_text()).get(
+        "smooth_sdf_directory", str(ARTIFACTS / "p3/pr3/smooth-sdf-v1/geometry")
+    )
+    smooth = build_smooth_sdf(model, qualified_directory=Path(directory))
     run = SolverMonolithic(
         model,
         contact_model=case["law"],
@@ -108,15 +111,15 @@ def build(case):
     return model, run, run.create_state(dt=case["dt"], source=source), samples
 
 
-def freeze_controls(output):
+def freeze_controls(output, *, input_manifest=FROZEN):
     """Write scene control streams shared by every law, acceptance mode and precision."""
     output.mkdir(parents=True, exist_ok=False)
-    manifest = {"input_manifest_sha256": validate_inputs(), "streams": {}, "source_hashes": {}}
+    manifest = {"input_manifest_sha256": validate_inputs(input_manifest), "streams": {}, "source_hashes": {}}
     for case in cases():
         name = case["scene"]
         if name in manifest["streams"]:
             continue
-        _, _, _, samples = build(case)
+        _, _, _, samples = build(case, input_manifest=input_manifest)
         path = output / f"{name}.npy"
         np.save(path, samples, allow_pickle=False)
         manifest["streams"][name] = {
@@ -131,7 +134,7 @@ def freeze_controls(output):
     (output / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
 
 
-def worker(case, controls, output, max_steps):
+def worker(case, controls, output, max_steps, *, input_manifest=FROZEN):
     """Preserve actual native states and first-failure context, without oracle feedback."""
     import warp as wp  # noqa: PLC0415
 
@@ -152,7 +155,8 @@ def worker(case, controls, output, max_steps):
         },
     }
     try:
-        receipt["input_manifest_sha256"] = validate_inputs()
+        receipt["input_manifest"] = str(input_manifest.resolve())
+        receipt["input_manifest_sha256"] = validate_inputs(input_manifest)
         manifest = json.loads((controls / "manifest.json").read_text())
         if manifest["input_manifest_sha256"] != receipt["input_manifest_sha256"]:
             raise ValueError("Control input identity differs")
@@ -163,7 +167,7 @@ def worker(case, controls, output, max_steps):
         receipt["controls_sha256"] = sha(path)
         samples = np.load(path, allow_pickle=False)
         start = time.perf_counter()
-        model, run, state, actual = build(case)
+        model, run, state, actual = build(case, input_manifest=input_manifest)
         wp.synchronize()
         receipt["build_seconds"] = time.perf_counter() - start
         if samples.dtype != np.float32 or not np.array_equal(actual, samples):
@@ -237,6 +241,7 @@ def main():
     )
     parser.add_argument("--freeze-controls", action="store_true")
     parser.add_argument("--controls", type=Path)
+    parser.add_argument("--input-manifest", type=Path, default=FROZEN, help="Explicit frozen asset generation")
     parser.add_argument("--case", action="append", default=[])
     parser.add_argument("--output", type=Path)
     parser.add_argument("--max-steps", type=int, help="Smoke only; always reports PARTIAL")
@@ -255,12 +260,18 @@ def main():
     if args.max_steps is not None and args.max_steps <= 0:
         parser.error("--max-steps must be positive")
     if args.freeze_controls:
-        freeze_controls(args.output.resolve())
+        freeze_controls(args.output.resolve(), input_manifest=args.input_manifest.resolve())
         return 0
     if args.worker:
         if len(selected) != 1:
             parser.error("Worker requires one case")
-        return worker(selected[0], args.controls.resolve(), args.output.resolve(), args.max_steps)
+        return worker(
+            selected[0],
+            args.controls.resolve(),
+            args.output.resolve(),
+            args.max_steps,
+            input_manifest=args.input_manifest.resolve(),
+        )
     args.output.mkdir(parents=True, exist_ok=False)
     rows = []
     for case in selected:
@@ -277,6 +288,8 @@ def main():
             case["id"],
             "--controls",
             str(args.controls.resolve()),
+            "--input-manifest",
+            str(args.input_manifest.resolve()),
             "--output",
             str(destination),
         ]
