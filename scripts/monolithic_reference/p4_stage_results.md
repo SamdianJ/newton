@@ -1,5 +1,10 @@
 # P4 stage results and commit policy
 
+Current acceptance: [P4 acceptance record](p4_acceptance.md). Historical entries
+below retain their original tested-source labels and time-specific status.
+Documentation closeout is complete; current formal-runner asset binding R1
+remains open. No new tests or trajectories are run for this closeout.
+
 Complete each independently reviewable phase or subtask, run its applicable checks, and commit its code, tests, and result summary on `SamiulJ/monolithic-refactor` before starting the next phase. Reference external evidence by path and SHA-256. Keep unrelated edits, large recordings, caches, and environments out of commits. Do not push without separate authorization. A blocked or unfinished phase is not complete.
 
 ## T0a–T0c: baseline admission
@@ -764,3 +769,22 @@ and complete pre-commit pass; integration remains unchanged; no push.
 
 Evidence: agents/integration/artifacts/p4/precision-comparison/t5-d-franka-v1/RESULTS.md,
 performance-analysis.json, trajectory-analysis.json and receipt.json.
+
+## P4 acceptance documentation closeout — 2026-09-30
+
+At the user's request, reuse existing long trajectories and phase receipts; do
+not run tests again. Consolidate 27 phase/experiment receipts in an evidence
+index, preserving tested-source labels and SHA-256. Deliver p4_acceptance.md,
+a machine-readable final receipt and snapshots of the four external documents.
+Update the plan checklist, regression plan, Source Map and HANDOFF.
+
+Historical FP64 equivalence/dev/full remain PASS at their recorded versions.
+T5 experimentation is delivered; original FP32 qualification remains FAIL and
+the relaxed experiment remains NOT_AUDITED. Current run_p4 and the Sharpa scene
+still bind old assets (R1 OPEN, not waived). This documentation-only request does
+not fix or waive R1 and does not certify a new current-source full run. No solver,
+runner, test, asset or trajectory is changed. No simulations or test discovery
+are executed. Static documentation checks are recorded separately.
+
+Evidence: agents/integration/artifacts/p4/final-acceptance-v1/RESULTS.md,
+evidence-index.json, receipt.json and commit-binding.json. No push.
