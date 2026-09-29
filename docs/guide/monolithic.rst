@@ -38,12 +38,32 @@ used directly for continuation.
    solver.save_checkpoint(state, "checkpoint.npz")
    solver.load_checkpoint(state, "checkpoint.npz")
 
-The default solver uses strict publication, diagnostic PCG and no CUDA graph.
+The default solver uses FP64 nonlinear arithmetic, strict publication, diagnostic
+PCG and no CUDA graph.
 Force results are independent read-only NumPy snapshots; check ``force_valid``
 and ``force_generation`` before using them. Stopped publication under an opt-in
 production policy is not convergence. Reset with ``reset_state(state, dt=...)``.
 Checkpoint restoration validates complete state and configuration identity before
 replacing the destination state.
+
+The experimental constructor parameter ``precision`` accepts
+``SolverMonolithic.Precision.FP64`` / ``FP32`` or ``"fp64"`` / ``"fp32"``.
+It cannot change after construction. FP32 selects native state, history,
+contact forces, E/r, posterior checks and host acceptance arithmetic; B/PCG
+arrays and directions remain FP32 in both modes. Existing PCG scalar threshold
+and restart checks retain their original FP64 arithmetic in both modes.
+FP32 numerical qualification is pending: unchanged
+physical guards and noise envelopes may reject a candidate.
+
+The precision-tagged state uses schema 3. Cross-precision continuation and
+checkpoint loads are rejected. Schema-2 FP64 checkpoints are validated against
+the original complete field schema and physical digest in scratch before being
+upgraded; failed loads preserve the destination. A plain initialization source
+is a new start, not a conversion of integration history.
+
+Smooth SDF construction still produces common offline FP64 coefficients.
+The FP32 solver derives a separately identified coefficient copy and retains
+validation of the reference source. Force snapshots use the selected precision.
 
 For mesh contact, attach the official mesh SDF before model finalization and use
 ``build_smooth_sdf(model)`` for the derived C2 field. A qualified frozen node
@@ -70,3 +90,14 @@ The repository's scene matrix uses explicit frozen external assets:
 The scene runner's result must be combined with component, lifecycle and replay
 checks for stage qualification. Retired driver snapshots, hashes and migration
 notes are documented in ``scripts/monolithic_reference/legacy_retirement.md``.
+
+The precision experiment runner enumerates eight scenes in both precisions::
+
+   uv run --no-sync python -m scripts.monolithic_reference.run_p5_precision --list
+   uv run --no-sync python -m scripts.monolithic_reference.run_p5_precision --freeze-controls --output /path/to/controls
+   uv run --no-sync python -m scripts.monolithic_reference.run_p5_precision --controls /path/to/controls --output /path/to/results
+
+Use ``--max-steps 2`` for a smoke run. A complete run reports
+``COMPLETE_NOT_AUDITED`` until the independent T5 numerical audit is performed;
+short runs report ``PARTIAL`` and hard failures retain their first-failure state.
+This runner does not yet perform the separate T5 performance experiment.

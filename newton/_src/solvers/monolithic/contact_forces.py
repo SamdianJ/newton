@@ -10,7 +10,7 @@ import numpy as np
 
 @dataclass(frozen=True, slots=True)
 class MonolithicContactForces:
-    """Read-only FP64 force snapshots, independent of subsequent solver operations.
+    """Read-only native-precision force snapshots, independent of subsequent solver operations.
 
     Attributes:
         particle_force: World contact forces in N, shape ``(particle_count, 3)``.
@@ -28,6 +28,6 @@ class MonolithicContactForces:
 
     def __post_init__(self):
         for name in ("particle_force", "body_wrench", "joint_force"):
-            value = np.array(getattr(self, name), dtype=np.float64, copy=True)
+            value = np.array(getattr(self, name), copy=True)
             value.setflags(write=False)
             object.__setattr__(self, name, value)

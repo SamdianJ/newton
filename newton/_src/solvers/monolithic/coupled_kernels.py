@@ -3,13 +3,13 @@
 
 """Device assembly and publication primitives for the private joint/particle path."""
 
-import warp as wp
+from typing import Any
 
-from .contact_variational import _Geometry
+import warp as wp
 
 
 @wp.kernel
-def combine(q: wp.array[wp.float64], x: wp.array[wp.vec3d], contact: wp.array[wp.float64], out: wp.array[wp.float64]):
+def combine(q: wp.array[Any], x: wp.array[Any], contact: wp.array[Any], out: wp.array[Any]):
     i = wp.tid()
     value = contact[i]
     if i < q.shape[0]:
@@ -22,25 +22,25 @@ def combine(q: wp.array[wp.float64], x: wp.array[wp.vec3d], contact: wp.array[wp
 
 @wp.kernel
 def particle_trial(
-    x: wp.array[wp.vec3d],
-    xn: wp.array[wp.vec3d],
+    x: wp.array[Any],
+    xn: wp.array[Any],
     mapping: wp.array[int],
     direction: wp.array[float],
     nq: int,
-    alpha: wp.float64,
-    dt: wp.float64,
-    out: wp.array[wp.vec3d],
-    velocity: wp.array[wp.vec3d],
+    alpha: Any,
+    dt: Any,
+    out: wp.array[Any],
+    velocity: wp.array[Any],
 ):
     i = wp.tid()
     j = mapping[i]
     out[i] = xn[i]
-    velocity[i] = wp.vec3d(0.0)
+    velocity[i] = type(x[0])(0.0)
     if j >= 0:
-        delta = wp.vec3d(
-            wp.float64(direction[nq + 3 * j]),
-            wp.float64(direction[nq + 3 * j + 1]),
-            wp.float64(direction[nq + 3 * j + 2]),
+        delta = type(x[0])(
+            type(dt)(direction[nq + 3 * j]),
+            type(dt)(direction[nq + 3 * j + 1]),
+            type(dt)(direction[nq + 3 * j + 2]),
         )
         out[i] = x[i] + alpha * delta
         velocity[i] = (out[i] - xn[i]) / dt
@@ -48,16 +48,16 @@ def particle_trial(
 
 @wp.kernel
 def particle_predict(
-    xn: wp.array[wp.vec3d],
-    vn: wp.array[wp.vec3d],
+    xn: wp.array[Any],
+    vn: wp.array[Any],
     mapping: wp.array[int],
-    dt: wp.float64,
-    out: wp.array[wp.vec3d],
-    velocity: wp.array[wp.vec3d],
+    dt: Any,
+    out: wp.array[Any],
+    velocity: wp.array[Any],
 ):
     i = wp.tid()
     out[i] = xn[i]
-    velocity[i] = wp.vec3d(0.0)
+    velocity[i] = type(xn[0])(0.0)
     if mapping[i] >= 0:
         out[i] = xn[i] + dt * vn[i]
         velocity[i] = (out[i] - xn[i]) / dt
@@ -65,28 +65,28 @@ def particle_predict(
 
 @wp.kernel
 def dynamic_diagonal(
-    jt: wp.array2d[wp.vec3d],
-    jw: wp.array2d[wp.vec3d],
-    rotations: wp.array[wp.mat33d],
-    mass: wp.array[wp.float64],
-    second: wp.array[wp.mat33d],
-    armature: wp.array[wp.float64],
+    jt: wp.array2d[Any],
+    jw: wp.array2d[Any],
+    rotations: wp.array[Any],
+    mass: wp.array[Any],
+    second: wp.array[Any],
+    armature: wp.array[Any],
     ids: wp.array[int],
     particle_mass: wp.array[float],
-    dt: wp.float64,
+    dt: Any,
     out: wp.array[float],
 ):
     i = wp.tid()
-    value = wp.float64(0.0)
+    value = type(dt)(0.0)
     nq = armature.shape[0]
     if i < nq:
         value = armature[i]
         for body in range(mass.shape[0]):
-            inertia = wp.trace(second[body]) * wp.identity(n=3, dtype=wp.float64) - second[body]
+            inertia = wp.trace(second[body]) * wp.identity(n=3, dtype=type(dt)) - second[body]
             world = rotations[body] * inertia * wp.transpose(rotations[body])
             value += mass[body] * wp.dot(jt[body, i], jt[body, i]) + wp.dot(jw[body, i], world * jw[body, i])
     else:
-        value = wp.float64(particle_mass[ids[(i - nq) / 3]])
+        value = type(dt)(particle_mass[ids[(i - nq) / 3]])
     out[i] = float(value / (dt * dt))
 
 
@@ -96,29 +96,29 @@ def sparse_posterior(
     columns: wp.array[int],
     values: wp.array[float],
     direction: wp.array[float],
-    residual: wp.array[wp.float64],
+    residual: wp.array[Any],
     scale: wp.array[float],
-    error: wp.array[wp.float64],
+    error: wp.array[Any],
 ):
     row = wp.tid()
     value = residual[row]
     for j in range(offsets[row], offsets[row + 1]):
-        value += wp.float64(values[j]) * wp.float64(direction[columns[j]])
-    error[row] = wp.float64(scale[row]) * value
+        value += type(residual[0])(values[j]) * type(residual[0])(direction[columns[j]])
+    error[row] = type(residual[0])(scale[row]) * value
 
 
 @wp.kernel
 def contact_forces(
-    geometry: _Geometry,
-    local_residual: wp.array[wp.vec3d],
+    geometry: Any,
+    local_residual: wp.array[Any],
     shapes: wp.array[int],
     bodies: wp.array[int],
     triangles: wp.array2d[int],
-    x: wp.array[wp.vec3d],
-    com: wp.array[wp.vec3d],
-    qforce: wp.array[wp.float64],
-    pforce: wp.array[wp.vec3d],
-    bforce: wp.array[wp.spatial_vectord],
+    x: wp.array[Any],
+    com: wp.array[Any],
+    qforce: wp.array[Any],
+    pforce: wp.array[Any],
+    bforce: wp.array[Any],
 ):
     key = wp.tid()
     shape = shapes[key % shapes.shape[0]]
@@ -126,11 +126,11 @@ def contact_forces(
     slot = (key / shapes.shape[0]) % 3
     local = local_residual[key]
     world = geometry.rotation[key] * local
-    point = wp.vec3d(0.0)
+    point = type(x[0])(0.0)
     for a in range(3):
-        weight = wp.float64(1.0) / wp.float64(6.0)
+        weight = type(x[0][0])(1.0) / type(x[0][0])(6.0)
         if a == slot:
-            weight = wp.float64(2.0) / wp.float64(3.0)
+            weight = type(x[0][0])(2.0) / type(x[0][0])(3.0)
         particle = triangles[face, a]
         point += weight * x[particle]
         wp.atomic_add(pforce, particle, -weight * world)
@@ -139,7 +139,7 @@ def contact_forces(
     body = bodies[shape]
     if body >= 0:
         torque = wp.cross(point - com[body], world)
-        wp.atomic_add(bforce, body, wp.spatial_vectord(world[0], world[1], world[2], torque[0], torque[1], torque[2]))
+        wp.atomic_add(bforce, body, type(bforce[0])(world[0], world[1], world[2], torque[0], torque[1], torque[2]))
 
 
 @wp.kernel
@@ -153,26 +153,26 @@ def _scatter(matrix: wp.array2d[float], actor: wp.array2d[float], values: wp.arr
 
 @wp.kernel
 def _coordinate_trial(
-    q: wp.array[wp.float64],
+    q: wp.array[Any],
     direction: wp.array[float],
-    alpha: wp.float64,
-    qn: wp.array[wp.float64],
-    h: wp.float64,
-    out: wp.array[wp.float64],
-    vout: wp.array[wp.float64],
+    alpha: Any,
+    qn: wp.array[Any],
+    h: Any,
+    out: wp.array[Any],
+    vout: wp.array[Any],
 ):
     i = wp.tid()
-    out[i] = q[i] + alpha * wp.float64(direction[i])
+    out[i] = q[i] + alpha * type(h)(direction[i])
     vout[i] = (out[i] - qn[i]) / h
 
 
 @wp.kernel
 def _coordinate_predictor(
-    q: wp.array[wp.float64],
-    v: wp.array[wp.float64],
-    h: wp.float64,
-    out: wp.array[wp.float64],
-    vout: wp.array[wp.float64],
+    q: wp.array[Any],
+    v: wp.array[Any],
+    h: Any,
+    out: wp.array[Any],
+    vout: wp.array[Any],
 ):
     i = wp.tid()
     out[i] = q[i] + h * v[i]

@@ -1,0 +1,1 @@
+Add experimental native FP32 precision to `SolverMonolithic`, retaining FP64 by default, precision-bound state and graphs, independently owned force snapshots, and validated migration of schema-2 FP64 checkpoints.

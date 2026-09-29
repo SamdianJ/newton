@@ -464,3 +464,34 @@ public precision/lifecycle migration, sampled scene controls and runner remain.
 T5-B/C/D have not started; public SolverMonolithic still runs FP64 only.
 Evidence: agents/integration/artifacts/p4/precision-comparison/t5-a2-v1/.
 Receipt SHA-256: `ede3c854ab417ab729398c5f9b036b1acc1db3234bfd9b4d63cdce069cb35b9e`.
+
+## T5-A completion: selectable nonlinear precision
+
+Complete the public immutable Precision enum, native contact/SDF and q+x
+state/history/forces, native host acceptance/posterior decisions, precision-bound
+state/configuration/graphs, and validated schema-2 FP64 checkpoint migration.
+Default FP64 physical digests remain unchanged. Common offline FP64 SDF
+coefficients are converted once for FP32, with their reference identity retained.
+Four frozen FP32 control streams cover the eight scenarios in both precisions;
+the serial runner binds imported sources and preserves first-failure state.
+
+Final suite: 426 run, 419 passed, seven unchanged skips; five added IDs, none
+removed, no retired solver modules loaded. Full pre-commit passes. The pre-edit
+FP64 step/checkpoint yields 26 exactly equal physical/history arrays. Default
+Franka/Sharpa physical digests match the original frozen configurations.
+
+All 16 two-step scene checks completed: eight FP64 cases each converge twice;
+FP32 Franka publishes two Stopped states; six FP32 Close cases and FP32 recorded
+Sharpa reject the first step with complete atomic rollback. Short runs remain
+PARTIAL; numerical rejections remain FAIL. Actual FP32 composed quaternion norm
+error reaches 1.1920928955078125e-7 against the unchanged 1e-10 geometry guard.
+No noise/guard widening, fallback or trajectory repair is introduced.
+
+T5-A is complete; T5-B/C/D and full FP64 scene requalification remain pending.
+FP32 is not numerically qualified. B/PCG arrays/directions retain FP32 and its
+existing scalar convergence/restart policy retains FP64 in both precisions;
+the precision contract explicitly lists these preserved decision operations.
+The numerical recorder is not the independent audit or isolated timing runner.
+
+Evidence: agents/integration/artifacts/p4/precision-comparison/t5-a3-v1/.
+Receipt SHA-256: `cc53b662c5e7c6762cf030e123fd32d2eba1ce7a7fce937e3d713c8a02753f38`.

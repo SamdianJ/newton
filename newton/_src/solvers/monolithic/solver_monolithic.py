@@ -3,6 +3,7 @@
 
 """Complete monolithic q+x solver with transactional state and force publication."""
 
+import enum
 import math
 import os
 import tempfile
@@ -61,6 +62,12 @@ class SolverMonolithic(SolverBase):
     policy publishes rejected trials. Force validity is not equilibrium.
     """
 
+    class Precision(enum.Enum):
+        """Construction-time precision of nonlinear state and decisions."""
+
+        FP64 = "fp64"
+        FP32 = "fp32"
+
     supports_collision_pipeline = False
     Status = Status
     Stats = Stats
@@ -96,7 +103,14 @@ class SolverMonolithic(SolverBase):
         linear_absolute_tolerance=1e-6,
         pcg_mode=PCGMode.DIAGNOSTIC,
         use_cuda_graph=False,
+        precision=Precision.FP64,
     ):
+        self._precision = self.Precision(precision)
+        self._dtype = wp.float64 if self._precision == self.Precision.FP64 else wp.float32
+        self._numpy_dtype = np.float64 if self._precision == self.Precision.FP64 else np.float32
+        self._precision_identity = (self._precision, self._dtype, self._numpy_dtype)
+        if smooth_sdf is not None:
+            smooth_sdf = smooth_sdf.for_precision(self._dtype)
         if publish_policy not in ("strict", "last_accepted", "current_iterate"):
             raise ValueError("Unknown coupled publication policy")
         if contact_model not in ("C-EE", "C-IE", "C-II"):
@@ -123,7 +137,9 @@ class SolverMonolithic(SolverBase):
         radius = model.particle_radius.numpy()
         if not np.isfinite(radius).all() or np.any(radius < 0) or not np.all(radius == radius[0]):
             raise ValueError("Coupled particles require one finite nonnegative radius")
-        self._tet = TetObjective(model, material_model=material_model, mass_mode=mass_mode, density=tet_rest_density)
+        self._tet = TetObjective(
+            model, material_model=material_model, mass_mode=mass_mode, density=tet_rest_density, dtype=self._dtype
+        )
         self._contact = ContactObjective(
             model,
             self._tet.mapping.numpy(),
@@ -136,6 +152,7 @@ class SolverMonolithic(SolverBase):
             particle_radius=float(radius[0]),
             smooth_sdf=smooth_sdf,
             alignment_policy=alignment_policy,
+            dtype=self._dtype,
         )
         capacity = 3 * self._contact.count if contact_factor_capacity is None else contact_factor_capacity
         if type(capacity) is not int or capacity < 0:
@@ -273,7 +290,7 @@ class SolverMonolithic(SolverBase):
         )
         for name in ("_rhs", "_y", "_delta", "_diagonal"):
             setattr(self, name, wp.zeros(nq + 3 * n, dtype=float, device=device))
-        self._complete_r = wp.zeros(nq + 3 * n, dtype=wp.float64, device=device)
+        self._complete_r = wp.zeros(nq + 3 * n, dtype=self._dtype, device=device)
         self._post_r, self._post_error = wp.zeros_like(self._complete_r), wp.zeros_like(self._complete_r)
         self._tet_r32 = wp.zeros(n, dtype=wp.vec3, device=device)
         self._frozen_force = wp.zeros(model.particle_count, dtype=wp.vec3, device=device)
@@ -313,7 +330,7 @@ class SolverMonolithic(SolverBase):
         fields.update(self._contact.values)
         fields.update(self._coupled_config)
         fields.update(self._sdf_fields)
-        return _TreeKinematics(model, extra_config=fields)
+        return _TreeKinematics(model, extra_config=fields, dtype=self._dtype)
 
     def _make_states(self):
         return CoupledState(self._kinematics)
@@ -393,7 +410,14 @@ class SolverMonolithic(SolverBase):
         """Require reconstruction after changes to the bound model."""
         raise NotImplementedError("Rebuild SolverMonolithic after model changes")
 
+    @property
+    def precision(self):
+        """Return the immutable nonlinear precision; rebuild to change it."""
+        return self._precision
+
     def _validate_components(self):
+        if self._precision_identity != (self._precision, self._dtype, self._numpy_dtype):
+            raise ValueError("Precision changed; rebuild solver")
         if self._policy_identity != (
             self._globalization,
             self._coupled_publish_policy,
@@ -432,6 +456,7 @@ class SolverMonolithic(SolverBase):
         self._stopped_failure = None
         if contacts is not None or not math.isfinite(dt) or dt <= 0:
             raise ValueError("Articulation step requires no contacts and finite positive dt")
+        dt = self._kinematics.timestep(dt)
         self._kinematics.validate_identity()
         self._states.validate(state_in)
         self._states.validate(state_out)
@@ -445,9 +470,9 @@ class SolverMonolithic(SolverBase):
             ):
                 raise ValueError(f"Invalid articulation control: {name}")
         self._joint_terms.snapshot_targets(control)
-        force = state_in.body_f.numpy().astype(float)
-        joint_force = control.joint_f.numpy().astype(float)
-        gravity = self.model.gravity.numpy().astype(float)
+        force = state_in.body_f.numpy().astype(self._numpy_dtype)
+        joint_force = control.joint_f.numpy().astype(self._numpy_dtype)
+        gravity = self.model.gravity.numpy().astype(self._numpy_dtype)
         if (
             not np.isfinite(force).all()
             or not np.isfinite(joint_force).all()
@@ -494,7 +519,7 @@ class SolverMonolithic(SolverBase):
                 history.link_v_com,
                 history.link_omega,
                 history.link_vsym,
-                wp.float64(dt),
+                self._dtype(dt),
                 obj.predicted_t,
                 obj.predicted_r,
             ],
@@ -502,12 +527,12 @@ class SolverMonolithic(SolverBase):
         )
         obj.force.assign(force[:, :3] + k.values["body_mass"][:, None] * gravity[k.values["body_world"]])
         obj.joint_force.assign(joint_force)
-        obj.qt.assign(self._joint_terms.target_q.numpy().astype(float))
-        obj.vt.assign(self._joint_terms.target_qd.numpy().astype(float))
+        obj.qt.assign(self._joint_terms.target_q.numpy().astype(self._numpy_dtype))
+        obj.vt.assign(self._joint_terms.target_qd.numpy().astype(self._numpy_dtype))
         wp.launch(
             kernels._coordinate_predictor,
             k.count,
-            [obj.qn, obj.vn, wp.float64(dt), self._accepted.joint_q, self._accepted.joint_qd],
+            [obj.qn, obj.vn, self._dtype(dt), self._accepted.joint_q, self._accepted.joint_qd],
             device=self.model.device,
         )
         k.evaluate(self._accepted.joint_q)
@@ -535,7 +560,7 @@ class SolverMonolithic(SolverBase):
                         obj.rn,
                         k.com,
                         k.rotations,
-                        wp.float64(dt),
+                        self._dtype(dt),
                         final.link_v_com,
                         final.link_omega,
                         final.link_vsym,
@@ -550,7 +575,7 @@ class SolverMonolithic(SolverBase):
                         self._old_joint_r,
                         k.joint_translations,
                         k.joint_rotations,
-                        wp.float64(dt),
+                        self._dtype(dt),
                         final.joint_v,
                         final.joint_omega,
                         final.joint_vsym,
@@ -663,7 +688,7 @@ class SolverMonolithic(SolverBase):
                 state_in.particle_q,
                 state_in.particle_qd,
                 self._tet.mapping,
-                wp.float64(dt),
+                self._dtype(dt),
                 self._accepted.particle_q,
                 self._accepted.particle_qd,
             ],
@@ -703,7 +728,7 @@ class SolverMonolithic(SolverBase):
                 device=self.model.device,
             )
 
-        self._graphs.run("coupled_objective", (dt, build_tangent), buffers, evaluate)
+        self._graphs.run("coupled_objective", (self.precision.value, dt, build_tangent), buffers, evaluate)
         self._current_state = state
         if tet.flags.numpy()[0]:
             status = self.Status.TET_INVERSION if tet.flags.numpy()[0] == 1 else self.Status.NONFINITE
@@ -722,7 +747,7 @@ class SolverMonolithic(SolverBase):
         if not np.isfinite(residual).all() or not np.isfinite(parts).all() or not np.isfinite(parts.sum()):
             raise _StepFailure(self.Status.NONFINITE, "Nonfinite coupled E/r")
         self._metrics["min_det_f"] = float(tet.min_det_f.numpy()[0])
-        return float(parts.sum()), residual, float(abs(parts).sum())
+        return parts.sum(), residual, abs(parts).sum()
 
     def _initial_reference(self, dt):
         return self._evaluate(self._original, dt, build_tangent=False)[1]
@@ -744,9 +769,9 @@ class SolverMonolithic(SolverBase):
             [
                 self._accepted.joint_q,
                 self._delta,
-                wp.float64(alpha),
+                self._dtype(alpha),
                 self._objective.qn,
-                wp.float64(dt),
+                self._dtype(dt),
                 self._trial.joint_q,
                 self._trial.joint_qd,
             ],
@@ -761,8 +786,8 @@ class SolverMonolithic(SolverBase):
                 self._tet.mapping,
                 self._delta,
                 self._kinematics.count,
-                wp.float64(alpha),
-                wp.float64(dt),
+                self._dtype(alpha),
+                self._dtype(dt),
                 self._trial.particle_q,
                 self._trial.particle_qd,
             ],
@@ -807,7 +832,7 @@ class SolverMonolithic(SolverBase):
             dynamic_particle_ids=self._tet.ids,
             particle_to_dynamic=self._tet.mapping,
             residual_x=self._tet_r32,
-            dt=self._dt,
+            dt=float(self._dt),
             min_det_f_guard=self._guard,
             workspace=self._tet_assembly,
             scatter=scatter,
@@ -836,7 +861,7 @@ class SolverMonolithic(SolverBase):
                 obj.armature,
                 self._tet.ids,
                 self._tet.physics.dynamic_mass_diagonal,
-                wp.float64(self._dt),
+                self._dtype(self._dt),
                 self._diagonal,
             ],
             device=self.model.device,
@@ -845,7 +870,7 @@ class SolverMonolithic(SolverBase):
             linear.build_scaling(self._diagonal, epsilon_d=self._config.epsilon_d, generation=self._generation)
         )
         self._metrics["matrix_assembly_count"] += 1
-        return None, linear.scale.numpy().astype(float)
+        return None, linear.scale.numpy().astype(self._numpy_dtype)
 
     def _physical_linear_error(self, matrix, direction, residual, scale):
         self._post_r.assign(residual)
@@ -853,7 +878,7 @@ class SolverMonolithic(SolverBase):
         buffers = [b.offsets, b.columns, b.values, self._delta, self._post_r, self._linear.scale, self._post_error]
         self._graphs.run(
             "coupled_posterior",
-            (),
+            (self.precision.value,),
             buffers,
             lambda: wp.launch(kernels.sparse_posterior, self._post_error.size, buffers, device=self.model.device),
         )
@@ -921,7 +946,7 @@ class SolverMonolithic(SolverBase):
         q, v = state.joint_q.numpy(), state.joint_qd.numpy()
         raw = p[:, 0] * (q - self._objective.qt.numpy()) + p[:, 1] * (v - self._objective.vt.numpy())
         pd = -np.clip(raw, -p[:, 2], p[:, 2])
-        limit, power = np.zeros(len(q)), np.zeros(len(q))
+        limit, power = np.zeros_like(q), np.zeros_like(q)
         for sign, bound in ((1.0, p[:, 4]), (-1.0, p[:, 3])):
             d = sign * (q - bound)
             z = np.clip(d / p[:, 7], 0.0, 1.0)
