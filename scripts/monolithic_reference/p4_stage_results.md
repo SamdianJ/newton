@@ -685,3 +685,17 @@ reruns FP64. The original failed run and historical T5-C evidence remain intact.
 Full pre-commit passed. Integration is unchanged at 39f80c48. No push.
 
 Evidence: agents/integration/artifacts/p4/sharpa-asset-recovery-v1/REQUALIFICATION.md.
+
+## Explicit FP32 tolerance experiment implementation — 2026-09-29
+
+Add opt-in fp32_absolute_tolerance to SolverMonolithic and the precision runner.
+The current experiment sets global/q/x absolute scaled RMS residual goals to
+1e-6, preserving relative goals, acceptance predicates, geometry safety, budgets
+and publication. Defaults and their checkpoint identities stay unchanged;
+override values participate in checkpoint identity and FP64 rejects the option.
+Derived posterior caps track the selected goals as before.
+
+Regression reproduced before implementation; 20 interface/precision/contact
+checks pass after implementation. All ten production/graph configurations
+complete ten-step smoke prefixes without hard failure. Full trajectories are
+pending. Evidence: agents/integration/artifacts/p4/precision-comparison/fp32-relaxed-v1/.

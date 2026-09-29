@@ -186,7 +186,16 @@ def plan_poses(model):
 class FrankaGrasp:
     """One fixed experimental scene with an explicit P3 solver and endpoint controller."""
 
-    def __init__(self, cache, device="cuda:0", *, law="C-IE", globalization="ArmijoOrResNorm", precision="fp64"):
+    def __init__(
+        self,
+        cache,
+        device="cuda:0",
+        *,
+        law="C-IE",
+        globalization="ArmijoOrResNorm",
+        precision="fp64",
+        fp32_absolute_tolerance=None,
+    ):
         cache = Path(cache)
         cache.mkdir(parents=True, exist_ok=True)
         self.model, self.metadata = build_model(cache, device=device)
@@ -223,6 +232,7 @@ class FrankaGrasp:
             use_cuda_graph=True,
             smooth_sdf=smooth,
             precision=precision,
+            fp32_absolute_tolerance=fp32_absolute_tolerance,
         )
         source = self.model.state()
         source.joint_q.assign(self.high.astype(np.float32))

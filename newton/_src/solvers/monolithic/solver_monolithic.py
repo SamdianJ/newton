@@ -56,6 +56,10 @@ class SolverMonolithic(SolverBase):
     """Keep strict defaults; opt in to masked contact and stopped publication.
 
     Nonconservative energy acceptance is heuristic, not a variational guarantee.
+    ``fp32_absolute_tolerance`` optionally overrides the global/q/x absolute
+    scaled RMS residual goals for an FP32 experiment. Relative goals and trial
+    acceptance are unchanged; the option is included in checkpoint identity.
+
     Stopped publication retains all physical/state gates except the residual goal.
     ``last_accepted`` requires an accepted Newton update; ``current_iterate``
     also permits the initialized predictor when no update was accepted. Neither
@@ -104,11 +108,21 @@ class SolverMonolithic(SolverBase):
         pcg_mode=PCGMode.DIAGNOSTIC,
         use_cuda_graph=False,
         precision=Precision.FP64,
+        fp32_absolute_tolerance=None,
     ):
         self._precision = self.Precision(precision)
         self._dtype = wp.float64 if self._precision == self.Precision.FP64 else wp.float32
         self._numpy_dtype = np.float64 if self._precision == self.Precision.FP64 else np.float32
         self._precision_identity = (self._precision, self._dtype, self._numpy_dtype)
+        if fp32_absolute_tolerance is not None:
+            if self._dtype != wp.float32 or isinstance(fp32_absolute_tolerance, (bool, np.bool_)):
+                raise ValueError("fp32_absolute_tolerance requires FP32 and a positive finite scalar")
+            if not isinstance(fp32_absolute_tolerance, (int, float, np.integer, np.floating)):
+                raise ValueError("Invalid FP32 absolute tolerance")
+            with np.errstate(over="ignore", under="ignore"):
+                native_tolerance = np.float32(fp32_absolute_tolerance)
+            if not np.isfinite(native_tolerance) or native_tolerance <= 0:
+                raise ValueError("FP32 absolute tolerance must be positive and representable")
         if smooth_sdf is not None:
             smooth_sdf = smooth_sdf.for_precision(self._dtype)
         if publish_policy not in ("strict", "last_accepted", "current_iterate"):
@@ -186,6 +200,8 @@ class SolverMonolithic(SolverBase):
         }
         if self._dtype == wp.float32:
             self._coupled_config["quaternion_norm_tolerance"] = np.array([self._contact.quaternion_norm_tolerance])
+        if fp32_absolute_tolerance is not None:
+            self._coupled_config["fp32_absolute_tolerance"] = np.array([fp32_absolute_tolerance], dtype=float)
         if smooth_sdf is not None:
             self._coupled_config["smooth_sdf_digest"] = np.frombuffer(bytes.fromhex(smooth_sdf.digest), dtype=np.uint8)
         # Include effective numeric policy in checkpoint identity; device execution
@@ -265,6 +281,13 @@ class SolverMonolithic(SolverBase):
             step_tolerance_global=1e-10,
             step_tolerance_x=1e-10,
         )
+        if fp32_absolute_tolerance is not None:
+            self._config = replace(
+                self._config,
+                merit_absolute_global=fp32_absolute_tolerance,
+                merit_absolute_q=fp32_absolute_tolerance,
+                merit_absolute_x=fp32_absolute_tolerance,
+            )
         n, nq, device = self._tet.ids.size, model.joint_dof_count, model.device
         pattern = build_tet_triplet_pattern(model.tet_indices.numpy(), self._tet.mapping.numpy(), x_dof_start=nq)
         self._tet_assembly = create_tet_assembly_workspace(

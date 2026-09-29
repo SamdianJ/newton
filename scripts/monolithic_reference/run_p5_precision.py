@@ -71,6 +71,7 @@ def build(case, *, input_manifest=FROZEN):
             law=case["law"],
             globalization=case["globalization"],
             precision=case["precision"],
+            fp32_absolute_tolerance=case.get("fp32_absolute_tolerance"),
         )
         samples = [franka_targets(scene.high, scene.low, i * case["dt"])[:2] for i in range(case["steps"] + 1)]
         return scene.model, scene.solver, scene.state, np.asarray(samples, dtype=np.float32)
@@ -100,6 +101,7 @@ def build(case, *, input_manifest=FROZEN):
         use_cuda_graph=True,
         smooth_sdf=smooth,
         precision=case["precision"],
+        fp32_absolute_tolerance=case.get("fp32_absolute_tolerance"),
     )
     source = model.state()
     q = source.joint_q.numpy()
@@ -239,6 +241,9 @@ def main():
         default="fp32",
         help="Default FP32; existing FP64 recordings are reused by T5-C",
     )
+    parser.add_argument(
+        "--fp32-absolute-tolerance", type=float, help="Experimental global/q/x absolute convergence goal"
+    )
     parser.add_argument("--freeze-controls", action="store_true")
     parser.add_argument("--controls", type=Path)
     parser.add_argument("--input-manifest", type=Path, default=FROZEN, help="Explicit frozen asset generation")
@@ -248,6 +253,14 @@ def main():
     parser.add_argument("--worker", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args()
     selected = [c for c in cases() if args.precision == "both" or c["precision"] == args.precision]
+    if args.fp32_absolute_tolerance is not None:
+        with np.errstate(over="ignore", under="ignore"):
+            tolerance = np.float32(args.fp32_absolute_tolerance)
+        if args.precision == "fp64" or not np.isfinite(tolerance) or tolerance <= 0:
+            parser.error("--fp32-absolute-tolerance requires selected FP32 and a positive representable value")
+        for case in selected:
+            if case["precision"] == "fp32":
+                case["fp32_absolute_tolerance"] = args.fp32_absolute_tolerance
     if set(args.case) - {c["id"] for c in selected}:
         parser.error("Unknown case ID")
     if args.case:
@@ -293,6 +306,8 @@ def main():
             "--output",
             str(destination),
         ]
+        if case.get("fp32_absolute_tolerance") is not None:
+            command += ["--fp32-absolute-tolerance", str(case["fp32_absolute_tolerance"])]
         if args.max_steps is not None:
             command += ["--max-steps", str(args.max_steps)]
         with (args.output / f"{case['id']}.log").open("w") as log:

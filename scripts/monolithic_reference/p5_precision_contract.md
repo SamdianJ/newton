@@ -219,3 +219,20 @@ Historical observations default to their original input manifest.
 The new Sharpa reference cannot establish byte equivalence to the deleted
 assets. It supports comparison between precisions on the new physical inputs.
 Sharpa grasp success remains uncertified.
+
+## Explicit FP32 convergence experiment (2026-09-29)
+
+SolverMonolithic accepts fp32_absolute_tolerance=None by default. An explicit
+positive finite FP32-representable value overrides all three scaled RMS
+absolute residual goals (global/q/x), with unchanged relative goals. Reject
+this option with FP64. Bind a provided value into configuration/checkpoint
+identity; default FP32 and FP64 identities are unchanged. No trial acceptance,
+geometry gate, iteration budget or publication policy is relaxed by this option.
+The derived linear posterior caps still follow the selected convergence goals.
+
+run_p5_precision --fp32-absolute-tolerance 1e-6 selects the current experiment,
+records it in each case receipt and forwards it into both scene constructors
+and child processes. Full runs use the rebuilt Sharpa input manifest and the
+nine retained Franka references plus the replacement Sharpa FP64 reference.
+Counts under the relaxed goals must not be presented as original FP64 accuracy.
+Stopped remains unconverged; physical hard failures still stop the case.

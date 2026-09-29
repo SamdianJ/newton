@@ -12,6 +12,7 @@ import numpy as np
 import warp as wp
 
 from newton._src.solvers.monolithic.smooth_sdf import SmoothSDF, SmoothSDFSet, sample_smooth
+from newton._src.solvers.monolithic.variational_iteration import measure
 from newton.solvers.experimental.monolithic import SolverMonolithic
 from newton.tests.test_monolithic_p3_coupled import assert_snapshot, scene, snapshot, solver
 from newton.tests.test_monolithic_p3_smooth_sdf import grid
@@ -63,6 +64,39 @@ class TestSolverPrecision(unittest.TestCase):
                             segment = run._graphs.summary()["segments"]["coupled_objective"]
                             self.assertGreater(segment["captures"], 0)
                             self.assertGreater(segment["replays"], segment["captures"])
+
+    def test_fp32_absolute_tolerance(self):
+        model = scene("cpu")
+        default = solver(model, precision="fp32")
+        relaxed = solver(model, precision="fp32", fp32_absolute_tolerance=1e-6)
+        for name in ("global", "q", "x"):
+            self.assertEqual(getattr(relaxed._config, "merit_absolute_" + name), 1e-6)
+            self.assertEqual(
+                getattr(relaxed._config, "merit_relative_" + name), getattr(default._config, "merit_relative_" + name)
+            )
+        self.assertNotEqual(default._kinematics.digest, relaxed._kinematics.digest)
+        size = relaxed._linear.layout.scalar_dof_count
+        residual = np.zeros(size, dtype=np.float32)
+        residual[: model.joint_dof_count] = 2e-6
+        relaxed._metrics = {}
+        values = measure(relaxed, residual, np.zeros_like(residual), np.ones_like(residual))
+        self.assertGreater(values["q"][0], values["q"][2])
+        self.assertLessEqual(values["x"][0], values["x"][2])
+        target = relaxed.create_state(dt=0.001)
+        before = snapshot(target)
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "state.npz"
+            default.save_checkpoint(default.create_state(dt=0.001), path)
+            with self.assertRaises(ValueError):
+                relaxed.load_checkpoint(target, path)
+            assert_snapshot(self, target, before)
+            relaxed.save_checkpoint(target, path)
+            relaxed.load_checkpoint(target, path)
+        for value in (True, 0, -1, np.nan, np.inf, 1e100, 1e-100):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                solver(model, precision="fp32", fp32_absolute_tolerance=value)
+        with self.assertRaises(ValueError):
+            solver(model, precision="fp64", fp32_absolute_tolerance=1e-6)
 
     def test_checkpoint_and_cross_precision(self):
         model = scene("cpu")
