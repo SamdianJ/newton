@@ -495,3 +495,48 @@ The numerical recorder is not the independent audit or isolated timing runner.
 
 Evidence: agents/integration/artifacts/p4/precision-comparison/t5-a3-v1/.
 Receipt SHA-256: `cc53b662c5e7c6762cf030e123fd32d2eba1ce7a7fce937e3d713c8a02753f38`.
+
+
+## T5-B: component safety and FP64 requalification
+
+Keep production solver sources, formulas, defaults, budgets and noise gates
+unchanged. Add CPU/CUDA tests for both native precisions, actual trial writes,
+physical B32 posterior, publication policies and rejected trials, atomic rollback,
+corrupt checkpoints, contact branches and mixed-precision rejection after graph
+warmup. The component oracle now promotes all frozen numeric inputs to FP64
+before arithmetic; a regression test rejects the previous mixed scalar arithmetic.
+The full runner explicitly validates the schema-2 to schema-3 FP64 transition;
+all physical fields and original frozen tolerances remain checked.
+
+Retained suite: 439 run, 432 passed,
+7 unchanged skips; 13 added IDs and none removed. All 27 original
+FP64 law/globalization/CUDA-mode cases pass. Full repository discovery, current
+recording replay and imported-source bindings are checked separately; this is not
+an assertion that every discovered Newton test was executed.
+
+All ten fresh FP64 full cases pass: 55,917 steps, 55,830
+converged, 87 Stopped and zero hard failures.
+Franka preserves its grasp gates; Sharpa completes its trajectory with grasp
+success still uncertified. Current dev uses the matching two current full cases.
+SDF identities, qualification labels and physical/configuration digests remain
+unchanged. The 44 deferred long cases remain deferred.
+
+The original 32-repeat/eightfold E/r/slope envelopes are retained. FP64 component
+probes pass; FP32 probes fail numerical qualification. Published small-system
+FP32 SUCCESS disagrees with the independent frozen-predictor residual gates in
+3 CPU and 0 CUDA law cases. Complete native
+component snapshots and block goals are retained. These are numerical failures,
+not xfails or permission to loosen gates; no oracle correction or fallback is
+introduced. The coupled component oracle freezes native predictors; articulation
+prediction/history is checked separately. This does not substitute for T5-C's
+independent full-scene history audit.
+
+The two original PR1 coordinate-failure inputs and 72 PR2 q/pose/history probes
+reproduce their precision negative controls without executing retired solvers.
+PR1 uses an explicitly identified mass-only scale, not the retired solver's
+assembled-B merit. T5-B is complete; FP32 remains unqualified and T5-C/D remain
+pending. Full pre-commit evidence and commit binding accompany the stage receipt.
+
+Evidence: `agents/integration/artifacts/p4/precision-comparison/t5-b-v1/`.
+Component receipt SHA-256: `ab2b672c60e31895ec5c79c0acea0f70cbad68b6bc7ebf673f6f9a1ee15f63a3`.
+Full matrix summary SHA-256: `7719e76c957798bdf802a924dd1ed5d931c027144d6502092489b5a6e1d1add1`.

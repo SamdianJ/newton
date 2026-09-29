@@ -331,29 +331,48 @@ def independent_objective(run, q, x, dt):
     """NumPy composition for this two-joint, one-plane, one-tet fixture."""
 
     model, obj = run.model, run._objective
+    q, x, dt = np.asarray(q, dtype=np.float64), np.asarray(x, dtype=np.float64), float(dt)
+    # Promote every frozen numeric input before reference arithmetic, including
+    # scalar coefficients that NumPy otherwise keeps in FP32.
+    frozen = {
+        name: getattr(obj, name).numpy().astype(np.float64)
+        for name in (
+            "qn",
+            "vn",
+            "force",
+            "predicted_t",
+            "predicted_r",
+            "params",
+            "armature",
+            "damping",
+            "qt",
+            "vt",
+            "joint_force",
+        )
+    }
     k = Kinematics(model)
     com, rot, jt, jr, *_ = k.evaluate(q)
-    old_com, old_rot, *_ = k.evaluate(obj.qn.numpy())
-    force = obj.force.numpy().copy()
-    energy, qr, _ = k.inertia(q, obj.predicted_t.numpy(), obj.predicted_r.numpy(), dt, force)
+    old_com, old_rot, *_ = k.evaluate(frozen["qn"])
+    force = frozen["force"].copy()
+    energy, qr, _ = k.inertia(q, frozen["predicted_t"], frozen["predicted_r"], dt, force)
     energy += np.sum(force * old_com)
     je, jres, jb = joint_terms(
         q,
-        obj.qn.numpy(),
-        obj.vn.numpy(),
+        frozen["qn"],
+        frozen["vn"],
         dt,
-        obj.params.numpy(),
-        obj.armature.numpy(),
-        obj.damping.numpy(),
-        obj.qt.numpy(),
-        obj.vt.numpy(),
-        obj.joint_force.numpy(),
+        frozen["params"],
+        frozen["armature"],
+        frozen["damping"],
+        frozen["qt"],
+        frozen["vt"],
+        frozen["joint_force"],
     )
     energy += je.sum()
     qr += jres
     qb = np.diag(jb)
     for body in range(k.b):
-        c = rot[body] @ k.second[body] @ obj.predicted_r.numpy()[body].T
+        c = rot[body] @ k.second[body] @ frozen["predicted_r"][body].T
         kr = (np.trace(c) * np.eye(3) - (c + c.T) / 2) / dt**2
         w, v = np.linalg.eigh(kr)
         kr = (v * np.maximum(w, 0)) @ v.T

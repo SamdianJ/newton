@@ -100,7 +100,9 @@ def worker(case, output):
             reference = ARTIFACTS / "p3/pr3/current-iterate-production-v1/sharpa"
         receipt["recording"] = check(recording, case["steps"])
         protocol = json.loads((T0 / "comparison-tolerances.json").read_text())
-        receipt["comparison"] = compare(reference, recording, protocol["cases"][case["id"]]["absolute"])
+        receipt["comparison"] = compare(
+            reference, recording, protocol["cases"][case["id"]]["absolute"], legacy_fp64=True
+        )
         if receipt["comparison"]["status"] not in ("PASS_EXACT", "PASS_FROZEN_ENVELOPE"):
             raise ValueError("Recording differs outside the frozen envelope")
         actual = json.loads((recording / "configuration.json").read_text())

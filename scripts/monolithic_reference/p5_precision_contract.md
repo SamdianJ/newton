@@ -1,9 +1,10 @@
 # P4 T5 precision contract
 
-Status: T5-A complete. This document freezes the implementation boundaries;
-it does not certify FP32 or complete T5-B/C/D. The public solver now accepts
-FP64 (default) and experimental FP32. Completion evidence is recorded in
-`agents/integration/artifacts/p4/precision-comparison/t5-a3-v1/receipt.json`.
+Status: T5-A and T5-B complete. FP64 remains the default; experimental FP32
+fails the original numerical qualification, including observed component-level
+false convergence. T5-C full-scene independent audits and T5-D performance
+experiments remain pending. T5-B evidence is recorded in
+`agents/integration/artifacts/p4/precision-comparison/t5-b-v1/receipt.json`.
 
 Starting commit: `56d054ae7dfa11bc9eb97582c3815b4d59349798`.
 Evidence: `agents/integration/artifacts/p4/precision-comparison/t5-a-v1/`.
@@ -27,8 +28,9 @@ following data-flow classification determines what changes.
 - Four full FP32 control streams cover the eight scenarios. The precision runner
   consumes the same frozen bytes for both precisions; it does not certify
   independent numerical accuracy or perform the T5-D timing protocol.
-- Pending: systematic T5-B safety/negative-control qualification, independent
-  T5-C audit/full numerical experiments and T5-D isolated performance repeats.
+- T5-B: native component/transaction checks, negative controls and the current
+  ten-case FP64 full regression are complete. FP32 numerical qualification fails.
+- Pending: independent T5-C full numerical audits and T5-D isolated performance repeats.
 
 ## Dtype boundaries
 
@@ -158,3 +160,25 @@ The production path keeps the fixed noise constants and rounds each native
 operation in its selected dtype, including sqrt, norm, dot and reductions.
 The independent audit must not supply directions, corrections or continuation.
 
+
+## T5-B validation scope
+
+The retained precision checks are implementation and safety gates. Their component
+approximation tolerances do not replace the original E/r/slope noise qualification.
+
+| Boundary | Retained checks / reproducible evidence |
+| --- | --- |
+| Native trial and physical posterior | `test_monolithic_p5_safety`: actual written q/x displacements, independent E/r, actual B32 posterior, frozen original history, three laws and both dtypes on CPU/CUDA. |
+| Publication and rollback | The same module injects failure after initialized/accepted candidates for strict, last_accepted and current_iterate; rejected trial coordinates contain NaN. Existing capacity/nonfinite/final-force/publication failure tests run in both precisions and both buffer arrangements. |
+| Checkpoints and identity | Corrupt schema, precision, digest, history, force metadata and dtype must leave the target unchanged. `test_monolithic_p5_solver_precision` additionally checks cross-precision continuation/restore and validates the legacy FP64 digest before migration. |
+| Modes and identity after warmup | `test_monolithic_p5_safety` additionally exercises all three globalizations/laws in CPU diagnostic/production and CUDA diagnostic/production/graph, then rejects the opposite precision without modifying the output. |
+| Contact and history components | `test_monolithic_p5_contact_precision` checks plane/sphere/box, radial slip, release/new contact and invalid geometry. Existing native tet/articulation suites cover both materials/mass modes, seven joint fixtures and graph replay. |
+| Native numerical qualification | External `native-probes.py` and `contact-probes.py` repeat evaluations 32 times, compare eightfold errors with the original envelopes and retain actual representable endpoint chords. C-EE energy differences and all-law contact residual differences are separate; C-IE/C-II are not treated as conservative energy gradients. |
+| Negative controls | External `negative-controls.py` reads the two preserved PR1 failure inputs and extracts only the pure PR2 q/pose/history precision formulas. It executes no retired solver. PR1 uses an explicitly reported mass-only scale; its merit is not a replay of the retired assembled-B solver. |
+| FP64 full regression | `run_p4 --profile full` runs the existing ten-case matrix. Its explicit schema-2 → schema-3 FP64 comparison validates the added precision field and schema transition; every physical field and original tolerance still applies. |
+
+External probe scripts and source/input hashes are retained under
+`agents/integration/artifacts/p4/precision-comparison/t5-b-v1/`. The coupled component oracle promotes every frozen numeric input before arithmetic;
+it holds the native predictor fixed, with prediction/history checked separately
+by the articulation component tests. These component probes do not implement the independent full-scene T5-C audit or the T5-D timing
+protocol. The 44 deferred P4 trajectories remain deferred.

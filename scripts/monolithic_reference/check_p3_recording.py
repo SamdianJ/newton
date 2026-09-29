@@ -107,13 +107,31 @@ def check(directory, expected_steps):
     }
 
 
-def compare(reference, actual, envelopes=None):
+def compare(reference, actual, envelopes=None, *, legacy_fp64=False):
     """Compare every same-configuration frame; never infer a trajectory tolerance."""
     errors = {}
     exact = True
     within_envelope = True
     count = 0
-    for left, right in zip(frames(reference), frames(actual), strict=True):
+    migrated = False
+    for left, right_block in zip(frames(reference), frames(actual), strict=True):
+        right = right_block
+        if legacy_fp64 and "history.precision" not in left:
+            if right.keys() != left.keys() | {"history.precision"}:
+                raise ValueError("Unexpected legacy FP64 comparison fields")
+            if (
+                not np.all(left["history.schema_version"] == 2)
+                or not np.all(right["history.schema_version"] == 3)
+                or right["history.precision"].dtype != np.int32
+                or right["history.precision"].shape != right["history.schema_version"].shape
+                or not np.all(right["history.precision"] == 64)
+                or left["joint_q"].dtype != np.float64
+                or right["joint_q"].dtype != np.float64
+            ):
+                raise ValueError("Invalid legacy FP64 recording migration")
+            right = {name: value for name, value in right.items() if name != "history.precision"}
+            right["history.schema_version"] = right["history.schema_version"] - np.int32(1)
+            migrated = True
         if left.keys() != right.keys():
             raise ValueError("Comparison schemas differ")
         count += len(left["frame_steps"])
@@ -137,7 +155,12 @@ def compare(reference, actual, envelopes=None):
     for row in errors.values():
         row["rms"] = (row.pop("sum_squared") / max(1, row["elements"])) ** 0.5
     status = "PASS_EXACT" if exact else "PASS_FROZEN_ENVELOPE" if within_envelope else "NOT_READY_TOLERANCE"
-    return {"status": status, "frames": count, "fields": errors}
+    return {
+        "status": status,
+        "frames": count,
+        "fields": errors,
+        "schema_migration": "2 -> 3 (FP64)" if migrated else None,
+    }
 
 
 def main():
