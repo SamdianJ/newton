@@ -204,7 +204,20 @@ class TestCoupledDiagnostics(unittest.TestCase):
             self.assertTrue(all(r["status"] == "NOT_CERTIFIED_INCOMPLETE" for r in comparison["refinement"]))
 
 
+def test_cube_driver(test, device):
+    """Build the frozen clamp and advance it without constructing an obsolete solver."""
+    with tempfile.TemporaryDirectory() as folder:
+        result = run_case("cube1", "C-EE", str(device), Path(folder) / "partial", steps=2)
+        test.assertIsNone(result["failure"])
+        test.assertEqual(result["successful_steps"], 2)
+        test.assertEqual(result["expected_steps"], 1500)
+        test.assertFalse(result["complete"])
+
+
 for _device in get_test_devices():
+    add_function_test(
+        TestCoupledDiagnostics, "test_cube_driver", test_cube_driver, devices=[_device], check_output=False
+    )
     add_function_test(TestCoupledDiagnostics, "test_reference_jacobian", test_reference_jacobian, devices=[_device])
     add_function_test(TestCoupledDiagnostics, "test_normal_input", test_normal_input, devices=[_device])
     add_function_test(

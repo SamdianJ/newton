@@ -1,3 +1,7 @@
+> Historical development record: commands for retired BE, q-only and x-only
+> drivers below are not active entry points. See [current entry points and
+> retirement notes](legacy_retirement.md). Frozen evidence and assets remain unchanged.
+
 # P2 验证：PR-8C2 masked smart PCG
 
 当前 production 唯一实现为 `masked_smart_restart_v3`；diagnostic 为 `dynamic_smart_restart_v2`。

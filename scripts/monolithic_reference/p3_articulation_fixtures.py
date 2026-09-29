@@ -81,14 +81,3 @@ def target(case, time):
     i = np.searchsorted(knots[:, 0], time, side="right") - 1
     slope = (knots[i + 1, 1] - knots[i, 1]) / (knots[i + 1, 0] - knots[i, 0])
     return np.full(n, knots[i, 1] + (time - knots[i, 0]) * slope), np.full(n, slope)
-
-
-def initialize(solver, case, *, dt):
-    state = solver._create_articulation_state(dt=dt)
-    state.joint_q.assign([row["q0"] for row in case["joints"]])
-    state.joint_qd.assign([row["qd0"] for row in case["joints"]])
-    solver._reset_articulation_state(state, dt=dt)
-    force = np.zeros((solver.model.body_count, 6), dtype=np.float32)
-    force[:, :3] = case.get("world_COM_force", (0.0, 0.0, 0.0))
-    state.body_f.assign(force)
-    return state

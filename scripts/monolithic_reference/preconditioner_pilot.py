@@ -13,7 +13,7 @@ import warp as wp
 
 from scripts.monolithic_reference import benchmark_pcg as benchmark
 from scripts.monolithic_reference import preconditioner_study as study
-from scripts.monolithic_reference.p2_measurement import array_fingerprint, evidence_index, snapshot_sources
+from scripts.monolithic_reference.linear_evidence import array_fingerprint, evidence_index, snapshot_sources
 
 
 def timed(call, device=None):

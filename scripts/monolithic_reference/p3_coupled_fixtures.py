@@ -12,6 +12,8 @@ import warp as wp
 from newton.solvers.experimental.monolithic import SolverMonolithic
 
 import newton
+from newton.examples.softbody.monolithic_soft_ball import load_ball
+from newton.examples.softbody.monolithic_soft_cube import load_cube
 from scripts.monolithic_reference.normal_loading import command_at
 
 DIRECTORY = Path(__file__).with_name("fixtures")
@@ -131,3 +133,72 @@ def set_control(control, case, time, q, qd):
     force = (gains[:, 0] * (targets[:, 0] - q) + gains[:, 1] * (targets[:, 1] - qd)).astype(np.float32)
     control.joint_f.assign(force)
     return force.astype(float), targets
+
+
+CLAMP_CONFIG = {
+    "schema": "sharpa-contact-calibration/v1",
+    "stiffness_scan_n_m3": [5e5, 1e6, 2e6, 5e6, 1e7, 2e7, 5e7, 1e8],
+    "refinements": [1, 2, 3],
+    "dt": 0.001,
+    "ramp_seconds": 0.5,
+    "hold_seconds": 1.0,
+    "measurement_seconds": 0.2,
+    "gravity": [0, 0, 0],
+    "load_definition": "per-jaw load = 2 * ball_mass * 9.81 / (2 * mu); gravity represented by equivalent clamp load",
+    "mu": 0.5,
+    "tangential_stiffness": 2e6,
+    "smoothing_width": 0.0001,
+    "gap": 0.002,
+    "particle_radius": 0.0002,
+    "plate_mass": 0.01,
+    "plate_velocity_gain": 10.0,
+    "pcg_iteration_p95_budget": 64,
+    "gates": {"penetration_m": 0.002, "min_det_f": 0.1, "converged_fraction": 0.99, "force_error": 0.05},
+}
+
+
+def make_clamp_model(ball, device, *, cube=False):
+    """Clamp a fully dynamic sphere between fixed and damped force-driven planes."""
+    if cube:
+        mesh = load_cube(ball)
+    else:
+        mesh = load_ball(ball)
+    b = newton.ModelBuilder(gravity=CLAMP_CONFIG["gravity"])
+    base = b.add_link(mass=1.0, inertia=wp.diag(wp.vec3(0.01)))
+    plate = b.add_link(mass=CLAMP_CONFIG["plate_mass"], inertia=wp.diag(wp.vec3(1e-5)))
+    fixed = b.add_joint_fixed(-1, base)
+    drive = b.add_joint_prismatic(
+        base,
+        plate,
+        axis=newton.Axis.Z,
+        target_ke=0,
+        target_kd=CLAMP_CONFIG["plate_velocity_gain"],
+        actuator_mode=newton.JointTargetMode.POSITION_VELOCITY,
+        armature=0,
+        damping=0,
+        friction=0,
+        limit_ke=0,
+        limit_kd=0,
+        effort_limit=5.0,
+    )
+    b.add_articulation([fixed, drive])
+    radius = (float(np.max(np.abs(mesh.vertices[:, 2]))) if cube else 0.02) + CLAMP_CONFIG["particle_radius"]
+    cfg = b.ShapeConfig(margin=0.0)
+    b.add_shape_plane(
+        body=base, width=0.0, length=0.0, xform=wp.transform((0, 0, -radius), wp.quat_identity()), cfg=cfg
+    )
+    b.add_shape_plane(
+        body=plate, width=0.0, length=0.0, xform=wp.transform((0, 0, radius), wp.quat(1.0, 0.0, 0.0, 0.0)), cfg=cfg
+    )
+    b.add_soft_mesh(
+        pos=(0, 0, 0),
+        rot=wp.quat_identity(),
+        scale=1.0,
+        vel=(0, 0, 0),
+        mesh=mesh,
+        particle_radius=CLAMP_CONFIG["particle_radius"],
+        add_surface_mesh_edges=False,
+    )
+    model = b.finalize(device=device)
+    load = float(model.particle_mass.numpy().sum()) * 9.81 / CLAMP_CONFIG["mu"]
+    return model, load

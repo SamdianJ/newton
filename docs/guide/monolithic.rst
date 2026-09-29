@@ -3,247 +3,70 @@
 
 .. _monolithic-normal-loading:
 
-Monolithic Normal Loading
+Monolithic Coupled Solver
 =========================
 
 .. experimental::
 
-   The ``newton.solvers.experimental.monolithic`` module, including
-   ``SolverMonolithic`` and ``MonolithicCollisionPipeline``, may change without
-   the normal deprecation period. The normal-loading example uses frictionless normal
-   contact between one articulated rigid actor and one connected tetrahedral
-   soft body in a single world.
-
-Run the example
----------------
-
-The example compresses a tetrahedron against its fixed apex using a dynamic
-infinite plane attached to a world-anchored prismatic joint. All geometry is
-built locally; no downloaded assets, SuperDex installation or reference scripts
-are needed.
-
-.. code-block:: bash
-
-   uv run --extra examples -m newton.examples monolithic_normal_loading
-   uv run --extra examples -m newton.examples monolithic_normal_loading --viewer null --device cpu --num-frames 100 --test
-   uv run --extra examples -m newton.examples monolithic_normal_loading --viewer null --device cuda:0 --num-frames 100 --test
-
-Each display frame advances ten substeps of 0.001 s. The full test runs for
-1 s: free approach ends at 0.2 s, loading ends at 0.7 s, and the remaining time
-holds the command. Longer interactive runs continue holding the final target.
-The test checks every substep for convergence, fixed-apex preservation,
-penetration below 1 mm and determinant of the deformation gradient above 0.2.
-Its final check requires at least 5 mm of deformation measured relative to the
-fixed apex. This example is a regression and usage demonstration; the release
-harness separately checks the frozen force-displacement envelope.
-
-The plane mass is 0.1 kg, the tetrahedron density is 1000 kg/m³, and the initial
-vertices are ``(-0.02, -0.015, 0)``, ``(0.02, -0.015, 0)``, ``(0, 0.03, 0)`` and
-``(0, 0, 0.03)`` m. The last vertex is fixed. Material parameters are
-``mu = 3846.15380859375`` Pa and ``lambda = 5769.23095703125`` Pa, with zero
-material damping. Contact uses a 1 mm particle radius, a 2 mm candidate gap and
-normal stiffness ``1e7`` N/m³. The gap controls candidate discovery; it is not
-an allowed penetration depth.
+   :mod:`newton.solvers.experimental.monolithic` supports one articulation and
+   one connected tetrahedral body. Its interfaces may change without the normal
+   deprecation period. The old BE, q-only and tet-only solver entry points and
+   their examples have been retired.
 
 Use the public API
 ------------------
 
+Build the supported model and supply its rest density, then create the complete
+solver state. A plain ``model.state()`` can initialize this state but cannot be
+used directly for continuation.
+
 .. code-block:: python
 
-   import newton
-   from newton.solvers.experimental.monolithic import (
-       MonolithicCollisionPipeline,
-       SolverMonolithic,
-   )
+   from newton.solvers.experimental.monolithic import SolverMonolithic
 
-   # Build the supported articulation and tetrahedral mesh first.
-   model = builder.finalize()
-   model.request_contact_attributes("force")
-   state = model.state()
-   newton.eval_fk(model, state.joint_q, state.joint_qd, state)
+   solver = SolverMonolithic(
+       model,
+       contact_model="C-EE",
+       globalization="ResNorm",
+       friction_velocity_scale=0.01,
+       tet_rest_density=rest_density,
+   )
+   state = solver.create_state(dt=0.001, source=model.state())
    control = model.control()
-   collision = MonolithicCollisionPipeline(model, soft_contact_gap=0.002)
-   solver = SolverMonolithic(
-       model, collision_pipeline=collision, contact_stiffness=1.0e7
-   )
-   # Set external control.joint_f once before each implicit substep.
-   solver.step(state, state, control, None, 0.001)
-   stats = solver.last_stats
+   solver.step(state, state, control, dt=0.001)
+   forces = solver.get_contact_forces(state)
+   solver.save_checkpoint(state, "checkpoint.npz")
+   solver.load_checkpoint(state, "checkpoint.npz")
 
-The example computes an external PD force with gains 2000 N/m and 30 N·s/m.
-That force remains fixed during the nonlinear solve; model actuator gains are
-zero. The solver owns contact generation at accepted and trial states, so do
-not pass default ``CollisionPipeline`` contacts to ``step``. In-place stepping
-is supported. Production numerical defaults are used without overrides.
+The default solver uses strict publication, diagnostic PCG and no CUDA graph.
+Force results are independent read-only NumPy snapshots; check ``force_valid``
+and ``force_generation`` before using them. Stopped publication under an opt-in
+production policy is not convergence. Reset with ``reset_state(state, dt=...)``.
+Checkpoint restoration validates complete state and configuration identity before
+replacing the destination state.
 
-``last_stats`` exposes convergence, rollback, nonlinear and linear iteration
-counts, current-scale convergence ratios and physical guards. A nonlinear
-iteration limit can commit a safe last candidate with ``converged=False``;
-a hard failure rolls back the state. Check these fields instead of assuming
-that returning from ``step`` means convergence. Contact force publication
-requires requesting the force attribute before constructing the solver.
+For mesh contact, attach the official mesh SDF before model finalization and use
+``build_smooth_sdf(model)`` for the derived C2 field. A qualified frozen node
+source can instead be supplied through ``qualified_directory``; failed
+qualification is rejected without falling back to resampling.
 
-Optional implicit joint terms
------------------------------
+``MonolithicCollisionPipeline`` remains independently available, but the coupled
+solver does not accept external Contacts or collision scheduling configuration.
 
-See :ref:`monolithic-p1-contract` for the versioned P1 input, factor/history,
-joint and Sharpa fixture contracts, including the still-disabled capabilities.
+Examples and validation
+-----------------------
 
-The external-force example above is unchanged. To enable implicit joint PD,
-physical joint limits and regularized joint friction, pass
-``SolverMonolithic.JointTerms`` when constructing the solver:
+See :doc:`monolithic_franka_grasp` for the complete Franka demonstration and
+:doc:`monolithic_sharpa_assets` for asset preparation. Sharpa's recorded scenario
+checks complete advancement and state safety; successful grasping is not certified.
 
-.. code-block:: python
-
-   # Example widths for two DOFs ordered [revolute, prismatic].
-   terms = SolverMonolithic.JointTerms(
-       implicit_pd=True,
-       limits=True,
-       friction=True,
-       limit_width=(0.02, 0.002),             # rad, m
-       friction_velocity_scale=(0.01, 0.005), # rad/s, m/s
-   )
-   solver = SolverMonolithic(
-       model, collision_pipeline=collision, contact_stiffness=1.0e7,
-       joint_terms=terms,
-   )
-
-Configure Model joint gains, lower/upper bounds, limit gains, nonnegative
-friction magnitudes and positive effort/velocity limits before construction.
-Each driven DOF requires ``JointTargetMode.POSITION_VELOCITY``; either PD gain
-may be zero. Parameters are copied into the solver: rebuild after changing
-Model parameter values. The widths above illustrate units, not calibrated
-settings for arbitrary assets.
-
-Set ``control.joint_target_q`` and ``control.joint_target_qd`` before each
-step, using ``model.joint_target_q_start`` to index position targets. Initialize
-targets explicitly and generate a speed-limited trajectory outside the solver.
-Set ``joint_f=0`` on driven DOFs: supplying both PD and an external drive on
-those DOFs is rejected before the state transaction. Undriven DOFs retain the
-external frozen-force path. Position/velocity targets are copied once per
-physical step; each nonlinear trial recomputes forces at its candidate state.
-
-The effort limit clamps the sum of elastic and damping PD forces. The PD
-position tangent is ``kp + kd/dt`` inside the bound and zero when saturated,
-including the boundary. Limit forces act only outside lower/upper bounds;
-the smoothly activated limit damper only opposes motion further outside.
-Limits are penalties with finite compliance, not post-step coordinate clamps.
-Joint friction uses ``-f*v/sqrt(v*v + v_eps*v_eps)``; it dissipates energy but
-does not implement an exact static-friction lock at zero velocity. Limit and
-friction forces are independent of the PD effort bound.
-
-Returned-state ``last_stats.joint_pd_force``, ``joint_limit_force`` and
-``joint_friction_force`` contain per-DOF physical forces (N*m or N), with
-saturation flags, damping/friction power and ``joint_force_generation``.
-They are recomputed for the state actually returned, including rollback;
-rejected trials do not publish their diagnostics. Without ``joint_terms`` the
-fields remain absent/None and the generation is -1.
-
-The G1 component tests cover CPU and CUDA. They do not certify the Sharpa
-hand-closing action (G1H) or soft-object grasping. G1H has a separate fixture below.
-
-Sharpa joint closure diagnostic
--------------------------------
-
-The internal G1H example uses the base 22-DoF Sharpa URDF and a time-stamped
-four-second CSV closure, with no particles, contacts or SDF. Supply the local
-asset directory and trajectory explicitly; these external assets are not bundled:
+The repository's scene matrix uses explicit frozen external assets:
 
 .. code-block:: bash
 
-    python -m newton.examples monolithic_sharpa_close \
-        --asset-dir /path/to/left_sharpa_wave --trajectory /path/to/motion.csv \
-        --device cuda:0 --viewer null --test --output /path/to/results
+   uv run --no-sync python -m scripts.monolithic_reference.run_p4 --profile full --list
+   uv run --no-sync python -m scripts.monolithic_reference.run_p4 --profile dev --output /path/to/new-output
 
-Use ``--device cpu`` for the matching CPU fixture, or omit ``--viewer null``
-for visualization. The fixture uses 1 ms physical steps, implicit PD, joint
-limits and nonzero joint friction. Its gains are simulation calibration
-parameters, not identified hardware properties. The signed CSV adapter defines
-an URDF closure; it does not assert equivalence to the source CAD coordinates.
-
-The example's private joint diagnostic factory is an internal test entry, not a
-supported general rigid-only mode. It reuses the production nonlinear and linear
-solver and state transactions. Particle/tet/contact metrics are not applicable
-(and use NaN in solver stats), not successful measurements. The normal public
-constructor continues to require a connected tet body.
-
-Joint candidates accumulate a displacement relative to the beginning of the
-step. BE velocities are recovered from that displacement before absolute
-positions are rounded into float32 State storage. This preserves sub-ULP motion
-at nonzero joint angles; differencing two stored absolute positions can lose it.
-The change applies to the shared candidate path, including rigid/tet steps.
-
-Outputs include the asset/parameter manifest, step trace and per-joint summary.
-A rollback stops the trajectory without advancing simulated time. This action
-has no self-collision and does not certify soft-ball grasping or mesh contact.
-
-Experimental execution policies
---------------------------------
-
-``SolverMonolithic`` accepts construction-time execution options:
-``use_optimized_articulation_mass_matrix=False`` and
-``pcg_mode=SolverMonolithic.PCGMode.DIAGNOSTIC``. The mass option requires a
-Python bool; True selects the solver's private parallel mass evaluation while
-sharing its Jacobian and inertia buffers. It applies to current and trial
-candidates and returned-state evaluation, rather than freezing mass for a step.
-The public Newton mass evaluation remains the default reference path.
-
-``pcg_mode="production"`` selects the private fixed-slot masked PCG backend.
-It checks the true global/q/x residual initially, every ten slots, and at the
-budget end. Accepted solutions freeze; remaining scheduled kernels honor a
-device mask. Both modes use the same block-gap smart restart policy, independent
-of optional diagnostic summaries. Production omits stagnation, near-zero
-curvature heuristics and unscheduled residual checks; iteration counts can
-differ from dynamic diagnostic scheduling. Unmeasured summaries remain NaN.
-
-``use_cuda_graph=False`` is an experimental, immutable, runtime-only option.
-True requires CUDA and production mode; it captures the entire fixed PCG chain.
-Generation, binding or stream changes invalidate reuse. Cross-generation graph
-caching and performance admission remain PR-8D work. Newton, line search, retries,
-assembly and state/history transactions remain outside the graph.
-
-Production publishes a direction only after successful true-residual acceptance
-and finite recovery. ``linear_iterations`` counts effective updates while
-``linear_scheduled_slots`` includes the fixed tail across calls and retries.
-The most recent policy, check, acceptance and failure slots are exposed in Stats.
-Performance is not certified by capture correctness; defaults and physical
-parameters remain unchanged. See ``scripts/monolithic_reference/p2_validation_zh.md``
-for current development and manually invoked overnight validation.
-
-These options are read-only after construction; create a new solver to choose
-different policies. They describe runtime execution, not material or asset
-properties, and intentionally have no USD schema. No execution option changes N/h,
-physical tolerances, contact history, or the supported model envelope. CPU and
-CUDA correctness are tested; performance is workload- and device-dependent.
-
-Current support boundaries
---------------------------
-
-The default material is Kim stable Neo-Hookean without a logarithmic term,
-with Newton lumped particle mass and first-order backward Euler integration.
-PR-6A also supports Smith log-stabilized material and consistent P1 mass;
-see :ref:`monolithic-p1-contract` and :ref:`monolithic-g2h`. Contact uses
-fixed P1Q3 boundary quadrature, with a quadratic hinge by default. PR-6B adds
-opt-in PolyReLU and elastic contact friction with transactional history; see
-:ref:`monolithic-contact-friction`. Full grasping acceptance remains incomplete.
-Strict SuperDex matching is deferred until after V0.2.
-
-The example's validation applies to the exact geometry, material, timestep and
-loading conditions above. Separate frozen C4 fixtures define additional
-measured support. Merely accepting an analytic shape type does not establish
-accuracy for arbitrary curved meshes or narrow features: a feature can lie
-between all fixed quadrature samples. The 2 mm narrow-feature failure remains
-outside the measured support envelope.
-
-Supported joints are world-anchored tree joints of type fixed, revolute or
-prismatic, with zero armature and independent passive damping. Joint friction,
-limit gains and target gains must also be zero unless their corresponding
-``joint_terms`` capability is explicitly enabled. Moving Dirichlet nodes, loop closures, mimic joints, multiple actors,
-multi-world batching and CUDA graph capture are unsupported. The tetrahedral
-surface must exactly match the derived boundary. Fixed-node input velocities
-must be zero. Finite planes and ellipsoids are rejected; this example uses an
-infinite plane. Volume SDFs have additional provenance and scale restrictions.
-
-CPU and CUDA correctness are supported. Python orchestration and explicit
-assembly are current implementation limits; this tiny example does not imply
-GPU speedup or a large-scene performance guarantee.
+The scene runner's result must be combined with component, lifecycle and replay
+checks for stage qualification. Retired driver snapshots, hashes and migration
+notes are documented in ``scripts/monolithic_reference/legacy_retirement.md``.

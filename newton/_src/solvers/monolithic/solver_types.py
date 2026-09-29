@@ -230,8 +230,8 @@ class Stats:
 class _SolverMonolithicInternalConfig:
     """Portable CPU/CUDA settings from the versioned P0 component and trajectory calibration.
 
-    See ``scripts/monolithic_reference/calibrate_components.py`` for the
-    component, float32 reduction, coordinate-ULP, and trajectory gates.
+    The historical component, float32 reduction, coordinate-ULP and trajectory
+    calibration driver is preserved in the P4 legacy archive.
     """
 
     epsilon_d: float = 1.0e-6

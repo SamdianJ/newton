@@ -21,11 +21,7 @@ Newton Physics
    guide/tutorials
    guide/monolithic
    guide/monolithic_p1_contract
-   guide/monolithic_g2h
-   guide/monolithic_tet_response
-   guide/monolithic_contact_friction
    guide/monolithic_sharpa_assets
-   guide/monolithic_sharpa_grasp
    guide/monolithic_franka_grasp
    Development <guide/development>
    Source Code Guidelines <guide/source_code_guidelines>

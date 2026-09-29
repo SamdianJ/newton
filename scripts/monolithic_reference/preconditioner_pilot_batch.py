@@ -14,25 +14,23 @@ from scripts.monolithic_reference.preconditioner_study import CANDIDATES
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--kind", choices=("matrix", "trajectory"), required=True)
+    parser.add_argument("--kind", choices=("matrix",), required=True)
     parser.add_argument("--matrix-list", type=Path)
     parser.add_argument("--candidates", choices=CANDIDATES, nargs="+", default=list(CANDIDATES))
     parser.add_argument("--repeats", type=int, default=3)
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args(argv)
-    if args.repeats < 1 or (args.kind == "matrix" and args.matrix_list is None):
+    if args.repeats < 1 or args.matrix_list is None:
         parser.error("Positive repeats and a matrix list for matrix jobs are required")
     args.output.mkdir(parents=True, exist_ok=False)
     jobs = []
     for repeat in range(args.repeats):
         candidates = args.candidates if repeat % 2 == 0 else list(reversed(args.candidates))
-        scenes = (
-            [("tet", 5), ("tet", 6), ("sharpa", 2), ("sharpa", 3)] if args.kind == "trajectory" else [("matrix", 0)]
-        )
+        scenes = [("matrix", 0)]
         for scene, refinement in scenes:
             for candidate in candidates:
                 name = f"rep{repeat:02d}-{scene}{refinement}-{candidate}"
-                module = "preconditioner_trajectory" if args.kind == "trajectory" else "preconditioner_pilot"
+                module = "preconditioner_pilot"
                 command = [
                     sys.executable,
                     "-m",
@@ -42,10 +40,7 @@ def main(argv=None):
                     "--output",
                     str(args.output / name),
                 ]
-                if args.kind == "trajectory":
-                    command += ["--kind", scene, "--refinement", str(refinement)]
-                else:
-                    command += ["--matrix-list", str(args.matrix_list.resolve())]
+                command += ["--matrix-list", str(args.matrix_list.resolve())]
                 jobs.append({"name": name, "command": command, "status": "PENDING", "repeat": repeat})
     manifest = {"phase": "PILOT_BUDGET_NOT_FROZEN", "jobs": jobs, "formal_admission": False}
 

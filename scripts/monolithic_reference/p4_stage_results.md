@@ -369,3 +369,46 @@ PASS is combined with separate component and lifecycle evidence here.
 
 Evidence: `agents/integration/artifacts/p4/t4-v1/RESULTS.md` and `receipt.json`.
 Receipt SHA-256: `811dff9bf95b3e936f579ab21242e6f234f1d827c226edb82f16053af748aa79`.
+
+
+## T3 closeout after T4 numerical acceptance
+
+Archive sources at 19b43e89 with original paths and SHA-256 before removing
+54 Python files: six legacy solver modules, eleven old examples/helpers and
+37 exclusive calibration, profiling and diagnostic drivers. Retire four old
+usage guides and remove their navigation/example advertisements. No fixture,
+SDF asset, certificate, trajectory or research result is removed or rewritten.
+Historical Markdown and frozen source-hash metadata remain explicitly historical.
+
+Preserve normal-loading model/control recipes and independent envelope math,
+removing their BE runners. Close controls retain the original arithmetic and
+use current joint mapping; independent matrix pilots use linear_evidence and
+reject the retired trajectory mode. Remove unused q-only initialization from
+the articulation fixture. Extract the unchanged clamp model into coupled
+fixtures: cube diagnostics no longer construct and discard an old solver.
+The original constructor failure is reproduced on CPU/CUDA; two added tests
+advance the supported cube through two real steps without claiming a full run.
+Their initial output-guard failure was test harness configuration, not a solve
+failure; the driver prints its result, so these tests allow expected output.
+
+Validation: 17 extraction parity checks pass. Final retained suite: 411 tests,
+404 passed and seven existing skips; actual Sharpa assets enabled. Discovery:
+7,846 IDs, zero import errors, no removed IDs and two added cube checks. All
+seven retired examples disappear from repository example discovery. There are
+no remaining static imports of the retired modules. Frozen input hashes pass.
+
+T4's complete ten-case recordings retain their original tested-source labels.
+All 236 runtime files loaded by those cases still exist; 235 are byte-identical
+and solver_types differs only in an archive-reference docstring. Executable AST
+is unchanged. Long trajectories are not rerun for this removal/helper batch;
+current components and lifecycle checks run again after removal. No numerical
+qualification or tolerance is widened. This closes T3 source/driver retirement;
+T4 numerical evidence is preserved with explicit runtime binding. T5 has not
+started. No production arithmetic, state schema, physical inputs or budgets change.
+
+Evidence: `agents/integration/artifacts/p4/t3-closeout-v1/`, including
+`retirement-manifest.json`, `extraction-parity.json`, `t4-runtime-binding.json`,
+`final-components.json` and `discovery.json`.
+
+Full pre-commit passes. Receipt: `t3-closeout-v1/receipt.json`.
+SHA-256: `35d1f880b3bbb8cdbbbe374aa47fd20c7ed260555ab2afcab36603d5e55e661d`.

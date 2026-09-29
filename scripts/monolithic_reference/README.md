@@ -1,3 +1,7 @@
+> Historical development record: commands for retired BE, q-only and x-only
+> drivers below are not active entry points. See [current entry points and
+> retirement notes](legacy_retirement.md). Frozen evidence and assets remain unchanged.
+
 <!-- SPDX-FileCopyrightText: Copyright (c) 2026 The Newton Developers -->
 <!-- SPDX-License-Identifier: Apache-2.0 -->
 

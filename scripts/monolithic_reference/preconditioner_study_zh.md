@@ -1,3 +1,7 @@
+> Historical development record: commands for retired BE, q-only and x-only
+> drivers below are not active entry points. See [current entry points and
+> retirement notes](legacy_retirement.md). Frozen evidence and assets remain unchanged.
+
 # PR8E/F 预条件器研究
 
 **当前状态：P2 8E/8F 已收尾，8G 为 NOT_APPLICABLE。** 当前 MAS 未展现明显端到端提升，默认保留 actor_block；SA-AMG 转入 P3 考虑，GPU 未测。见[收尾决定](preconditioner_closeout_p2_zh.md)。以下门槛与命令保留为研究协议，不代表 P2 仍等待性能准入。

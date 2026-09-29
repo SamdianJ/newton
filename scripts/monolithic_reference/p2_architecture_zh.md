@@ -1,3 +1,7 @@
+> Historical development record: commands for retired BE, q-only and x-only
+> drivers below are not active entry points. See [current entry points and
+> retirement notes](legacy_retirement.md). Frozen evidence and assets remain unchanged.
+
 # Newton Monolithic Solver P2 Architecture
 
 > Historical v1 design. Current 8C2 implementation and validation policy are tracked in `p2_validation_zh.md`; old production commands/tests are not active instructions.

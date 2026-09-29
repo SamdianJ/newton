@@ -870,9 +870,6 @@ If you run the examples from a source checkout with uv, use
       </a>
     </td>
     <td align="center" width="33%">
-      <a href="https://github.com/newton-physics/newton/blob/main/newton/examples/softbody/example_monolithic_normal_loading.py">
-        <img width="320" src="https://raw.githubusercontent.com/newton-physics/newton/main/docs/images/examples/example_monolithic_normal_loading.jpg" alt="Monolithic Normal Loading">
-      </a>
     </td>
   </tr>
   <tr>
@@ -883,52 +880,6 @@ If you run the examples from a source checkout with uv, use
       <code>python -m newton.examples softbody_franka</code>
     </td>
     <td align="center" width="33%">
-      <code>python -m newton.examples monolithic_normal_loading</code>
-    </td>
-  </tr>
-  <tr>
-    <td align="center" width="33%">
-      <a href="newton/examples/softbody/example_monolithic_sharpa_close.py">
-        <img width="320" src="docs/images/examples/example_monolithic_sharpa_close.jpg" alt="Sharpa joint closure diagnostic">
-      </a>
-      <br><code>python -m newton.examples monolithic_sharpa_close --asset-dir /path/to/left_sharpa_wave --trajectory /path/to/motion.csv</code>
-    </td>
-    <td align="center" width="33%">
-      <a href="newton/examples/softbody/example_monolithic_tet_compare.py">
-        <img width="320" src="docs/images/examples/example_monolithic_tet_compare.jpg" alt="G2H material and mass comparison">
-      </a>
-      <br><code>python -m newton.examples monolithic_tet_compare</code>
-    </td>
-    <td align="center" width="33%">
-      <a href="newton/examples/softbody/example_monolithic_tet_response.py">
-        <img width="320" src="docs/images/examples/example_monolithic_tet_response.jpg" alt="Nonlinear material and released vibration comparison">
-      </a>
-      <br><code>python -m newton.examples monolithic_tet_response --experiment material</code>
-      <br>Modes: <code>material</code>, <code>mass</code>, <code>gravity</code>
-    </td>
-  </tr>
-  <tr>
-    <td align="center" width="33%">
-      <a href="newton/examples/softbody/example_monolithic_contact_friction.py">
-        <img width="320" src="docs/images/examples/example_monolithic_contact_friction.jpg" alt="Monolithic sticking, sliding and release">
-      </a>
-      <br><code>python -m newton.examples monolithic_contact_friction</code>
-    </td>
-    <td align="center" width="33%">
-      <a href="newton/examples/softbody/example_monolithic_sharpa_soft_ball.py">
-        <img width="320" src="docs/images/examples/example_monolithic_sharpa_soft_ball.jpg" alt="Sharpa closure around a locally anchored deformable sphere">
-      </a>
-      <br><code>python -m newton.examples monolithic_sharpa_soft_ball</code>
-      <br><a href="docs/guide/monolithic_sharpa_grasp.rst">Required asset arguments and usage</a>
-      <br>Palm-anchored soft sphere: closure stability and efficiency.
-    </td>
-    <td align="center" width="33%">
-      <a href="newton/examples/softbody/example_monolithic_sharpa_soft_cube.py">
-        <img width="320" src="docs/images/examples/example_monolithic_sharpa_soft_cube.jpg" alt="40 mm deformable cube asset preview; grasp calibration pending">
-      </a>
-      <br><code>python -m newton.examples monolithic_sharpa_soft_cube</code>
-      <br><a href="scripts/monolithic_reference/cube_grasp_zh.md">Required assets and independent cube calibration</a>
-      <br>Experimental cube grasp; physical calibration is not yet passed.
     </td>
   </tr>
   <tr>

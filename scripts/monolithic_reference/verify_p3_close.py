@@ -18,7 +18,7 @@ from newton.solvers.experimental.monolithic import SolverMonolithic
 
 import newton
 from newton.examples.softbody.monolithic_sharpa_assets import load_hand_cube
-from newton.examples.softbody.monolithic_sharpa_grasp import joint_mapping, stage_target
+from newton.examples.softbody.monolithic_sharpa_scene import joint_mapping
 from newton.examples.softbody.sharpa_close import ClosureTrajectory, load_fixture
 from scripts.monolithic_reference.build_p3_smooth_sdf import load_qualified_fields
 from scripts.monolithic_reference.verify_p3_coupled import measure, save, serial, state_arrays
@@ -66,6 +66,34 @@ def mask_statistics(contact):
         "max_masked_penetration": float(np.maximum(-gap[keys], 0).max()) if len(keys) else 0.0,
         "max_all_penetration": float(np.maximum(-gap, 0).max()) if len(gap) else 0.0,
     }
+
+
+CLOSE_SCHEDULE = {"duration": 9.0, "lift_height": 0.05}
+
+
+def stage_target(trajectory, time_s):
+    """Sample continuous positions and same-segment velocities at physical step end."""
+    if not np.isfinite(time_s) or time_s < 0 or time_s > CLOSE_SCHEDULE["duration"] + 1e-12:
+        raise ValueError("Time outside the fixed nine-second schedule")
+    if time_s <= 0.5:
+        stage, source, rate = "prepare", 0.0, 0.0
+    elif time_s <= 2.5:
+        stage, source, rate = "close", time_s - 0.5, 1.0
+    elif time_s <= 4.5:
+        stage, source, rate = "hold", time_s - 0.5, 1.0
+    elif time_s <= 5.5:
+        stage, source, rate = "lift", 4.0, 0.0
+    elif time_s <= 6.5:
+        stage, source, rate = "hold_high", 4.0, 0.0
+    elif time_s <= 8.5:
+        stage, source, rate = "release", 2.0 - (time_s - 6.5), -1.0
+    else:
+        stage, source, rate = "observe", 0.0, 0.0
+    q, v = trajectory.sample(source)
+    u = min(max(time_s - 4.5, 0.0), 1.0)
+    lift = CLOSE_SCHEDULE["lift_height"] * u**3 * (10 - 15 * u + 6 * u * u)
+    lift_v = CLOSE_SCHEDULE["lift_height"] * 30 * u * u * (1 - u) ** 2
+    return stage, q, rate * v, lift, lift_v
 
 
 def targets(curve, mapping, time_s, count):

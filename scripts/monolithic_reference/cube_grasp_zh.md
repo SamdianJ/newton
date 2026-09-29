@@ -1,3 +1,7 @@
+> Historical development record: commands for retired BE, q-only and x-only
+> drivers below are not active entry points. See [current entry points and
+> retirement notes](legacy_retirement.md). Frozen evidence and assets remain unchanged.
+
 # PR8H：40 mm cube 抓取入口
 
 **三档物理校准已通过，抓取 fixture 尚未冻结。** 三档资产与入口可用；不能用旧球校准或修改结果中的状态绕过门槛。版本化状态见 [cube v3](fixtures/p2_cube_grasp_v3.json)；[历史 v1](fixtures/p2_cube_grasp_v1.json) 保留。历史球入口与 anchored-close 保留，cube 不用于重写旧性能结果。

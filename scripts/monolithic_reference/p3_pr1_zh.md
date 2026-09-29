@@ -1,3 +1,7 @@
+> Historical development record: commands for retired BE, q-only and x-only
+> drivers below are not active entry points. See [current entry points and
+> retirement notes](legacy_retirement.md). Frozen evidence and assets remain unchanged.
+
 # P3-PR1：私有 tet-only 变分基线
 
 > P4退役说明：本文记录历史tet-only实现，下面的旧驱动与测试命令已退役，不是当前执行入口。当前共享tet检查为 `test_solver_monolithic_tet`、`test_solver_monolithic_material_mass`、`test_monolithic_p4_tet_components`；正式场景回归使用 `scripts.monolithic_reference.run_p4`。

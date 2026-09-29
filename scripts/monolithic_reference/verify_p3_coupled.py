@@ -105,12 +105,11 @@ def run_case(
     output.mkdir(parents=True, exist_ok=False)
     load = None
     if case.startswith("cube"):
-        from scripts.monolithic_reference.calibrate_sharpa_contact import CONFIG, make_case  # noqa: PLC0415
+        from scripts.monolithic_reference.p3_coupled_fixtures import CLAMP_CONFIG, make_clamp_model  # noqa: PLC0415
 
         refinement = int(case[-1])
         asset = DIRECTORY / "soft_cube_40mm" / f"cube_r{refinement}.npz"
-        model, old_solver, _, _, load = make_case(asset, 1e7, device, cube=True)
-        del old_solver
+        model, load = make_clamp_model(asset, device, cube=True)
         duration = 1.5
     else:
         model = make_tiny(case, device)
@@ -193,7 +192,7 @@ def run_case(
                 if case.startswith("cube"):
                     u = min(t / 0.5, 1.0)
                     target = load * u * u * (3 - 2 * u)
-                    control.joint_target_qd.assign([-target / CONFIG["plate_velocity_gain"]])
+                    control.joint_target_qd.assign([-target / CLAMP_CONFIG["plate_velocity_gain"]])
                     row["target_load"] = target
                 else:
                     q, v = (oracle.q, oracle.v) if reference else (state.joint_q.numpy(), state.joint_qd.numpy())

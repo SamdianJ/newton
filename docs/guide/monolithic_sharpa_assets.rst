@@ -28,7 +28,7 @@ a tetrahedralizer. The display/contact boundary comes from its tetrahedra.
 Density is explicitly 1000 kg/m³, Young's modulus 10000 Pa, Poisson ratio 0.3,
 and damping zero. These are simulation calibration parameters, not measured
 hardware/material properties. The canonical component uses Smith/consistent;
-Kim/lumped free-fall regression is also checked.
+Material and mass components retain independent tests.
 
 Prepare derived collision meshes, SDF caches, and a measured support manifest::
 
@@ -44,28 +44,11 @@ requires the selected resolution to pass every mesh's distance/sign/finite
 nonzero-gradient checks; raw trilinear gradients need not have unit length.
 The collision path normalizes them when producing physical normals.
 
-Run a short whole-hand contact check::
-
-   uv run --extra examples -m scripts.monolithic_reference.run_sharpa_assets --asset-dir /path/to/left_sharpa_wave --contact-dir /path/to/hand-contact --output /path/to/contact-check
-
-The diagnostic holds all 22 joint targets at their initial values and lets
-the free ball approach a finger for 20 ms, with gravity enabled. It uses the
-ordinary coupled solver, joint PD/limits/friction, smoothed normal contact
-and contact friction. It records actual forces, deformation after removing
-rigid translation and rotation, slip speed, penetration, convergence and step cost. The latter
-is a short component timing, not a steady-state performance claim. A rollback
-stops the run without advancing physical time. This is not the closure
-trajectory, a grasp demonstration, or a self-collision check.
-
 Run the opt-in real-asset checks::
 
    NEWTON_SHARPA_ASSET_DIR=/path/to/left_sharpa_wave NEWTON_SHARPA_CONTACT_DIR=/path/to/hand-contact uv run --extra dev --extra examples -m unittest newton.tests.test_monolithic_sharpa_assets newton.tests.test_monolithic_soft_ball -q
 
 The source-dependent tests explicitly skip when these paths are absent.
 Independent FK checks cover all links and several poses; CUDA checks cover
-all shape descriptors and transformed queries. The existing collision-free
-``monolithic_sharpa_close`` example keeps its previous behavior.
-
-PR-7 still owns two-level AABB acceleration, lift carriage and the complete
-Close–Hold–Lift–Release fixture, friction-off negative control, and G6/G7.
-G5 asset evidence does not close its separate AABB-equivalence requirement.
+all shape descriptors and transformed queries. The old BE contact and q-only examples have been retired.
+Asset preparation and independent geometry checks remain supported.

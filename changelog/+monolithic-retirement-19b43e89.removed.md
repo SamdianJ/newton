@@ -1,0 +1,1 @@
+Remove retired experimental Monolithic BE, q-only and tet-only implementations and their obsolete examples and diagnostic drivers, preserving the public coupled solver, independent collision pipeline and shared reference components.

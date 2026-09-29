@@ -8,15 +8,12 @@ against a horizontal plane. It uses float64 Kim stress and rest-area penalty,
 without reading the production trajectory or contact records to set tolerances.
 """
 
-import argparse
 import hashlib
 import json
 import math
 from pathlib import Path
 
 import numpy as np
-
-import newton
 
 DIRECTORY = Path(__file__).with_name("fixtures")
 FROZEN_FIXTURE = DIRECTORY / "normal_loading_frozen_v3.json"
@@ -246,70 +243,3 @@ def assess_envelope(records, summary, fixture):
         )
     gates["force_displacement_curve"] = bool(valid and reached >= envelope["curve_interval_m"][1])
     return {"pass": all(gates.values()), "gates": gates, "observations": observations}
-
-
-def verify_static_cpu(fixture):
-    """Check prescribed analytic equilibria through actual Newton CPU stepping."""
-    from .normal_loading import build_scene  # noqa: PLC0415 - avoid the runner/oracle import cycle
-
-    records = []
-    rest = np.asarray(fixture["soft"]["rest_positions_m"], dtype=float)
-    clearance = (
-        rest[0, 2]
-        - fixture["rigid"]["initial_plane_z_m"]
-        - fixture["soft"]["particle_radius_m"]
-        - fixture["contact"]["shape_margin_m"]
-    )
-    for point in static_curve(fixture, count=13):
-        model, state, control, solver = build_scene(fixture, device="cpu")
-        positions = rest.copy()
-        positions[:3, :2] *= point["lateral_stretch"]
-        positions[:3, 2] = rest[3, 2] + point["axial_stretch"] * (rest[:3, 2] - rest[3, 2])
-        state.particle_q.assign(positions.astype(np.float32))
-        state.joint_q.assign(np.asarray([clearance + point["closure_m"]], dtype=np.float32))
-        newton.eval_fk(model, state.joint_q, state.joint_qd, state)
-        before = state.particle_q.numpy().copy()
-        control.joint_f.assign(np.asarray([point["force_n"]], dtype=np.float32))
-        solver.step(state, state, control, None, fixture["dt_s"])
-        count = int(solver.contacts.soft_contact_count.numpy()[0])
-        force = -float(solver.contacts.force.numpy()[:count, 2].sum())
-        drift = float(np.max(np.abs(state.particle_q.numpy() - before)))
-        record = {
-            **point,
-            "actual_force_n": force,
-            "force_error_n": abs(force - point["force_n"]),
-            "position_drift_m": drift,
-            "active_samples": solver.last_stats.active_sample_count,
-            "converged": solver.last_stats.converged,
-            "rolled_back": solver.last_stats.rolled_back,
-        }
-        record["pass"] = bool(
-            record["converged"]
-            and not record["rolled_back"]
-            and drift < 1e-6
-            and record["force_error_n"] < 1e-4
-            and record["active_samples"] in (0, 3)
-        )
-        records.append(record)
-    return {
-        "method": "13 independent prescribed analytical static states; actual Newton CPU step with matching frozen force",
-        "records": records,
-        "pass": all(r["pass"] for r in records),
-    }
-
-
-def main():
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--output", type=Path, required=True)
-    parser.add_argument("--verify-cpu", action="store_true")
-    args = parser.parse_args()
-    from .normal_loading import load_fixture  # noqa: PLC0415 - CLI-only runner import
-
-    evidence = verify_static_cpu(load_fixture()) if args.verify_cpu else make_envelope(load_fixture())
-    with args.output.open("x") as stream:
-        json.dump(evidence, stream, indent=2, allow_nan=False)
-        stream.write("\n")
-
-
-if __name__ == "__main__":
-    main()
