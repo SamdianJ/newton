@@ -607,3 +607,30 @@ full-trajectory qualification. No FP64 trajectories or Close cases were run.
 Prior T5-C evidence is retained unchanged. T5-D remains unperformed.
 
 Evidence: agents/integration/artifacts/p4/precision-comparison/fp32-quaternion-v1/.
+
+## Sharpa deleted asset rebuild — 2026-09-29
+
+Rebuilt the hand assets with prepare_sharpa_contact at 964da0d0 using the
+unchanged source URDF/meshes and integration environment. All 11 meshes pass
+the 128-resolution geometry checks; four CPU/CUDA asset tests pass.
+
+Compared with the 101 frozen paths: 45 match byte-for-byte, 38 differ and
+18 historical cache files were not produced by the current preparation recipe.
+The two marching-cubes repairs (left_MP and left_thumb_MC) do not reproduce
+original mesh bytes. Cache files also contain new creation timestamps.
+The original manifest was recovered exactly from an embedded historical copy,
+and is saved separately; its old timings/results are not assigned to new assets.
+No complete original mesh backup was found in the searched local artifacts.
+
+A real model built from the new assets has different texture identity and is
+rejected by the old qualified smooth SDF certificate. Do not overwrite frozen
+hashes or use that certificate for new textures. Rebuilt assets remain in this
+report directory's hand/ folder; original baseline manifests are unchanged.
+
+To resume Sharpa, regenerate and qualify smooth SDF against these new textures,
+then establish a new Sharpa FP64 reference before comparing FP32. This requires
+a change to the prior frozen-asset/baseline scope. Franka assets are unchanged;
+its runner is currently also blocked by the shared all-input validation.
+No long trajectories have been rerun.
+
+Evidence: agents/integration/artifacts/p4/sharpa-asset-recovery-v1/.
