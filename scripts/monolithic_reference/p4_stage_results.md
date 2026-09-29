@@ -718,3 +718,20 @@ is NOT_AUDITED. Stopped is never counted as converged. T5-D remains unperformed.
 
 Evidence: agents/integration/artifacts/p4/precision-comparison/fp32-relaxed-v1/RESULTS.md,
 analysis.json and receipt.json. Twenty affected tests passed before execution.
+
+## T5-D default Franka measurement harness — 2026-09-29
+
+User narrowed T5-D to Franka OR/C-IE production/graph only. Compare default
+FP64 with the explicit FP32 absolute-goal 1e-6 experiment, three fresh processes
+per precision, full 5250 steps. No other scenes or new full recordings.
+The harness verifies frozen inputs/controls, warms 20 steps, restores the exact
+initial checkpoint, synchronizes solve boundaries, and retains final state and
+lightweight statistics. Warmup does not reset the solver's monotone generation;
+final force generation is checked against that offset. Compilation/cache loads,
+SDF construction/conversion, warm restore, solve, final I/O and graph counters
+are separately observable. Tests reproduce the absent harness before addition;
+runner unit checks and 25-step FP32 smoke pass, complete pre-commit passes.
+Smoke reveals objective graph recapture on every measured step; capture-free
+steady-state cost must not be claimed or obtained by subtracting async host
+capture timings. Formal measurements are pending. No production code changed.
+Evidence: agents/integration/artifacts/p4/precision-comparison/t5-d-franka-v1/.
