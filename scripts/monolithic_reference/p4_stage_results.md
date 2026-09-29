@@ -735,3 +735,32 @@ Smoke reveals objective graph recapture on every measured step; capture-free
 steady-state cost must not be claimed or obtained by subtracting async host
 capture timings. Formal measurements are pending. No production code changed.
 Evidence: agents/integration/artifacts/p4/precision-comparison/t5-d-franka-v1/.
+
+## T5-D scoped Franka experiment completed — 2026-09-30
+
+Measured e7e18416: Franka OR/C-IE production/graph, three fresh processes per
+precision, 5250 steps each. All 31,500 steps published without hard failure.
+FP64 solve seconds: 430.241 / 251.724 / 251.975 (median 251.975), every step
+converged. FP32 with explicit absolute goals 1e-6: 642.944 / 573.110 / 583.445
+(median 583.445), respectively 0 / 1 / 0 converged steps; all others Stopped.
+The observed FP32 wall cost is 2.32 times FP64, not a qualified speedup ratio.
+CUDA pool peaks including construction are about 527 / 594 MiB. FP32 retains
+FP64 SDF reference coefficients and their identity copy, so its total memory
+is not halved. Objective graph recapture persists after warmup in both modes.
+
+Source, asset, control, config, SDF and initial-state identities agree across
+repetitions. Maximum pairwise final particle-coordinate difference is 2.48e-12 m
+for FP64 and 0.342 mm for FP32. FP32 iteration paths also differ; root cause
+has not been isolated. First-round clocks/timing differed markedly; cold compile
+is separately recorded and cannot explain all solve-time variation. Preserve
+all samples; do not present this as a fixed-clock hardware benchmark.
+
+Prior full recordings supply separate position/force comparisons, not numerical
+qualification of the new performance trajectories. Complete independent FP32
+residual auditing remains unperformed. Default FP64 and production code are
+unchanged. Only the user-scoped T5-D cost experiment is complete, not FP32
+qualification or a renewed ten-case full regression. Eight runner/summary tests
+and complete pre-commit pass; integration remains unchanged; no push.
+
+Evidence: agents/integration/artifacts/p4/precision-comparison/t5-d-franka-v1/RESULTS.md,
+performance-analysis.json, trajectory-analysis.json and receipt.json.
