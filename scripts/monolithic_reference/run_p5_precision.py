@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 The Newton Developers
 # SPDX-License-Identifier: Apache-2.0
 
-"""Freeze shared controls and run the eight T5 scenes in native FP64/FP32."""
+"""Run the ten P4 scene configurations in native precision; default to FP32."""
 
 import argparse
 import gzip
@@ -15,6 +15,8 @@ from pathlib import Path
 
 import numpy as np
 
+from scripts.monolithic_reference.run_p3_baseline import cases as baseline_cases
+
 ROOT = Path(__file__).resolve().parents[2]
 ARTIFACTS = ROOT.parents[1] / "agents/integration/artifacts"
 FROZEN = ARTIFACTS / "p4/precision-comparison/t5-a-v1/frozen-inputs.json"
@@ -25,29 +27,22 @@ def sha(path):
 
 
 def cases():
-    """Expand the frozen eight scenarios across the two construction precisions."""
-    result = []
-    for position in (18, 24):
-        for law in ("C-EE", "C-IE", "C-II"):
-            result.append({"scene": f"close-{position}", "law": law, "steps": 2500})
-    result.extend(
-        (
-            {"scene": "franka-cube", "law": "C-IE", "steps": 5250},
-            {"scene": "sharpa-recorded-10mm", "law": "C-IE", "steps": 8667},
-        )
-    )
+    """Match the existing ten FP64 baselines; include globalization in every ID."""
     return [
-        dict(
-            c,
-            precision=p,
-            id=f"{c['scene']}--{c['law']}--{p}",
-            dt=0.001,
-            globalization="ArmijoOrResNorm",
-            publish_policy="current_iterate",
-            pcg_mode="production",
-            graph=True,
-        )
-        for c in result
+        {
+            "scene": c["id"].split("--")[0],
+            "law": c["law"],
+            "steps": c["steps"],
+            "precision": p,
+            "id": f"{c['id']}--{p}",
+            "reference_case": c["id"],
+            "dt": 0.001,
+            "globalization": c["globalization"],
+            "publish_policy": "current_iterate",
+            "pcg_mode": "production",
+            "graph": True,
+        }
+        for c in baseline_cases()
         for p in ("fp64", "fp32")
     ]
 
@@ -66,26 +61,26 @@ def build(case):
 
     import newton  # noqa: PLC0415
     from newton.examples.softbody.monolithic_sharpa_recorded import build_recorded, targets  # noqa: PLC0415
-    from newton.examples.softbody.monolithic_sharpa_scene import build as build_close  # noqa: PLC0415
-    from scripts.monolithic_reference.verify_p3_close import targets as close_targets  # noqa: PLC0415
 
     if case["scene"] == "franka-cube":
         from newton.examples.softbody.monolithic_franka import FrankaGrasp  # noqa: PLC0415
         from newton.examples.softbody.monolithic_franka import targets as franka_targets  # noqa: PLC0415
 
-        scene = FrankaGrasp(ARTIFACTS / "p3/pr3/franka-grasp-v1/cache", precision=case["precision"])
+        scene = FrankaGrasp(
+            ARTIFACTS / "p3/pr3/franka-grasp-v1/cache",
+            law=case["law"],
+            globalization=case["globalization"],
+            precision=case["precision"],
+        )
         samples = [franka_targets(scene.high, scene.low, i * case["dt"])[:2] for i in range(case["steps"] + 1)]
         return scene.model, scene.solver, scene.state, np.asarray(samples, dtype=np.float32)
-    if case["scene"].startswith("close-"):
-        position = int(case["scene"].split("-")[1])
-        model, _, _, mapping, curve, terms, _ = build_close(position)
-        samples = [close_targets(curve, mapping, i * case["dt"], 23)[1:] for i in range(case["steps"] + 1)]
-    else:
-        payload = json.loads((ARTIFACTS / "p3/pr3/current-iterate-production-v1/sharpa-trajectory.json").read_text())
-        model, _, mapping, curve, terms, trajectory, _ = build_recorded(payload)
-        if (trajectory.steps, trajectory.dt) != (case["steps"], case["dt"]):
-            raise ValueError("Frozen recorded schedule changed")
-        samples = [targets(trajectory, curve, mapping, i * case["dt"])[:2] for i in range(case["steps"] + 1)]
+    if case["scene"] != "sharpa-recorded-10mm":
+        raise ValueError("T5-C only supports the ten frozen Franka/Sharpa configurations")
+    payload = json.loads((ARTIFACTS / "p3/pr3/current-iterate-production-v1/sharpa-trajectory.json").read_text())
+    model, _, mapping, curve, terms, trajectory, _ = build_recorded(payload)
+    if (trajectory.steps, trajectory.dt) != (case["steps"], case["dt"]):
+        raise ValueError("Frozen recorded schedule changed")
+    samples = [targets(trajectory, curve, mapping, i * case["dt"])[:2] for i in range(case["steps"] + 1)]
     samples = np.asarray(samples, dtype=np.float32)
     smooth = build_smooth_sdf(model, qualified_directory=ARTIFACTS / "p3/pr3/smooth-sdf-v1/geometry")
     run = SolverMonolithic(
@@ -114,7 +109,7 @@ def build(case):
 
 
 def freeze_controls(output):
-    """Write four sampled streams; every law and precision consumes the same bytes."""
+    """Write scene control streams shared by every law, acceptance mode and precision."""
     output.mkdir(parents=True, exist_ok=False)
     manifest = {"input_manifest_sha256": validate_inputs(), "streams": {}, "source_hashes": {}}
     for case in cases():
@@ -234,6 +229,12 @@ def worker(case, controls, output, max_steps):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--list", action="store_true")
+    parser.add_argument(
+        "--precision",
+        choices=("fp32", "fp64", "both"),
+        default="fp32",
+        help="Default FP32; existing FP64 recordings are reused by T5-C",
+    )
     parser.add_argument("--freeze-controls", action="store_true")
     parser.add_argument("--controls", type=Path)
     parser.add_argument("--case", action="append", default=[])
@@ -241,7 +242,7 @@ def main():
     parser.add_argument("--max-steps", type=int, help="Smoke only; always reports PARTIAL")
     parser.add_argument("--worker", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args()
-    selected = cases()
+    selected = [c for c in cases() if args.precision == "both" or c["precision"] == args.precision]
     if set(args.case) - {c["id"] for c in selected}:
         parser.error("Unknown case ID")
     if args.case:
@@ -270,6 +271,8 @@ def main():
             "-m",
             "scripts.monolithic_reference.run_p5_precision",
             "--worker",
+            "--precision",
+            case["precision"],
             "--case",
             case["id"],
             "--controls",

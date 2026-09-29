@@ -540,3 +540,48 @@ pending. Full pre-commit evidence and commit binding accompany the stage receipt
 Evidence: `agents/integration/artifacts/p4/precision-comparison/t5-b-v1/`.
 Component receipt SHA-256: `ab2b672c60e31895ec5c79c0acea0f70cbad68b6bc7ebf673f6f9a1ee15f63a3`.
 Full matrix summary SHA-256: `7719e76c957798bdf802a924dd1ed5d931c027144d6502092489b5a6e1d1add1`.
+
+
+## T5-C: ten existing configurations and independent FP32 audit
+
+Apply the user's scope change: nine Franka globalization/law combinations and
+one Sharpa OR/C-IE, production/graph. Stop supplemental Close runs and retain
+those files as OUT_OF_SCOPE. Reuse all ten T5-B FP64 trajectories after checking
+production source hashes, exact initial states, configuration digests and
+control schedules. No new FP64 trajectory is launched for these ten cases.
+Franka controls are regenerated from the recorded pose plan and unchanged
+controller source; Sharpa controls match the stored per-frame arrays directly.
+
+Reuse the user's two matching FP32 runs and execute the other eight Franka
+configurations. Every case terminates at its first hard failure: Franka on step
+3 or 4, Sharpa on step 1. Across the ten original native runs there are zero
+CONVERGED, 22 Stopped publications and ten verified atomic rollbacks.
+
+Add a read-only observer and offline NumPy/SciPy audit. Preserve native step-start
+histories, every evaluated candidate/trial, B32 directions/scales and actual
+publication. Recompute FK, link/joint prediction/history, tet and contact E/r,
+force/wrench, physical posterior and acceptance from the instrumented run's own
+inputs. Qualify the audit with retained small-system math, energy differences,
+independent natural splines and an end-to-end successful transaction test.
+The instrumentation and plain runs share exact initial states and classifications,
+but can differ numerically; report these differences without an enlarged gate.
+Do not claim the supplemental observations reproduce the old FP32 run bitwise.
+
+All ten first failures coincide with native composed-quaternion norm error above
+the original 1e-10 guard (Franka 1.1920928955078125e-7; Sharpa
+5.960464477539063e-8); independent geometry remains valid. Audit 1,024 candidate
+observations and 259 physical postchecks. There are 51 native-accepted trials
+rejected by independent acceptance recomputation. No scene-level false convergence
+is observed because no scene step reports convergence. Stopped remains
+unconverged. Physical safety, convergence agreement, prefix trajectory differences
+and qualification are reported separately; FP32 qualification is FAIL.
+
+Only same-time published prefixes are compared to FP64. Failed rolled-back frames
+are retained separately, with no fabricated continuation or time shift. These
+millisecond prefixes do not establish grasp accuracy, sustained contact quality
+or speed. Sharpa grasp remains uncertified. T5-D is not performed.
+
+Retained tests: 443 run, 436 pass, seven unchanged skips; four new IDs and none
+removed. Full pre-commit and source bindings accompany the final receipt.
+Production solver code, equations, numerical gates, controls and defaults remain
+unchanged. Evidence: `agents/integration/artifacts/p4/precision-comparison/t5-c-v1/`.

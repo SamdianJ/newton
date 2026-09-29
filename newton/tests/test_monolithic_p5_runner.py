@@ -3,27 +3,46 @@
 
 """Frozen precision matrix and host decision arithmetic contracts."""
 
+import io
+import json
 import unittest
+from contextlib import redirect_stdout
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import numpy as np
 
 from newton._src.solvers.monolithic.solver_types import _SolverMonolithicInternalConfig
 from newton._src.solvers.monolithic.variational_iteration import measure
-from scripts.monolithic_reference.run_p5_precision import cases
+from scripts.monolithic_reference.run_p3_baseline import cases as baseline_cases
+from scripts.monolithic_reference.run_p5_precision import cases, main
 
 
 class TestPrecisionRunner(unittest.TestCase):
     def test_matrix(self):
+        """Match the ten existing P4 configurations in each precision, excluding Close."""
         rows = cases()
-        self.assertEqual(len(rows), 16)
-        self.assertEqual(len({r["id"] for r in rows}), 16)
+        self.assertEqual(len(rows), 20)
+        self.assertEqual(len({r["id"] for r in rows}), 20)
         for precision in ("fp32", "fp64"):
             selected = [r for r in rows if r["precision"] == precision]
-            self.assertEqual(sum(r["steps"] for r in selected), 28917)
-            self.assertEqual(sum(r["scene"].startswith("close-") for r in selected), 6)
+            self.assertEqual(sum(r["steps"] for r in selected), 55917)
+            self.assertEqual(sum(r["scene"].startswith("close-") for r in selected), 0)
+            self.assertEqual(
+                {(r["reference_case"], r["law"], r["globalization"]) for r in selected},
+                {(r["id"], r["law"], r["globalization"]) for r in baseline_cases()},
+            )
             self.assertTrue(all(r["graph"] and r["pcg_mode"] == "production" for r in selected))
             self.assertTrue(all(r["publish_policy"] == "current_iterate" for r in selected))
+
+    def test_default_fp32_list(self):
+        """List only ten FP32 cases by default so baseline trajectories are not rerun."""
+        output = io.StringIO()
+        with patch("sys.argv", ["run_p5_precision", "--list"]), redirect_stdout(output):
+            self.assertEqual(main(), 0)
+        rows = json.loads(output.getvalue())
+        self.assertEqual(len(rows), 10)
+        self.assertTrue(all(r["precision"] == "fp32" for r in rows))
 
     def test_native_host_targets(self):
         for dtype in (np.float32, np.float64):

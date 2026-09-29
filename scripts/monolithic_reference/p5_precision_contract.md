@@ -1,10 +1,15 @@
 # P4 T5 precision contract
 
-Status: T5-A and T5-B complete. FP64 remains the default; experimental FP32
-fails the original numerical qualification, including observed component-level
-false convergence. T5-C full-scene independent audits and T5-D performance
-experiments remain pending. T5-B evidence is recorded in
-`agents/integration/artifacts/p4/precision-comparison/t5-b-v1/receipt.json`.
+> T5-C scope override: compare only the existing ten T5-B configurations (nine
+> Franka globalization/law combinations and one Sharpa OR/C-IE), production/graph.
+> Reuse validated FP64 recordings; exclude Close. The FP32 runner defaults to
+> these ten cases. This replaces the original Close-based T5-C matrix.
+
+Status: T5-A/B/C complete. FP64 remains the default; experimental FP32 fails
+numerical qualification. All ten T5-C native paths terminate at geometry guards;
+independent audits preserve trial-acceptance disagreements and actual histories.
+T5-D performance experiments remain pending. T5-C evidence is recorded in
+`agents/integration/artifacts/p4/precision-comparison/t5-c-v1/receipt.json`.
 
 Starting commit: `56d054ae7dfa11bc9eb97582c3815b4d59349798`.
 Evidence: `agents/integration/artifacts/p4/precision-comparison/t5-a-v1/`.
@@ -30,7 +35,9 @@ following data-flow classification determines what changes.
   independent numerical accuracy or perform the T5-D timing protocol.
 - T5-B: native component/transaction checks, negative controls and the current
   ten-case FP64 full regression are complete. FP32 numerical qualification fails.
-- Pending: independent T5-C full numerical audits and T5-D isolated performance repeats.
+- T5-C: ten paired results, reused FP64 baselines, independent native-prefix
+  E/r/history/force and acceptance audits; FP32 fails qualification.
+- Pending: T5-D isolated performance repeats.
 
 ## Dtype boundaries
 
@@ -111,30 +118,26 @@ arithmetic must be validated before any scratch is published.
 
 ## Experiments and commands
 
-`frozen-inputs.json` contains eight IDs, each expanded across FP64/FP32:
+The user narrowed T5-C to the existing ten P4/T5-B configurations:
 
-- `close-18--C-EE`, `close-18--C-IE`, `close-18--C-II`;
-- `close-24--C-EE`, `close-24--C-IE`, `close-24--C-II`;
-- `franka-cube--C-IE`, `sharpa-recorded-10mm--C-IE`.
+- Franka: three globalizations times three laws, 5,250 steps each;
+- Sharpa: OR/C-IE, 8,667 steps.
 
-All use 1 ms, OR, current_iterate, CUDA production/graph. Close uses 2,500 steps;
-Franka 5,250; Sharpa 8,667. The old Close driver's last_accepted configuration is
-not the T5 configuration. Reuse its frozen construction and targets, not its
-solver factory/configuration. Each numerical case is attempted independently,
-stops on first hard failure and records complete input/trial/history evidence.
+All use 1 ms, current_iterate and CUDA production/graph. The result matrix has
+ten FP64/FP32 pairs. Reuse all ten validated T5-B FP64 recordings; do not launch
+new FP64 trajectories. Close is outside T5-C; interrupted supplemental Close
+runs are retained as OUT_OF_SCOPE, not included in the qualification result.
+The original control manifest remains immutable; this scope uses only its two
+grasp streams. Default runner execution/listing selects the ten FP32 cases;
+`--precision both --list` lists all twenty result IDs without running them.
 
-Performance repeats each of these eight cases three times per precision, serially,
-from t=0 after warmup and state reinitialization. Separate build/compile/capture,
-solve, recording and independent audit cost. Report failed-prefix cost without
-claiming a qualified speedup. Parameterized FP64 must rerun the existing ten-case
-full matrix (44 deferred cases remain deferred).
+Native execution and independent offline auditing are separate. The observer
+captures only first-failure prefixes and never feeds the solver. Its own states
+are audited; differences from uninstrumented runs are reported without expanding
+an equivalence tolerance. Native receipts preserve actual execution hashes;
+independent audit hashes identify the subsequent analysis source.
 
-Executable current FP64 regression commands (from this worktree):
-
-```bash
-UV_PROJECT_ENVIRONMENT=../monolithic-integration/.venv uv run --no-sync python -B -m scripts.monolithic_reference.run_p4 --profile dev --list
-UV_PROJECT_ENVIRONMENT=../monolithic-integration/.venv uv run --no-sync python -B -m scripts.monolithic_reference.run_p4 --profile full --list
-```
+T5-D timing experiments remain pending. No speed claim follows from early failure.
 
 Executable precision commands (same environment prefix as above):
 
