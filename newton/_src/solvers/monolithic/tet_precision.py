@@ -1,22 +1,23 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 The Newton Developers
 # SPDX-License-Identifier: Apache-2.0
 
-"""Direct FP64 tet E/r for the private coupled path; legacy entry points are unchanged."""
+"""Native FP64/FP32 tet E/r from one formula source; B/PCG remain FP32."""
 
 import math
+from typing import Any
 
 import numpy as np
 import warp as wp
 
 from .tet_common import TetPhysicsWorkspace, _validate_candidate_particles, validate_tet_scope
-from .tet_material import _evaluate_energy_stress64
+from .tet_material import _evaluate_energy_stress
 
 
 @wp.kernel
 def _particles(
-    x: wp.array[wp.vec3d],
-    xn: wp.array[wp.vec3d],
-    vn: wp.array[wp.vec3d],
+    x: wp.array[Any],
+    xn: wp.array[Any],
+    vn: wp.array[Any],
     forces: wp.array[wp.vec3],
     gravity: wp.array[wp.vec3],
     worlds: wp.array[int],
@@ -24,9 +25,9 @@ def _particles(
     mass: wp.array[float],
     row_mass: wp.array[float],
     consistent: bool,
-    dt: wp.float64,
-    residual: wp.array[wp.vec3d],
-    parts: wp.array[wp.float64],
+    dt: Any,
+    residual: wp.array[Any],
+    parts: wp.array[Any],
     flags: wp.array[int],
 ):
     i = wp.tid()
@@ -36,12 +37,12 @@ def _particles(
         world = gravity.shape[0] - 1
     displacement = x[p] - xn[p]
     delta = displacement - dt * vn[p]
-    applied = wp.float64(row_mass[p]) * wp.vec3d(gravity[world]) + wp.vec3d(forces[p])
+    applied = type(dt)(row_mass[p]) * type(x[0])(gravity[world]) + type(x[0])(forces[p])
     r = -applied
-    inertia = wp.float64(0.0)
+    inertia = type(dt)(0.0)
     if not consistent:
-        r += wp.float64(mass[p]) * delta / (dt * dt)
-        inertia = wp.float64(0.5) * wp.float64(mass[p]) * wp.dot(delta, delta) / (dt * dt)
+        r += type(dt)(mass[p]) * delta / (dt * dt)
+        inertia = type(dt)(0.5) * type(dt)(mass[p]) * wp.dot(delta, delta) / (dt * dt)
     external = -wp.dot(applied, displacement)
     residual[i] = r
     if not wp.isfinite(inertia) or not wp.isfinite(external) or not wp.isfinite(wp.length(r)):
@@ -52,9 +53,9 @@ def _particles(
 
 @wp.kernel
 def _elements(
-    x: wp.array[wp.vec3d],
-    xn: wp.array[wp.vec3d],
-    vn: wp.array[wp.vec3d],
+    x: wp.array[Any],
+    xn: wp.array[Any],
+    vn: wp.array[Any],
     indices: wp.array2d[int],
     poses: wp.array[wp.mat33],
     materials: wp.array2d[float],
@@ -62,15 +63,15 @@ def _elements(
     coefficients: wp.array[float],
     material: int,
     consistent: bool,
-    dt: wp.float64,
-    guard: wp.float64,
-    residual: wp.array[wp.vec3d],
-    parts: wp.array[wp.float64],
-    min_det: wp.array[wp.float64],
+    dt: Any,
+    guard: Any,
+    residual: wp.array[Any],
+    parts: wp.array[Any],
+    min_det: wp.array[Any],
     flags: wp.array[int],
 ):
     e = wp.tid()
-    pose = wp.mat33d(poses[e])
+    pose = wp.matrix(poses[e], shape=(3, 3), dtype=type(dt))
     origin = x[indices[e, 0]]
     f = wp.matrix_from_cols(x[indices[e, 1]] - origin, x[indices[e, 2]] - origin, x[indices[e, 3]] - origin) * pose
     det = wp.determinant(f)
@@ -81,36 +82,34 @@ def _elements(
     if det < guard:
         wp.atomic_max(flags, 0, 1)
         return
-    volume = wp.float64(1.0) / (wp.float64(6.0) * wp.determinant(pose))
-    energy, stress = _evaluate_energy_stress64(
-        f, volume, wp.float64(materials[e, 0]), wp.float64(materials[e, 1]), material
-    )
+    volume = type(dt)(1.0) / (type(dt)(6.0) * wp.determinant(pose))
+    energy, stress = _evaluate_energy_stress(f, volume, type(dt)(materials[e, 0]), type(dt)(materials[e, 1]), material)
     if not wp.isfinite(energy) or not wp.isfinite(wp.ddot(stress, stress)):
         wp.atomic_max(flags, 0, 2)
         return
-    inertia = wp.float64(0.0)
+    inertia = type(dt)(0.0)
     for a in range(4):
         ia = indices[e, a]
-        gradient = wp.vec3d(0.0)
+        gradient = type(x[0])(0.0)
         if a == 0:
-            gradient = -wp.vec3d(
+            gradient = -type(x[0])(
                 pose[0, 0] + pose[1, 0] + pose[2, 0],
                 pose[0, 1] + pose[1, 1] + pose[2, 1],
                 pose[0, 2] + pose[1, 2] + pose[2, 2],
             )
         else:
-            gradient = wp.vec3d(pose[a - 1, 0], pose[a - 1, 1], pose[a - 1, 2])
+            gradient = type(x[0])(pose[a - 1, 0], pose[a - 1, 1], pose[a - 1, 2])
         r = stress * gradient
         da = x[ia] - xn[ia] - dt * vn[ia]
         if consistent:
             for b in range(4):
                 ib = indices[e, b]
                 db = x[ib] - xn[ib] - dt * vn[ib]
-                weight = wp.float64(coefficients[e])
+                weight = type(dt)(coefficients[e])
                 if a == b:
-                    weight *= wp.float64(2.0)
+                    weight *= type(dt)(2.0)
                 r += weight * db / (dt * dt)
-                inertia += weight * wp.dot(da, db) / (wp.float64(2.0) * dt * dt)
+                inertia += weight * wp.dot(da, db) / (type(dt)(2.0) * dt * dt)
         if mapping[ia] >= 0:
             wp.atomic_add(residual, mapping[ia], r)
     if not wp.isfinite(inertia):
@@ -120,15 +119,19 @@ def _elements(
 
 
 @wp.kernel
-def _finite(residual: wp.array[wp.vec3d], flags: wp.array[int]):
+def _finite(residual: wp.array[Any], flags: wp.array[int]):
     if not wp.isfinite(wp.length(residual[wp.tid()])):
         wp.atomic_max(flags, 0, 2)
 
 
-class TetObjective64:
-    """Own preallocated FP64 E/r scratch; input coordinates and step history remain read-only."""
+class TetObjective:
+    """Own native E/r scratch; input coordinates and step history remain read-only."""
 
-    def __init__(self, model, *, material_model, mass_mode, density=None):
+    def __init__(self, model, *, material_model, mass_mode, density=None, dtype=wp.float64):
+        if dtype not in (wp.float64, wp.float32):
+            raise ValueError("Tet E/r requires float64 or float32")
+        self.dtype = dtype
+        self.vector = wp.vec3d if dtype == wp.float64 else wp.vec3
         ids = np.flatnonzero(model.particle_inv_mass.numpy() > 0).astype(np.int32)
         mapping = np.full(model.particle_count, -1, dtype=np.int32)
         mapping[ids] = np.arange(len(ids))
@@ -137,19 +140,24 @@ class TetObjective64:
         self.physics = TetPhysicsWorkspace(model, material_model=material_model, mass_mode=mass_mode, density=density)
         self.ids = wp.array(ids, dtype=int, device=model.device)
         self.mapping = wp.array(mapping, dtype=int, device=model.device)
-        self.residual = wp.zeros(len(ids), dtype=wp.vec3d, device=model.device)
-        self.parts = wp.zeros(3, dtype=wp.float64, device=model.device)
-        self.min_det_f = wp.zeros(1, dtype=wp.float64, device=model.device)
+        self.residual = wp.zeros(len(ids), dtype=self.vector, device=model.device)
+        self.parts = wp.zeros(3, dtype=self.dtype, device=model.device)
+        self.min_det_f = wp.zeros(1, dtype=self.dtype, device=model.device)
         self.flags = wp.zeros(1, dtype=int, device=model.device)
 
     def evaluate(self, x, xn, vn, forces, gravity, *, dt, min_det_f_guard=0.2):
-        """Overwrite E/r and status, without reading or rounding an existing FP32 residual."""
+        """Evaluate directly in the selected dtype, without promoting a rounded residual."""
         if not math.isfinite(dt) or dt <= 0 or not math.isfinite(min_det_f_guard) or min_det_f_guard <= 0:
             raise ValueError("dt and detF guard must be finite and positive")
+        native = np.float64 if self.dtype == wp.float64 else np.float32
+        with np.errstate(over="ignore", under="ignore"):
+            dt, min_det_f_guard = native(dt), native(min_det_f_guard)
+        if not np.isfinite([dt, min_det_f_guard]).all() or dt <= 0 or min_det_f_guard <= 0:
+            raise ValueError("dt and detF guard must be representable and positive in the selected dtype")
         for value, dtype, shape in (
-            (x, wp.vec3d, (self.model.particle_count,)),
-            (xn, wp.vec3d, (self.model.particle_count,)),
-            (vn, wp.vec3d, (self.model.particle_count,)),
+            (x, self.vector, (self.model.particle_count,)),
+            (xn, self.vector, (self.model.particle_count,)),
+            (vn, self.vector, (self.model.particle_count,)),
             (forces, wp.vec3, (self.model.particle_count,)),
             (gravity, wp.vec3, self.model.gravity.shape),
         ):
@@ -158,7 +166,7 @@ class TetObjective64:
                 shape,
                 self.model.device,
             ):
-                raise ValueError("Incompatible FP64 tet inputs")
+                raise ValueError("Incompatible native tet inputs")
         physics = self.physics
         physics.validate_identity()
         self.flags.zero_()
@@ -184,7 +192,7 @@ class TetObjective64:
                 physics.mass,
                 physics.row_mass,
                 physics.mass_mode == "consistent",
-                dt,
+                self.dtype(dt),
                 self.residual,
                 self.parts,
                 self.flags,
@@ -205,8 +213,8 @@ class TetObjective64:
                 physics.coefficients,
                 int(physics.material_model == "smith_log_stabilized"),
                 physics.mass_mode == "consistent",
-                dt,
-                min_det_f_guard,
+                self.dtype(dt),
+                self.dtype(min_det_f_guard),
                 self.residual,
                 self.parts,
                 self.min_det_f,

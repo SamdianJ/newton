@@ -17,7 +17,7 @@ from newton._src.solvers.monolithic.tet_assembly import (
     build_tet_triplet_pattern,
     create_tet_assembly_workspace,
 )
-from newton._src.solvers.monolithic.tet_precision import TetObjective64
+from newton._src.solvers.monolithic.tet_precision import TetObjective
 from newton.tests.unittest_utils import add_function_test, get_test_devices
 from scripts.monolithic_reference.p3_tet_fixtures import build_model
 from scripts.monolithic_reference.p3_tet_oracle import TetOracle, material
@@ -27,7 +27,7 @@ def test_objective_and_assembly(test, device):
     """Compare both materials and mass modes with an independent E/r and scatter oracle."""
     for smith, consistent, fixed in product((False, True), repeat=3):
         model = build_model(device, fixed=fixed, gravity=(1, -2, -9.81))
-        objective = TetObjective64(
+        objective = TetObjective(
             model,
             material_model="smith_log_stabilized" if smith else "kim_stable_no_log",
             mass_mode="consistent" if consistent else "lumped",

@@ -412,3 +412,30 @@ Evidence: `agents/integration/artifacts/p4/t3-closeout-v1/`, including
 
 Full pre-commit passes. Receipt: `t3-closeout-v1/receipt.json`.
 SHA-256: `35d1f880b3bbb8cdbbbe374aa47fd20c7ed260555ab2afcab36603d5e55e661d`.
+
+
+## T5-A initial batch: freeze boundaries and specialize tet E/r
+
+T5 starts from 56d054ae. Freeze 396 input hashes, 92 source hashes, 725 dtype/
+host-decision locations and eight scene definitions. Record implementation,
+noise, lifecycle and experiment boundaries in p5_precision_contract.md.
+
+Specialize tet E/r and material energy/stress from one formula source for native
+FP64/FP32. Keep FP64 default, existing FP32 model inputs and B/PCG arithmetic;
+reject mixed coordinates and unrepresentable native dt/guard before scratch
+mutation. Rename the internal objective without retaining a deprecated alias.
+The public solver remains FP64-only pending the rest of the online path.
+
+New tests first fail for the absent objective. Final retained suite: 416 tests,
+409 passed, seven unchanged skips, five IDs added and none removed. Both dtypes
+pass independent tet oracle/guard checks on CPU/CUDA and graph replay on CUDA.
+Sixteen FP64 baseline fixture cases produce 64 exactly matching arrays.
+Full pre-commit passes. No long trajectories run in this batch; prior T4 evidence
+retains its tested source. Component tolerances do not widen production gates.
+
+T5-A remains in progress: FK/history, contact/SDF, host acceptance, solver state/
+identity, sampled controls and the scene runner are pending. T5-B/C/D have not
+started. Do not interpret this component batch as full FP32 qualification.
+
+Evidence: agents/integration/artifacts/p4/precision-comparison/t5-a-v1/.
+Receipt SHA-256: `240b58105076c489fcaaa82571dce1082faf77070ea0e11eb4ff804d7b5a9952`.

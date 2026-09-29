@@ -21,7 +21,7 @@ from newton._src.solvers.monolithic.tet_assembly import (
     build_tet_triplet_pattern,
     create_tet_assembly_workspace,
 )
-from newton._src.solvers.monolithic.tet_precision import TetObjective64
+from newton._src.solvers.monolithic.tet_precision import TetObjective
 from newton.tests.test_solver_monolithic_collision import _scene
 from newton.tests.test_solver_monolithic_tet import _dense
 from newton.tests.unittest_utils import add_function_test, get_test_devices
@@ -225,7 +225,7 @@ def test_tet64_oracle(test, device):
             for fixed in (False, True):
                 with test.subTest(material=material, mass=mass, fixed=fixed):
                     model = build_model(device, fixed=fixed, gravity=(0, 0, -9.81))
-                    obj = TetObjective64(
+                    obj = TetObjective(
                         model,
                         material_model=material,
                         mass_mode=mass,
@@ -364,7 +364,7 @@ def test_tet_tangent_and_domain(test, device):
 
     for material in ("kim_stable_no_log", "smith_log_stabilized"):
         model = build_model(device, fixed=True)
-        obj = TetObjective64(
+        obj = TetObjective(
             model,
             material_model=material,
             mass_mode="consistent",

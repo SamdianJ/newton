@@ -183,21 +183,21 @@ def _shape_gradient(inverse_rest: wp.mat33, node: int) -> wp.vec3:
 
 
 @wp.func
-def _evaluate_energy_stress64(f: wp.mat33d, volume: wp.float64, mu: wp.float64, lam: wp.float64, material: int):
+def _evaluate_energy_stress(f: Any, volume: Any, mu: Any, lam: Any, material: int):
     ic = wp.ddot(f, f)
-    d = wp.determinant(f) - wp.float64(1.0)
+    d = wp.determinant(f) - type(volume)(1.0)
     cof = wp.matrix_from_cols(wp.cross(f[:, 1], f[:, 2]), wp.cross(f[:, 2], f[:, 0]), wp.cross(f[:, 0], f[:, 1]))
     a = mu
     s = (lam + mu) * d - mu
-    energy = wp.float64(0.5) * mu * (ic - wp.float64(3.0)) - mu * d + wp.float64(0.5) * (lam + mu) * d * d
+    energy = type(volume)(0.5) * mu * (ic - type(volume)(3.0)) - mu * d + type(volume)(0.5) * (lam + mu) * d * d
     if material == 1:
-        mh = wp.float64(4.0) * mu / wp.float64(3.0)
-        lh = lam + wp.float64(5.0) * mu / wp.float64(6.0)
-        a = mh * (wp.float64(1.0) - wp.float64(1.0) / (ic + wp.float64(1.0)))
+        mh = type(volume)(4.0) * mu / type(volume)(3.0)
+        lh = lam + type(volume)(5.0) * mu / type(volume)(6.0)
+        a = mh * (type(volume)(1.0) - type(volume)(1.0) / (ic + type(volume)(1.0)))
         s = lh * d - mu
         energy = (
-            wp.float64(0.5) * mh * (ic - wp.float64(3.0) - wp.log((ic + wp.float64(1.0)) / wp.float64(4.0)))
-            + wp.float64(0.5) * lh * d * d
+            type(volume)(0.5) * mh * (ic - type(volume)(3.0) - wp.log((ic + type(volume)(1.0)) / type(volume)(4.0)))
+            + type(volume)(0.5) * lh * d * d
             - mu * d
         )
     return volume * energy, volume * (a * f + s * cof)
@@ -247,7 +247,7 @@ def _elastic_state(
             f, rest_volume, tet_materials[tet, 0], tet_materials[tet, 1], tangent
         )
     if high_precision:
-        exact_energy, exact_stress = _evaluate_energy_stress64(
+        exact_energy, exact_stress = _evaluate_energy_stress(
             wp.mat33d(ds) * wp.mat33d(tet_poses[tet]),
             wp.float64(rest_volume),
             wp.float64(tet_materials[tet, 0]),

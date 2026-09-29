@@ -47,7 +47,7 @@ from .tet_assembly import (
     build_tet_triplet_pattern,
     create_tet_assembly_workspace,
 )
-from .tet_precision import TetObjective64
+from .tet_precision import TetObjective
 from .variational_iteration import iterate, measure
 
 
@@ -123,7 +123,7 @@ class SolverMonolithic(SolverBase):
         radius = model.particle_radius.numpy()
         if not np.isfinite(radius).all() or np.any(radius < 0) or not np.all(radius == radius[0]):
             raise ValueError("Coupled particles require one finite nonnegative radius")
-        self._tet = TetObjective64(model, material_model=material_model, mass_mode=mass_mode, density=tet_rest_density)
+        self._tet = TetObjective(model, material_model=material_model, mass_mode=mass_mode, density=tet_rest_density)
         self._contact = ContactObjective(
             model,
             self._tet.mapping.numpy(),
