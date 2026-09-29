@@ -11,6 +11,17 @@ Evidence: `agents/integration/artifacts/p4/precision-comparison/t5-a-v1/`.
 before implementation edits. This lexical inventory is an audit aid; the
 following data-flow classification determines what changes.
 
+## Implemented component batches
+
+- Tet E/r: native FP64/FP32, independent component checks and exact FP64 parity
+  (`t5-a-v1`, commit `0476bf91`).
+- Articulation: native FK/Jacobians, joint/link E/r, predictor/history, private
+  state storage and host inertia checks (`t5-a2-v1`). Seven fixture-model probes
+  pass on CPU/CUDA; 378 FP64 arrays match the previous implementation exactly.
+  Both precision graphs coexist and replay. This does not expose a q-only solver.
+- Pending: contact/SDF, complete coupled state/step, host acceptance, public
+  precision/lifecycle migration, sampled full controls, scene runner and T5-B/C/D.
+
 ## Dtype boundaries
 
 `real` below means FP64 by default, FP32 only for the explicit experiment.

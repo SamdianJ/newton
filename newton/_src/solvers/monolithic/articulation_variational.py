@@ -1,11 +1,12 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 The Newton Developers
 # SPDX-License-Identifier: Apache-2.0
 
-"""Private FP64 kinematics for the P3 articulation incremental objective."""
+"""Native-precision kinematics for the P3 articulation incremental objective."""
 
 import hashlib
 import json
 import struct
+from typing import Any
 
 import numpy as np
 import warp as wp
@@ -21,42 +22,42 @@ def _forward(
     parents: wp.array[int],
     children: wp.array[int],
     starts: wp.array[int],
-    axes: wp.array[wp.vec3d],
-    xp: wp.array[wp.transformd],
-    xc: wp.array[wp.transformd],
-    local_com: wp.array[wp.vec3d],
-    q: wp.array[wp.float64],
-    poses: wp.array[wp.transformd],
-    rotations: wp.array[wp.mat33d],
-    com: wp.array[wp.vec3d],
-    world_axes: wp.array[wp.vec3d],
-    pivots: wp.array[wp.vec3d],
-    joint_rotations: wp.array[wp.mat33d],
-    joint_translations: wp.array[wp.vec3d],
+    axes: wp.array[Any],
+    xp: wp.array[Any],
+    xc: wp.array[Any],
+    local_com: wp.array[Any],
+    q: wp.array[Any],
+    poses: wp.array[Any],
+    rotations: wp.array[Any],
+    com: wp.array[Any],
+    world_axes: wp.array[Any],
+    pivots: wp.array[Any],
+    joint_rotations: wp.array[Any],
+    joint_translations: wp.array[Any],
 ):
     # One tree, in parent-before-child order; no cross-thread FK dependency.
     for j in range(types.shape[0]):
-        parent = wp.transformd(wp.vec3d(0.0), wp.quatd(0.0, 0.0, 0.0, 1.0))
+        parent = type(xp[0])(type(axes[0])(0.0), wp.quat_identity(dtype=q.dtype))
         if parents[j] >= 0:
             parent = poses[parents[j]]
         joint_frame = parent * xp[j]
-        motion = wp.transformd(wp.vec3d(0.0), wp.quatd(0.0, 0.0, 0.0, 1.0))
-        world_axes[j] = wp.vec3d(0.0)
+        motion = type(xp[0])(type(axes[0])(0.0), wp.quat_identity(dtype=q.dtype))
+        world_axes[j] = type(axes[0])(0.0)
         pivots[j] = wp.transform_get_translation(joint_frame)
         if types[j] != JointType.FIXED:
             i = starts[j]
             axis = axes[i]
             world_axes[j] = wp.transform_vector(joint_frame, axis)
             if types[j] == JointType.REVOLUTE:
-                motion = wp.transformd(wp.vec3d(0.0), wp.quat_from_axis_angle(axis, q[i]))
+                motion = type(xp[0])(type(axes[0])(0.0), wp.quat_from_axis_angle(axis, q[i]))
             else:
-                motion = wp.transformd(axis * q[i], wp.quatd(0.0, 0.0, 0.0, 1.0))
+                motion = type(xp[0])(axis * q[i], wp.quat_identity(dtype=q.dtype))
         joint_rotations[j] = wp.quat_to_matrix(wp.transform_get_rotation(motion))
         joint_translations[j] = wp.transform_get_translation(motion)
         child = children[j]
         pose = joint_frame * motion * wp.transform_inverse(xc[j])
         # Maintain a proper rotation through long fixed/revolute chains.
-        pose = wp.transformd(wp.transform_get_translation(pose), wp.normalize(wp.transform_get_rotation(pose)))
+        pose = type(xp[0])(wp.transform_get_translation(pose), wp.normalize(wp.transform_get_rotation(pose)))
         poses[child] = pose
         rotations[child] = wp.quat_to_matrix(wp.transform_get_rotation(pose))
         com[child] = wp.transform_point(pose, local_com[child])
@@ -67,15 +68,15 @@ def _jacobians(
     ancestors: wp.array2d[int],
     dof_joint: wp.array[int],
     types: wp.array[int],
-    axes: wp.array[wp.vec3d],
-    pivots: wp.array[wp.vec3d],
-    com: wp.array[wp.vec3d],
-    jt: wp.array2d[wp.vec3d],
-    jw: wp.array2d[wp.vec3d],
+    axes: wp.array[Any],
+    pivots: wp.array[Any],
+    com: wp.array[Any],
+    jt: wp.array2d[Any],
+    jw: wp.array2d[Any],
 ):
     body, dof = wp.tid()
-    translation = wp.vec3d(0.0)
-    angular = wp.vec3d(0.0)
+    translation = type(com[0])(0.0)
+    angular = type(com[0])(0.0)
     if ancestors[body, dof] != 0:
         joint = dof_joint[dof]
         if types[joint] == JointType.REVOLUTE:
@@ -89,15 +90,15 @@ def _jacobians(
 
 @wp.kernel
 def _body_outputs(
-    poses: wp.array[wp.transformd],
-    jt: wp.array2d[wp.vec3d],
-    jw: wp.array2d[wp.vec3d],
-    qd: wp.array[wp.float64],
+    poses: wp.array[Any],
+    jt: wp.array2d[Any],
+    jw: wp.array2d[Any],
+    qd: wp.array[Any],
     body_q: wp.array[wp.transform],
     body_qd: wp.array[wp.spatial_vector],
 ):
     b = wp.tid()
-    linear, angular = wp.vec3d(0.0), wp.vec3d(0.0)
+    linear, angular = type(jt[0, 0])(0.0), type(jt[0, 0])(0.0)
     for i in range(qd.shape[0]):
         linear += jt[b, i] * qd[i]
         angular += jw[b, i] * qd[i]
@@ -124,7 +125,7 @@ def _configuration_digest(fields):
 
 
 class _TreeKinematics:
-    """Own the immutable geometry and FP64 scratch for one supported tree."""
+    """Own the immutable geometry and native scratch for one supported tree."""
 
     _fields = (
         "articulation_start",
@@ -160,7 +161,14 @@ class _TreeKinematics:
         "shape_flags",
     )
 
-    def __init__(self, model, *, extra_config=None):
+    def __init__(self, model, *, extra_config=None, dtype=wp.float64):
+        if dtype not in (wp.float64, wp.float32):
+            raise ValueError("Articulation requires float64 or float32")
+        self.dtype = dtype
+        self.numpy_dtype = np.float64 if dtype == wp.float64 else np.float32
+        self.vector = wp.vec3d if dtype == wp.float64 else wp.vec3
+        self.matrix = wp.mat33d if dtype == wp.float64 else wp.mat33
+        self.transform = wp.transformd if dtype == wp.float64 else wp.transform
         _validate_joint_coordinate_layout(model)
         if model.articulation_count != 1 or not model.joint_dof_count:
             raise ValueError("P3 articulation requires one nonempty tree")
@@ -216,8 +224,13 @@ class _TreeKinematics:
         for name, value in v.items():
             if not np.isfinite(value).all():
                 raise ValueError(f"Nonfinite articulation configuration: {name}")
-        inertia = v["body_inertia"].astype(float)
-        second = 0.5 * np.trace(inertia, axis1=1, axis2=2)[:, None, None] * np.eye(3) - inertia
+        inertia = v["body_inertia"].astype(self.numpy_dtype)
+        second = (
+            self.numpy_dtype(0.5)
+            * np.trace(inertia, axis1=1, axis2=2)[:, None, None]
+            * np.eye(3, dtype=self.numpy_dtype)
+            - inertia
+        )
         if (
             np.any(v["body_mass"] < 0)
             or not np.allclose(inertia, inertia.transpose(0, 2, 1), atol=0, rtol=1e-6)
@@ -229,6 +242,8 @@ class _TreeKinematics:
                 raise ValueError(f"Negative {name}")
         fields = dict(v)
         fields.update({} if extra_config is None else extra_config)
+        if dtype == wp.float32:
+            fields["native_precision"] = np.array([32], dtype=np.int32)
         self.digest = _configuration_digest(fields)
 
         def array(data, dtype):
@@ -240,41 +255,49 @@ class _TreeKinematics:
         self.starts = array(v["joint_q_start"], int)
         self.dof_joint = array(dof_joint, int)
         self.ancestors = array(ancestors, int)
-        axes = v["joint_axis"].astype(float)
+        axes = v["joint_axis"].astype(self.numpy_dtype)
         norms = np.linalg.norm(axes, axis=1)
         if np.any(abs(norms - 1) > 1e-5):
             raise ValueError("Joint axes must be unit directions")
-        self.axes = array(axes / norms[:, None], wp.vec3d)
+        self.axes = array(axes / norms[:, None], self.vector)
         for name in ("joint_X_p", "joint_X_c"):
-            transforms = v[name].astype(float)
+            transforms = v[name].astype(self.numpy_dtype)
             norms = np.linalg.norm(transforms[:, 3:], axis=1)
             if np.any(abs(norms - 1) > 1e-5):
                 raise ValueError("Static joint rotations must be unit quaternions")
             transforms[:, 3:] /= norms[:, None]
-            setattr(self, "xp" if name == "joint_X_p" else "xc", array(transforms, wp.transformd))
-        self.local_com = array(v["body_com"].astype(float), wp.vec3d)
-        self.mass = array(v["body_mass"].astype(float), wp.float64)
-        self.second = array(second, wp.mat33d)
-        self.poses = wp.zeros(self.bodies, dtype=wp.transformd, device=self.device)
-        self.rotations = wp.zeros(self.bodies, dtype=wp.mat33d, device=self.device)
-        self.com = wp.zeros(self.bodies, dtype=wp.vec3d, device=self.device)
-        self.world_axes = wp.zeros(self.joints, dtype=wp.vec3d, device=self.device)
-        self.pivots = wp.zeros(self.joints, dtype=wp.vec3d, device=self.device)
-        self.joint_rotations = wp.zeros(self.joints, dtype=wp.mat33d, device=self.device)
-        self.joint_translations = wp.zeros(self.joints, dtype=wp.vec3d, device=self.device)
-        self.jt = wp.zeros((self.bodies, self.count), dtype=wp.vec3d, device=self.device)
+            setattr(self, "xp" if name == "joint_X_p" else "xc", array(transforms, self.transform))
+        self.local_com = array(v["body_com"].astype(self.numpy_dtype), self.vector)
+        self.mass = array(v["body_mass"].astype(self.numpy_dtype), self.dtype)
+        self.second = array(second, self.matrix)
+        self.poses = wp.zeros(self.bodies, dtype=self.transform, device=self.device)
+        self.rotations = wp.zeros(self.bodies, dtype=self.matrix, device=self.device)
+        self.com = wp.zeros(self.bodies, dtype=self.vector, device=self.device)
+        self.world_axes = wp.zeros(self.joints, dtype=self.vector, device=self.device)
+        self.pivots = wp.zeros(self.joints, dtype=self.vector, device=self.device)
+        self.joint_rotations = wp.zeros(self.joints, dtype=self.matrix, device=self.device)
+        self.joint_translations = wp.zeros(self.joints, dtype=self.vector, device=self.device)
+        self.jt = wp.zeros((self.bodies, self.count), dtype=self.vector, device=self.device)
         self.jw = wp.zeros_like(self.jt)
-        self.evaluate(wp.array(model.joint_q.numpy(), dtype=wp.float64, device=self.device))
+        self.evaluate(wp.array(model.joint_q.numpy(), dtype=self.dtype, device=self.device))
         self.validate_inertia()
+
+    def timestep(self, value):
+        """Validate a timestep in the arithmetic used by this component."""
+        with np.errstate(over="ignore", under="ignore"):
+            value = self.numpy_dtype(value)
+        if not np.isfinite(value) or value <= 0:
+            raise ValueError("Articulation requires a representable finite positive dt")
+        return value
 
     def validate_inertia(self):
         """Require physical positive inertia at the currently evaluated private FK."""
         v = self.values
         jt, jw, rotation = self.jt.numpy(), self.jw.numpy(), self.rotations.numpy()
-        world_inertia = rotation @ v["body_inertia"].astype(float) @ rotation.transpose(0, 2, 1)
+        world_inertia = rotation @ v["body_inertia"].astype(self.numpy_dtype) @ rotation.transpose(0, 2, 1)
         effective_inertia = np.einsum("bni,bmi,b->nm", jt, jt, v["body_mass"])
         effective_inertia += np.einsum("bni,bij,bmj->nm", jw, world_inertia, jw)
-        effective_inertia += np.diag(v["joint_armature"].astype(float))
+        effective_inertia += np.diag(v["joint_armature"].astype(self.numpy_dtype))
         if not np.isfinite(effective_inertia).all() or np.linalg.eigvalsh(effective_inertia).min() <= 0:
             raise ValueError("Articulation inertia must be positive definite on every free DOF")
 
@@ -289,8 +312,8 @@ class _TreeKinematics:
 
     def evaluate(self, q, *, state=None):
         """Evaluate FK and COM/angular Jacobians without using public FP32 FK."""
-        if (q.shape, q.dtype, q.device) != ((self.count,), wp.float64, self.device):
-            raise ValueError("P3 FK requires owned-shape FP64 coordinates on the model device")
+        if (q.shape, q.dtype, q.device) != ((self.count,), self.dtype, self.device):
+            raise ValueError("P3 FK requires owned-shape native coordinates on the model device")
         wp.launch(
             _forward,
             1,
@@ -332,17 +355,17 @@ class _TreeKinematics:
 class ArticulationKinematics(_TreeKinematics):
     """Retain the q-only entrance contract while sharing supported-tree FK."""
 
-    def __init__(self, model, *, extra_config=None):
+    def __init__(self, model, *, extra_config=None, dtype=wp.float64):
         if model.particle_count or model.tet_count:
             raise ValueError("P3 articulation requires one nonempty tree and no particles/tets")
         if np.any(model.shape_flags.numpy() & int(ShapeFlags.COLLIDE_SHAPES | ShapeFlags.COLLIDE_PARTICLES)):
             raise ValueError("P3 articulation requires collision-disabled shapes")
-        super().__init__(model, extra_config=extra_config)
+        super().__init__(model, extra_config=extra_config, dtype=dtype)
 
 
 @wp.func
-def _inner(a: wp.mat33d, b: wp.mat33d):
-    result = wp.float64(0.0)
+def _inner(a: Any, b: Any):
+    result = type(a[0, 0])(0.0)
     for i in range(3):
         for j in range(3):
             result += a[i, j] * b[i, j]
@@ -350,30 +373,30 @@ def _inner(a: wp.mat33d, b: wp.mat33d):
 
 
 @wp.func
-def _limit_primitive(y: wp.float64, dn: wp.float64, width: wp.float64):
-    z = wp.min(wp.max(y, wp.float64(0.0)), width)
-    value = wp.float64(0.75) * z * z * z * z / (width * width) - dn * z * z * z / (width * width)
-    value += -wp.float64(0.4) * z * z * z * z * z / (width * width * width) + dn * z * z * z * z / (
-        wp.float64(2.0) * width * width * width
+def _limit_primitive(y: Any, dn: Any, width: Any):
+    z = wp.min(wp.max(y, type(y)(0.0)), width)
+    value = type(y)(0.75) * z * z * z * z / (width * width) - dn * z * z * z / (width * width)
+    value += -type(y)(0.4) * z * z * z * z * z / (width * width * width) + dn * z * z * z * z / (
+        type(y)(2.0) * width * width * width
     )
     if y > width:
-        value += (y - width) * ((y + width) * wp.float64(0.5) - dn)
+        value += (y - width) * ((y + width) * type(y)(0.5) - dn)
     return value
 
 
 @wp.func
-def _limit_variation(d: wp.float64, dn: wp.float64, ke: wp.float64, kd: wp.float64, width: wp.float64, h: wp.float64):
-    zero = wp.float64(0.0)
+def _limit_variation(d: Any, dn: Any, ke: Any, kd: Any, width: Any, h: Any):
+    zero = type(d)(0.0)
     penetration = wp.max(d, zero)
     activation, derivative = zero, zero
     if d >= width:
-        activation = wp.float64(1.0)
+        activation = type(d)(1.0)
     elif d > zero:
         t = d / width
-        activation = t * t * (wp.float64(3.0) - wp.float64(2.0) * t)
-        derivative = wp.float64(6.0) * t * (wp.float64(1.0) - t) / width
+        activation = t * t * (type(d)(3.0) - type(d)(2.0) * t)
+        derivative = type(d)(6.0) * t * (type(d)(1.0) - t) / width
     outward = wp.max(d - dn, zero)
-    energy = ke * penetration * penetration * wp.float64(0.5)
+    energy = ke * penetration * penetration * type(d)(0.5)
     if d > wp.max(dn, zero):
         energy += kd / h * (_limit_primitive(d, dn, width) - _limit_primitive(wp.max(dn, zero), dn, width))
     residual = ke * penetration + kd / h * activation * outward
@@ -387,46 +410,46 @@ def _limit_variation(d: wp.float64, dn: wp.float64, ke: wp.float64, kd: wp.float
 
 @wp.kernel
 def _joint_variation(
-    q: wp.array[wp.float64],
-    qn: wp.array[wp.float64],
-    vn: wp.array[wp.float64],
-    params: wp.array2d[wp.float64],
-    armature: wp.array[wp.float64],
-    damping: wp.array[wp.float64],
-    qt: wp.array[wp.float64],
-    vt: wp.array[wp.float64],
-    force: wp.array[wp.float64],
-    h: wp.float64,
-    energy: wp.array[wp.float64],
-    residual: wp.array[wp.float64],
-    tangent: wp.array[wp.float64],
+    q: wp.array[Any],
+    qn: wp.array[Any],
+    vn: wp.array[Any],
+    params: wp.array2d[Any],
+    armature: wp.array[Any],
+    damping: wp.array[Any],
+    qt: wp.array[Any],
+    vt: wp.array[Any],
+    force: wp.array[Any],
+    h: Any,
+    energy: wp.array[Any],
+    residual: wp.array[Any],
+    tangent: wp.array[Any],
 ):
     i = wp.tid()
     delta = q[i] - qn[i]
     v = delta / h
     inertial = delta - h * vn[i]
     e = (
-        armature[i] * inertial * inertial / (wp.float64(2.0) * h * h)
-        + damping[i] * delta * delta / (wp.float64(2.0) * h)
+        armature[i] * inertial * inertial / (type(h)(2.0) * h * h)
+        + damping[i] * delta * delta / (type(h)(2.0) * h)
         - force[i] * delta
     )
     r = armature[i] * inertial / (h * h) + damping[i] * v - force[i]
     b = armature[i] / (h * h) + damping[i] / h
     kp, kd, effort = params[i, 0], params[i, 1], params[i, 2]
     a = kp + kd / h
-    if a > wp.float64(0.0):
+    if a > type(h)(0.0):
         u = kp * (q[i] - qt[i]) + kd * (v - vt[i])
         r += wp.clamp(u, -effort, effort)
         if wp.abs(u) < effort:
-            e += u * u / (wp.float64(2.0) * a)
+            e += u * u / (type(h)(2.0) * a)
             b += a
         else:
-            e += effort * (wp.abs(u) - effort * wp.float64(0.5)) / a
+            e += effort * (wp.abs(u) - effort * type(h)(0.5)) / a
     for side in range(2):
-        sign = wp.float64(1.0)
+        sign = type(h)(1.0)
         bound = params[i, 4]
         if side == 1:
-            sign = wp.float64(-1.0)
+            sign = type(h)(-1.0)
             bound = params[i, 3]
         el, rl, bl = _limit_variation(
             sign * (q[i] - bound), sign * (qn[i] - bound), params[i, 5], params[i, 6], params[i, 7], h
@@ -448,63 +471,61 @@ def _joint_variation(
 
 @wp.kernel
 def _link_variation(
-    t: wp.array[wp.vec3d],
-    r: wp.array[wp.mat33d],
-    tn: wp.array[wp.vec3d],
-    predicted_t: wp.array[wp.vec3d],
-    predicted_r: wp.array[wp.mat33d],
-    mass: wp.array[wp.float64],
-    second: wp.array[wp.mat33d],
-    force: wp.array[wp.vec3d],
-    h: wp.float64,
-    energy: wp.array[wp.float64],
-    translation_gradient: wp.array[wp.vec3d],
-    rotation_gradient: wp.array[wp.vec3d],
-    rotation_tangent: wp.array[wp.mat33d],
+    t: wp.array[Any],
+    r: wp.array[Any],
+    tn: wp.array[Any],
+    predicted_t: wp.array[Any],
+    predicted_r: wp.array[Any],
+    mass: wp.array[Any],
+    second: wp.array[Any],
+    force: wp.array[Any],
+    h: Any,
+    energy: wp.array[Any],
+    translation_gradient: wp.array[Any],
+    rotation_gradient: wp.array[Any],
+    rotation_tangent: wp.array[Any],
     build_tangent: bool,
 ):
     b = wp.tid()
     dt, dr = t[b] - predicted_t[b], r[b] - predicted_r[b]
     rs = dr * second[b]
-    energy[b] = (mass[b] * wp.dot(dt, dt) + _inner(rs, dr)) / (wp.float64(2.0) * h * h) - wp.dot(force[b], t[b] - tn[b])
+    energy[b] = (mass[b] * wp.dot(dt, dt) + _inner(rs, dr)) / (type(h)(2.0) * h * h) - wp.dot(force[b], t[b] - tn[b])
     translation_gradient[b] = mass[b] * dt / (h * h) - force[b]
     a = rs * wp.transpose(r[b]) / (h * h)
-    rotation_gradient[b] = wp.vec3d(a[2, 1] - a[1, 2], a[0, 2] - a[2, 0], a[1, 0] - a[0, 1])
+    rotation_gradient[b] = type(t[0])(a[2, 1] - a[1, 2], a[0, 2] - a[2, 0], a[1, 0] - a[0, 1])
     if build_tangent:
         c = r[b] * second[b] * wp.transpose(predicted_r[b])
-        local = (wp.identity(n=3, dtype=wp.float64) * wp.trace(c) - (c + wp.transpose(c)) * wp.float64(0.5)) / (h * h)
+        local = (wp.identity(n=3, dtype=type(h)) * wp.trace(c) - (c + wp.transpose(c)) * type(h)(0.5)) / (h * h)
         vectors, values = wp.eig3(local)
-        positive = wp.vec3d(
-            wp.max(values[0], wp.float64(0.0)), wp.max(values[1], wp.float64(0.0)), wp.max(values[2], wp.float64(0.0))
+        positive = type(t[0])(
+            wp.max(values[0], type(h)(0.0)), wp.max(values[1], type(h)(0.0)), wp.max(values[2], type(h)(0.0))
         )
         rotation_tangent[b] = vectors * wp.diag(positive) * wp.transpose(vectors)
 
 
 @wp.kernel
 def _reduced_variation(
-    jt: wp.array2d[wp.vec3d],
-    jw: wp.array2d[wp.vec3d],
-    mass: wp.array[wp.float64],
-    gt: wp.array[wp.vec3d],
-    gr: wp.array[wp.vec3d],
-    kr: wp.array[wp.mat33d],
-    joint_r: wp.array[wp.float64],
-    joint_b: wp.array[wp.float64],
-    h: wp.float64,
-    residual: wp.array[wp.float64],
-    tangent: wp.array2d[wp.float64],
+    jt: wp.array2d[Any],
+    jw: wp.array2d[Any],
+    mass: wp.array[Any],
+    gt: wp.array[Any],
+    gr: wp.array[Any],
+    kr: wp.array[Any],
+    joint_r: wp.array[Any],
+    joint_b: wp.array[Any],
+    h: Any,
+    residual: wp.array[Any],
+    tangent: wp.array2d[Any],
     tangent32: wp.array2d[float],
 ):
     i, j = wp.tid()
-    b = wp.float64(0.0)
+    b = type(h)(0.0)
     r = joint_r[i]
     if i == j:
         b = joint_b[i]
     for link in range(mass.shape[0]):
         b += mass[link] * wp.dot(jt[link, i], jt[link, j]) / (h * h)
-        b += (wp.dot(jw[link, i], kr[link] * jw[link, j]) + wp.dot(jw[link, j], kr[link] * jw[link, i])) * wp.float64(
-            0.5
-        )
+        b += (wp.dot(jw[link, i], kr[link] * jw[link, j]) + wp.dot(jw[link, j], kr[link] * jw[link, i])) * type(h)(0.5)
         if i == j:
             r += wp.dot(jt[link, i], gt[link]) + wp.dot(jw[link, i], gr[link])
     tangent[i, j] = b
@@ -515,12 +536,12 @@ def _reduced_variation(
 
 @wp.kernel
 def _reduced_residual(
-    jt: wp.array2d[wp.vec3d],
-    jw: wp.array2d[wp.vec3d],
-    gt: wp.array[wp.vec3d],
-    gr: wp.array[wp.vec3d],
-    joint_r: wp.array[wp.float64],
-    residual: wp.array[wp.float64],
+    jt: wp.array2d[Any],
+    jw: wp.array2d[Any],
+    gt: wp.array[Any],
+    gr: wp.array[Any],
+    joint_r: wp.array[Any],
+    residual: wp.array[Any],
 ):
     i = wp.tid()
     r = joint_r[i]
@@ -530,28 +551,29 @@ def _reduced_residual(
 
 
 class ArticulationObjective:
-    """Evaluate the frozen physical incremental objective on device in FP64."""
+    """Evaluate the frozen physical incremental objective on device in the kinematics dtype."""
 
     def __init__(self, kinematics, parameters):
         self.k = kinematics
         k = kinematics
         n, b, device = k.count, k.bodies, k.device
-        self.params = wp.array(parameters, dtype=wp.float64, device=device)
-        self.armature = wp.array(k.values["joint_armature"], dtype=wp.float64, device=device)
-        self.damping = wp.array(k.values["joint_damping"], dtype=wp.float64, device=device)
+        self.params = wp.array(parameters, dtype=k.dtype, device=device)
+        self.armature = wp.array(k.values["joint_armature"], dtype=k.dtype, device=device)
+        self.damping = wp.array(k.values["joint_damping"], dtype=k.dtype, device=device)
         for name in ("qn", "vn", "qt", "vt", "joint_force", "joint_energy", "joint_r", "joint_b", "residual"):
-            setattr(self, name, wp.zeros(n, dtype=wp.float64, device=device))
+            setattr(self, name, wp.zeros(n, dtype=k.dtype, device=device))
         for name in ("tn", "predicted_t", "force", "gt", "gr"):
-            setattr(self, name, wp.zeros(b, dtype=wp.vec3d, device=device))
+            setattr(self, name, wp.zeros(b, dtype=k.vector, device=device))
         for name in ("rn", "predicted_r", "kr"):
-            setattr(self, name, wp.zeros(b, dtype=wp.mat33d, device=device))
-        self.link_energy = wp.zeros(b, dtype=wp.float64, device=device)
-        self.tangent = wp.zeros((n, n), dtype=wp.float64, device=device)
+            setattr(self, name, wp.zeros(b, dtype=k.matrix, device=device))
+        self.link_energy = wp.zeros(b, dtype=k.dtype, device=device)
+        self.tangent = wp.zeros((n, n), dtype=k.dtype, device=device)
         self.tangent32 = wp.zeros((n, n), dtype=wp.float32, device=device)
 
     def evaluate(self, q, h, *, build_tangent=True):
         """Evaluate without reading derived FP32 body outputs or changing history."""
         k = self.k
+        h = k.timestep(h)
         k.evaluate(q)
         wp.launch(
             _joint_variation,
@@ -566,7 +588,7 @@ class ArticulationObjective:
                 self.qt,
                 self.vt,
                 self.joint_force,
-                wp.float64(h),
+                k.dtype(h),
                 self.joint_energy,
                 self.joint_r,
                 self.joint_b,
@@ -585,7 +607,7 @@ class ArticulationObjective:
                 k.mass,
                 k.second,
                 self.force,
-                wp.float64(h),
+                k.dtype(h),
                 self.link_energy,
                 self.gt,
                 self.gr,
@@ -611,7 +633,7 @@ class ArticulationObjective:
                 self.kr,
                 self.joint_r,
                 self.joint_b,
-                wp.float64(h),
+                k.dtype(h),
                 self.residual,
                 self.tangent,
                 self.tangent32,

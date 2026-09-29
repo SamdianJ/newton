@@ -439,3 +439,28 @@ started. Do not interpret this component batch as full FP32 qualification.
 
 Evidence: agents/integration/artifacts/p4/precision-comparison/t5-a-v1/.
 Receipt SHA-256: `240b58105076c489fcaaa82571dce1082faf77070ea0e11eb4ff804d7b5a9952`.
+
+
+## T5-A second batch: native articulation components
+
+Specialize shared FK/COM/Jacobians, joint/link E/r and tangent preparation,
+predictor and integration history using the same formulas for FP64/FP32.
+Private articulation state storage follows the kinematics dtype; standard model/
+display buffers and B/PCG remain unchanged. Select NumPy dtype for normalization,
+second moments, effective inertia and eigenvalue checks. Reject unrepresentable
+dt before reset/objective writes; distinguish FP32 component identity while
+preserving the original FP64 digest and schema.
+
+New tests first reject the unsupported dtype option. Seven original fixture
+models exercise component probes on CPU/CUDA, independent E/r/FK/Jacobian/history
+math, dtype rejection, copy/reset and coexisting precision graphs. Final retained
+suite: 421 run, 414 passed, seven unchanged skips; five added IDs, none removed,
+no legacy modules loaded. Fourteen FP64 probes produce 378 arrays exactly equal
+to the pre-edit capture at 0476bf91. Full pre-commit passes. No long trajectories
+run and no production acceptance/noise threshold changes.
+
+T5-A remains partial: contact/SDF, complete coupled state/step, host acceptance,
+public precision/lifecycle migration, sampled scene controls and runner remain.
+T5-B/C/D have not started; public SolverMonolithic still runs FP64 only.
+Evidence: agents/integration/artifacts/p4/precision-comparison/t5-a2-v1/.
+Receipt SHA-256: `ede3c854ab417ab729398c5f9b036b1acc1db3234bfd9b4d63cdce069cb35b9e`.

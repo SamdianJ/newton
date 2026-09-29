@@ -1,7 +1,9 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 The Newton Developers
 # SPDX-License-Identifier: Apache-2.0
 
-"""Private, explicitly owned FP64 articulation integration history."""
+"""Private, explicitly owned native-precision articulation integration history."""
+
+from typing import Any
 
 import numpy as np
 import warp as wp
@@ -10,23 +12,23 @@ from ...sim import JointType, Model
 
 
 @wp.func
-def _skew(v: wp.vec3d):
-    return wp.mat33d(0.0, -v[2], v[1], v[2], 0.0, -v[0], -v[1], v[0], 0.0)
+def _skew(v: Any):
+    return wp.matrix(0.0, -v[2], v[1], v[2], 0.0, -v[0], -v[1], v[0], 0.0, shape=(3, 3), dtype=type(v[0]))
 
 
 @wp.func
-def _store_symmetric(a: wp.mat33d, values: wp.array2d[wp.float64], i: int):
+def _store_symmetric(a: Any, values: wp.array2d[Any], i: int):
     values[i, 0] = a[0, 0]
     values[i, 1] = a[1, 1]
     values[i, 2] = a[2, 2]
-    values[i, 3] = (a[0, 1] + a[1, 0]) * wp.float64(0.5)
-    values[i, 4] = (a[0, 2] + a[2, 0]) * wp.float64(0.5)
-    values[i, 5] = (a[1, 2] + a[2, 1]) * wp.float64(0.5)
+    values[i, 3] = (a[0, 1] + a[1, 0]) * type(a[0, 0])(0.5)
+    values[i, 4] = (a[0, 2] + a[2, 0]) * type(a[0, 0])(0.5)
+    values[i, 5] = (a[1, 2] + a[2, 1]) * type(a[0, 0])(0.5)
 
 
 @wp.func
-def _load_symmetric(values: wp.array2d[wp.float64], i: int):
-    return wp.mat33d(
+def _load_symmetric(values: wp.array2d[Any], i: int):
+    return wp.matrix(
         values[i, 0],
         values[i, 3],
         values[i, 4],
@@ -36,19 +38,21 @@ def _load_symmetric(values: wp.array2d[wp.float64], i: int):
         values[i, 4],
         values[i, 5],
         values[i, 2],
+        shape=(3, 3),
+        dtype=type(values[0, 0]),
     )
 
 
 @wp.kernel
 def _initial_link_rates(
-    jt: wp.array2d[wp.vec3d],
-    jw: wp.array2d[wp.vec3d],
-    qd: wp.array[wp.float64],
-    v: wp.array[wp.vec3d],
-    omega: wp.array[wp.vec3d],
+    jt: wp.array2d[Any],
+    jw: wp.array2d[Any],
+    qd: wp.array[Any],
+    v: wp.array[Any],
+    omega: wp.array[Any],
 ):
     b = wp.tid()
-    linear, angular = wp.vec3d(0.0), wp.vec3d(0.0)
+    linear, angular = type(v[0])(0.0), type(v[0])(0.0)
     for i in range(qd.shape[0]):
         linear += jt[b, i] * qd[i]
         angular += jw[b, i] * qd[i]
@@ -60,14 +64,14 @@ def _initial_link_rates(
 def _initial_joint_rates(
     types: wp.array[int],
     starts: wp.array[int],
-    axes: wp.array[wp.vec3d],
-    qd: wp.array[wp.float64],
-    v: wp.array[wp.vec3d],
-    omega: wp.array[wp.vec3d],
+    axes: wp.array[Any],
+    qd: wp.array[Any],
+    v: wp.array[Any],
+    omega: wp.array[Any],
 ):
     j = wp.tid()
-    v[j] = wp.vec3d(0.0)
-    omega[j] = wp.vec3d(0.0)
+    v[j] = type(v[0])(0.0)
+    omega[j] = type(v[0])(0.0)
     if types[j] == JointType.REVOLUTE:
         omega[j] = axes[starts[j]] * qd[starts[j]]
     elif types[j] == JointType.PRISMATIC:
@@ -75,41 +79,41 @@ def _initial_joint_rates(
 
 
 @wp.kernel
-def _initial_symmetric(omega: wp.array[wp.vec3d], h: wp.float64, sym: wp.array2d[wp.float64]):
+def _initial_symmetric(omega: wp.array[Any], h: Any, sym: wp.array2d[Any]):
     i = wp.tid()
     cross = _skew(omega[i])
-    value = h * (cross * cross) / (wp.float64(1.0) + wp.sqrt(wp.float64(1.0) - h * h * wp.dot(omega[i], omega[i])))
+    value = h * (cross * cross) / (type(h)(1.0) + wp.sqrt(type(h)(1.0) - h * h * wp.dot(omega[i], omega[i])))
     _store_symmetric(value, sym, i)
 
 
 @wp.kernel
 def _recover_history(
-    old_t: wp.array[wp.vec3d],
-    old_r: wp.array[wp.mat33d],
-    new_t: wp.array[wp.vec3d],
-    new_r: wp.array[wp.mat33d],
-    h: wp.float64,
-    v: wp.array[wp.vec3d],
-    omega: wp.array[wp.vec3d],
-    sym: wp.array2d[wp.float64],
+    old_t: wp.array[Any],
+    old_r: wp.array[Any],
+    new_t: wp.array[Any],
+    new_r: wp.array[Any],
+    h: Any,
+    v: wp.array[Any],
+    omega: wp.array[Any],
+    sym: wp.array2d[Any],
 ):
     i = wp.tid()
     v[i] = (new_t[i] - old_t[i]) / h
     a = (new_r[i] - old_r[i]) * wp.transpose(new_r[i]) / h
-    omega[i] = wp.vec3d(a[2, 1] - a[1, 2], a[0, 2] - a[2, 0], a[1, 0] - a[0, 1]) * wp.float64(0.5)
+    omega[i] = type(v[0])(a[2, 1] - a[1, 2], a[0, 2] - a[2, 0], a[1, 0] - a[0, 1]) * type(h)(0.5)
     _store_symmetric(a, sym, i)
 
 
 @wp.kernel
 def _predict(
-    t: wp.array[wp.vec3d],
-    r: wp.array[wp.mat33d],
-    v: wp.array[wp.vec3d],
-    omega: wp.array[wp.vec3d],
-    sym: wp.array2d[wp.float64],
-    h: wp.float64,
-    predicted_t: wp.array[wp.vec3d],
-    predicted_r: wp.array[wp.mat33d],
+    t: wp.array[Any],
+    r: wp.array[Any],
+    v: wp.array[Any],
+    omega: wp.array[Any],
+    sym: wp.array2d[Any],
+    h: Any,
+    predicted_t: wp.array[Any],
+    predicted_r: wp.array[Any],
 ):
     i = wp.tid()
     predicted_t[i] = t[i] + h * v[i]
@@ -124,18 +128,19 @@ class ArticulationState:
 
     def __init__(self, kinematics):
         self.kinematics = kinematics
+        self.dtype, self.vector = kinematics.dtype, kinematics.vector
         self.model, self.device = kinematics.model, kinematics.device
         n, j, b = kinematics.count, kinematics.joints, kinematics.bodies
         self.schema = {
-            "joint_v": ((j,), wp.vec3d),
-            "joint_omega": ((j,), wp.vec3d),
-            "joint_vsym": ((j, 6), wp.float64),
-            "link_v_com": ((b,), wp.vec3d),
-            "link_omega": ((b,), wp.vec3d),
-            "link_vsym": ((b, 6), wp.float64),
-            "bound_q": ((n,), wp.float64),
-            "bound_qd": ((n,), wp.float64),
-            "last_dt": ((1,), wp.float64),
+            "joint_v": ((j,), self.vector),
+            "joint_omega": ((j,), self.vector),
+            "joint_vsym": ((j, 6), self.dtype),
+            "link_v_com": ((b,), self.vector),
+            "link_omega": ((b,), self.vector),
+            "link_vsym": ((b, 6), self.dtype),
+            "bound_q": ((n,), self.dtype),
+            "bound_qd": ((n,), self.dtype),
+            "last_dt": ((1,), self.dtype),
             "schema_version": ((1,), wp.int32),
             "valid": ((1,), wp.int32),
             "config_digest": ((32,), wp.uint8),
@@ -169,7 +174,7 @@ class ArticulationState:
 
     def _copy_coordinates(self, state, source):
         for name in ("joint_q", "joint_qd"):
-            setattr(state, name, wp.array(getattr(source, name).numpy(), dtype=wp.float64, device=self.device))
+            setattr(state, name, wp.array(getattr(source, name).numpy(), dtype=self.dtype, device=self.device))
 
     def _particle_schema(self):
         return dict.fromkeys(("particle_q", "particle_qd", "particle_f"), ((0,), wp.vec3))
@@ -208,7 +213,7 @@ class ArticulationState:
             raise ValueError("Invalid articulation history schema")
         fields = {name: (getattr(history, name), shape, dtype) for name, (shape, dtype) in self.schema.items()}
         for name in ("joint_q", "joint_qd"):
-            fields[name] = (getattr(state, name, None), (k.count,), wp.float64)
+            fields[name] = (getattr(state, name, None), (k.count,), self.dtype)
         standard = {"joint_q", "joint_qd", "body_q", "body_qd", "body_f", "particle_q", "particle_qd", "particle_f"}
         for name, dtype in (("body_q", wp.transform), ("body_qd", wp.spatial_vector), ("body_f", wp.spatial_vector)):
             fields[name] = (getattr(state, name, None), (k.bodies,), dtype)
@@ -246,15 +251,18 @@ class ArticulationState:
 
     def reset(self, state, *, dt):
         """Explicitly initialize discrete velocities from physical q/qd and dt."""
-        if not np.isfinite(dt) or dt <= 0:
-            raise ValueError("Articulation initialization requires finite positive dt")
         k = self.kinematics
+        dt = k.timestep(dt)
         k.validate_identity()
         history = self.validate(state, bound=False)
         # Validate before modifying any published state, including on reset failure.
         omega = np.einsum("bni,n->bi", k.jw.numpy(), state.joint_qd.numpy())
-        if np.any(dt * np.linalg.norm(omega, axis=1) >= 1) or np.any(
-            dt * abs(state.joint_qd.numpy()[k.values["joint_type"][k.dof_joint.numpy()] == JointType.REVOLUTE]) >= 1
+        if (
+            not np.isfinite(omega).all()
+            or np.any(dt * np.linalg.norm(omega, axis=1) >= 1)
+            or np.any(
+                dt * abs(state.joint_qd.numpy()[k.values["joint_type"][k.dof_joint.numpy()] == JointType.REVOLUTE]) >= 1
+            )
         ):
             raise ValueError("Initial angular velocity requires dt * |omega| < 1")
         wp.launch(
@@ -273,7 +281,7 @@ class ArticulationState:
             wp.launch(
                 _initial_symmetric,
                 count,
-                [getattr(history, prefix + "_omega"), wp.float64(dt), getattr(history, prefix + "_vsym")],
+                [getattr(history, prefix + "_omega"), self.dtype(dt), getattr(history, prefix + "_vsym")],
                 device=self.device,
             )
         k.evaluate(state.joint_q, state=state)
