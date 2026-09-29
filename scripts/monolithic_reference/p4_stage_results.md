@@ -649,3 +649,39 @@ the manifest into subprocesses and observer replay. Two new tests fail before
 the change; eight runner/audit tests pass afterward. Production code is unchanged.
 The single Sharpa FP64 baseline is pending; no Franka FP64 trajectories rerun.
 Evidence: agents/integration/artifacts/p4/sharpa-asset-recovery-v1/.
+
+## Rebuilt Sharpa FP64 reference completed — 2026-09-29
+
+User-authorized continuation after deleted Sharpa hand assets were rebuilt.
+Implementation commit: 4a93478b. Production solver code and numerical gates
+are unchanged in this continuation.
+
+- Rebuilt hand assets restored at p1/pr6d-assets/hand; old manifests preserved.
+- Eleven C1/C2 fields pass new geometry, independent oracle, continuity and
+  expanded frozen-query certification. Current source textures bind successfully.
+- New 409-file frozen-inputs.json includes rebuilt hand assets, qualified SDF
+  and unchanged remaining inputs. Control streams are byte-identical to T5-A3;
+  controls/manifest.json records the explicit rebind and parent provenance.
+- Runner --input-manifest selects this generation and propagates it to workers
+  and observer replay. Historical inputs still fail closed. Two new regressions
+  fail before implementation; eight runner/audit tests pass afterward.
+- New Sharpa FP64 OR/C-IE production/graph reference completes 8667 steps:
+  8637 CONVERGED, 30 STOPPED, zero hard failures. Complete finite states,
+  histories, force generations and independent tet determinants pass validation;
+  minimum det F = 0.5900113022643424. Final checkpoint restores exactly;
+  old-asset checkpoint is rejected without modifying the target state.
+- Initial state arrays equal the old Sharpa reference except config digest.
+  This is a new physical input generation, not a claim of old-asset equivalence.
+- Nine Franka FP64 references are reused with checked receipts/control hashes;
+  zero new Franka trajectory steps. fp64-reference-index.json identifies all ten.
+- Sharpa FP32 ten-step smoke completes without hard failure (PARTIAL).
+  Full FP32 qualification and grasp success remain unclaimed; no full independent
+  residual audit of this new FP64 trajectory was performed.
+
+Use bash run-fp32.sh from this directory to run all ten FP32 trajectories on
+this generation. It creates a fresh timestamped output directory and never
+reruns FP64. The original failed run and historical T5-C evidence remain intact.
+
+Full pre-commit passed. Integration is unchanged at 39f80c48. No push.
+
+Evidence: agents/integration/artifacts/p4/sharpa-asset-recovery-v1/REQUALIFICATION.md.
