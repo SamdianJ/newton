@@ -6,6 +6,7 @@
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import numpy as np
 import warp as wp
@@ -68,6 +69,8 @@ class TestSolverPrecision(unittest.TestCase):
         run64, run32 = solver(model), solver(model, precision="fp32")
         state64, state32 = run64.create_state(dt=0.001), run32.create_state(dt=0.001)
         self.assertEqual(run64.precision, SolverMonolithic.Precision.FP64)
+        self.assertNotIn("quaternion_norm_tolerance", run64._coupled_config)
+        np.testing.assert_array_equal(run32._coupled_config["quaternion_norm_tolerance"], [1e-6])
         with self.assertRaises(AttributeError):
             run32.precision = "fp64"
         for value in ("double", None, 32):
@@ -103,6 +106,27 @@ class TestSolverPrecision(unittest.TestCase):
             with self.assertRaises(ValueError), np.errstate(over="ignore"):
                 run32.step(state32, state32, model.control(), dt=dt)
             assert_snapshot(self, state32, before)
+
+    def test_previous_fp32_guard_checkpoint_rejected(self):
+        model = scene("cpu")
+        make_kinematics = SolverMonolithic._make_kinematics
+
+        def previous_identity(run, *args, **kwargs):
+            # Reproduce the pre-adjustment identity without rewriting a saved digest.
+            del run._coupled_config["quaternion_norm_tolerance"]
+            return make_kinematics(run, *args, **kwargs)
+
+        with patch.object(SolverMonolithic, "_make_kinematics", previous_identity):
+            previous = solver(model, precision="fp32")
+        current = solver(model, precision="fp32")
+        state = current.create_state(dt=0.001)
+        before = snapshot(state)
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "previous.npz"
+            previous.save_checkpoint(previous.create_state(dt=0.001), path)
+            with self.assertRaises(ValueError):
+                current.load_checkpoint(state, path)
+        assert_snapshot(self, state, before)
 
     def test_sdf_native_reference_and_source_binding(self):
         lo, hi, values = grid()

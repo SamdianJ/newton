@@ -184,6 +184,8 @@ class SolverMonolithic(SolverBase):
             "alignment_policy": np.frombuffer(alignment_policy.encode(), dtype=np.uint8),
             "heuristic_energy": np.array([allow_nonconservative_energy], dtype=np.uint8),
         }
+        if self._dtype == wp.float32:
+            self._coupled_config["quaternion_norm_tolerance"] = np.array([self._contact.quaternion_norm_tolerance])
         if smooth_sdf is not None:
             self._coupled_config["smooth_sdf_digest"] = np.frombuffer(bytes.fromhex(smooth_sdf.digest), dtype=np.uint8)
         # Include effective numeric policy in checkpoint identity; device execution

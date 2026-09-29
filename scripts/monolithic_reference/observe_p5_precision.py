@@ -57,6 +57,7 @@ class Observer:
             output / "physics.json",
             {
                 "contact_parameters": run._contact.parameters,
+                "quaternion_norm_tolerance": run._contact.quaternion_norm_tolerance,
                 "law": run._contact.contact_model,
                 "alignment": run._contact.alignment_policy,
                 "material": run._tet.physics.material_model,

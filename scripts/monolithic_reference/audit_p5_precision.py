@@ -99,7 +99,8 @@ def audit(directory):
             )
             scale_rounding = error(last_scale, rebuilt_scale)
         norms = data["native.composed_norms"][oracle.shapes].astype(float)
-        bad = np.flatnonzero(abs(norms - 1) > 1e-10)
+        # Archives predating the precision-specific guard used 1e-10 in both dtypes.
+        bad = np.flatnonzero(abs(norms - 1) > config.get("quaternion_norm_tolerance", 1e-10))
         item = dict(
             **row,
             energy=result["energy"],

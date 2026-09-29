@@ -102,6 +102,7 @@ def _geometry(
     sdf_indices: wp.array[int],
     table: wp.array[TextureSDFData],
     smooth_table: wp.array[Any],
+    quaternion_tolerance: Any,
     out: Any,
     flags: wp.array[int],
 ):
@@ -127,7 +128,7 @@ def _geometry(
         transform = poses[body] * transform
     quaternion = wp.transform_get_rotation(transform)
     norm = wp.length(quaternion)
-    if not wp.isfinite(norm) or wp.abs(norm - type(x[0][0])(1.0)) > type(x[0][0])(1e-10):
+    if not wp.isfinite(norm) or wp.abs(norm - type(x[0][0])(1.0)) > quaternion_tolerance:
         _failure(flags, key, 2)
         return
     rotation = wp.quat_to_matrix(wp.transform_get_rotation(transform))
@@ -561,6 +562,11 @@ class ContactObjective:
         self.mask_seen = wp.zeros(count, dtype=int, device=model.device)
         self._started, self._evaluated = False, False
 
+    @property
+    def quaternion_norm_tolerance(self):
+        """Unit-quaternion guard selected by native arithmetic precision."""
+        return 1e-6 if self.dtype == wp.float32 else 1e-10
+
     def _geometry_storage(self):
         value = _geometry_type(self.dtype)()
         value.y = wp.zeros(self.count, dtype=self.vector, device=self.model.device)
@@ -625,6 +631,7 @@ class ContactObjective:
                     self.sdf_indices,
                     self.table,
                     self.smooth_table,
+                    self.dtype(self.quaternion_norm_tolerance),
                     output,
                     flags,
                 ],

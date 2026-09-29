@@ -97,11 +97,35 @@ def test_native_contact(test, device):
                     test.assertEqual(obj.weights.numpy()[:, 1].max(), 0)
 
 
+def test_quaternion_tolerance(test, device):
+    """Allow native rounding while rejecting malformed poses in both query paths."""
+    model, x = contact.fixture(device, "plane")
+    for dtype, tolerance in ((wp.float64, 1e-10), (wp.float32, 1e-6)):
+        with patch.object(contact, "ContactObjective", partial(ContactObjective, dtype=dtype)):
+            obj = contact.contact(model, "C-IE")
+        for error in (0.0, -0.5 * tolerance, 0.5 * tolerance, -2 * tolerance, 2 * tolerance, np.nan):
+            with test.subTest(dtype=dtype, error=error):
+                inputs = list(native_inputs(model, x, np.zeros(2), dtype))
+                pose = inputs[1].numpy()
+                pose[0, 3:7] = [0, 0, 0, 1 + error]
+                inputs[1].assign(pose)
+                valid = np.isfinite(error) and abs(error) < tolerance
+                obj.begin_step(*inputs)
+                test.assertEqual(obj.start_flags.numpy()[0] == 0, valid)
+                obj.evaluate(*inputs, dt=0.001)
+                test.assertEqual(obj.flags.numpy()[0] == 0, valid)
+
+
 class TestContactPrecision(unittest.TestCase):
     pass
 
 
 add_function_test(TestContactPrecision, "test_native_contact", test_native_contact, devices=get_test_devices())
+
+
+add_function_test(
+    TestContactPrecision, "test_quaternion_tolerance", test_quaternion_tolerance, devices=get_test_devices()
+)
 
 
 if __name__ == "__main__":

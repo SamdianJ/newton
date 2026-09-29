@@ -185,3 +185,17 @@ External probe scripts and source/input hashes are retained under
 it holds the native predictor fixed, with prediction/history checked separately
 by the articulation component tests. These component probes do not implement the independent full-scene T5-C audit or the T5-D timing
 protocol. The 44 deferred P4 trajectories remain deferred.
+
+## FP32 quaternion guard adjustment (2026-09-29)
+
+User-authorized numerical-policy exception after T5-C: the composed quaternion
+unit-norm guard is 1e-6 for FP32 and remains 1e-10 for FP64. This changes only
+geometry validation, not residual tolerances, acceptance, budgets or publication.
+Nonfinite and out-of-tolerance poses still fail. FP32 configuration identity now
+includes this guard; earlier FP32 checkpoints are rejected rather than silently
+migrated. FP64 configuration identity is unchanged.
+
+Observers record the guard in physics metadata. Auditing older archives without
+this field retains their historical 1e-10 policy, including FP32 archives.
+The prior T5-C FAIL remains a result of its original source and policy; short
+prefix verification of this adjustment does not establish full qualification.

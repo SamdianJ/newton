@@ -585,3 +585,25 @@ Retained tests: 443 run, 436 pass, seven unchanged skips; four new IDs and none
 removed. Full pre-commit and source bindings accompany the final receipt.
 Production solver code, equations, numerical gates, controls and defaults remain
 unchanged. Evidence: `agents/integration/artifacts/p4/precision-comparison/t5-c-v1/`.
+
+## FP32 quaternion guard adjustment — 2026-09-29
+
+FP32 unit-quaternion norm tolerance is now 1e-6; FP64 remains 1e-10.
+Residual/acceptance tolerances, budgets and publication rules are unchanged.
+FP32 configuration identity includes the new guard. Prior FP32 checkpoints
+are rejected atomically. FP64 configuration fields remain unchanged.
+Historical audit archives without guard metadata retain their original 1e-10.
+
+Regression was RED on both CPU and CUDA before the fix (four failing subcases).
+After the fix, contact/solver precision tests (7), audit/runner/checkpoint tests
+(7, including one repeated checkpoint test), and prior-identity checkpoint test
+(1) all passed. Full pre-commit passed.
+
+All ten FP32 production/graph configurations completed 10 steps each:
+2 CONVERGED, 98 STOPPED, 0 HARD_FAILURE. Every receipt is PARTIAL.
+The two native convergence reports are from Sharpa and have not been independently audited.
+This clears the earlier quaternion failures at steps 1–4, but does not establish
+full-trajectory qualification. No FP64 trajectories or Close cases were run.
+Prior T5-C evidence is retained unchanged. T5-D remains unperformed.
+
+Evidence: agents/integration/artifacts/p4/precision-comparison/fp32-quaternion-v1/.
