@@ -31,17 +31,17 @@ dev/monolithic/
     HANDOFF.md                   # 当前状态、运行方式、开放项
     acceptance.md                # 阶段目标验收、完整场景及合并结论
   test/
-    components/                  # 按模块功能复用的组件测试
-    integration/                 # PR 收尾的小型集成测试
-    e2e/                         # 阶段端到端/完整场景测试入口
     results/
       <阶段>/
         <PR或stage>/<运行ID>/     # 命令、回执、摘要、必要失败数据
+worktrees/<阶段worktree>/
+  newton/tests/                  # 按功能组织的组件、小型集成和 E2E 测试
+  scripts/monolithic_reference/   # 复用现有完整场景 runner
 ```
 
-**开发文档统一维护在 `dev/monolithic/` 并按阶段组织；Monolithic 测试统一收口到 `dev/monolithic/test/`，结果按阶段分组。** 测试文件按功能命名，阶段归属通过 PRD 映射和结果目录表达，避免重复复制组件测试。阶段测试只调用受验 worktree 的代码，运行时记录并核对实际导入来源，不依赖隐含当前目录。新的测试结果不再散落到 `agents/` 或各 worktree 的临时 output 中；历史产物保持原身份，通过索引定位，不为改目录而重跑。
+**开发文档统一维护在 `dev/monolithic/` 并按阶段组织；测试源码继续放在各阶段 worktree 的 `newton/tests/`，测试结果统一写入 `dev/monolithic/test/results/` 并按阶段分组。** 测试文件按功能命名，阶段归属通过 PRD 映射和结果目录表达，避免重复复制组件测试。阶段测试只调用受验 worktree 的代码，运行时记录并核对实际导入来源，不依赖隐含当前目录。新的测试结果不再散落到 `agents/` 或各 worktree 的临时 output 中；历史产物保持原身份，通过索引定位，不为改目录而重跑。
 
-**迁移状态：** 本次先明确规则，现有可执行测试仍在 `newton/tests/`，场景 runner 在 `scripts/monolithic_reference/`；尚未完成测试源码的物理迁移。后续迁移须同步处理导入、fixture、Newton discovery 与 CI，使干净 checkout 能通过显式测试路径配置或必要的发现入口执行测试，不能静默跳过缺失的 workspace 测试，也不在两处维护相同断言。下文列出现存模块与迁移前命令，不表示豁免统一目录要求。
+**测试源码不迁移。** 取消将测试搬到 workspace 的计划，继续使用仓库现有的 unittest 注册、Newton discovery 和 CI。完整场景 runner 保留在受验 worktree 的 `scripts/monolithic_reference/`；`dev/monolithic/test/` 仅存放结果与索引，不维护测试实现副本。测试修改随阶段分支提交、验收和合并。
 
 `dev/` 当前位于 Newton Git 仓库之外。每个 PR 仍必须实际更新该阶段文档，并在提交说明或版本化回执中记录文档路径/版本或摘要哈希；提交 worktree 不等于已提交、推送这些外部文件。合并记录须能定位阶段 PRD 与验收结果，不能仅依赖聊天记录或旧 PASS 标签。
 
@@ -57,7 +57,7 @@ dev/monolithic/
 
 ## 按功能选择测试
 
-以下为尚未迁移的 `newton/tests/` 功能清单，当前仍使用现有 unittest 注册和设备选择机制。统一目录目标见上节；迁移不新增测试框架。以下前缀均可用 Newton runner 的 `--pattern` 选择：
+测试位于各 worktree 的 `newton/tests/`，继续使用现有 unittest 注册、设备选择和发现机制。以下前缀均可用 Newton runner 的 `--pattern` 选择：
 
 | 文件模式 | 主要职责 |
 | --- | --- |
