@@ -1,10 +1,12 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 The Newton Developers
 # SPDX-License-Identifier: Apache-2.0
 
-"""Run the frozen P4 dev/full scene matrix serially, in isolated CUDA processes."""
+"""Manually run retained FP64 scene regressions, including the ten-case nightly profile."""
 
 import argparse
+import hashlib
 import json
+import shutil
 import subprocess
 import sys
 import traceback
@@ -28,7 +30,9 @@ ROOT = Path(__file__).resolve().parents[2]
 def select_cases(profile, filters=()):
     """Expand the shared T0 case definitions before applying explicit filters."""
     full = cases()
-    selected = full if profile == "full" else [full[0], full[-1]]
+    if profile not in ("dev", "full", "nightly"):
+        raise ValueError(f"Unknown scene profile: {profile}")
+    selected = full if profile in ("full", "nightly") else [full[0], full[-1]]
     if filters:
         unknown = set(filters) - {c["id"] for c in selected}
         if unknown:
@@ -41,7 +45,50 @@ def aggregate(results, filtered):
     """Never grant profile qualification to a filtered run."""
     if any(row["status"] != "PASS" for row in results):
         return "FAIL"
+    identities = {(row.get("commit"), row.get("source_sha256"), row.get("input_manifest_sha256")) for row in results}
+    if len(identities) > 1:
+        return "FAIL"
     return "PARTIAL" if filtered else "PASS"
+
+
+def finalize_case(destination, receipt, exit_code, retention):
+    """Retain failure recordings and remove only successful newly generated recordings."""
+    status = "PASS" if exit_code == 0 and receipt["status"] == "PASS" else "FAIL"
+    recording = destination / "recording"
+    receipt["retention"] = retention
+    receipt["recording_retained"] = recording.is_dir()
+    prune = status == "PASS" and retention == "failures" and recording.is_dir()
+    if prune:
+        if recording.is_symlink():
+            raise ValueError("Refuse to prune a linked recording")
+        receipt["recording_retained"] = False
+    # Persist the decision and numerical summary before dropping full successful states.
+    if destination.is_dir():
+        (destination / "receipt.json").write_text(json.dumps(receipt, indent=2) + "\n")
+    if prune:
+        shutil.rmtree(recording)
+    return status
+
+
+def write_report(output, summary):
+    """Produce a compact report for review after the manually started batch finishes."""
+    lines = [
+        "# Monolithic scene regression",
+        "",
+        f"Profile: {summary['profile']}; status: {summary['status']}; complete: {summary['complete']}.",
+        "Component tests: NOT_RUN_BY_SCENE_RUNNER. Stopped is not convergence.",
+        "",
+        "| Case | Result | Converged | Stopped | Recording retained | Receipt |",
+        "| --- | --- | --- | --- | --- | --- |",
+    ]
+    for row in summary["cases"]:
+        lines.append(
+            f"| {row['case']} | {row['status']} | {row['counts'].get('CONVERGED', '-')} | "
+            f"{row['counts'].get('STOPPED_ACCEPTED', '-')} | {row['recording_retained']} | "
+            f"[receipt]({row['case']}/receipt.json) |"
+        )
+    lines += ["", "Receipts include source/input/reference identities, environment, scene metrics and first errors."]
+    (output / "RESULTS.md").write_text("\n".join(lines) + "\n")
 
 
 def validate_inputs():
@@ -131,6 +178,12 @@ def worker(case, output):
 
         if not wp.get_device("cuda:0").is_cuda:
             raise ValueError("P4 profiles require CUDA")
+        receipt["environment"] = {
+            "python": sys.version,
+            "warp": wp.__version__,
+            "numpy": np.__version__,
+            "device": wp.get_device("cuda:0").name,
+        }
         recording = output / "recording"
         if case["id"].startswith("franka"):
             from newton.examples.softbody.example_monolithic_franka_grasp import Example  # noqa: PLC0415
@@ -182,16 +235,25 @@ def worker(case, output):
     except Exception:
         receipt["exception"] = traceback.format_exc()
     finally:
+        scene_summary = output / "recording/summary.json"
+        if scene_summary.is_file():
+            receipt["scene_summary"] = json.loads(scene_summary.read_text())
         (output / "receipt.json").write_text(json.dumps(receipt, indent=2) + "\n")
     return int(receipt["status"] != "PASS")
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--profile", choices=("dev", "full"), default="dev")
+    parser.add_argument("--profile", choices=("dev", "full", "nightly"), default="dev")
     parser.add_argument("--list", action="store_true")
     parser.add_argument("--case", action="append", default=[])
     parser.add_argument("--output", type=Path)
+    parser.add_argument(
+        "--retain-recordings",
+        choices=("failures", "all"),
+        default="failures",
+        help="Keep compact success receipts and full failure recordings by default",
+    )
     parser.add_argument("--worker", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args()
     try:
@@ -228,12 +290,20 @@ def main():
             process = subprocess.run(command, cwd=ROOT, stdout=log, stderr=subprocess.STDOUT, check=False)
         path = destination / "receipt.json"
         receipt = json.loads(path.read_text()) if path.is_file() else {"status": "FAIL"}
+        status = finalize_case(destination, receipt, process.returncode, args.retain_recordings)
         results.append(
             {
                 "case": case["id"],
-                "status": "PASS" if process.returncode == 0 and receipt["status"] == "PASS" else "FAIL",
+                "status": status,
                 "receipt": str(path),
                 "exit_code": process.returncode,
+                "counts": receipt.get("recording", {}).get("counts", {}),
+                "recording_retained": receipt["recording_retained"],
+                "commit": receipt.get("commit"),
+                "source_sha256": hashlib.sha256(
+                    json.dumps(receipt.get("source_hashes", {}), sort_keys=True).encode()
+                ).hexdigest(),
+                "input_manifest_sha256": receipt.get("input_manifest_sha256"),
             }
         )
         summary = {
@@ -246,6 +316,7 @@ def main():
         if not summary["complete"] and summary["status"] == "PASS":
             summary["status"] = "RUNNING"
         (args.output / "summary.json").write_text(json.dumps(summary, indent=2) + "\n")
+        write_report(args.output, summary)
         print(json.dumps(results[-1]), flush=True)
     return int(summary["status"] == "FAIL")
 

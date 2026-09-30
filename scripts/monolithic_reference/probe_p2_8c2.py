@@ -7,7 +7,7 @@ import json
 import numpy as np
 import warp as wp
 
-from newton.tests.test_monolithic_pcg_production import impl, make_plan
+from newton.tests.test_monolithic_linear_production import impl, make_plan
 
 
 def main():
