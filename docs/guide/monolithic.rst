@@ -88,11 +88,15 @@ Historical manifest hashes remain unchanged; recorded paths are resolved through
 
 .. code-block:: bash
 
-   uv run --no-sync python -m scripts.monolithic_reference.run_p4 --profile full --list
-   uv run --no-sync python -m scripts.monolithic_reference.run_p4 --profile dev --output /path/to/new-output
+   uv run --no-sync python -m scripts.monolithic_reference.run_p4 --profile nightly --list
+   uv run --no-sync python -m scripts.monolithic_reference.run_p4 --profile nightly --output /path/to/new-output
 
-The full profile contains nine Franka configurations and one Sharpa configuration;
-dev selects the default configuration of each scene. The runner binds each case
+The nightly profile contains nine Franka configurations and one Sharpa configuration
+and is triggered manually for overnight regression. The full profile selects the
+same ten cases; dev selects the default configuration of each scene and still runs
+two complete trajectories. Routine development and ordinary CI use functional
+component and small integration tests instead; see ``project.md`` and ``AGENTS.md``
+at the repository root for the testing policy. The runner binds each case
 to ``asset/monolithic/references.json``, verifies retained file hashes and frozen
 controls, and rejects a changed physical configuration before stepping. Franka
 uses its existing frozen comparison envelopes. The rebuilt Sharpa reference uses
@@ -101,6 +105,12 @@ initial frame, complete history, publication labels and frozen control frames.
 Sharpa requires exact equality because no repeatability envelope has been
 qualified for the rebuilt generation. Missing or differing data produces FAIL;
 filtered profiles remain PARTIAL.
+
+After completion, review ``summary.json``, ``RESULTS.md`` and per-case receipts.
+By default, successful new recordings are removed after their summaries and
+comparison results are saved; failed recordings remain for diagnosis. Pass
+``--retain-recordings all`` to keep all new recordings. Existing reference
+trajectories are never modified by this retention policy.
 
 The scene runner's result must be combined with component, lifecycle and replay
 checks for stage qualification. Retired driver snapshots, hashes and migration

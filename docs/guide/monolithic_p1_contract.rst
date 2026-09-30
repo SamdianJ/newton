@@ -10,7 +10,7 @@ Monolithic P1 contract
 
    This is a historical P1 contract. Its BE, q-only and xi-history solver
    tests were archived and retired during P4. Current solver boundary checks
-   live in ``test_monolithic_p4_api`` and ``test_monolithic_p3_coupled``;
+   live in ``test_monolithic_solver_state_api`` and ``test_monolithic_solver_coupled``;
    independent collision and shared component checks remain active.
 
 This supplement freezes ``monolithic-p1-contract/v1`` against the implemented
