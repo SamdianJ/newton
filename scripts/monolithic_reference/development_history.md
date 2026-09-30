@@ -51,3 +51,13 @@ tar -xOf agents/integration/artifacts/history/evidence.tar.gz p4/t4-v1/receipt.j
 ## 后续R1修复（2026-09-30）
 
 正式runner已绑定worktree内的重建Sharpa清单、资格目录与十条保留FP64参考；场景不再依赖agents资产路径链接。精度runner默认使用重建清单，历史observer未指定清单时仍选择原代次。Sharpa原生录制只读适配，Franka保留原冻结包络，重建Sharpa逐字段严格比较。409项输入与十参考的文件身份检查通过；新增回归检查未执行，GPU/长轨迹未运行。因此R1为代码修复完成、运行验收待执行。此前章节中的OPEN描述是当时状态。
+
+## P4 后维护收口（2026-09-30）
+
+`56be2f04` 将测试按当前组件组织并退役纯历史证据守护，`99d71259` 写明手动夜间回归规范。`f370d64b` 提取 BSR、PCG、预条件器和 production 设备 kernel；92 个搬移定义/方法保持 AST 一致，公开导入与十项选择通过，pre-commit 通过。`474914ab` 将47份 Monolithic changelog 合并为3条。以上维护未运行测试、discovery 或轨迹，不能复用历史 PASS 作为新源码验收。
+
+当前命令为 `run_regression --profile nightly`、`run_precision`、`run_performance`；solver 内部模块为 `articulation`、`contact`、`iteration`。公开 API、状态 schema、物理 digest 和序列化标识保留；固定旧基线适配器仍针对原 checkout 导入旧名称。
+
+workspace 文档现位于 `dev/monolithic/`，顶层仅 PRD、当前架构和开放项；历史按 P0–P4 归档，一页 HANDOFF 位于 P4。原横幅已移至 p4_stage_results.md。六个退役角色、integration 旧报告和清理记录移入 `agents/integration/artifacts/history/`；reference 研究资料和现存资产链接保留。
+
+根目录 trajectories 的两个独立早期控制输入已搬至 worktree 的 `asset/monolithic/trajectories/`；10 mm 输入与正式控制文件相同，删除重复副本。十条参考与冻结清单未改。仓库外迁移的逐文件原/新路径和哈希、文档原快照及代码静态核对记录在 `agents/integration/artifacts/history/repository-consolidation-v1/`；这些本机文档和证据不会仅因提交 worktree 而被推送。

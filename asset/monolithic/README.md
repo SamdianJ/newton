@@ -4,8 +4,9 @@
 
 - `data/reference/`：Franka 的三种 globalization × 三种 friction law，均为 production/graph、5250 步；Sharpa 为 OR＋C-IE＋production/graph、8667 步。
 - `data/inputs/`：机器人网格/URDF、官方 SDF 缓存、smooth SDF 节点与资格证书、冻结控制、Close 场景参数、输入清单及比较容差。
+- `trajectories/`：两份独立的早期 Sharpa 控制输入，保留为研究来源，不参与默认十条回归。根目录的 10 mm 副本已与正式 `data/inputs/sharpa/recorded-control.json` 核对哈希并去重，三个旧路径均已加入迁移表。
 - [references.json](references.json)：每条轨迹的来源、原回执身份、物理 digest、当前相对位置及录制格式。
-- [files.sha256](files.sha256)：1086个保留文件的SHA-256，可从本目录用 `sha256sum -c files.sha256` 核对。
+- [files.sha256](files.sha256)：1088个保留文件的SHA-256，可从本目录用 `sha256sum -c files.sha256` 核对。
 - [relocations.json](relocations.json)：旧位置到本目录的迁移表。原路径保留相对符号链接；文件搬迁没有重算物理身份或改写历史清单。
 
 Franka 保持原 P3 recording 格式，回放入口使用各 case 的 `recording/` 目录。Sharpa 保持原 P5 native state chunks 格式；没有假装转换成 P3 回放格式。状态块、初末状态、模型及原始回执未修改。每个 `steps.jsonl.gz` 仅保留原有标量统计，去掉嵌套迭代细节；相邻 `log-compaction.json` 记录原/新哈希。这些精简日志不能代替原始独立数值审计数据。

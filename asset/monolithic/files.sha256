@@ -1084,3 +1084,5 @@ c39846b801bfe660ad501537f3cad2ddf81e91d3e7e68400bbc2161ea42223ae  data/reference
 9e363667f3680b409bf2761aeed7c10c6a18c0e11cbb5fd9f78401b72c1885cc  data/reference/sharpa-recorded-10mm--ArmijoOrResNorm--C-IE--production--graph1--fp64/states-0085.npz
 86cb13154eed923a281089edff42233d30966c24cd4563f149c0d5cd7d7c4e01  data/reference/sharpa-recorded-10mm--ArmijoOrResNorm--C-IE--production--graph1--fp64/states-0086.npz
 02ab5030301d98d0c70831993495088195c60c03c651d8bf10ab8eeeec60473e  data/reference/sharpa-recorded-10mm--ArmijoOrResNorm--C-IE--production--graph1--fp64/steps.jsonl.gz
+feebed16bd250a52b7be258dd8f3bddb4767daa4036b97ebbad467adb5378828  trajectories/sharpa_cube_grasp.json
+b964fd1bae80718e799e977651839fdc2f7e4ceac8394ad21e625140ac6f2cc5  trajectories/sharpa_cube_grasp_approach_5mm.json

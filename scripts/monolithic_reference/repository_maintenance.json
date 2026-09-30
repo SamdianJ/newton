@@ -1,0 +1,15 @@
+{
+  "workspace_history": "agents/integration/artifacts/history/repository-consolidation-v1",
+  "local_evidence_sha256": {
+    "workspace-docs-before.tar.gz": "14a8b7d5c4ab6b1029b53eab451c73b01df6af4553ece2d2cdfe08743423010c",
+    "changelog-before.tar.gz": "4f1d120e843769f7f457520c847c3650364d35994a440e4ba0946a41fae1487c",
+    "relocations.csv.gz": "670954ba6b68063ad9a19c624ed48301dd3a7f61961d25460ec600d37dabd453",
+    "trajectory-relocations.json": "7f8adaa0748c242fefded53934cf57a45f7b08bbc788569f8564c2cd85de3c64",
+    "current-documents.json": "9c51391eae235b74c522f5f69dba0de03f6f2277da4515ff3e92d74ed702ec53",
+    "monolithic-code-audit.json": "44872038824da8bdecd658b8f4cc4a521799abcf830befd8e7a6bbc8406f3df2",
+    "monolithic-module-map.json": "cd7edcb52eae6f2ea1e1626856e24fda12d5a46dae0a0a1051aa3c97851440fa",
+    "navigation-check.json": "025930f20d818f00040960737f8cb4f49ceb5637e5c84aabf65602080c436e01"
+  },
+  "runtime_tests": "NOT_RUN",
+  "trajectories": "NOT_RUN"
+}

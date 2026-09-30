@@ -154,5 +154,23 @@
     "asset_path": "data/reference/sharpa-recorded-10mm--ArmijoOrResNorm--C-IE--production--graph1--fp64",
     "files": 91,
     "byte_identity": "UNCHANGED"
+  },
+  {
+    "old_path": "/home/lightwheel/Desktop/newton/SamiulJ/trajectories/sharpa_cube_grasp.json",
+    "asset_path": "trajectories/sharpa_cube_grasp.json",
+    "files": 1,
+    "byte_identity": "UNCHANGED"
+  },
+  {
+    "old_path": "/home/lightwheel/Desktop/newton/SamiulJ/trajectories/sharpa_cube_grasp_approach_10mm.json",
+    "asset_path": "data/inputs/sharpa/recorded-control.json",
+    "files": 1,
+    "byte_identity": "UNCHANGED"
+  },
+  {
+    "old_path": "/home/lightwheel/Desktop/newton/SamiulJ/trajectories/sharpa_cube_grasp_approach_5mm.json",
+    "asset_path": "trajectories/sharpa_cube_grasp_approach_5mm.json",
+    "files": 1,
+    "byte_identity": "UNCHANGED"
   }
 ]

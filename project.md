@@ -49,7 +49,7 @@ uv run --extra dev -m newton.tests --pattern 'test_monolithic_*.py' -j 1
 
 - 退役 `test_monolithic_p2_evidence.py` 和 `test_monolithic_p3_close_diagnostics.py`，共五个历史测试方法。
 - 退役旧 baseline 中两个构造函数 AST 对比及一个固定旧源码/输入保护方法；当前参考身份、运行来源与输入变更拒绝覆盖保留。
-- 54个既有模块改为功能名称；拆出求解器 oracle，将接受与原生收敛目标集中到 globalization 测试。当前共55个测试模块。
+- 54个既有模块改为功能名称；拆出求解器 oracle，将接受与原生收敛目标集中到 globalization 测试。当前共55个测试模块；后续维护将 joint_variational 改名为 joint_objective。
 - 录制完整性与比较包络归入 recording；矩阵选择和来源检查归入 runner。控制测试直接调用当前场景实现，不再经过历史转发入口。
 - 保留当前 API 对非法参数/外来历史的拒绝以及仍明确支持的 checkpoint/录制 schema 兼容检查；这些保护当前输入边界，不维护退役 solver 的可运行性。
 
@@ -87,3 +87,9 @@ uv run --no-sync python -B -m scripts.monolithic_reference.run_regression \
 分别记录组件检查与夜间回归结果；未执行写 NOT_RUN，不能沿用其他提交的 PASS。Stopped 单独统计，不当作收敛。FP32完整场景数值实验和性能实验独立于默认FP64验收；精度安全、跨精度拒绝等当前组件覆盖仍保留。
 
 每个完成的可审查批次提交一次，按请求推送；显式“不运行测试”的指令优先。静态检查通过只证明静态检查范围，不能据此宣称运行验收通过。
+
+## 当前维护入口
+
+线性实现分为 `linear.py` 工作区、`linear_types.py`、`bsr.py`、`preconditioner.py`、`pcg.py` 及 production plan/kernel 两个模块。公开 solver API 不变；原 `articulation_variational`、`contact_variational`、`variational_iteration` 分别为 `articulation`、`contact`、`iteration`。活动参考工具的 P2/P3/P4/P5 模块名已换成功能名；历史报告仍记录当时名称。
+
+本机设计文档已由 workspace 的 `dev/monothlic` 整理为 `dev/monolithic`，顶层为 `PRD.md`、`architecture.md`、`open_items.md`，一页交接位于 `P4/HANDOFF.md`。这些文档位于 Newton Git 仓库之外，不能声称随本分支提交或推送；仓库内开发历史与阶段记录保留便携摘要。
