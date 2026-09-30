@@ -16,7 +16,7 @@ import numpy as np
 import warp as wp
 
 from newton._src.solvers.kamino._src.linalg.conjugate import BatchedLinearOperator, CGSolver
-from newton._src.solvers.monolithic import linear
+from newton._src.solvers.monolithic import bsr
 from newton._src.solvers.style3d import linear_solver
 from newton._src.solvers.style3d.linear_solver import PcgSolver
 from scripts.monolithic_reference.benchmark_pcg import Reference, Runner
@@ -118,7 +118,7 @@ class ExternalRunner(Runner):
             self.solver.solve(self.rhs, self.y)
         # Include direction recovery for every external call, even when it fails.
         wp.launch(
-            linear._scale_vector,
+            bsr._scale_vector,
             self.y.size,
             [self.workspace.scale, self.y, self.delta],
             device=self.workspace.device,

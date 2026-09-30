@@ -8,7 +8,7 @@ from unittest.mock import patch
 
 import numpy as np
 
-from scripts.monolithic_reference.check_p3_recording import compare
+from scripts.monolithic_reference.check_recording import compare
 
 
 class TestPrecisionRecording(unittest.TestCase):
@@ -25,7 +25,7 @@ class TestPrecisionRecording(unittest.TestCase):
             "history.precision": np.full((2, 1), 64, np.int32),
         }
         with patch(
-            "scripts.monolithic_reference.check_p3_recording.frames",
+            "scripts.monolithic_reference.check_recording.frames",
             side_effect=lambda p: iter([before if p == "old" else after]),
         ):
             with self.assertRaises(ValueError):

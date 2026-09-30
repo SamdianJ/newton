@@ -22,7 +22,7 @@ from scripts.monolithic_reference.retained_assets import (
     verify_retained,
 )
 from scripts.monolithic_reference.retained_assets import validate_inputs as validate_manifest
-from scripts.monolithic_reference.run_p3_baseline import cases, module_origins, sha
+from scripts.monolithic_reference.run_baseline import cases, module_origins, sha
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -174,7 +174,7 @@ def worker(case, output):
         import numpy as np  # noqa: PLC0415
         import warp as wp  # noqa: PLC0415
 
-        from scripts.monolithic_reference.check_p3_recording import check, compare  # noqa: PLC0415
+        from scripts.monolithic_reference.check_recording import check, compare  # noqa: PLC0415
 
         if not wp.get_device("cuda:0").is_cuda:
             raise ValueError("P4 profiles require CUDA")
@@ -277,7 +277,7 @@ def main():
             sys.executable,
             "-B",
             "-m",
-            "scripts.monolithic_reference.run_p4",
+            "scripts.monolithic_reference.run_regression",
             "--profile",
             args.profile,
             "--case",

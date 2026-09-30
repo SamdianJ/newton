@@ -15,13 +15,13 @@ import warp as wp
 import newton
 from newton._src.geometry import GeoType
 from newton._src.geometry.sdf_texture import TextureSDFData, create_sparse_sdf_textures
-from newton._src.solvers.monolithic.articulation_variational import ArticulationKinematics
+from newton._src.solvers.monolithic.articulation import ArticulationKinematics
 from newton._src.solvers.monolithic.solver_monolithic import SolverMonolithic, _StepFailure
 from newton.tests.test_monolithic_contact_mesh import synthetic
 from newton.tests.unittest_utils import add_function_test, get_test_devices
-from scripts.monolithic_reference.p3_articulation_oracle import Kinematics, joint_terms
-from scripts.monolithic_reference.p3_contact_oracle import local
-from scripts.monolithic_reference.p3_tet_oracle import TetOracle, material
+from scripts.monolithic_reference.articulation_oracle import Kinematics, joint_terms
+from scripts.monolithic_reference.contact_oracle import local
+from scripts.monolithic_reference.tet_oracle import TetOracle, material
 
 
 def scene(device, *, contact=True, fixed=False, particles=True, articulation=True):
@@ -228,7 +228,7 @@ def test_failure_gates(test, device):
             context = patch.object(run, "_physical_linear_error", return_value=np.full(14, np.nan))
         elif failure == "trial":
             context = patch(
-                "newton._src.solvers.monolithic.variational_iteration.acceptance",
+                "newton._src.solvers.monolithic.iteration.acceptance",
                 return_value=(False, False, False, False),
             )
         elif failure == "small":
@@ -239,7 +239,7 @@ def test_failure_gates(test, device):
             )
             context.enter_context(
                 patch(
-                    "newton._src.solvers.monolithic.variational_iteration.acceptance",
+                    "newton._src.solvers.monolithic.iteration.acceptance",
                     return_value=(True, True, True, True),
                 )
             )

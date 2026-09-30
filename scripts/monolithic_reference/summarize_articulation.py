@@ -10,8 +10,8 @@ from pathlib import Path
 
 import numpy as np
 
-from .p3_articulation_fixtures import FIXTURE_PATH, build_case, specification
-from .p3_articulation_oracle import Kinematics
+from .articulation_fixtures import FIXTURE_PATH, build_case, specification
+from .articulation_oracle import Kinematics
 
 
 def angles(a, b):

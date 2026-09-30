@@ -10,9 +10,9 @@ from unittest.mock import patch
 import numpy as np
 
 from newton.tests.test_monolithic_solver_contracts import model_and_solver
-from scripts.monolithic_reference.p3_articulation_fixtures import specification
-from scripts.monolithic_reference.p3_articulation_oracle import DiscreteOracle
-from scripts.monolithic_reference.reference_p3_articulation_continuous import reference
+from scripts.monolithic_reference.articulation_fixtures import specification
+from scripts.monolithic_reference.articulation_oracle import DiscreteOracle
+from scripts.monolithic_reference.reference_articulation_continuous import reference
 
 
 class TestJointOracle(unittest.TestCase):

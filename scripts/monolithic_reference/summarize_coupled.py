@@ -10,8 +10,8 @@ from pathlib import Path
 
 import numpy as np
 
-from .p3_coupled_fixtures import DIRECTORY
-from .verify_p3_coupled import save
+from .coupled_fixtures import DIRECTORY
+from .verify_coupled import save
 
 GATES = json.loads((DIRECTORY / "p3_pr2_v3.json").read_text())["same_discrete_oracle_max_errors"]
 LIMITS = {

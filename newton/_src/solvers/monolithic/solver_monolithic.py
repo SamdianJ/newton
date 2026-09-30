@@ -17,19 +17,20 @@ import warp as wp
 from ...sim import JointType
 from ..solver import SolverBase
 from . import coupled_kernels as kernels
+from .articulation import ArticulationObjective, _TreeKinematics
 from .articulation_state import _predict, _recover_history
-from .articulation_variational import ArticulationObjective, _TreeKinematics
 from .collision import _validate_and_collect_boundary_faces
+from .contact import ContactObjective, ContactStatus
 from .contact_forces import MonolithicContactForces
-from .contact_variational import ContactObjective, ContactStatus
 from .coupled_state import CoupledState
+from .iteration import iterate, measure
 from .joint_parameters import JointParameters
-from .linear import (
+from .linear import MonolithicLinearWorkspace
+from .linear_types import (
     MonolithicLinearCapacities,
     MonolithicLinearGeneration,
     MonolithicLinearLayout,
     MonolithicLinearStatus,
-    MonolithicLinearWorkspace,
 )
 from .segment_graph import _SegmentGraphCache
 from .solver_types import (
@@ -49,7 +50,6 @@ from .tet_assembly import (
     create_tet_assembly_workspace,
 )
 from .tet_precision import TetObjective
-from .variational_iteration import iterate, measure
 
 
 class SolverMonolithic(SolverBase):
@@ -361,7 +361,7 @@ class SolverMonolithic(SolverBase):
         return CoupledState(self._kinematics)
 
     def create_state(self, *, dt, source=None):
-        """Initialize full P3 history with positive dt, optionally from ordinary model state."""
+        """Initialize full integration history with positive dt, optionally from ordinary model state."""
         self._validate_components()
         self._kinematics.validate_identity()
         return self._states.create(dt=dt, source=source)

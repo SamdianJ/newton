@@ -10,15 +10,15 @@ import warp as wp
 
 from newton._src.geometry import GeoType
 from newton._src.geometry.sdf_texture import TextureSDFData, create_sparse_sdf_textures
-from newton._src.solvers.monolithic.contact_variational import ContactObjective, ContactStatus
+from newton._src.solvers.monolithic.contact import ContactObjective, ContactStatus
 from newton._src.solvers.monolithic.smooth_sdf import SmoothSDF, SmoothSDFSet, sample_smooth
 from newton.tests.test_monolithic_contact_components import fixture, state, tangent
 from newton.tests.test_monolithic_contact_mesh import synthetic
 from newton.tests.unittest_utils import add_function_test, get_test_devices
-from scripts.monolithic_reference.build_p3_smooth_sdf import build_coefficients
-from scripts.monolithic_reference.p3_contact_oracle import evaluate as contact_oracle
-from scripts.monolithic_reference.p3_smooth_sdf_oracle import evaluate
-from scripts.monolithic_reference.verify_p3_smooth_sdf import geometry_gate
+from scripts.monolithic_reference.build_smooth_sdf import build_coefficients
+from scripts.monolithic_reference.contact_oracle import evaluate as contact_oracle
+from scripts.monolithic_reference.smooth_sdf_oracle import evaluate
+from scripts.monolithic_reference.verify_smooth_sdf import geometry_gate
 
 
 def grid():

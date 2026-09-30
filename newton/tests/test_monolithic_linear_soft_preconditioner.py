@@ -8,7 +8,7 @@ from unittest.mock import patch
 import numpy as np
 import warp as wp
 
-from newton._src.solvers.monolithic.linear import MonolithicLinearStatus
+from newton._src.solvers.monolithic.linear_types import MonolithicLinearStatus
 from newton._src.solvers.monolithic.pcg_production import MaskedPcgPlan
 from newton._src.solvers.monolithic.soft_preconditioner import _BlockPreconditioner
 from scripts.monolithic_reference import benchmark_pcg as benchmark

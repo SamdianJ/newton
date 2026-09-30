@@ -11,8 +11,8 @@ from contextlib import redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
 
-from scripts.monolithic_reference.run_p3_baseline import cases as baseline_cases
-from scripts.monolithic_reference.run_p5_precision import cases, main, sha, validate_inputs
+from scripts.monolithic_reference.run_baseline import cases as baseline_cases
+from scripts.monolithic_reference.run_precision import cases, main, sha, validate_inputs
 
 
 class TestPrecisionRunner(unittest.TestCase):
@@ -35,7 +35,7 @@ class TestPrecisionRunner(unittest.TestCase):
     def test_default_fp32_list(self):
         """List only ten FP32 cases by default so baseline trajectories are not rerun."""
         output = io.StringIO()
-        with patch("sys.argv", ["run_p5_precision", "--list"]), redirect_stdout(output):
+        with patch("sys.argv", ["run_precision", "--list"]), redirect_stdout(output):
             self.assertEqual(main(), 0)
         rows = json.loads(output.getvalue())
         self.assertEqual(len(rows), 10)
@@ -74,7 +74,7 @@ class TestPrecisionRunner(unittest.TestCase):
             ]
             with (
                 patch("sys.argv", args),
-                patch("scripts.monolithic_reference.run_p5_precision.worker", return_value=0) as worker,
+                patch("scripts.monolithic_reference.run_precision.worker", return_value=0) as worker,
             ):
                 self.assertEqual(main(), 0)
             self.assertEqual(worker.call_args.kwargs["input_manifest"], root / "inputs.json")

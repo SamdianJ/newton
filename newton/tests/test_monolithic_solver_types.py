@@ -20,8 +20,8 @@ class TestMonolithicTypes(unittest.TestCase):
                 "assert Stats(Status.NOT_RUN).status is Status.NOT_RUN; "
                 "assert _StepFailure(Status.NONFINITE, 'probe').status is Status.NONFINITE; "
                 "assert not any('newton._src.solvers.monolithic.' + name in sys.modules "
-                "for name in ('solver_monolithic', 'articulation_variational', "
-                "'tet_assembly', 'contact_variational', 'collision'))",
+                "for name in ('solver_monolithic', 'articulation', "
+                "'tet_assembly', 'contact', 'collision'))",
             ],
             check=True,
         )
@@ -48,15 +48,15 @@ class TestMonolithicTypes(unittest.TestCase):
         from dataclasses import FrozenInstanceError, replace  # noqa: PLC0415
 
         from newton._src.solvers.monolithic import (  # noqa: PLC0415
+            iteration,
             solver_monolithic,
             solver_types,
-            variational_iteration,
         )
         from newton.solvers.experimental.monolithic import SolverMonolithic  # noqa: PLC0415
 
         for name in ("Status", "Stats", "JointTerms", "PCGMode", "MassMode", "MaterialModel"):
             self.assertIs(getattr(SolverMonolithic, name), getattr(solver_types, name))
-        for module in (solver_monolithic, variational_iteration):
+        for module in (solver_monolithic, iteration):
             self.assertIs(module._StepFailure, solver_types._StepFailure)
         timings = {"solve": 1.0}
         stats = SolverMonolithic.Stats(SolverMonolithic.Status.NOT_RUN, timings=timings)

@@ -5,7 +5,7 @@
 
 import unittest
 
-from scripts.monolithic_reference.run_p5_performance import summarize
+from scripts.monolithic_reference.run_performance import summarize
 
 
 class TestPerformanceSummary(unittest.TestCase):

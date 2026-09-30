@@ -19,9 +19,9 @@ from newton._src.geometry.sdf_texture import TextureSDFData
 from newton._src.solvers.monolithic.contact_geometry import _mesh64
 from newton._src.solvers.monolithic.smooth_sdf import SmoothSDF
 from newton._src.solvers.monolithic.smooth_sdf_builder import _nodes, sample
-from scripts.monolithic_reference.build_p3_smooth_sdf import build_coefficients
-from scripts.monolithic_reference.verify_p3_close import ARTIFACTS, build
-from scripts.monolithic_reference.verify_p3_coupled import save
+from scripts.monolithic_reference.build_smooth_sdf import build_coefficients
+from scripts.monolithic_reference.verify_close import ARTIFACTS, build
+from scripts.monolithic_reference.verify_coupled import save
 
 
 @wp.kernel

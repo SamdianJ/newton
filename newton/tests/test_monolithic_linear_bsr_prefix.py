@@ -10,7 +10,7 @@ import numpy as np
 import warp as wp
 from warp import sparse
 
-from newton._src.solvers.monolithic.linear import MonolithicLinearGeneration, MonolithicLinearStatus
+from newton._src.solvers.monolithic.linear_types import MonolithicLinearGeneration, MonolithicLinearStatus
 from newton.tests.test_monolithic_linear_assembly import _contact, _dense_bsr, _owners, _workspace
 from newton.tests.unittest_utils import add_function_test, get_test_devices
 

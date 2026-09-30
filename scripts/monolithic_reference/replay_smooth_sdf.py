@@ -14,10 +14,10 @@ import numpy as np
 import warp as wp
 from newton.solvers.experimental.monolithic import SolverMonolithic
 
-from scripts.monolithic_reference.build_p3_smooth_sdf import load_qualified_fields
-from scripts.monolithic_reference.verify_p3_close import ARTIFACTS, DT, build, targets
-from scripts.monolithic_reference.verify_p3_coupled import save, serial, state_arrays
-from scripts.monolithic_reference.verify_p3_smooth_sdf import sha256
+from scripts.monolithic_reference.build_smooth_sdf import load_qualified_fields
+from scripts.monolithic_reference.verify_close import ARTIFACTS, DT, build, targets
+from scripts.monolithic_reference.verify_coupled import save, serial, state_arrays
+from scripts.monolithic_reference.verify_smooth_sdf import sha256
 
 
 def run(args):

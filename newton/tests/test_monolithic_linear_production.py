@@ -10,11 +10,8 @@ import numpy as np
 import warp as wp
 
 from newton._src.solvers.monolithic import pcg_production as impl
-from newton._src.solvers.monolithic.linear import (
-    MonolithicLinearStatus,
-    MonolithicLinearWorkspace,
-    MonolithicPcgWarmStart,
-)
+from newton._src.solvers.monolithic.linear import MonolithicLinearWorkspace
+from newton._src.solvers.monolithic.linear_types import MonolithicLinearStatus, MonolithicPcgWarmStart
 from newton._src.solvers.monolithic.pcg_common import decide_restart
 from newton.solvers.experimental.monolithic import SolverMonolithic
 from newton.tests import test_monolithic_linear_assembly as fixtures

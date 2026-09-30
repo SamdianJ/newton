@@ -9,8 +9,8 @@ from pathlib import Path
 
 import numpy as np
 
-from .p3_articulation_fixtures import build_case, specification, target
-from .p3_articulation_oracle import Kinematics
+from .articulation_fixtures import build_case, specification, target
+from .articulation_oracle import Kinematics
 
 
 def reference(case, subdivisions, *, output_dt=0.001, control_period=None):

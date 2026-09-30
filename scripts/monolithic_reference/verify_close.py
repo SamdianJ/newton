@@ -20,8 +20,8 @@ import newton
 from newton.examples.softbody.monolithic_sharpa_assets import load_hand_cube
 from newton.examples.softbody.monolithic_sharpa_scene import joint_mapping
 from newton.examples.softbody.sharpa_close import ClosureTrajectory, load_fixture
-from scripts.monolithic_reference.build_p3_smooth_sdf import load_qualified_fields
-from scripts.monolithic_reference.verify_p3_coupled import measure, save, serial, state_arrays
+from scripts.monolithic_reference.build_smooth_sdf import load_qualified_fields
+from scripts.monolithic_reference.verify_coupled import measure, save, serial, state_arrays
 
 REPO = Path(__file__).resolve().parents[2]
 WORKSPACE = REPO.parents[1]

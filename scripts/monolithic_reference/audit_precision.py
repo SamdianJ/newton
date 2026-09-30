@@ -10,9 +10,9 @@ from pathlib import Path
 
 import numpy as np
 
-from scripts.monolithic_reference.p3_articulation_oracle import skew
-from scripts.monolithic_reference.p5_scene_oracle import SceneOracle, unpack_symmetric
-from scripts.monolithic_reference.run_p5_precision import sha
+from scripts.monolithic_reference.articulation_oracle import skew
+from scripts.monolithic_reference.run_precision import sha
+from scripts.monolithic_reference.scene_oracle import SceneOracle, unpack_symmetric
 
 
 def error(actual, reference):

@@ -9,8 +9,8 @@ from types import SimpleNamespace
 
 import numpy as np
 
+from newton._src.solvers.monolithic.iteration import acceptance, measure
 from newton._src.solvers.monolithic.solver_types import _SolverMonolithicInternalConfig
-from newton._src.solvers.monolithic.variational_iteration import acceptance, measure
 
 
 class TestGlobalization(unittest.TestCase):

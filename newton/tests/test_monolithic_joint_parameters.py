@@ -83,7 +83,7 @@ class TestJointParameters(unittest.TestCase):
                 "-c",
                 "import sys; "
                 "from newton._src.solvers.monolithic.joint_parameters import JointParameters; "
-                "from newton._src.solvers.monolithic.articulation_variational import ArticulationKinematics; "
+                "from newton._src.solvers.monolithic.articulation import ArticulationKinematics; "
                 "assert 'newton._src.solvers.monolithic.articulation' not in sys.modules; "
                 "assert 'newton._src.solvers.monolithic.solver_monolithic' not in sys.modules",
             ],

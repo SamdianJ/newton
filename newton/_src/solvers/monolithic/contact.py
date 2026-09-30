@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 The Newton Developers
 # SPDX-License-Identifier: Apache-2.0
 
-"""Private full-pair P3 contact components; no step or publication policy.
+"""Private full-pair contact components; no step or publication policy.
 
 C-EE/C-IE/C-II use current and frozen start geometry, not historical spring/Huber
 xi state. Contact factors are shared through linear; geometry and smooth SDF
@@ -18,13 +18,13 @@ import warp as wp
 
 from ...geometry import GeoType, ShapeFlags
 from ...geometry.sdf_texture import TextureSDFData
-from .contact_geometry import _shape64
-from .linear import (
+from .bsr import (
     _append_monolithic_contact_factor_triplets,
     _MonolithicContactFactors,
     _MonolithicScalarTriplets,
     _reserve_monolithic_contact_factor,
 )
+from .contact_geometry import _shape64
 from .smooth_sdf import _sdf_type, smooth_query
 
 

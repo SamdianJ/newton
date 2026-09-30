@@ -10,7 +10,7 @@
 | 小型集成 | 小规模 q+x、多步历史、真实 trial、发布/回滚、graph 生命周期、状态恢复 | 修改相关求解路径时；与组件测试一起按 CPU/CUDA 条件执行 |
 | 夜间全量 | Franka 九条＋Sharpa 一条完整 FP64 轨迹 | 手动触发，安排夜间运行；结束后读取报告和回执 |
 
-不要求每次提交运行十条轨迹，也不把 `run_p4 --profile dev` 当轻量测试：它仍运行 Franka 和 Sharpa 两条完整轨迹。当前没有新增 GitHub 自动调度、远端 runner 或资产上传；夜间任务使用已具备 GPU 和本地资产的环境显式启动。
+不要求每次提交运行十条轨迹，也不把 `run_regression --profile dev` 当轻量测试：它仍运行 Franka 和 Sharpa 两条完整轨迹。当前没有新增 GitHub 自动调度、远端 runner 或资产上传；夜间任务使用已具备 GPU 和本地资产的环境显式启动。
 
 ## 按功能选择测试
 
@@ -63,10 +63,10 @@ uv run --extra dev -m newton.tests --pattern 'test_monolithic_*.py' -j 1
 
 ```bash
 # 只列出十项，不构建场景或启动 GPU 求解。
-uv run --no-sync python -B -m scripts.monolithic_reference.run_p4 --profile nightly --list
+uv run --no-sync python -B -m scripts.monolithic_reference.run_regression --profile nightly --list
 
 # 夜间由操作者手动启动；output 必须是新目录。
-uv run --no-sync python -B -m scripts.monolithic_reference.run_p4 \
+uv run --no-sync python -B -m scripts.monolithic_reference.run_regression \
   --profile nightly --output /path/to/new-nightly-output
 ```
 

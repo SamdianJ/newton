@@ -9,9 +9,9 @@ from unittest.mock import patch
 import numpy as np
 
 from newton.tests.unittest_utils import add_function_test, get_test_devices
-from scripts.monolithic_reference.p3_coupled_fixtures import make_solver, make_tiny, set_control
-from scripts.monolithic_reference.p3_coupled_oracle import CoupledOracle
-from scripts.monolithic_reference.verify_p3_coupled import state_arrays
+from scripts.monolithic_reference.coupled_fixtures import make_solver, make_tiny, set_control
+from scripts.monolithic_reference.coupled_oracle import CoupledOracle
+from scripts.monolithic_reference.verify_coupled import state_arrays
 
 
 def test_reference_jacobian(test, device):

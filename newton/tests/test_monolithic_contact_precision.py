@@ -10,10 +10,10 @@ from unittest.mock import patch
 import numpy as np
 import warp as wp
 
-from newton._src.solvers.monolithic.contact_variational import ContactObjective
+from newton._src.solvers.monolithic.contact import ContactObjective
 from newton.tests import test_monolithic_contact_components as contact
 from newton.tests.unittest_utils import add_function_test, get_test_devices
-from scripts.monolithic_reference import p3_contact_oracle as oracle_math
+from scripts.monolithic_reference import contact_oracle as oracle_math
 
 
 def native_inputs(model, x, q, dtype):

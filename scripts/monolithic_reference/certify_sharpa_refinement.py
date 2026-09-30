@@ -10,8 +10,8 @@ from pathlib import Path
 
 import numpy as np
 
-from .p3_articulation_fixtures import specification
-from .summarize_p3_articulation import angles
+from .articulation_fixtures import specification
+from .summarize_articulation import angles
 
 
 def main():

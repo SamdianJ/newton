@@ -7,7 +7,7 @@ import math
 
 import numpy as np
 
-from .linear import MonolithicPcgConfig, MonolithicPcgWarmStart
+from .linear_types import MonolithicPcgConfig, MonolithicPcgWarmStart
 from .solver_types import _StepFailure
 
 

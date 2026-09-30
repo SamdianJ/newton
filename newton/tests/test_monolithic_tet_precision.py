@@ -11,8 +11,8 @@ import warp as wp
 
 from newton._src.solvers.monolithic.tet_precision import TetObjective
 from newton.tests.unittest_utils import add_function_test, get_test_devices
-from scripts.monolithic_reference.p3_tet_fixtures import build_model
-from scripts.monolithic_reference.p3_tet_oracle import TetOracle
+from scripts.monolithic_reference.tet_fixtures import build_model
+from scripts.monolithic_reference.tet_oracle import TetOracle
 
 
 def test_native_objective(test, device):

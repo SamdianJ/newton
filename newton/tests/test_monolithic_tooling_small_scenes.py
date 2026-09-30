@@ -10,10 +10,10 @@ from pathlib import Path
 import numpy as np
 
 from newton.tests.unittest_utils import add_function_test, get_test_devices
+from scripts.monolithic_reference.coupled_fixtures import NORMAL, knots_at, make_tiny
 from scripts.monolithic_reference.normal_loading import build_model
-from scripts.monolithic_reference.p3_coupled_fixtures import NORMAL, knots_at, make_tiny
-from scripts.monolithic_reference.summarize_p3_coupled import LIMITS, differences, errors, summarize
-from scripts.monolithic_reference.verify_p3_coupled import assess, run_case
+from scripts.monolithic_reference.summarize_coupled import LIMITS, differences, errors, summarize
+from scripts.monolithic_reference.verify_coupled import assess, run_case
 
 
 def test_normal_input(test, device):

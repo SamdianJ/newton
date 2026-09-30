@@ -5,9 +5,9 @@
 
 import numpy as np
 
-from scripts.monolithic_reference.p3_articulation_oracle import Kinematics, joint_terms, transform
-from scripts.monolithic_reference.p3_contact_oracle import geometry, local, penalty
-from scripts.monolithic_reference.p3_tet_oracle import TetOracle
+from scripts.monolithic_reference.articulation_oracle import Kinematics, joint_terms, transform
+from scripts.monolithic_reference.contact_oracle import geometry, local, penalty
+from scripts.monolithic_reference.tet_oracle import TetOracle
 
 
 class CoupledOracle:

@@ -10,12 +10,12 @@ from unittest.mock import patch
 import numpy as np
 import warp as wp
 
+from newton._src.solvers.monolithic.articulation import ArticulationObjective, _TreeKinematics
 from newton._src.solvers.monolithic.articulation_state import ArticulationState, _predict, _recover_history
-from newton._src.solvers.monolithic.articulation_variational import ArticulationObjective, _TreeKinematics
 from newton._src.solvers.monolithic.joint_parameters import JointParameters
 from newton.tests.unittest_utils import add_function_test, get_test_devices
-from scripts.monolithic_reference.p3_articulation_fixtures import build_case, specification, target
-from scripts.monolithic_reference.p3_articulation_oracle import Kinematics, joint_terms, skew
+from scripts.monolithic_reference.articulation_fixtures import build_case, specification, target
+from scripts.monolithic_reference.articulation_oracle import Kinematics, joint_terms, skew
 
 
 def component(case, device, dtype=None):

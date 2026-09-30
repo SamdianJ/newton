@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 The Newton Developers
 # SPDX-License-Identifier: Apache-2.0
 
-"""Native-precision kinematics for the P3 articulation incremental objective."""
+"""Native-precision kinematics for the Monolithic articulation incremental objective."""
 
 import hashlib
 import json
@@ -171,11 +171,11 @@ class _TreeKinematics:
         self.transform = wp.transformd if dtype == wp.float64 else wp.transform
         _validate_joint_coordinate_layout(model)
         if model.articulation_count != 1 or not model.joint_dof_count:
-            raise ValueError("P3 articulation requires one nonempty tree")
+            raise ValueError("Monolithic articulation requires one nonempty tree")
         if model.requires_grad or model.constraint_mimic_count or model.actuators:
-            raise ValueError("P3 articulation does not support autograd, mimic constraints or model actuators")
+            raise ValueError("Monolithic articulation does not support autograd, mimic constraints or model actuators")
         if model.muscle_count:
-            raise ValueError("P3 articulation does not support muscle forces")
+            raise ValueError("Monolithic articulation does not support muscle forces")
         self.model, self.device = model, model.device
         self.counts = {
             name: getattr(model, name)
@@ -199,14 +199,14 @@ class _TreeKinematics:
         ]:
             raise ValueError("Unowned joints are unsupported")
         if not v["joint_enabled"].all() or len(np.unique(v["body_world"])) != 1:
-            raise ValueError("P3 requires enabled joints in one world")
+            raise ValueError("Monolithic requires enabled joints in one world")
         self.count, self.bodies, self.joints = model.joint_dof_count, model.body_count, model.joint_count
         seen, roots = set(), 0
         ancestors = np.zeros((self.bodies, self.count), dtype=np.int32)
         dof_joint = np.zeros(self.count, dtype=np.int32)
         for j, (parent, child) in enumerate(zip(v["joint_parent"], v["joint_child"], strict=True)):
             if child < 0 or child >= self.bodies or child in seen or (parent != -1 and parent not in seen):
-                raise ValueError("P3 requires a parent-before-child world-anchored tree")
+                raise ValueError("Monolithic requires a parent-before-child world-anchored tree")
             roots += int(parent == -1)
             seen.add(int(child))
             if parent >= 0:
@@ -216,11 +216,13 @@ class _TreeKinematics:
                 ancestors[child, dof] = 1
                 dof_joint[dof] = j
         if roots != 1 or len(seen) != self.bodies:
-            raise ValueError("P3 tree must own every body")
+            raise ValueError("Monolithic tree must own every body")
         if not np.isin(v["body_flags"], [int(BodyFlags.DYNAMIC), int(BodyFlags.KINEMATIC)]).all():
-            raise ValueError("P3 articulation requires dynamic or kinematic body flags; proxies are unsupported")
+            raise ValueError(
+                "Monolithic articulation requires dynamic or kinematic body flags; proxies are unsupported"
+            )
         if np.any((v["body_flags"] == int(BodyFlags.KINEMATIC)) & ancestors.any(axis=1)):
-            raise ValueError("P3 articulation does not support kinematic bodies with movable ancestors")
+            raise ValueError("Monolithic articulation does not support kinematic bodies with movable ancestors")
         for name, value in v.items():
             if not np.isfinite(value).all():
                 raise ValueError(f"Nonfinite articulation configuration: {name}")
@@ -313,7 +315,7 @@ class _TreeKinematics:
     def evaluate(self, q, *, state=None):
         """Evaluate FK and COM/angular Jacobians without using public FP32 FK."""
         if (q.shape, q.dtype, q.device) != ((self.count,), self.dtype, self.device):
-            raise ValueError("P3 FK requires owned-shape native coordinates on the model device")
+            raise ValueError("Monolithic FK requires owned-shape native coordinates on the model device")
         wp.launch(
             _forward,
             1,
@@ -357,9 +359,9 @@ class ArticulationKinematics(_TreeKinematics):
 
     def __init__(self, model, *, extra_config=None, dtype=wp.float64):
         if model.particle_count or model.tet_count:
-            raise ValueError("P3 articulation requires one nonempty tree and no particles/tets")
+            raise ValueError("Monolithic articulation requires one nonempty tree and no particles/tets")
         if np.any(model.shape_flags.numpy() & int(ShapeFlags.COLLIDE_SHAPES | ShapeFlags.COLLIDE_PARTICLES)):
-            raise ValueError("P3 articulation requires collision-disabled shapes")
+            raise ValueError("Monolithic articulation requires collision-disabled shapes")
         super().__init__(model, extra_config=extra_config, dtype=dtype)
 
 

@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 The Newton Developers
 # SPDX-License-Identifier: Apache-2.0
 
-"""Frozen scalar joint parameters and control snapshots shared by the P3 solver."""
+"""Frozen scalar joint parameters and control snapshots shared by the coupled solver."""
 
 from __future__ import annotations
 

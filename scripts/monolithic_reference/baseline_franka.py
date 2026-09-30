@@ -4,8 +4,8 @@
 """Parameterize only the two baseline scene constructors, leaving stepping/recording inherited.
 
 Constructor bodies are copied from 39f80c48; physical helpers and all runtime
-methods come from the explicitly selected baseline checkout. This adapter is
-private T0 tooling and will be consolidated with the scene entry points in T3.
+methods come from the explicitly selected baseline checkout. This historical adapter
+only runs against the fixed baseline checkout; current scenes use the public API.
 """
 
 import gzip
@@ -16,6 +16,7 @@ from pathlib import Path
 import numpy as np
 import warp as wp
 from newton.solvers.experimental.monolithic import SolverMonolithic
+from scripts.monolithic_reference.verify_p3_coupled import save, state_arrays
 
 import newton
 from newton.examples.softbody.example_monolithic_franka_grasp import Example
@@ -29,7 +30,6 @@ from scripts.monolithic_reference.franka_grasp import (
     sha,
     smooth_fields,
 )
-from scripts.monolithic_reference.verify_p3_coupled import save, state_arrays
 
 
 class BaselineFranka(FrankaGrasp):

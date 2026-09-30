@@ -12,7 +12,7 @@ from unittest.mock import patch
 
 import numpy as np
 
-from scripts.monolithic_reference import check_p3_recording as recording
+from scripts.monolithic_reference import check_recording as recording
 
 
 class TestRecordingValidation(unittest.TestCase):

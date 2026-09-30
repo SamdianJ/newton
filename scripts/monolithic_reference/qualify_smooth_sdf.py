@@ -12,11 +12,11 @@ import numpy as np
 import warp as wp
 
 from newton._src.solvers.monolithic.smooth_sdf import SmoothSDF
-from scripts.monolithic_reference.build_p3_smooth_sdf import build_coefficients, texture_identity
-from scripts.monolithic_reference.p3_smooth_sdf_oracle import evaluate
-from scripts.monolithic_reference.verify_p3_close import ARTIFACTS, build
-from scripts.monolithic_reference.verify_p3_coupled import save
-from scripts.monolithic_reference.verify_p3_smooth_sdf import _old, geometry_gate, measure, sample, sha256
+from scripts.monolithic_reference.build_smooth_sdf import build_coefficients, texture_identity
+from scripts.monolithic_reference.smooth_sdf_oracle import evaluate
+from scripts.monolithic_reference.verify_close import ARTIFACTS, build
+from scripts.monolithic_reference.verify_coupled import save
+from scripts.monolithic_reference.verify_smooth_sdf import _old, geometry_gate, measure, sample, sha256
 
 
 def mesh_distance(vertices, indices, points):

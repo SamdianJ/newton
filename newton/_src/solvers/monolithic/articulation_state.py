@@ -207,7 +207,7 @@ class ArticulationState:
         k = self.kinematics
         history = getattr(state, self.namespace, None)
         if not isinstance(history, Model.AttributeNamespace):
-            raise ValueError("P3 requires a complete articulation state")
+            raise ValueError("Monolithic requires a complete articulation state")
         actual = {name for name, value in vars(history).items() if isinstance(value, wp.array)}
         if actual != self.schema.keys():
             raise ValueError("Invalid articulation history schema")

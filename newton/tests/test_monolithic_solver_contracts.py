@@ -14,8 +14,8 @@ import numpy as np
 import warp as wp
 
 import newton
-from newton._src.solvers.monolithic.articulation_variational import _configuration_digest
-from newton._src.solvers.monolithic.variational_iteration import acceptance
+from newton._src.solvers.monolithic.articulation import _configuration_digest
+from newton._src.solvers.monolithic.iteration import acceptance
 from newton.solvers.experimental.monolithic import SolverMonolithic
 from newton.tests.monolithic_test_utils import add_contact_free_tet
 from newton.tests.unittest_utils import add_function_test, get_test_devices
@@ -282,9 +282,7 @@ def test_trial_failure_rollback(test, device):
         out = state if alias else solver.create_state(dt=0.001)
         state.body_f.assign([[1, 0, 0, 0, 0, 0]])
         original, output = snapshot(state), snapshot(out)
-        with patch(
-            "newton._src.solvers.monolithic.variational_iteration.acceptance", return_value=(False, False, False, False)
-        ):
+        with patch("newton._src.solvers.monolithic.iteration.acceptance", return_value=(False, False, False, False)):
             solver.step(state, out, model.control(), dt=0.001)
         test.assertEqual(solver.last_stats.status, solver.Status.REGULARIZATION_EXHAUSTED)
         test.assertTrue(solver.last_stats.rolled_back)

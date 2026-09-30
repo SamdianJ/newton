@@ -9,7 +9,7 @@ from unittest.mock import patch
 import numpy as np
 import warp as wp
 
-from newton._src.solvers.monolithic import linear
+from newton._src.solvers.monolithic import linear_types
 from newton._src.solvers.monolithic.segment_graph import _SegmentGraphCache
 from newton.tests import test_monolithic_linear_assembly as linear_tests
 from newton.tests import test_monolithic_solver_coupled as coupled
@@ -117,7 +117,7 @@ def test_factor_scaling_and_failures(test, device):
     workspace.aq_actor_dense.fill_(-1e10)
     test.assertEqual(
         workspace.factor_actor_preconditioner(generation=generation, pivot_tolerance=0),
-        linear.MonolithicLinearStatus.NON_POSITIVE_PIVOT,
+        linear_types.MonolithicLinearStatus.NON_POSITIVE_PIVOT,
     )
     test.assertFalse(workspace._factor_valid)
 

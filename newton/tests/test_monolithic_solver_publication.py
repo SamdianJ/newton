@@ -12,7 +12,7 @@ import numpy as np
 import warp as wp
 
 from newton._src.solvers.monolithic import solver_monolithic
-from newton._src.solvers.monolithic.contact_variational import ContactObjective, ContactStatus
+from newton._src.solvers.monolithic.contact import ContactObjective, ContactStatus
 from newton._src.solvers.monolithic.solver_monolithic import _StepFailure
 from newton.tests.test_monolithic_contact_components import fixture, state, tangent
 from newton.tests.test_monolithic_solver_coupled import assert_snapshot, scene, snapshot, solver

@@ -13,7 +13,7 @@ import warp as wp
 
 import newton
 from newton._src.solvers.monolithic import solver_monolithic as impl
-from newton._src.solvers.monolithic.linear import MonolithicLinearStatus, MonolithicPcgWarmStart
+from newton._src.solvers.monolithic.linear_types import MonolithicLinearStatus, MonolithicPcgWarmStart
 from newton._src.solvers.monolithic.tet_assembly import assemble_tet_residual_tangent
 from newton._src.solvers.monolithic.tet_common import TetPhysicsWorkspace
 from newton._src.solvers.monolithic.tet_material import (

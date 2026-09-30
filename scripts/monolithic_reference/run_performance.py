@@ -20,7 +20,7 @@ from unittest.mock import patch
 
 import numpy as np
 
-from scripts.monolithic_reference.run_p5_precision import ROOT, build, cases, sha, validate_inputs
+from scripts.monolithic_reference.run_precision import ROOT, build, cases, sha, validate_inputs
 
 COUNTERS = (
     "nonlinear_iterations",
@@ -59,7 +59,7 @@ def worker(args):
     from newton._src.solvers.monolithic.smooth_sdf import SmoothSDFSet  # noqa: PLC0415
     from newton.examples.softbody import monolithic_franka as franka  # noqa: PLC0415
     from newton.examples.softbody.monolithic_recording import save, state_arrays  # noqa: PLC0415
-    from scripts.monolithic_reference.run_p3_baseline import module_origins  # noqa: PLC0415
+    from scripts.monolithic_reference.run_baseline import module_origins  # noqa: PLC0415
 
     args.output.mkdir(parents=True, exist_ok=False)
     if args.kernel_cache:

@@ -7,7 +7,7 @@ import unittest
 import numpy as np
 import warp as wp
 
-from newton._src.solvers.monolithic.linear import MonolithicPcgWarmStart
+from newton._src.solvers.monolithic.linear_types import MonolithicPcgWarmStart
 from newton.tests import test_monolithic_linear_assembly as fixtures
 from newton.tests.unittest_utils import add_function_test, get_test_devices
 

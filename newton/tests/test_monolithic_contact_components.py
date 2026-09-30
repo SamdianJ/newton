@@ -8,12 +8,12 @@ import unittest
 import numpy as np
 import warp as wp
 
-from newton._src.solvers.monolithic.contact_variational import ContactObjective, ContactStatus
-from newton._src.solvers.monolithic.linear import (
+from newton._src.solvers.monolithic.contact import ContactObjective, ContactStatus
+from newton._src.solvers.monolithic.linear import MonolithicLinearWorkspace
+from newton._src.solvers.monolithic.linear_types import (
     MonolithicLinearCapacities,
     MonolithicLinearGeneration,
     MonolithicLinearLayout,
-    MonolithicLinearWorkspace,
 )
 from newton._src.solvers.monolithic.tet_assembly import (
     TetScatterBuffers,
@@ -25,9 +25,9 @@ from newton._src.solvers.monolithic.tet_precision import TetObjective
 from newton.tests.test_monolithic_collision_stream import _scene
 from newton.tests.test_monolithic_tet_derivatives import _dense
 from newton.tests.unittest_utils import add_function_test, get_test_devices
-from scripts.monolithic_reference.p3_contact_oracle import evaluate, penalty, rotation
-from scripts.monolithic_reference.p3_tet_fixtures import build_model
-from scripts.monolithic_reference.p3_tet_oracle import TetOracle
+from scripts.monolithic_reference.contact_oracle import evaluate, penalty, rotation
+from scripts.monolithic_reference.tet_fixtures import build_model
+from scripts.monolithic_reference.tet_oracle import TetOracle
 
 
 def contact(model, law, *, fixed=False, mu=0.5):

@@ -15,7 +15,7 @@ from pathlib import Path
 import numpy as np
 
 from scripts.monolithic_reference.retained_assets import FROZEN, INPUTS, resolve_input, sha, validate_inputs
-from scripts.monolithic_reference.run_p3_baseline import cases as baseline_cases
+from scripts.monolithic_reference.run_baseline import cases as baseline_cases
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -128,7 +128,7 @@ def worker(case, controls, output, max_steps, *, input_manifest=FROZEN):
     import warp as wp  # noqa: PLC0415
 
     from newton.examples.softbody.monolithic_recording import save, serial, state_arrays  # noqa: PLC0415
-    from scripts.monolithic_reference.run_p3_baseline import module_origins  # noqa: PLC0415
+    from scripts.monolithic_reference.run_baseline import module_origins  # noqa: PLC0415
 
     output.mkdir(parents=True, exist_ok=False)
     receipt = {
@@ -280,7 +280,7 @@ def main():
             sys.executable,
             "-B",
             "-m",
-            "scripts.monolithic_reference.run_p5_precision",
+            "scripts.monolithic_reference.run_precision",
             "--worker",
             "--precision",
             case["precision"],

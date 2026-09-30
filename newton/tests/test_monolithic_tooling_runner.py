@@ -16,9 +16,9 @@ from unittest.mock import patch
 import numpy as np
 
 from scripts.monolithic_reference import retained_assets
-from scripts.monolithic_reference import run_p3_baseline as baseline
+from scripts.monolithic_reference import run_baseline as baseline
 from scripts.monolithic_reference.native_reference import frames as native_frames
-from scripts.monolithic_reference.run_p4 import (
+from scripts.monolithic_reference.run_regression import (
     ROOT,
     aggregate,
     finalize_case,
@@ -97,7 +97,7 @@ class TestSceneRunner(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             (root / "references.json").write_text("[]")
-            with patch("scripts.monolithic_reference.run_p4.ASSET_ROOT", root):
+            with patch("scripts.monolithic_reference.run_regression.ASSET_ROOT", root):
                 with self.assertRaisesRegex(ValueError, "exact ten"):
                     reference_binding(select_cases("full")[0])
 
@@ -177,7 +177,7 @@ class TestSceneRunner(unittest.TestCase):
     def test_list(self):
         """List the frozen matrix without initializing a GPU or loading scenes."""
         result = subprocess.run(
-            [sys.executable, "-m", "scripts.monolithic_reference.run_p4", "--profile", "full", "--list"],
+            [sys.executable, "-m", "scripts.monolithic_reference.run_regression", "--profile", "full", "--list"],
             text=True,
             capture_output=True,
             check=True,

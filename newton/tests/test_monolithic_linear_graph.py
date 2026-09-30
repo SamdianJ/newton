@@ -27,7 +27,7 @@ def no_host_or_allocations():
 def test_hot_path(test, device):
     """Enqueue success, failure and warm starts without host reads or allocations."""
     plan = make_plan(device, np.eye(4), [1, 2, 3, 4])
-    wp.load_module(module=impl.__name__, device=device)
+    wp.load_module(module=impl._initialize_state.module, device=device)
     for value, warm in ((1, False), (-1, False), (1, False), (1, True)):
         plan.values.assign((np.eye(4) * value).astype(np.float32).reshape(-1))
         plan.set_solve_parameters(regularization=0, zero_initial_guess=not warm)
@@ -45,7 +45,7 @@ def test_graph_replay(test, device):
     graph_plan = make_plan(device, np.eye(4), [1, 2, 3, 4], config=cfg)
     reference = make_plan(device, np.eye(4), [1, 2, 3, 4], config=cfg)
     graph_plan.set_solve_parameters(regularization=0)
-    wp.load_module(module=impl.__name__, device=device)
+    wp.load_module(module=impl._initialize_state.module, device=device)
     with no_host_or_allocations():
         graph_plan.capture()
     original_graph = graph_plan.graph

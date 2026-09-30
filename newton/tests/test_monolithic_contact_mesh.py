@@ -13,7 +13,7 @@ from newton._src.geometry.sdf_texture import TextureSDFData, create_sparse_sdf_t
 from newton._src.solvers.monolithic.contact_geometry import _shape64
 from newton.tests.test_monolithic_contact_components import contact, fixture, state, tangent
 from newton.tests.unittest_utils import add_function_test, get_test_devices
-from scripts.monolithic_reference.p3_contact_oracle import evaluate, mesh_reference
+from scripts.monolithic_reference.contact_oracle import evaluate, mesh_reference
 
 
 @wp.kernel

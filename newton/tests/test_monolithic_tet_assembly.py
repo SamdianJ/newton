@@ -19,8 +19,8 @@ from newton._src.solvers.monolithic.tet_assembly import (
 )
 from newton._src.solvers.monolithic.tet_precision import TetObjective
 from newton.tests.unittest_utils import add_function_test, get_test_devices
-from scripts.monolithic_reference.p3_tet_fixtures import build_model
-from scripts.monolithic_reference.p3_tet_oracle import TetOracle, material
+from scripts.monolithic_reference.tet_fixtures import build_model
+from scripts.monolithic_reference.tet_oracle import TetOracle, material
 
 
 def test_objective_and_assembly(test, device):
@@ -113,7 +113,7 @@ class TestTetComponents(unittest.TestCase):
                 "-c",
                 "import sys; "
                 "from newton._src.solvers.monolithic import tet_common, tet_material, tet_assembly, tet_precision; "
-                "from newton._src.solvers.monolithic.variational_iteration import acceptance; "
+                "from newton._src.solvers.monolithic.iteration import acceptance; "
                 "assert not any('newton._src.solvers.monolithic.' + name in sys.modules "
                 "for name in ('tet', 'tet_variational', 'solver_monolithic', 'articulation_solver'))",
             ],

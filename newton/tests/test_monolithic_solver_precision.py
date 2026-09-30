@@ -11,13 +11,13 @@ from unittest.mock import patch
 import numpy as np
 import warp as wp
 
+from newton._src.solvers.monolithic.iteration import measure
 from newton._src.solvers.monolithic.smooth_sdf import SmoothSDF, SmoothSDFSet, sample_smooth
-from newton._src.solvers.monolithic.variational_iteration import measure
 from newton.solvers.experimental.monolithic import SolverMonolithic
 from newton.tests.test_monolithic_sdf_fields import grid
 from newton.tests.test_monolithic_solver_coupled import assert_snapshot, scene, snapshot, solver
-from scripts.monolithic_reference.build_p3_smooth_sdf import build_coefficients
-from scripts.monolithic_reference.p3_smooth_sdf_oracle import evaluate
+from scripts.monolithic_reference.build_smooth_sdf import build_coefficients
+from scripts.monolithic_reference.smooth_sdf_oracle import evaluate
 
 
 class TestSolverPrecision(unittest.TestCase):

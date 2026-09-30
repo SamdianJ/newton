@@ -11,14 +11,7 @@ import numpy as np
 import warp as wp
 import warp.sparse as sparse
 
-from newton._src.solvers.monolithic.linear import (
-    MonolithicLinearCapacities,
-    MonolithicLinearGeneration,
-    MonolithicLinearLayout,
-    MonolithicLinearStatus,
-    MonolithicLinearWorkspace,
-    MonolithicPcgConfig,
-    MonolithicPcgWarmStart,
+from newton._src.solvers.monolithic.bsr import (
     _accumulate_monolithic_actor_q_entry,
     _accumulate_monolithic_internal_x_block,
     _append_monolithic_contact_factor_triplets,
@@ -27,6 +20,15 @@ from newton._src.solvers.monolithic.linear import (
     _MonolithicMat33Triplets,
     _MonolithicScalarTriplets,
     _reserve_monolithic_contact_factor,
+)
+from newton._src.solvers.monolithic.linear import MonolithicLinearWorkspace
+from newton._src.solvers.monolithic.linear_types import (
+    MonolithicLinearCapacities,
+    MonolithicLinearGeneration,
+    MonolithicLinearLayout,
+    MonolithicLinearStatus,
+    MonolithicPcgConfig,
+    MonolithicPcgWarmStart,
 )
 from newton.tests.monolithic_test_utils import build_tiny_cpu_fixture
 from newton.tests.unittest_utils import add_function_test, get_test_devices

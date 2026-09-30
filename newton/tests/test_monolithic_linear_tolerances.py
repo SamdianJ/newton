@@ -10,7 +10,7 @@ from unittest.mock import patch
 import numpy as np
 import warp as wp
 
-from newton._src.solvers.monolithic import linear, pcg_production
+from newton._src.solvers.monolithic import pcg, pcg_production_kernels
 from newton._src.solvers.monolithic.pcg_production import MaskedPcgConfig
 from newton.solvers.experimental.monolithic import SolverMonolithic
 from newton.tests.monolithic_test_utils import build_contact_free_coupled_fixture, build_tiny_cpu_fixture
@@ -49,7 +49,7 @@ def test_absolute_acceptance(test, device):
 def test_block_acceptance(test, device):
     """Require every block to pass either its relative or absolute bound in both controllers."""
     plan = make_plan(device, np.eye(4), [1, 0, 0, 0])
-    packet = wp.zeros(1, dtype=linear._MonolithicPcgPacket, device=device)
+    packet = wp.zeros(1, dtype=pcg._MonolithicPcgPacket, device=device)
     ratios = wp.zeros(3, dtype=float, device=device)
     unbounded = (float("inf"),) * 3
     for norms, rhs, limits, expected in (
@@ -64,17 +64,17 @@ def test_block_acceptance(test, device):
     ):
         with test.subTest(norms=norms, rhs=rhs, limits=limits):
             plan.residual_norm_limits.assign(np.asarray(limits, dtype=np.float32))
-            plan._launch(pcg_production._initialize_state, 1, [plan.state, plan.error, plan.scalars, 11])
+            plan._launch(pcg_production_kernels._initialize_state, 1, [plan.state, plan.error, plan.scalars, 11])
             plan.norms.assign(np.array([*norms, 0, 0, 0, *rhs], dtype=np.float32))
             plan._launch(
-                pcg_production._checkpoint_decision,
+                pcg_production_kernels._checkpoint_decision,
                 1,
                 [plan.norms, plan.state, plan.error, plan.params, 0, True, False],
             )
             test.assertEqual(int(plan.state.numpy()[0]["status"]) == 0, expected)
             diagnostic_norms = wp.array([*norms, *rhs], dtype=float, device=device)
             wp.launch(
-                linear._pack_monolithic_pcg_residual,
+                pcg._pack_monolithic_pcg_residual,
                 1,
                 [plan.error, ratios, diagnostic_norms, plan.params.floors, 1e-4, 1e-6, wp.vec3(*limits), packet],
                 device=device,

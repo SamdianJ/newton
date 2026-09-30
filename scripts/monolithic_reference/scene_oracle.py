@@ -7,7 +7,7 @@ from types import SimpleNamespace
 
 import numpy as np
 
-from scripts.monolithic_reference.p3_articulation_oracle import Kinematics, joint_terms, skew, transform
+from scripts.monolithic_reference.articulation_oracle import Kinematics, joint_terms, skew, transform
 
 
 def unpack_symmetric(values):

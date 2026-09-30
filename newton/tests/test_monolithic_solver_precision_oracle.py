@@ -13,12 +13,12 @@ import numpy as np
 
 from newton.examples.softbody.monolithic_recording import serial, state_arrays
 from newton.tests.test_monolithic_solver_coupled import scene, solver
-from scripts.monolithic_reference.audit_p5_precision import audit
-from scripts.monolithic_reference.build_p3_smooth_sdf import build_coefficients
-from scripts.monolithic_reference.observe_p5_precision import Observer
-from scripts.monolithic_reference.p3_smooth_sdf_oracle import evaluate as spline_reference
-from scripts.monolithic_reference.p5_scene_oracle import SceneOracle, spline
-from scripts.monolithic_reference.run_p5_precision import sha
+from scripts.monolithic_reference.audit_precision import audit
+from scripts.monolithic_reference.build_smooth_sdf import build_coefficients
+from scripts.monolithic_reference.observe_precision import Observer
+from scripts.monolithic_reference.run_precision import sha
+from scripts.monolithic_reference.scene_oracle import SceneOracle, spline
+from scripts.monolithic_reference.smooth_sdf_oracle import evaluate as spline_reference
 
 
 class TestSceneAudit(unittest.TestCase):

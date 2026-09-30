@@ -43,7 +43,7 @@ class TestContactBoundary(unittest.TestCase):
                 sys.executable,
                 "-c",
                 "import sys; "
-                "from newton._src.solvers.monolithic.contact_variational import ContactObjective; "
+                "from newton._src.solvers.monolithic.contact import ContactObjective; "
                 "from newton._src.solvers.monolithic.coupled_state import CoupledState; "
                 "from newton.solvers.experimental.monolithic import MonolithicCollisionPipeline; "
                 "assert not any('newton._src.solvers.monolithic.' + name in sys.modules "

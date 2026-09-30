@@ -93,7 +93,7 @@ def run(args):
         "argv": sys.argv,
         "cwd": str(Path.cwd()),
         "manifest_sha256": sha(args.manifest),
-        "tool_hashes": {p.name: sha(p) for p in (Path(__file__), Path(__file__).with_name("p3_baseline_franka.py"))},
+        "tool_hashes": {p.name: sha(p) for p in (Path(__file__), Path(__file__).with_name("baseline_franka.py"))},
         "status": "RUNNING",
         "baseline_only": True,
     }
@@ -111,7 +111,7 @@ def run(args):
 
         # Load just the independent tool by file path. Its dependencies resolve to
         # the fixed checkout; no solver factory, method, or option is monkeypatched.
-        path = Path(__file__).with_name("p3_baseline_franka.py")
+        path = Path(__file__).with_name("baseline_franka.py")
         spec = importlib.util.spec_from_file_location("p4_baseline_franka_tool", path)
         adapter = importlib.util.module_from_spec(spec)
         sys.modules[spec.name] = adapter
@@ -139,6 +139,7 @@ def run(args):
         receipt["configuration_digest"] = solver._kinematics.digest.hex()
         receipt["build_seconds"] = time.perf_counter() - begin
         # Freeze the actual source node arithmetic and coefficient identities.
+        # This import belongs to the fixed 39f80c48 checkout, not the current tree.
         from scripts.monolithic_reference.verify_p3_smooth_sdf import _nodes  # noqa: PLC0415
 
         smooth = solver._contact.smooth_sdf

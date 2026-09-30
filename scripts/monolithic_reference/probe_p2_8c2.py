@@ -14,7 +14,7 @@ def main():
     wp.init()
     device = wp.get_device("cuda:0")
     config = impl.MaskedPcgConfig(maximum_iterations=200, true_residual_interval=10)
-    wp.load_module(module=impl.__name__, device=device)
+    wp.load_module(module=impl._initialize_state.module, device=device)
     records = []
     for graph in (False, True):
         plan = make_plan(device, np.eye(4), [1, 2, 3, 4], config=config)

@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 The Newton Developers
 # SPDX-License-Identifier: Apache-2.0
 
-"""Solver definitions shared by the P3 path without importing a solver implementation."""
+"""Solver definitions shared by the coupled solver without importing a solver implementation."""
 
 from __future__ import annotations
 

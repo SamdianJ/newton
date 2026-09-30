@@ -10,7 +10,7 @@ import itertools
 
 import numpy as np
 
-from scripts.monolithic_reference.p3_smooth_sdf_oracle import evaluate as smooth_reference
+from scripts.monolithic_reference.smooth_sdf_oracle import evaluate as smooth_reference
 
 GENERATOR = np.array([[0.0, 0.0, 1.0], [0.0, 0.0, 0.0], [-1.0, 0.0, 0.0]])
 

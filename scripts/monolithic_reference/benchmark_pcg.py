@@ -20,7 +20,7 @@ import numpy as np
 import warp as wp
 import warp.sparse as sparse
 
-from newton._src.solvers.monolithic import linear, pcg_production
+from newton._src.solvers.monolithic import linear, linear_types, pcg, pcg_production_kernels
 from newton._src.solvers.monolithic.soft_preconditioner import _BlockPreconditioner
 from newton._src.solvers.monolithic.solver_monolithic import _SolverMonolithicInternalConfig
 from scripts.monolithic_reference.linear_evidence import (
@@ -34,7 +34,7 @@ from scripts.monolithic_reference.linear_evidence import (
 def pcg_config(maximum_iterations=200, *, linear_absolute_tolerance=1e-6):
     """Use the solver's current tolerances and policies, without tuning per mode."""
     defaults = _SolverMonolithicInternalConfig()
-    return linear.MonolithicPcgConfig(
+    return linear_types.MonolithicPcgConfig(
         maximum_iterations,
         10,
         1e-4,
@@ -251,11 +251,11 @@ class Runner:
         self.mode, self.config = mode, config
         a = case.arrays
         nx = (case.n - case.nq) // 3
-        capacity = linear.MonolithicLinearCapacities(
+        capacity = linear_types.MonolithicLinearCapacities(
             0, 0, len(a["factor_weights"]), config.maximum_iterations, config.maximum_iterations + 2
         )
         self.workspace = w = linear.MonolithicLinearWorkspace(
-            linear.MonolithicLinearLayout(case.nq, nx),
+            linear_types.MonolithicLinearLayout(case.nq, nx),
             capacity,
             wp.array(np.arange(nx, dtype=np.int32), device=device),
             device=device,
@@ -273,7 +273,7 @@ class Runner:
             getattr(w._factors, name).assign(a["factor_" + name])
         w._factors.count.fill_(len(a["factor_weights"]))
         # This is a sealed offline algebra snapshot, not a resumed physical transaction.
-        w._generation = linear.MonolithicLinearGeneration(1, 0, 1, 1)
+        w._generation = linear_types.MonolithicLinearGeneration(1, 0, 1, 1)
         w._sealed = w._valid = w._scaling_valid = True
         self._require(w.set_regularization(case.metadata["lambda"], generation=w._generation))
         if study_hierarchy is not None:
@@ -285,7 +285,7 @@ class Runner:
 
     @staticmethod
     def _require(status):
-        if status != linear.MonolithicLinearStatus.SUCCESS:
+        if status != linear_types.MonolithicLinearStatus.SUCCESS:
             raise ValueError(f"Offline workspace setup failed: {status.name}")
 
     def refresh_generation(self):
@@ -305,11 +305,11 @@ class Runner:
             self.rhs,
             self.y,
             generation=w._generation,
-            warm_start=linear.MonolithicPcgWarmStart.ZERO,
+            warm_start=linear_types.MonolithicPcgWarmStart.ZERO,
             config=self.config,
             delta=self.delta,
         )
-        if self.mode == "diagnostic" and result.status == linear.MonolithicLinearStatus.SUCCESS:
+        if self.mode == "diagnostic" and result.status == linear_types.MonolithicLinearStatus.SUCCESS:
             self._require(w.recover_delta(self.y, self.delta, generation=w._generation))
         return result
 
@@ -328,11 +328,11 @@ def observe_convergence(runner, reference):
         nonlocal last_iterations
         result = launch(kernel, *args, **kwargs)
         recursive = None
-        if kernel is linear._update_monolithic_pcg_solution_residual:
+        if kernel is pcg._update_monolithic_pcg_solution_residual:
             last_iterations += 1
             slot = last_iterations
             recursive = runner.workspace._r
-        elif kernel is pcg_production._finish_update:
+        elif kernel is pcg_production_kernels._finish_update:
             plan = runner.workspace._masked_pcg_plan
             state = plan.state.numpy()[0]
             iterations = int(state["effective_iterations"])

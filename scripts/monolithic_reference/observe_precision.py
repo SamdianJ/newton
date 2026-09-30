@@ -12,7 +12,7 @@ import numpy as np
 import warp as wp
 
 from newton.examples.softbody.monolithic_recording import save, serial, state_arrays
-from scripts.monolithic_reference import run_p5_precision as runner
+from scripts.monolithic_reference import run_precision as runner
 from scripts.monolithic_reference.retained_assets import ORIGINAL_FROZEN
 
 

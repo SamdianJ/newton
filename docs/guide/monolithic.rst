@@ -88,8 +88,8 @@ Historical manifest hashes remain unchanged; recorded paths are resolved through
 
 .. code-block:: bash
 
-   uv run --no-sync python -m scripts.monolithic_reference.run_p4 --profile nightly --list
-   uv run --no-sync python -m scripts.monolithic_reference.run_p4 --profile nightly --output /path/to/new-output
+   uv run --no-sync python -m scripts.monolithic_reference.run_regression --profile nightly --list
+   uv run --no-sync python -m scripts.monolithic_reference.run_regression --profile nightly --output /path/to/new-output
 
 The nightly profile contains nine Franka configurations and one Sharpa configuration
 and is triggered manually for overnight regression. The full profile selects the
@@ -120,8 +120,8 @@ The precision experiment runner uses the same ten configurations, defaults to
 FP32, and accepts ``--precision both``. The retained controls already match the
 rebuilt manifest; they do not need to be generated again::
 
-   uv run --no-sync python -m scripts.monolithic_reference.run_p5_precision --list
-   uv run --no-sync python -m scripts.monolithic_reference.run_p5_precision --controls asset/monolithic/data/inputs/controls --output /path/to/results
+   uv run --no-sync python -m scripts.monolithic_reference.run_precision --list
+   uv run --no-sync python -m scripts.monolithic_reference.run_precision --controls asset/monolithic/data/inputs/controls --output /path/to/results
 
 Use ``--max-steps 2`` for a smoke run. A complete run reports
 ``COMPLETE_NOT_AUDITED`` until the independent T5 numerical audit is performed;

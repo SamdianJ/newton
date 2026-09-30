@@ -14,7 +14,7 @@ import numpy as np
 import warp as wp
 
 from newton.examples.softbody.monolithic_recording import measure, save, serial, state_arrays
-from scripts.monolithic_reference.p3_coupled_fixtures import (
+from scripts.monolithic_reference.coupled_fixtures import (
     DIRECTORY,
     NORMAL,
     PROTOCOL,
@@ -22,7 +22,7 @@ from scripts.monolithic_reference.p3_coupled_fixtures import (
     make_tiny,
     set_control,
 )
-from scripts.monolithic_reference.p3_coupled_oracle import CoupledOracle
+from scripts.monolithic_reference.coupled_oracle import CoupledOracle
 
 
 def assess(rows, case, expected, load):
@@ -105,7 +105,7 @@ def run_case(
     output.mkdir(parents=True, exist_ok=False)
     load = None
     if case.startswith("cube"):
-        from scripts.monolithic_reference.p3_coupled_fixtures import CLAMP_CONFIG, make_clamp_model  # noqa: PLC0415
+        from scripts.monolithic_reference.coupled_fixtures import CLAMP_CONFIG, make_clamp_model  # noqa: PLC0415
 
         refinement = int(case[-1])
         asset = DIRECTORY / "soft_cube_40mm" / f"cube_r{refinement}.npz"

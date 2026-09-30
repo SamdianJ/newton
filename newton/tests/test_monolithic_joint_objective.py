@@ -12,17 +12,17 @@ import numpy as np
 import warp as wp
 
 import newton
-from newton._src.solvers.monolithic.articulation_state import ArticulationState, _predict, _recover_history
-from newton._src.solvers.monolithic.articulation_variational import (
+from newton._src.solvers.monolithic.articulation import (
     ArticulationKinematics,
     ArticulationObjective,
     _joint_variation,
 )
+from newton._src.solvers.monolithic.articulation_state import ArticulationState, _predict, _recover_history
 from newton._src.solvers.monolithic.coupled_kernels import _coordinate_trial
 from newton.solvers.experimental.monolithic import SolverMonolithic
 from newton.tests.monolithic_test_utils import add_contact_free_tet
 from newton.tests.unittest_utils import add_function_test, get_test_devices
-from scripts.monolithic_reference.p3_articulation_oracle import Kinematics, joint_terms, skew
+from scripts.monolithic_reference.articulation_oracle import Kinematics, joint_terms, skew
 
 
 def make_tree(device, *, coupled=False):

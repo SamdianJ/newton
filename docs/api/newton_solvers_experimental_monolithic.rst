@@ -81,8 +81,8 @@ Repository regression runner
 
 From the development checkout, list the frozen profiles without loading CUDA::
 
-    uv run --no-sync python -m scripts.monolithic_reference.run_p4 --profile dev --list
-    uv run --no-sync python -m scripts.monolithic_reference.run_p4 --profile full --list
+    uv run --no-sync python -m scripts.monolithic_reference.run_regression --profile dev --list
+    uv run --no-sync python -m scripts.monolithic_reference.run_regression --profile full --list
 
 Run with ``--output <new-directory>``. Each case executes serially in its own
 process and binds source paths/hashes, frozen inputs and comparison tolerances.
