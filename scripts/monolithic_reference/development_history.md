@@ -61,3 +61,7 @@ tar -xOf agents/integration/artifacts/history/evidence.tar.gz p4/t4-v1/receipt.j
 workspace 文档现位于 `dev/monolithic/`，顶层仅 PRD、当前架构和开放项；历史按 P0–P4 归档，一页 HANDOFF 位于 P4。原横幅已移至 p4_stage_results.md。六个退役角色、integration 旧报告和清理记录移入 `agents/integration/artifacts/history/`；reference 研究资料和现存资产链接保留。
 
 根目录 trajectories 的两个独立早期控制输入已搬至 worktree 的 `asset/monolithic/trajectories/`；10 mm 输入与正式控制文件相同，删除重复副本。十条参考与冻结清单未改。仓库外迁移的逐文件原/新路径和哈希、文档原快照及代码静态核对记录在 `agents/integration/artifacts/history/repository-consolidation-v1/`；这些本机文档和证据不会仅因提交 worktree 而被推送。
+
+## 默认 Franka 运行复验（2026-09-30）
+
+用户明确要求运行默认抓取，受测源码 `558d958b`。FP64、OR＋C-IE、production/graph 的5250步全部收敛，0 Stopped、0硬失败；保持0.5秒、最低抬升70.686 mm，原抓取指标通过。5251帧完整状态与参考比较为 PASS_FROZEN_ENVELOPE。只运行这一条，矩阵仍为PARTIAL，组件套件及其他场景未运行。详见 [验证记录](franka_default_validation.md)。此前维护批次的NOT_RUN为当时状态，保留不回写。
