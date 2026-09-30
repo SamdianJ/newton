@@ -1,6 +1,6 @@
 # Monolithic 项目与测试规范
 
-本文件说明当前 `SamiulJ/monolithic-refactor` 分支的测试组织方式，与 [AGENTS.md](AGENTS.md) 配套。范围限于 Monolithic；不替换 Newton 其他模块的 CI 或 nightly。公开 solver 用法见 [Monolithic 指南](docs/guide/monolithic.rst)，开发历史见 [development_history.md](scripts/monolithic_reference/development_history.md)。
+本文件说明当前 `SamiulJ/monolithic-refactor` 分支的测试组织方式，与 [AGENTS.md](AGENTS.md) 配套。范围限于 Monolithic；不替换 Newton 其他模块的 CI 或 nightly。公开 solver 用法见 [Monolithic 指南](docs/guide/monolithic.rst)，开发历史见 [development_history.md](../../dev/monolithic/P4/script_records/development_history.md)。
 
 ## 阶段开发流程
 
@@ -96,7 +96,7 @@ uv run --extra dev -m newton.tests --pattern 'test_monolithic_*.py' -j 1
 - 录制完整性与比较包络归入 recording；矩阵选择和来源检查归入 runner。控制测试直接调用当前场景实现，不再经过历史转发入口。
 - 保留当前 API 对非法参数/外来历史的拒绝以及仍明确支持的 checkpoint/录制 schema 兼容检查；这些保护当前输入边界，不维护退役 solver 的可运行性。
 
-旧文件快照、哈希、模块迁移表和静态核对记录在 workspace 的 `agents/integration/artifacts/history/test-reorganization-v1/`。静态计数为294个测试函数定义调整到288个：退役8个、新增2个；这是源码定义数，不是按设备展开后的运行用例数。静态导入/语法核对和 pre-commit 已通过；当时按“不重跑测试”的要求，运行测试、discovery 和完整轨迹均为 **NOT_RUN**。后续用户指定的默认 Franka 单条复验已通过，见 [验证记录](scripts/monolithic_reference/franka_default_validation.md)；不等于全部组件或完整矩阵通过。
+旧文件快照、哈希、模块迁移表和静态核对记录在 workspace 的 `agents/integration/artifacts/history/test-reorganization-v1/`。静态计数为294个测试函数定义调整到288个：退役8个、新增2个；这是源码定义数，不是按设备展开后的运行用例数。静态导入/语法核对和 pre-commit 已通过；当时按“不重跑测试”的要求，运行测试、discovery 和完整轨迹均为 **NOT_RUN**。后续用户指定的默认 Franka 单条复验已通过，见 [验证记录](../../dev/monolithic/P4/script_records/franka_default_validation.md)；不等于全部组件或完整矩阵通过。
 
 ## 手动夜间全量回归
 
@@ -135,4 +135,6 @@ uv run --no-sync python -B -m scripts.monolithic_reference.run_regression \
 
 线性实现分为 `linear.py` 工作区、`linear_types.py`、`bsr.py`、`preconditioner.py`、`pcg.py` 及 production plan/kernel 两个模块。公开 solver API 不变；原 `articulation_variational`、`contact_variational`、`variational_iteration` 分别为 `articulation`、`contact`、`iteration`。活动参考工具的 P2/P3/P4/P5 模块名已换成功能名；历史报告仍记录当时名称。
 
-本机设计文档已由 workspace 的 `dev/monothlic` 整理为 `dev/monolithic`，顶层为 `PRD.md`、`architecture.md`、`open_items.md`，一页交接位于 `P4/HANDOFF.md`。这些文档位于 Newton Git 仓库之外，不能声称随本分支提交或推送；仓库内开发历史与阶段记录保留便携摘要。
+本机设计文档已由 workspace 的 `dev/monothlic` 整理为 `dev/monolithic`，顶层为 `PRD.md`、`architecture.md`、`open_items.md`，一页交接位于 `P4/HANDOFF.md`。这些文档位于 Newton Git 仓库之外，不能声称随本分支提交或推送；当前脚本说明维护在 workspace 的 `dev/scripts/`，历史记录归档到 `dev/monolithic/<阶段>/script_records/`；仓库脚本目录保留导航和含哈希的迁移索引。
+
+当前脚本用法见 [dev/scripts](../../dev/scripts/README.md)；旧文档位置见 [迁移索引](scripts/monolithic_reference/documentation-index.json)。脚本及 fixture 未因文档整理搬迁。

@@ -114,7 +114,8 @@ trajectories are never modified by this retention policy.
 
 The scene runner's result must be combined with component, lifecycle and replay
 checks for stage qualification. Retired driver snapshots, hashes and migration
-notes are documented in ``scripts/monolithic_reference/legacy_retirement.md``.
+notes are documented in the workspace file
+``dev/monolithic/P4/script_records/legacy_retirement.md``.
 
 The precision experiment runner uses the same ten configurations, defaults to
 FP32, and accepts ``--precision both``. The retained controls already match the

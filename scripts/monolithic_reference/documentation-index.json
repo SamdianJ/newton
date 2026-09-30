@@ -1,0 +1,128 @@
+{
+  "source_commit": "f3b9a6961b7841eee42b46c2095b496b04ac111f",
+  "workspace_root": "../.. (relative to worktree root)",
+  "originals_archive": "dev/monolithic/P4/script_records/documentation-relocation/originals.tar.gz",
+  "files": [
+    {
+      "old_repository_path": "scripts/monolithic_reference/README.md",
+      "workspace_path": "dev/monolithic/P0/script_records/reference_harness_README.md",
+      "original_sha256": "9df0bf0ecc803b48ef3f923a4db5eec1b625db9aa1746634b9d3e7da59f8427d",
+      "relocated_sha256": "99e78e81de3199b8e262823e15d3be26718cb3d49ddf72d7f3652be0f1c5e899"
+    },
+    {
+      "old_repository_path": "scripts/monolithic_reference/cube_grasp_zh.md",
+      "workspace_path": "dev/monolithic/P2/script_records/cube_grasp_zh.md",
+      "original_sha256": "1f3fc6a99f15aba5a31c541b6d2cc4f37658457fde5a45318c5a3c89b7be4b34",
+      "relocated_sha256": "b0cc23a6652269c9af9e193b7ca96c9c868208df776ae4e2b2182fb8d6d80d55"
+    },
+    {
+      "old_repository_path": "scripts/monolithic_reference/cube_grasp_round2_zh.md",
+      "workspace_path": "dev/monolithic/P2/script_records/cube_grasp_round2_zh.md",
+      "original_sha256": "37ccce282877c4f4f67ec2fb9c93e4bd804160a192eb0c3147bc0ae54e4fc823",
+      "relocated_sha256": "37ccce282877c4f4f67ec2fb9c93e4bd804160a192eb0c3147bc0ae54e4fc823"
+    },
+    {
+      "old_repository_path": "scripts/monolithic_reference/normal_patch_spd_adr_zh.md",
+      "workspace_path": "dev/monolithic/P2/script_records/normal_patch_spd_adr_zh.md",
+      "original_sha256": "13d3a0c83d6c731ded2262abfbe3c343f0653052b4af5220547f1d1a71d3be61",
+      "relocated_sha256": "13d3a0c83d6c731ded2262abfbe3c343f0653052b4af5220547f1d1a71d3be61"
+    },
+    {
+      "old_repository_path": "scripts/monolithic_reference/p2_architecture_zh.md",
+      "workspace_path": "dev/monolithic/P2/script_records/p2_architecture_zh.md",
+      "original_sha256": "15ed00e1161b63fd1bc20afa9c817d46c652416208abc4f55a07844061cc8d93",
+      "relocated_sha256": "15ed00e1161b63fd1bc20afa9c817d46c652416208abc4f55a07844061cc8d93"
+    },
+    {
+      "old_repository_path": "scripts/monolithic_reference/p2_segment_graphs_zh.md",
+      "workspace_path": "dev/monolithic/P2/script_records/p2_segment_graphs_zh.md",
+      "original_sha256": "35ce74fa1c19316dfce6b238c4b320ba48288594bb40be457a7e973da8c6e3fc",
+      "relocated_sha256": "35ce74fa1c19316dfce6b238c4b320ba48288594bb40be457a7e973da8c6e3fc"
+    },
+    {
+      "old_repository_path": "scripts/monolithic_reference/p2_validation_zh.md",
+      "workspace_path": "dev/monolithic/P2/script_records/p2_validation_zh.md",
+      "original_sha256": "56e5425532b0912fafa1101299db0269a6f871c5fcfab9fcb05c80f54e2dadaf",
+      "relocated_sha256": "56e5425532b0912fafa1101299db0269a6f871c5fcfab9fcb05c80f54e2dadaf"
+    },
+    {
+      "old_repository_path": "scripts/monolithic_reference/preconditioner_closeout_p2_zh.md",
+      "workspace_path": "dev/monolithic/P2/script_records/preconditioner_closeout_p2_zh.md",
+      "original_sha256": "5b4b787d499ece872019a52dfcb4950088a534ff8667c97a1a0d56e945085d41",
+      "relocated_sha256": "5b4b787d499ece872019a52dfcb4950088a534ff8667c97a1a0d56e945085d41"
+    },
+    {
+      "old_repository_path": "scripts/monolithic_reference/preconditioner_study_zh.md",
+      "workspace_path": "dev/monolithic/P2/script_records/preconditioner_study_zh.md",
+      "original_sha256": "e62bd5e69469ae6f3ecac269f0e1816941b4fefd8aef81f5d55e9d55b90f6636",
+      "relocated_sha256": "e62bd5e69469ae6f3ecac269f0e1816941b4fefd8aef81f5d55e9d55b90f6636"
+    },
+    {
+      "old_repository_path": "scripts/monolithic_reference/p3_phase_transition_zh.md",
+      "workspace_path": "dev/monolithic/P3/script_records/p3_phase_transition_zh.md",
+      "original_sha256": "150bb3c0a0ed92adf7166acd6a3ddf1ce9f4a91d99a0de0c2c4c7bf114283c21",
+      "relocated_sha256": "de8fb2f58abb385dc23d3ff1bfcf3eaa4796392d1861bf3268c52b8064c2a604"
+    },
+    {
+      "old_repository_path": "scripts/monolithic_reference/p3_pr1_zh.md",
+      "workspace_path": "dev/monolithic/P3/script_records/p3_pr1_zh.md",
+      "original_sha256": "d0d23efc81576f21ddd95bb43f00af4091260e108659600bdb1fb2b40d5fe87e",
+      "relocated_sha256": "94141df38d3c7c3482fae99de357f7c354a00acbe8fb840e1191e61b17a931ea"
+    },
+    {
+      "old_repository_path": "scripts/monolithic_reference/development_history.md",
+      "workspace_path": "dev/monolithic/P4/script_records/development_history.md",
+      "original_sha256": "69bee6a95f8b50171c54452ff4b5a0934bb2c456b0944dcb6a433681c26e29cf",
+      "relocated_sha256": "b87b387f3d0509f869042e2e779650b868bb5f1cd100b4b2152e24a07f4bbb91"
+    },
+    {
+      "old_repository_path": "scripts/monolithic_reference/franka_default_validation.md",
+      "workspace_path": "dev/monolithic/P4/script_records/franka_default_validation.md",
+      "original_sha256": "922226bede598aa6faa5545b4b6b59948bf71252048580486f98032786f486af",
+      "relocated_sha256": "922226bede598aa6faa5545b4b6b59948bf71252048580486f98032786f486af"
+    },
+    {
+      "old_repository_path": "scripts/monolithic_reference/legacy_retirement.md",
+      "workspace_path": "dev/monolithic/P4/script_records/legacy_retirement.md",
+      "original_sha256": "2b9648e16c4f99642566e34b8c0b062787ed3babfaa3746c6744ef1e8204c314",
+      "relocated_sha256": "2b9648e16c4f99642566e34b8c0b062787ed3babfaa3746c6744ef1e8204c314"
+    },
+    {
+      "old_repository_path": "scripts/monolithic_reference/p4_acceptance.md",
+      "workspace_path": "dev/monolithic/P4/script_records/p4_acceptance.md",
+      "original_sha256": "b34ce22527c8fdf7d22f243d309a00ac1e4c88bdda6c38ff20aba6588aeb579b",
+      "relocated_sha256": "7e045a4b6d41b6d6e145536b0eff4ababcc548047b2c63147a780372cfcc78b2"
+    },
+    {
+      "old_repository_path": "scripts/monolithic_reference/p4_stage_results.md",
+      "workspace_path": "dev/monolithic/P4/script_records/p4_stage_results.md",
+      "original_sha256": "1f420ce09621634ae7878ca4a867a03b9d9b0bb6207115fcc260ff30e0e42635",
+      "relocated_sha256": "124fb7689f35b358309b723a355cea5d777a751950a0cc27a1730e7bc20eb359"
+    },
+    {
+      "old_repository_path": "scripts/monolithic_reference/p5_precision_contract.md",
+      "workspace_path": "dev/monolithic/P4/script_records/p5_precision_contract.md",
+      "original_sha256": "df1277bc9fe9d0b8b6c020cb31af82e5cc0ac122d36aedcddc742d4f48ead835",
+      "relocated_sha256": "df1277bc9fe9d0b8b6c020cb31af82e5cc0ac122d36aedcddc742d4f48ead835"
+    },
+    {
+      "old_repository_path": "scripts/monolithic_reference/repository_maintenance.md",
+      "workspace_path": "dev/monolithic/P4/script_records/repository_maintenance.md",
+      "original_sha256": "5795f090b177e664b731fc379ac580f846bb278dea063191e0d967769bf3760a",
+      "relocated_sha256": "1d8a650c40da0317b6da1975412d1efa39d14e0291a27fd42ff0214b99ccbc82"
+    },
+    {
+      "old_repository_path": "scripts/monolithic_reference/repository_maintenance.json",
+      "workspace_path": "dev/monolithic/P4/script_records/repository_maintenance.json",
+      "original_sha256": "0095a4888083f66acf1f338c651562c705377b7822c712ad068838b6c3036260",
+      "relocated_sha256": "0095a4888083f66acf1f338c651562c705377b7822c712ad068838b6c3036260"
+    },
+    {
+      "old_repository_path": "scripts/monolithic_reference/pcg_benchmark_zh.md",
+      "workspace_path": "dev/scripts/pcg_benchmark.md",
+      "original_sha256": "6f0690a8c327d05e0ae3106689a405012219c0c63660939dbe4fbb42ca8ba49b",
+      "relocated_sha256": "0f455de5da5a71e50cf37738f7ca40f88ec0856a5fb1f0f2c67a991d2fa93bf8"
+    }
+  ],
+  "note": "Frozen manifests retain historical paths and hashes. Original bytes are in the archive and source commit. Python, fixtures and references were not changed."
+}
