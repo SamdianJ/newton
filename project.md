@@ -2,19 +2,62 @@
 
 本文件说明当前 `SamiulJ/monolithic-refactor` 分支的测试组织方式，与 [AGENTS.md](AGENTS.md) 配套。范围限于 Monolithic；不替换 Newton 其他模块的 CI 或 nightly。公开 solver 用法见 [Monolithic 指南](docs/guide/monolithic.rst)，开发历史见 [development_history.md](scripts/monolithic_reference/development_history.md)。
 
+## 阶段开发流程
+
+P4 开发阶段已结束；后续以明确命名的阶段推进，`P4j` 这样的子阶段也视为独立阶段，拥有自己的目标、PRD、worktree 和验收。当前项目集成主干为 worktree `worktrees/Monolithic-refactor` 对应的分支 `SamiulJ/monolithic-refactor`，不是 Newton 上游 `main`。
+
+1. **制定阶段目标并创建 worktree。** 写清要解决的问题、交付物、不做什么和完成标准。从当前集成主干的明确提交创建该阶段的独立分支与 worktree；一个阶段使用一个 worktree，阶段内各 PR 在其中按依赖顺序推进。记录阶段 ID、分支、worktree 路径和起始提交；不在集成主干上直接开展下一阶段开发。
+2. **根据目标制定阶段 PRD。** 放在 `dev/monolithic/<阶段>/PRD.md`，明确支持范围、行为/API 边界、资产/环境、验收指标与开放项。每份阶段 PRD **至少包含一个端到端（E2E）阶段测试**：从真实输入到最终输出，写明场景/配置、执行命令、完整运行长度、通过/失败条件和结果位置。组件测试通过或脚本能启动不能替代 E2E。E2E 可复用已有完整场景，但须说明它如何验证本阶段目标。
+3. **按 PRD 拆分 PR。** 为每个 PR 明确目标、修改范围、依赖、组件测试、小型集成测试及对应 PRD 条目。阶段 E2E 和完整场景集合在开发前约定；不在看到结果后临时删减失败项。PRD 中的 E2E 若已属于完整场景集合，同一受验源码与输入的执行结果可复用，不重复跑同一条长轨迹。
+4. **开发中只做组件测试，PR 收尾做小型集成。** 迭代期间运行受影响的组件测试和必要静态检查；每个 PR 完成时运行其约定的小型集成，验证组件连接、短步进和关键事务。不得把完整 Franka/Sharpa 轨迹作为日常调试或每个 PR 的默认检查。
+5. **每个 PR 更新文档并提交。** 在 `dev/monolithic/<阶段>/` 更新实现说明、PRD/PR 对应关系、验证结果、偏差与开放项，然后将该 PR 的代码和可版本化记录提交到阶段 worktree 所属分支。失败或未执行的检查不能写成通过，未满足该 PR 退出条件不得标记完成。这里的“提交 worktree”指提交其 Git 分支，不是删除工作树或提前合并主干。
+6. **阶段目标验收后跑完整场景，再合并。** 全部 PR 完成后，先核对阶段目标、文档、组件与小型集成结果；通过这一轮阶段目标验收后，执行 PRD 约定的 E2E 和完整场景回归。长场景安排手动夜间运行，结束后检查结果。所有必需门槛通过、开放项如实记录后，才将阶段分支合并到 `SamiulJ/monolithic-refactor`；完整场景检查仍属于最终合并门槛，不能先宣称最终 PASS 再补跑。若合并冲突修改了受验代码，须复验受影响范围。合并后更新阶段 HANDOFF 与主干状态；确认成果已保留后再清理阶段 worktree。
+
+本流程规定后续开发的执行顺序；修改规则本身不创建新阶段、不启动测试或合并。显式的阶段范围调整、暂停或“不运行测试”指令优先，受影响门槛保留为待执行，不自动豁免。
+
+## 文档、测试与结果目录
+
+下面路径均相对于共享 workspace `/home/lightwheel/Desktop/newton/SamiulJ`，不是任意 worktree 的当前目录：
+
+```text
+dev/monolithic/
+  PRD.md                         # 当前项目范围
+  architecture.md                # 当前架构
+  open_items.md                  # 跨阶段开放项
+  <阶段>/                        # P0–P4 历史，P4j 等后续阶段
+    PRD.md                       # 阶段目标、至少一个 E2E、验收门槛
+    plan.md                      # PR 拆分、顺序与测试映射
+    PR-01.md                     # 每个 PR 的实现/验证/偏差记录
+    HANDOFF.md                   # 当前状态、运行方式、开放项
+    acceptance.md                # 阶段目标验收、完整场景及合并结论
+  test/
+    components/                  # 按模块功能复用的组件测试
+    integration/                 # PR 收尾的小型集成测试
+    e2e/                         # 阶段端到端/完整场景测试入口
+    results/
+      <阶段>/
+        <PR或stage>/<运行ID>/     # 命令、回执、摘要、必要失败数据
+```
+
+**开发文档统一维护在 `dev/monolithic/` 并按阶段组织；Monolithic 测试统一收口到 `dev/monolithic/test/`，结果按阶段分组。** 测试文件按功能命名，阶段归属通过 PRD 映射和结果目录表达，避免重复复制组件测试。阶段测试只调用受验 worktree 的代码，运行时记录并核对实际导入来源，不依赖隐含当前目录。新的测试结果不再散落到 `agents/` 或各 worktree 的临时 output 中；历史产物保持原身份，通过索引定位，不为改目录而重跑。
+
+**迁移状态：** 本次先明确规则，现有可执行测试仍在 `newton/tests/`，场景 runner 在 `scripts/monolithic_reference/`；尚未完成测试源码的物理迁移。后续迁移须同步处理导入、fixture、Newton discovery 与 CI，使干净 checkout 能通过显式测试路径配置或必要的发现入口执行测试，不能静默跳过缺失的 workspace 测试，也不在两处维护相同断言。下文列出现存模块与迁移前命令，不表示豁免统一目录要求。
+
+`dev/` 当前位于 Newton Git 仓库之外。每个 PR 仍必须实际更新该阶段文档，并在提交说明或版本化回执中记录文档路径/版本或摘要哈希；提交 worktree 不等于已提交、推送这些外部文件。合并记录须能定位阶段 PRD 与验收结果，不能仅依赖聊天记录或旧 PASS 标签。
+
 ## 测试分层
 
 | 层级 | 内容 | 运行时机 |
 | --- | --- | --- |
 | 组件 | 当前模块的数学、装配、输入校验、API、独立参考和工具行为 | 开发时运行受影响组件；普通 CI 通过现有 Newton runner 发现这些测试 |
-| 小型集成 | 小规模 q+x、多步历史、真实 trial、发布/回滚、graph 生命周期、状态恢复 | 修改相关求解路径时；与组件测试一起按 CPU/CUDA 条件执行 |
-| 夜间全量 | Franka 九条＋Sharpa 一条完整 FP64 轨迹 | 手动触发，安排夜间运行；结束后读取报告和回执 |
+| 小型集成 | 小规模 q+x、多步历史、真实 trial、发布/回滚、graph 生命周期、状态恢复 | 每个 PR 完成时运行约定的小型集成，按 CPU/CUDA 条件报告 |
+| 夜间全量 | Franka 九条＋Sharpa 一条完整 FP64 轨迹 | 阶段目标验收后、合并前手动触发；结束后读取报告和回执 |
 
 不要求每次提交运行十条轨迹，也不把 `run_regression --profile dev` 当轻量测试：它仍运行 Franka 和 Sharpa 两条完整轨迹。当前没有新增 GitHub 自动调度、远端 runner 或资产上传；夜间任务使用已具备 GPU 和本地资产的环境显式启动。
 
 ## 按功能选择测试
 
-测试保持在 `newton/tests/`，继续使用现有 unittest 注册和设备选择机制，无新增测试框架。以下前缀均可用 Newton runner 的 `--pattern` 选择：
+以下为尚未迁移的 `newton/tests/` 功能清单，当前仍使用现有 unittest 注册和设备选择机制。统一目录目标见上节；迁移不新增测试框架。以下前缀均可用 Newton runner 的 `--pattern` 选择：
 
 | 文件模式 | 主要职责 |
 | --- | --- |
@@ -35,7 +78,7 @@
 # 按修改选择一个组件；GPU 环境下先串行运行，避免测试争抢设备。
 uv run --extra dev -m newton.tests --pattern 'test_monolithic_joint_*.py' -j 1
 
-# 当前 Monolithic 功能集合，包含小型集成，不包含十条完整轨迹。
+# PR 收尾按范围选择小型集成；下例为当前全部组件＋小型集成集合。
 uv run --extra dev -m newton.tests --pattern 'test_monolithic_*.py' -j 1
 ```
 
@@ -53,11 +96,11 @@ uv run --extra dev -m newton.tests --pattern 'test_monolithic_*.py' -j 1
 - 录制完整性与比较包络归入 recording；矩阵选择和来源检查归入 runner。控制测试直接调用当前场景实现，不再经过历史转发入口。
 - 保留当前 API 对非法参数/外来历史的拒绝以及仍明确支持的 checkpoint/录制 schema 兼容检查；这些保护当前输入边界，不维护退役 solver 的可运行性。
 
-旧文件快照、哈希、模块迁移表和静态核对记录在 workspace 的 `agents/integration/artifacts/history/test-reorganization-v1/`。静态计数为294个测试函数定义调整到288个：退役8个、新增2个；这是源码定义数，不是按设备展开后的运行用例数。静态导入/语法核对和 pre-commit 已通过；按此前“不重跑测试”的要求，运行测试、discovery 和完整轨迹均为 **NOT_RUN**。
+旧文件快照、哈希、模块迁移表和静态核对记录在 workspace 的 `agents/integration/artifacts/history/test-reorganization-v1/`。静态计数为294个测试函数定义调整到288个：退役8个、新增2个；这是源码定义数，不是按设备展开后的运行用例数。静态导入/语法核对和 pre-commit 已通过；当时按“不重跑测试”的要求，运行测试、discovery 和完整轨迹均为 **NOT_RUN**。后续用户指定的默认 Franka 单条复验已通过，见 [验证记录](scripts/monolithic_reference/franka_default_validation.md)；不等于全部组件或完整矩阵通过。
 
 ## 手动夜间全量回归
 
-固定集合为：Franka 的 Armijo/ResNorm/ArmijoOrResNorm × C-EE/C-IE/C-II，共九条，各5250步；Sharpa 的 ArmijoOrResNorm＋C-IE，一条8667步。全部使用 FP64、production、graph，单 GPU 串行执行。
+当前完整回归集合为：Franka 的 Armijo/ResNorm/ArmijoOrResNorm × C-EE/C-IE/C-II，共九条，各5250步；Sharpa 的 ArmijoOrResNorm＋C-IE，一条8667步。全部使用 FP64、production、graph，单 GPU 串行执行。后续阶段在 PRD 中明确引用此集合及本阶段 E2E；经明确范围调整前保持这十项，不能把仅一条默认场景的 PASS 称为 full PASS。
 
 保留资产及十条参考位于 [asset/monolithic](asset/monolithic/README.md)，大数据不随 Git 克隆。缺少资产应明确失败，不能跳过后声称 full PASS，也不能自动重建替代资产或改写物理身份。
 
@@ -65,9 +108,9 @@ uv run --extra dev -m newton.tests --pattern 'test_monolithic_*.py' -j 1
 # 只列出十项，不构建场景或启动 GPU 求解。
 uv run --no-sync python -B -m scripts.monolithic_reference.run_regression --profile nightly --list
 
-# 夜间由操作者手动启动；output 必须是新目录。
+# 替换阶段/运行ID占位符；阶段目标验收后手动启动，output 必须是新目录。
 uv run --no-sync python -B -m scripts.monolithic_reference.run_regression \
-  --profile nightly --output /path/to/new-nightly-output
+  --profile nightly --output "/home/lightwheel/Desktop/newton/SamiulJ/dev/monolithic/test/results/<阶段>/stage/<运行ID>"
 ```
 
 当前本机执行时同样使用上述 `UV_PROJECT_ENVIRONMENT` 共享环境设置。`full` 作为原十项入口继续支持；`--case` 过滤只能得到 PARTIAL，不能替代夜间全量结论。不添加定时触发，也不因为组件测试失败而自动启动长轨迹。
