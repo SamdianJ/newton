@@ -47,3 +47,7 @@ tar -xOf agents/integration/artifacts/history/evidence.tar.gz p4/t4-v1/receipt.j
 保留当前 `Monolithic-refactor`、提供共享环境的 `monolithic-integration`、主checkout `newton`，以及仍被独立oracle引用的 `superdex-reference-54ae749a`。移除已干净的 articulation、collision、contact、linear、tet、verification 和 p28-baseline 工作树；保留原分支，detached p28提交另以 `archive/monolithic-p28-baseline` 固定。
 
 本批不更改solver或runner。R1仍需正式入口明确接入重建Sharpa身份和保留参考；旧T0参考的重复录制已经清理，不能继续依赖旧完整证据树。Q1为FP32新阈值未独立认证，Q2为Sharpa抓取未认证，Q3为矩阵与性能范围限制。后续恢复正式runner时应利用这十条保留参考，不能绕过身份验证或将不同格式的Sharpa参考直接冒充P3录制。
+
+## 后续R1修复（2026-09-30）
+
+正式runner已绑定worktree内的重建Sharpa清单、资格目录与十条保留FP64参考；场景不再依赖agents资产路径链接。精度runner默认使用重建清单，历史observer未指定清单时仍选择原代次。Sharpa原生录制只读适配，Franka保留原冻结包络，重建Sharpa逐字段严格比较。409项输入与十参考的文件身份检查通过；新增回归检查未执行，GPU/长轨迹未运行。因此R1为代码修复完成、运行验收待执行。此前章节中的OPEN描述是当时状态。

@@ -19,7 +19,7 @@ from newton.solvers.experimental.monolithic import SolverMonolithic, build_smoot
 import newton
 from newton.examples.softbody.monolithic_grasp_trajectory import RecordedGrasp
 from newton.examples.softbody.monolithic_recording import measure, save, serial, state_arrays
-from newton.examples.softbody.monolithic_sharpa_scene import ARTIFACTS, REPO, WORKSPACE, build, mask_statistics
+from newton.examples.softbody.monolithic_sharpa_scene import ASSETS, REPO, build, mask_statistics
 
 
 def build_recorded(payload):
@@ -75,7 +75,7 @@ def run(args):
     output = args.output
     payload = json.loads(args.trajectory.read_text())
     model, scene, mapping, curve, terms, trajectory, palm = build_recorded(payload)
-    smooth = build_smooth_sdf(model, qualified_directory=ARTIFACTS / "p3/pr3/smooth-sdf-v1/geometry")
+    smooth = build_smooth_sdf(model, qualified_directory=ASSETS / "sharpa/geometry-rebuilt")
     solver = SolverMonolithic(
         model,
         contact_model="C-IE",
@@ -104,6 +104,17 @@ def run(args):
     source.joint_qd.zero_()
     newton.eval_fk(model, source.joint_q, source.joint_qd, source)
     state = solver.create_state(dt=trajectory.dt, source=source)
+    expected_digest = getattr(args, "expected_config_digest", None)
+    if expected_digest is not None and solver._kinematics.digest.hex() != expected_digest:
+        raise ValueError("Physical configuration digest changed")
+    expected_controls = getattr(args, "expected_controls", None)
+    if expected_controls is not None:
+        samples = np.asarray(
+            [targets(trajectory, curve, mapping, i * trajectory.dt)[:2] for i in range(trajectory.steps + 1)],
+            dtype=np.float32,
+        )
+        if not np.array_equal(samples, np.load(expected_controls, allow_pickle=False)):
+            raise ValueError("Constructed controls differ from frozen controls")
     pose = solver._kinematics.poses.numpy()[palm]
     np.testing.assert_allclose(pose[:3], trajectory.position[0], atol=1e-8, rtol=0)
     if abs(abs(np.dot(pose[3:], trajectory.quaternion)) - 1) > 1e-12:
@@ -288,7 +299,7 @@ def run(args):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--trajectory", type=Path, default=WORKSPACE / "trajectories/sharpa_cube_grasp.json")
+    parser.add_argument("--trajectory", type=Path, default=ASSETS / "sharpa/recorded-control.json")
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
     args.output.mkdir(parents=True, exist_ok=False)

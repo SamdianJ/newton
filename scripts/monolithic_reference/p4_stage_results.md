@@ -4,8 +4,8 @@
 
 Current acceptance: [P4 acceptance record](p4_acceptance.md). Historical entries
 below retain their original tested-source labels and time-specific status.
-Documentation closeout is complete; current formal-runner asset binding R1
-remains open. No new tests or trajectories are run for this closeout.
+Documentation closeout is complete. R1 asset/reference binding is now implemented;
+runtime validation remains pending. No tests or trajectories were rerun.
 
 Complete each independently reviewable phase or subtask, run its applicable checks, and commit its code, tests, and result summary on `SamiulJ/monolithic-refactor` before starting the next phase. Reference external evidence by path and SHA-256. Keep unrelated edits, large recordings, caches, and environments out of commits. Do not push without separate authorization. A blocked or unfinished phase is not complete.
 
@@ -790,3 +790,11 @@ are executed. Static documentation checks are recorded separately.
 
 Evidence: agents/integration/artifacts/p4/final-acceptance-v1/RESULTS.md,
 evidence-index.json, receipt.json and commit-binding.json. No push.
+
+## R1: retained runner and rebuilt Sharpa binding (2026-09-30)
+
+Formal dev/full now reads the rebuilt manifest and the ten retained FP64 references directly from `asset/monolithic`. Both scene builders use retained inputs; the precision runner defaults to the rebuilt manifest. Original manifests remain byte-identical and historical observation fallback remains on the original generation.
+
+Verify input, reference receipt/chunk and control identities before stepping; reject changed physical configuration or constructed controls. Read native Sharpa blocks without rewriting the stored reference, aligning the initial state, publication labels and frozen control frames. Keep Franka's frozen envelopes; use exact comparison for rebuilt Sharpa because no new repeatability envelope was qualified.
+
+File integrity: 409 frozen inputs and all ten retained references passed. The rebuilt manifest SHA-256 is `d66d567014570ed7275116cbdcf5c52e302c71969c51554ea25e5118e3e875fb`. Evidence: `agents/integration/artifacts/history/runner-asset-binding-v1/file-integrity.json`. Added focused regression checks, **NOT_RUN** per user instruction; no GPU construction, simulation, unit tests or discovery. Static pre-commit checks are separate from numerical acceptance. R1 implementation is complete; runtime acceptance is pending, and no historical PASS is rebound to this commit.

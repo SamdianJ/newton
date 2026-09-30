@@ -12,7 +12,6 @@ from newton.solvers.experimental.monolithic import SolverMonolithic, build_smoot
 
 import newton
 import newton.ik as ik
-import newton.utils
 from newton.examples.softbody.monolithic_soft_cube import load_cube
 
 REPO = Path(__file__).resolve().parents[3]
@@ -45,7 +44,7 @@ def targets(high, low, time_s):
 
 def build_model(cache, device="cuda:0"):
     """Keep URDF masses/colliders and add the unchanged 40 mm all-dynamic P3 cube."""
-    asset = newton.utils.download_asset("franka_emika_panda")
+    asset = REPO / "asset/monolithic/data/inputs/franka/franka_emika_panda"
     urdf = asset / "urdf/fr3_franka_hand.urdf"
     builder = newton.ModelBuilder(gravity=(0, 0, -9.81))
     builder.add_urdf(str(urdf), floating=False, collapse_fixed_joints=True, enable_self_collisions=False)

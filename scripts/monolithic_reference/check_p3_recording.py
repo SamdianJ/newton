@@ -107,14 +107,20 @@ def check(directory, expected_steps):
     }
 
 
-def compare(reference, actual, envelopes=None, *, legacy_fp64=False):
+def compare(reference, actual, envelopes=None, *, legacy_fp64=False, native_controls=None):
     """Compare every same-configuration frame; never infer a trajectory tolerance."""
     errors = {}
     exact = True
     within_envelope = True
     count = 0
     migrated = False
-    for left, right_block in zip(frames(reference), frames(actual), strict=True):
+    if native_controls is None:
+        reference_frames = frames(reference)
+    else:
+        from scripts.monolithic_reference.native_reference import frames as native_frames  # noqa: PLC0415
+
+        reference_frames = native_frames(reference, native_controls)
+    for left, right_block in zip(reference_frames, frames(actual), strict=True):
         right = right_block
         if legacy_fp64 and "history.precision" not in left:
             if right.keys() != left.keys() | {"history.precision"}:

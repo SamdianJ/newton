@@ -15,6 +15,7 @@ from newton.examples.softbody.sharpa_close import ClosureTrajectory, load_fixtur
 REPO = Path(__file__).resolve().parents[3]
 WORKSPACE = REPO.parents[1]
 ARTIFACTS = WORKSPACE / "agents/integration/artifacts"
+ASSETS = REPO / "asset/monolithic/data/inputs"
 
 
 def joint_mapping(model, names, *, carriage=True):
@@ -49,12 +50,12 @@ def mask_statistics(contact):
 
 def build(position):
     """Reuse frozen assets, mount, imported inertia corrections and all joint terms."""
-    old = ARTIFACTS / f"p2/close-p0-capture-20260915-{position}"
+    old = ASSETS / f"sharpa/close-{position}"
     manifest = json.loads((old / "manifest.json").read_text())
     parameters = load_fixture(REPO / "newton/examples/softbody/sharpa_g1h.json")
     model, loaded = load_hand_cube(
-        WORKSPACE / "assets/left_sharpa_wave",
-        ARTIFACTS / "p1/pr6d-assets/hand",
+        ASSETS / "sharpa/left_sharpa_wave",
+        ASSETS / "sharpa/hand",
         REPO / "scripts/monolithic_reference/fixtures/soft_cube_40mm/cube_r2.npz",
         device="cuda:0",
         parameters=parameters,
@@ -67,7 +68,7 @@ def build(position):
     mapping = joint_mapping(model, loaded["joint_names"], carriage=True)
     dofs = [mapping[n][1] for n in loaded["joint_names"]]
     curve = ClosureTrajectory(
-        WORKSPACE / "assets/trajectory/Ball_catch - Left_hand_motion_rad.csv",
+        ASSETS / "sharpa/Ball_catch - Left_hand_motion_rad.csv",
         loaded["joint_names"],
         model.joint_limit_lower.numpy()[dofs],
         model.joint_limit_upper.numpy()[dofs],

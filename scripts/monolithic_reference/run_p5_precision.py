@@ -5,7 +5,6 @@
 
 import argparse
 import gzip
-import hashlib
 import json
 import subprocess
 import sys
@@ -15,15 +14,10 @@ from pathlib import Path
 
 import numpy as np
 
+from scripts.monolithic_reference.retained_assets import FROZEN, INPUTS, resolve_input, sha, validate_inputs
 from scripts.monolithic_reference.run_p3_baseline import cases as baseline_cases
 
 ROOT = Path(__file__).resolve().parents[2]
-ARTIFACTS = ROOT.parents[1] / "agents/integration/artifacts"
-FROZEN = ARTIFACTS / "p4/precision-comparison/t5-a-v1/frozen-inputs.json"
-
-
-def sha(path):
-    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
 
 
 def cases():
@@ -47,13 +41,6 @@ def cases():
     ]
 
 
-def validate_inputs(input_manifest=FROZEN):
-    for name, digest in json.loads(input_manifest.read_text())["input_hashes"].items():
-        if sha(name) != digest:
-            raise ValueError(f"Frozen input changed: {name}")
-    return sha(input_manifest)
-
-
 def build(case, *, input_manifest=FROZEN):
     """Reuse frozen scene construction and sample the original FP32 controls."""
     import warp as wp  # noqa: PLC0415
@@ -67,7 +54,7 @@ def build(case, *, input_manifest=FROZEN):
         from newton.examples.softbody.monolithic_franka import targets as franka_targets  # noqa: PLC0415
 
         scene = FrankaGrasp(
-            ARTIFACTS / "p3/pr3/franka-grasp-v1/cache",
+            INPUTS / "franka/sdf-cache",
             law=case["law"],
             globalization=case["globalization"],
             precision=case["precision"],
@@ -77,16 +64,16 @@ def build(case, *, input_manifest=FROZEN):
         return scene.model, scene.solver, scene.state, np.asarray(samples, dtype=np.float32)
     if case["scene"] != "sharpa-recorded-10mm":
         raise ValueError("T5-C only supports the ten frozen Franka/Sharpa configurations")
-    payload = json.loads((ARTIFACTS / "p3/pr3/current-iterate-production-v1/sharpa-trajectory.json").read_text())
+    payload = json.loads((INPUTS / "sharpa/recorded-control.json").read_text())
     model, _, mapping, curve, terms, trajectory, _ = build_recorded(payload)
     if (trajectory.steps, trajectory.dt) != (case["steps"], case["dt"]):
         raise ValueError("Frozen recorded schedule changed")
     samples = [targets(trajectory, curve, mapping, i * case["dt"])[:2] for i in range(case["steps"] + 1)]
     samples = np.asarray(samples, dtype=np.float32)
     directory = json.loads(input_manifest.read_text()).get(
-        "smooth_sdf_directory", str(ARTIFACTS / "p3/pr3/smooth-sdf-v1/geometry")
+        "smooth_sdf_directory", str(INPUTS / "sharpa/geometry-original")
     )
-    smooth = build_smooth_sdf(model, qualified_directory=Path(directory))
+    smooth = build_smooth_sdf(model, qualified_directory=resolve_input(directory))
     run = SolverMonolithic(
         model,
         contact_model=case["law"],

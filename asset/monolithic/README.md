@@ -10,6 +10,6 @@
 
 Franka 保持原 P3 recording 格式，回放入口使用各 case 的 `recording/` 目录。Sharpa 保持原 P5 native state chunks 格式；没有假装转换成 P3 回放格式。状态块、初末状态、模型及原始回执未修改。每个 `steps.jsonl.gz` 仅保留原有标量统计，去掉嵌套迭代细节；相邻 `log-compaction.json` 记录原/新哈希。这些精简日志不能代替原始独立数值审计数据。
 
-两个 Sharpa geometry 目录代表原资产与重建资产的不同资格代次。旧场景仍引用原代次，因此两个都保留；不得混合证书、替换节点或静默重绑定 digest。正式 runner 的历史资产绑定问题 R1 仍未关闭。重建资产使用 `data/inputs/frozen-inputs-rebuilt.json`，不应误用原清单。
+两个 Sharpa geometry 目录代表原资产与重建资产的不同资格代次。旧诊断与显式旧清单仍可能引用原代次，因此两个都保留；不得混合证书、替换节点或静默重绑定 digest。当前正式 runner 和精度 runner 默认使用重建代次，直接读取此目录；R1代码修复已实现，实际运行验证待执行。重建资产使用 `data/inputs/frozen-inputs-rebuilt.json`，不应误用原清单。正式比较从 `references.json` 选择十条参考，Franka沿用原冻结包络，Sharpa通过只读适配使用原生状态块并要求逐字段精确一致；没有为重建资产伪造新的重复性容差。
 
 开发历史及证据压缩规则见 [development_history.md](../../scripts/monolithic_reference/development_history.md)。完整资产和轨迹文件的 SHA-256 清单在 workspace 的 `agents/integration/artifacts/history/retained-files.csv.gz`。迁移及清理只做文件完整性核对，没有启动测试、仿真或重新授予验收结论。

@@ -70,7 +70,7 @@ class Example:
         parser.add_argument(
             "--asset-cache",
             type=Path,
-            default=REPO.parents[1] / "agents/integration/artifacts/p3/pr3/franka-grasp-v1/cache",
+            default=REPO / "asset/monolithic/data/inputs/franka/sdf-cache",
         )
         parser.add_argument("--output", type=Path, help="New directory for complete trajectory and diagnostics")
         parser.add_argument("--law", choices=("C-IE", "C-EE", "C-II"), default="C-IE")

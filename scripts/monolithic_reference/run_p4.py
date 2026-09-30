@@ -11,11 +11,18 @@ import traceback
 from pathlib import Path
 from types import SimpleNamespace
 
+from scripts.monolithic_reference.retained_assets import (
+    ASSET_ROOT,
+    FROZEN,
+    INPUTS,
+    resolve_input,
+    retained_hashes,
+    verify_retained,
+)
+from scripts.monolithic_reference.retained_assets import validate_inputs as validate_manifest
 from scripts.monolithic_reference.run_p3_baseline import cases, module_origins, sha
 
 ROOT = Path(__file__).resolve().parents[2]
-ARTIFACTS = ROOT.parents[1] / "agents/integration/artifacts"
-T0 = ARTIFACTS / "p4/t0-v1"
 
 
 def select_cases(profile, filters=()):
@@ -38,18 +45,67 @@ def aggregate(results, filtered):
 
 
 def validate_inputs():
-    """Bind inputs to the frozen manifest, remapping repository files to this tree."""
-    manifest = json.loads((T0 / "input-manifest.json").read_text())
-    baseline = Path(manifest["source_root"])
-    for original, digest in manifest["input_hashes"].items():
-        path = Path(original)
-        if path.is_relative_to(baseline):
-            path = ROOT / path.relative_to(baseline)
-        if not path.is_file():
-            raise FileNotFoundError(f"Frozen input unavailable: {path}")
-        if sha(path) != digest:
-            raise ValueError(f"Frozen input changed: {path}")
-    return sha(T0 / "input-manifest.json")
+    """Bind the current runner to the retained, recertified asset generation."""
+    verify_retained(FROZEN, retained_hashes())
+    manifest = json.loads(FROZEN.read_text())
+    if resolve_input(manifest["smooth_sdf_directory"]) != INPUTS / "sharpa/geometry-rebuilt":
+        raise ValueError("Unexpected qualified Sharpa asset generation")
+    return validate_manifest(FROZEN)
+
+
+def reference_binding(case):
+    """Verify the selected reference before building a scene or taking any steps."""
+    rows = json.loads((ASSET_ROOT / "references.json").read_text())
+    expected = {f"{c['id']}--fp64" for c in cases()}
+    if len(rows) != len(expected) or {row["case"] for row in rows} != expected:
+        raise ValueError("Retained reference index must contain the exact ten FP64 cases")
+    entry = next(row for row in rows if row["case"] == f"{case['id']}--fp64")
+    directory = ASSET_ROOT / entry["retained_path"]
+    if not directory.resolve().is_relative_to((ASSET_ROOT / "data/reference").resolve()):
+        raise ValueError("Reference outside retained directory")
+    hashes = retained_hashes()
+    prefix = entry["retained_path"] + "/"
+    for name in hashes:
+        if name.startswith(prefix):
+            verify_retained(ASSET_ROOT / name, hashes)
+    if sha(directory / "receipt.json") != entry["receipt_sha256"]:
+        raise ValueError("Reference receipt identity changed")
+    scene = case["id"].split("--")[0]
+    control_manifest = INPUTS / "controls/manifest.json"
+    verify_retained(control_manifest, hashes)
+    manifest = json.loads(control_manifest.read_text())
+    if manifest["input_manifest_sha256"] != sha(FROZEN):
+        raise ValueError("Control input identity differs")
+    stream = manifest["streams"][scene]
+    controls = INPUTS / "controls" / stream["file"]
+    verify_retained(controls, hashes)
+    if sha(controls) != stream["sha256"]:
+        raise ValueError("Frozen control stream changed")
+    if entry["state_format"] == "p3_recording" and scene == "franka-cube":
+        reference = directory / "recording"
+        digest = json.loads((reference / "configuration.json").read_text())["config_digest"]
+        protocol = INPUTS / "comparison-tolerances.json"
+        verify_retained(protocol, hashes)
+        envelopes = json.loads(protocol.read_text())["cases"][case["id"]]["absolute"]
+        native_controls = None
+        policy = "FRANKA_FROZEN_T0_ENVELOPE"
+        if stream["sha256"] != entry["controls_sha256"]:
+            raise ValueError("Franka reference/control identity differs")
+    elif entry["state_format"] == "p5_native_state_chunks" and scene == "sharpa-recorded-10mm":
+        reference = directory
+        receipt = json.loads((directory / "receipt.json").read_text())
+        digest = receipt["config_digest"]
+        if receipt["case"]["id"] != entry["case"] or receipt["input_manifest_sha256"] != sha(FROZEN):
+            raise ValueError("Sharpa reference input generation differs")
+        if receipt["controls_sha256"] != stream["sha256"]:
+            raise ValueError("Sharpa reference/control identity differs")
+        # No repeatability envelope was certified for this rebuilt asset generation.
+        envelopes, native_controls, policy = {}, controls, "REBUILT_SHARPA_EXACT"
+    else:
+        raise ValueError("Unsupported retained scene/reference format")
+    if digest != entry["config_digest"]:
+        raise ValueError("Reference configuration digest differs from its index")
+    return reference, controls, native_controls, envelopes, {**entry, "comparison_policy": policy}
 
 
 def worker(case, output):
@@ -65,6 +121,10 @@ def worker(case, output):
     receipt["commit"] = subprocess.check_output(["git", "-C", str(ROOT), "rev-parse", "HEAD"], text=True).strip()
     try:
         receipt["input_manifest_sha256"] = validate_inputs()
+        receipt["input_manifest"] = str(FROZEN)
+        reference, controls, native_controls, envelopes, binding = reference_binding(case)
+        receipt["reference"] = binding
+        import numpy as np  # noqa: PLC0415
         import warp as wp  # noqa: PLC0415
 
         from scripts.monolithic_reference.check_p3_recording import check, compare  # noqa: PLC0415
@@ -74,40 +134,48 @@ def worker(case, output):
         recording = output / "recording"
         if case["id"].startswith("franka"):
             from newton.examples.softbody.example_monolithic_franka_grasp import Example  # noqa: PLC0415
+            from newton.examples.softbody.monolithic_franka import targets  # noqa: PLC0415
             from newton.viewer import ViewerNull  # noqa: PLC0415
 
             args = SimpleNamespace(
                 device="cuda:0",
                 output=recording,
-                asset_cache=ARTIFACTS / "p3/pr3/franka-grasp-v1/cache",
+                asset_cache=INPUTS / "franka/sdf-cache",
                 law=case["law"],
                 globalization=case["globalization"],
             )
             example = Example(ViewerNull(), args)
+            if example.case.solver._kinematics.digest.hex() != binding["config_digest"]:
+                raise ValueError("Physical configuration digest changed")
+            samples = np.asarray(
+                [targets(example.case.high, example.case.low, i * 0.001)[:2] for i in range(case["steps"] + 1)],
+                dtype=np.float32,
+            )
+            if not np.array_equal(samples, np.load(controls, allow_pickle=False)):
+                raise ValueError("Constructed controls differ from frozen controls")
             while not example.closed:
                 example.step()
             example.test_final()
-            reference = T0 / "baseline" / case["id"] / "recording"
         else:
             from newton.examples.softbody.monolithic_sharpa_recorded import run  # noqa: PLC0415
 
             recording.mkdir()
             args = SimpleNamespace(
-                output=recording, trajectory=ARTIFACTS / "p3/pr3/current-iterate-production-v1/sharpa-trajectory.json"
+                output=recording,
+                trajectory=INPUTS / "sharpa/recorded-control.json",
+                expected_config_digest=binding["config_digest"],
+                expected_controls=controls,
             )
             if not run(args):
                 raise ValueError("Sharpa did not publish its complete trajectory")
-            reference = ARTIFACTS / "p3/pr3/current-iterate-production-v1/sharpa"
         receipt["recording"] = check(recording, case["steps"])
-        protocol = json.loads((T0 / "comparison-tolerances.json").read_text())
         receipt["comparison"] = compare(
-            reference, recording, protocol["cases"][case["id"]]["absolute"], legacy_fp64=True
+            reference, recording, envelopes, legacy_fp64=True, native_controls=native_controls
         )
         if receipt["comparison"]["status"] not in ("PASS_EXACT", "PASS_FROZEN_ENVELOPE"):
             raise ValueError("Recording differs outside the frozen envelope")
         actual = json.loads((recording / "configuration.json").read_text())
-        frozen = json.loads((reference / "configuration.json").read_text())
-        if actual["config_digest"] != frozen["config_digest"]:
+        if actual["config_digest"] != binding["config_digest"]:
             raise ValueError("Physical configuration digest changed")
         receipt["modules"] = module_origins(ROOT, source_hashes)
         receipt["status"] = "PASS"

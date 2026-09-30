@@ -13,6 +13,7 @@ import warp as wp
 
 from newton.examples.softbody.monolithic_recording import save, serial, state_arrays
 from scripts.monolithic_reference import run_p5_precision as runner
+from scripts.monolithic_reference.retained_assets import ORIGINAL_FROZEN
 
 
 @wp.kernel
@@ -185,7 +186,7 @@ def main():
         args.controls.resolve(),
         args.output.resolve(),
         prior["first_failure_step"],
-        input_manifest=Path(prior.get("input_manifest", runner.FROZEN)),
+        input_manifest=Path(prior.get("input_manifest", ORIGINAL_FROZEN)),
     )
     receipt = json.loads((args.output / "receipt.json").read_text())
     assert receipt.get("exception") is None, receipt.get("exception")

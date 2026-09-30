@@ -80,22 +80,38 @@ See :doc:`monolithic_franka_grasp` for the complete Franka demonstration and
 :doc:`monolithic_sharpa_assets` for asset preparation. Sharpa's recorded scenario
 checks complete advancement and state safety; successful grasping is not certified.
 
-The repository's scene matrix uses explicit frozen external assets:
+The repository's scene matrix uses the retained local files under
+``asset/monolithic/data`` (not included in Git). The current default is the
+recertified Sharpa generation in ``inputs/frozen-inputs-rebuilt.json``.
+Historical manifest hashes remain unchanged; recorded paths are resolved through
+``asset/monolithic/relocations.json`` rather than requiring old artifact links.
 
 .. code-block:: bash
 
    uv run --no-sync python -m scripts.monolithic_reference.run_p4 --profile full --list
    uv run --no-sync python -m scripts.monolithic_reference.run_p4 --profile dev --output /path/to/new-output
 
+The full profile contains nine Franka configurations and one Sharpa configuration;
+dev selects the default configuration of each scene. The runner binds each case
+to ``asset/monolithic/references.json``, verifies retained file hashes and frozen
+controls, and rejects a changed physical configuration before stepping. Franka
+uses its existing frozen comparison envelopes. The rebuilt Sharpa reference uses
+native state chunks, read without conversion on disk; comparison includes the
+initial frame, complete history, publication labels and frozen control frames.
+Sharpa requires exact equality because no repeatability envelope has been
+qualified for the rebuilt generation. Missing or differing data produces FAIL;
+filtered profiles remain PARTIAL.
+
 The scene runner's result must be combined with component, lifecycle and replay
 checks for stage qualification. Retired driver snapshots, hashes and migration
 notes are documented in ``scripts/monolithic_reference/legacy_retirement.md``.
 
-The precision experiment runner enumerates eight scenes in both precisions::
+The precision experiment runner uses the same ten configurations, defaults to
+FP32, and accepts ``--precision both``. The retained controls already match the
+rebuilt manifest; they do not need to be generated again::
 
    uv run --no-sync python -m scripts.monolithic_reference.run_p5_precision --list
-   uv run --no-sync python -m scripts.monolithic_reference.run_p5_precision --freeze-controls --output /path/to/controls
-   uv run --no-sync python -m scripts.monolithic_reference.run_p5_precision --controls /path/to/controls --output /path/to/results
+   uv run --no-sync python -m scripts.monolithic_reference.run_p5_precision --controls asset/monolithic/data/inputs/controls --output /path/to/results
 
 Use ``--max-steps 2`` for a smoke run. A complete run reports
 ``COMPLETE_NOT_AUDITED`` until the independent T5 numerical audit is performed;
