@@ -95,8 +95,9 @@ The nightly profile contains nine Franka configurations and one Sharpa configura
 and is triggered manually for overnight regression. The full profile selects the
 same ten cases; dev selects the default configuration of each scene and still runs
 two complete trajectories. Routine development and ordinary CI use functional
-component and small integration tests instead; see ``project.md`` and ``AGENTS.md``
-at the repository root for the testing policy. The runner binds each case
+component and small integration tests instead. The Monolithic project policy is
+in the workspace file ``dev/monolithic/project.md``; repository ``AGENTS.md``
+links to that project-specific policy. The runner binds each case
 to ``asset/monolithic/references.json``, verifies retained file hashes and frozen
 controls, and rejects a changed physical configuration before stepping. Franka
 uses its existing frozen comparison envelopes. The rebuilt Sharpa reference uses

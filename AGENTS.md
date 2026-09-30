@@ -19,7 +19,7 @@ uv run -m newton.examples basic_pendulum
 
 ### Monolithic test policy
 
-For Monolithic work, apply the following scope rules to the general testing instructions above. The authoritative stage workflow, directory layout, component map and commands are in [project.md](project.md).
+For Monolithic work, apply the following scope rules to the general testing instructions above. The authoritative stage workflow, directory layout, component map and commands are in [project.md](../../dev/monolithic/project.md).
 
 - Give each development stage (including a substage such as P4j) its own worktree and branch from `SamiulJ/monolithic-refactor`. Define the goal and a stage PRD with at least one E2E test, then split it into PRs. Update stage documents and commit each completed PR. After stage-goal review, pass the PRD E2E and full-scene gates before merging into the integration branch.
 - Organize tests around currently supported functionality: joint, tet, contact, collision, linear, SDF, solver lifecycle, assets, controls and tooling. Use functional names such as `test_monolithic_<component>_*.py`; do not introduce development-phase names such as `p2`, `p3` or `p4` for new tests.
