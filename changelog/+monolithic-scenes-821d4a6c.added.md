@@ -1,0 +1,1 @@
+Add a unified smooth SDF builder over official mesh SDFs and qualified frozen nodes, retain the independent Monolithic collision pipeline, and provide Franka and recorded Sharpa soft-cube scenes with recording and replay. Bind regression inputs to verified local assets and ten retained FP64 references; Sharpa grasp success remains uncertified.

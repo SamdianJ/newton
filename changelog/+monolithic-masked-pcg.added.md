@@ -1,1 +1,0 @@
-Add fixed-slot, device-masked monolithic production PCG with shared smart restart, finite direction publication, explicit CUDA graph capture, and per-call scheduling evidence. Keep diagnostic and graph-off defaults; performance admission remains pending.

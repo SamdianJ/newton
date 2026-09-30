@@ -1,1 +1,0 @@
-Add experimental monolithic articulation and tet assembly components and a fixed P1Q3 collision pipeline. `newton.solvers.experimental.monolithic.SolverMonolithic` validates construction and owns separate final and trial contact buffers.

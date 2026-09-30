@@ -1,1 +1,0 @@
-Add experimental 40 mm tet cube assets, independent contact calibration and a Sharpa grasp entry with retained failure evidence. Cube grasp calibration is not yet passed; the existing ball entry and solver defaults remain available.

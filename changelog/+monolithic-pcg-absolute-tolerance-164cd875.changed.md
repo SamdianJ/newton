@@ -1,1 +1,0 @@
-Add configurable `SolverMonolithic.linear_absolute_tolerance` to diagnostic and production PCG, with a provisional default of `1e-6` pending calibration. Each residual block must satisfy its combined relative/absolute bound; zero restores the previous acceptance rule.

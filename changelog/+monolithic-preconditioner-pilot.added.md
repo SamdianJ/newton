@@ -1,1 +1,0 @@
-Add private local-block and MAS GPU preconditioner research paths and an isolated CPU SA-AMG comparison, with frozen-matrix and trajectory pilot tools. Keep the default solver preconditioner unchanged pending admission review.

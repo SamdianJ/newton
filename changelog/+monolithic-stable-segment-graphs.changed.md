@@ -1,1 +1,0 @@
-Extend the experimental monolithic CUDA graph option to stable articulation, trial tet residual, nonlinear norm, assembly initialization, scaling and preconditioner factorization segments, preserving host numerical checks and transactions.
