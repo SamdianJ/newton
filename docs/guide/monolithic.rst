@@ -9,7 +9,8 @@ Monolithic Coupled Solver
 .. experimental::
 
    :mod:`newton.solvers.experimental.monolithic` supports one articulation and
-   one connected tetrahedral body. Its interfaces may change without the normal
+   one connected tetrahedral body, with optional single-body world-root FREE
+   rigid actors. Its interfaces may change without the normal
    deprecation period. The old BE, q-only and tet-only solver entry points and
    their examples have been retired.
 
@@ -55,11 +56,29 @@ and restart checks retain their original FP64 arithmetic in both modes.
 FP32 numerical qualification is pending: unchanged
 physical guards and noise envelopes may reject a candidate.
 
-The precision-tagged state uses schema 3. Cross-precision continuation and
-checkpoint loads are rejected. Schema-2 FP64 checkpoints are validated against
-the original complete field schema and physical digest in scratch before being
-upgraded; failed loads preserve the destination. A plain initialization source
+The precision-tagged state uses schema 4, including actor ownership, layout
+identity and native rigid continuation fields. Cross-layout and cross-precision
+checkpoint loads are rejected. Schema-2 FP64 and schema-3 checkpoints are
+validated against their original complete fields and physical digest in scratch
+before migration to a matching canonical articulation-plus-tet model; failed
+loads preserve the destination. A plain initialization source
 is a new start, not a conversion of integration history.
+
+FREE actors use native world COM position, rotation, velocity and integration
+history. ``body_q`` and ``body_qd`` are derived FP32 displays. The FREE coordinate
+and velocity segments remain synchronized through their Model mappings; FREE
+velocity is COM linear/angular velocity in the parent joint frame.
+Each rigid translation and rotation block must pass its own convergence gate.
+
+Rigid contact is not yet supported. Disable particle collision on rigid shapes
+and filter all allowed shape pairs involving rigid actors before finalization;
+otherwise construction fails even when the shapes are initially separated.
+Existing articulation-tet and tet-static contact remains available.
+FREE PD, limit gains, friction, damping and armature must be zero.
+Rigid ``body_f`` and FREE ``control.joint_f`` each contribute a world COM wrench
+[N, N·m] once. Convert off-center loads to COM wrenches before calling ``step``.
+Nonzero rigid torque with Armijo or ArmijoOrResNorm requires explicit
+``allow_nonconservative_energy=True``; ResNorm supports that torque directly.
 
 Smooth SDF construction still produces common offline FP64 coefficients.
 The FP32 solver derives a separately identified coefficient copy and retains

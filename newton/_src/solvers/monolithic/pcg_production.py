@@ -54,6 +54,7 @@ from .pcg_production_kernels import (
     _masked_direction,
     _masked_products,
     _masked_q_solve,
+    _masked_rigid_solve,
     _masked_scaled_csr_mv,
     _masked_update,
     _masked_x_solve,
@@ -179,6 +180,8 @@ class MaskedPcgPlan:
         config: MaskedPcgConfig | None = None,
         _study_soft=None,
         layout=None,
+        rigid_cholesky=None,
+        rigid_rows=None,
     ):
         self.config = MaskedPcgConfig() if config is None else config
         if not isinstance(self.config, MaskedPcgConfig):
@@ -193,6 +196,11 @@ class MaskedPcgPlan:
         self.nq = q_cholesky.shape[0]
         self.nx = x_cholesky.size
         self.layout = layout or MonolithicLinearLayout(self.nq, self.nx)
+        count = len(self.layout.rigid_ranges)
+        self.rigid_cholesky = (
+            wp.zeros((0, 6, 6), dtype=float, device=self.device) if rigid_cholesky is None else rigid_cholesky
+        )
+        self.rigid_rows = wp.zeros((0, 6), dtype=int, device=self.device) if rigid_rows is None else rigid_rows
         if (self.layout.q_dof_count, self.layout.dynamic_particle_count) != (self.nq, self.nx):
             raise ValueError("PCG factors do not match the actor layout")
         membership, aliases = group_data(self.layout)
@@ -201,9 +209,20 @@ class MaskedPcgPlan:
         self.compat_groups = wp.array(aliases, dtype=int, device=self.device)
         floors, _ = group_policy(self.layout, self.config)
         self.group_floors = wp.array(floors, dtype=float, device=self.device)
-        if self.n <= 0 or self.n != self.nq + 3 * self.nx:
+        if self.n <= 0 or self.n != self.layout.scalar_dof_count:
             raise ValueError("Expected n = q_dof_count + 3 * dynamic_particle_count > 0")
-        arrays = (offsets, columns, values, scale, q_cholesky, x_cholesky, rhs_hat, y)
+        arrays = (
+            offsets,
+            columns,
+            values,
+            scale,
+            q_cholesky,
+            x_cholesky,
+            self.rigid_cholesky,
+            self.rigid_rows,
+            rhs_hat,
+            y,
+        )
         for a in arrays:
             if not isinstance(a, wp.array) or a.device != self.device or not a.is_contiguous:
                 raise ValueError("All bound arrays must be contiguous on the same device")
@@ -214,6 +233,8 @@ class MaskedPcgPlan:
             (scale, wp.float32, (self.n,)),
             (q_cholesky, wp.float32, (self.nq, self.nq)),
             (x_cholesky, wp.mat33, (self.nx,)),
+            (self.rigid_cholesky, wp.float32, (count, 6, 6)),
+            (self.rigid_rows, wp.int32, (count, 6)),
             (rhs_hat, wp.float32, (self.n,)),
             (y, wp.float32, (self.n,)),
         )
@@ -286,7 +307,7 @@ class MaskedPcgPlan:
     @classmethod
     def from_workspace(cls, workspace, rhs_hat, y, *, config, delta=None):
         matrix = workspace.k_global_scalar_bsr
-        if not workspace._scaling_valid or not workspace._factor_valid:
+        if not workspace._scaling_valid or not workspace._factor_is_current():
             raise ValueError("Binding requires valid scaling and actor factors")
         plan = cls(
             offsets=matrix.offsets,
@@ -301,6 +322,8 @@ class MaskedPcgPlan:
             config=config,
             _study_soft=workspace._study_soft,
             layout=workspace.layout,
+            rigid_cholesky=workspace._rigid_cholesky,
+            rigid_rows=workspace.rigid_rows,
         )
         plan._workspace = workspace
         plan._generation = workspace._generation
@@ -337,7 +360,7 @@ class MaskedPcgPlan:
             if (
                 not workspace._current(self._generation)
                 or not workspace._scaling_valid
-                or not workspace._factor_valid
+                or not workspace._factor_is_current()
                 or regularization != workspace._lambda
                 or not self.matches_workspace(workspace, self.rhs, self.y, self.config, self.delta)
             ):
@@ -353,6 +376,8 @@ class MaskedPcgPlan:
             workspace.scale,
             workspace._q_cholesky,
             workspace._x_cholesky,
+            workspace._rigid_cholesky,
+            workspace.rigid_rows,
             rhs_hat,
             y,
             self.delta if delta is None else delta,
@@ -428,6 +453,12 @@ class MaskedPcgPlan:
             self._launch(_masked_products, self.n, [a, b, self.products, self.state, self.error])
 
     def _emit_direction(self, slot):
+        if len(self.layout.rigid_ranges):
+            self._launch(
+                _masked_rigid_solve,
+                len(self.layout.rigid_ranges),
+                [self.rigid_cholesky, self.rigid_rows, self.r, self.z, self.state, self.error],
+            )
         if self.nq:  # Static layout test, not a device-dependent branch.
             self._launch(
                 _masked_q_solve,
@@ -622,7 +653,7 @@ def solve_pcg_production(workspace, rhs_hat, y, *, generation, warm_start, confi
         raise RuntimeError("Use MaskedPcgPlan.enqueue_solve() inside capture, not the synchronous solve adapter")
     if not workspace._current(generation) or not workspace._scaling_valid:
         return invalid(MonolithicLinearStatus.STALE_GENERATION)
-    if not workspace._factor_valid:
+    if not workspace._factor_is_current():
         return invalid(MonolithicLinearStatus.PRECONDITIONER_NOT_FACTORED)
     if warm_start not in (MonolithicPcgWarmStart.ZERO, MonolithicPcgWarmStart.SAME_GENERATION):
         return invalid(MonolithicLinearStatus.INVALID_ARGUMENT)

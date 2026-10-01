@@ -25,9 +25,13 @@ def group_policy(layout, config):
     names = {"global": 0, "articulation": 1, "tet": 2}
     floors = (config.residual_floor_global, config.residual_floor_q, config.residual_floor_x)
     limits = getattr(config, "residual_norm_limits", None) or (float("inf"),) * 3
+    keys = [names.get(kind, 2 if kind.endswith("_t") else 1) for kind, _, _ in layout.groups]
+    complete_limits = getattr(config, "group_norm_limits", None)
+    if complete_limits is not None and len(complete_limits) != len(keys):
+        raise ValueError("Residual limits must match all layout groups")
     return (
-        [floors[names[kind]] for kind, _, _ in layout.groups],
-        [limits[names[kind]] for kind, _, _ in layout.groups],
+        [floors[key] for key in keys],
+        list(complete_limits) if complete_limits is not None else [limits[key] for key in keys],
     )
 
 

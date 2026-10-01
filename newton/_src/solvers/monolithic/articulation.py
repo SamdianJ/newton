@@ -127,6 +127,12 @@ def _configuration_digest(fields):
     return digest.digest()
 
 
+@wp.kernel
+def _gather_native(source: wp.array[Any], mapping: wp.array[int], target: wp.array[Any]):
+    i = wp.tid()
+    target[i] = source[mapping[i]]
+
+
 class _TreeKinematics:
     """Own the immutable geometry and native scratch for one supported tree."""
 
@@ -187,6 +193,7 @@ class _TreeKinematics:
                 "particle_count",
                 "tet_count",
                 "joint_dof_count",
+                "joint_coord_count",
                 "joint_count",
                 "body_count",
                 "muscle_count",
@@ -319,8 +326,23 @@ class _TreeKinematics:
         self.jt = wp.zeros((self.bodies, self.count), dtype=self.vector, device=self.device)
         self.jw = wp.zeros_like(self.jt)
         coord_ids = list(range(model.joint_coord_count)) if actor is None else list(actor.coord_indices)
+        self.coord_map = array(coord_ids, int)
+        self.local_q = wp.zeros(self.count, dtype=self.dtype, device=self.device)
+        self.local_qd = wp.zeros_like(self.local_q)
         self.evaluate(wp.array(model.joint_q.numpy()[coord_ids], dtype=self.dtype, device=self.device))
         self.validate_inertia()
+
+    def gather_q(self, state):
+        if state.joint_q.size == self.count:
+            return state.joint_q
+        wp.launch(_gather_native, self.count, [state.joint_q, self.coord_map, self.local_q], device=self.device)
+        return self.local_q
+
+    def gather_qd(self, state):
+        if state.joint_qd.size == self.count:
+            return state.joint_qd
+        wp.launch(_gather_native, self.count, [state.joint_qd, self.dof_map, self.local_qd], device=self.device)
+        return self.local_qd
 
     def timestep(self, value):
         """Validate a timestep in the arithmetic used by this component."""

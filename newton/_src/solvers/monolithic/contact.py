@@ -588,6 +588,7 @@ class ContactObjective:
         )
         self.triplet_capacity = triplet_count
         self.model, self.contact_model = model, contact_model
+        self.body_count = model.body_count if articulation_actor is None else len(articulation_actor.body_indices)
         self.parameters, self.nq, self.count = parameters, q_dof_count, count
         self._source_table = table
         self._descriptors = descriptors.copy() if descriptors is not None else None
@@ -615,6 +616,15 @@ class ContactObjective:
         self.triangles = wp.clone(model.tri_indices)
         self.types = wp.clone(model.shape_type)
         self.bodies = wp.clone(model.shape_body)
+        body_local = np.arange(model.body_count, dtype=np.int32)
+        if articulation_actor is not None:
+            body_local.fill(-1)
+            body_local[list(articulation_actor.body_indices)] = np.arange(len(articulation_actor.body_indices))
+        self.body_local = wp.array(body_local, dtype=int, device=model.device)
+        target_bodies = v["shape_body"].copy()
+        dynamic_shapes = target_bodies >= 0
+        target_bodies[dynamic_shapes] = body_local[target_bodies[dynamic_shapes]]
+        self.target_bodies = wp.array(target_bodies, dtype=int, device=model.device)
         self.sdf_indices = wp.clone(model._shape_sdf_index)
         self.transforms = wp.array(transforms, dtype=self.transform, device=model.device)
         self.scales = wp.array(v["shape_scale"].astype(self.numpy_dtype), dtype=self.vector, device=model.device)
@@ -623,7 +633,7 @@ class ContactObjective:
         self.current, self.start = self._geometry_storage(), self._geometry_storage()
         self.flags = wp.zeros(2, dtype=int, device=model.device)
         self.start_flags = wp.zeros_like(self.flags)
-        self.residual = wp.zeros(q_dof_count + 3 * len(dynamic), dtype=self.dtype, device=model.device)
+        self.residual = wp.zeros(self.layout.scalar_dof_count, dtype=self.dtype, device=model.device)
         self.energy = wp.zeros((count, 2), dtype=self.dtype, device=model.device)
         self.normal = wp.zeros(count, dtype=self.vector, device=model.device)
         self.tangent = wp.zeros_like(self.normal)
@@ -672,10 +682,10 @@ class ContactObjective:
             self.smooth_sdf.validate_binding()
         for array, dtype, shape in (
             (x, self.vector, (self.model.particle_count,)),
-            (poses, self.transform, (self.model.body_count,)),
-            (com, self.vector, (self.model.body_count,)),
-            (jt, self.vector, (self.model.body_count, self.nq)),
-            (jw, self.vector, (self.model.body_count, self.nq)),
+            (poses, self.transform, (self.body_count,)),
+            (com, self.vector, (self.body_count,)),
+            (jt, self.vector, (self.body_count, self.nq)),
+            (jw, self.vector, (self.body_count, self.nq)),
         ):
             if not isinstance(array, wp.array) or (array.dtype, array.shape, array.device) != (
                 dtype,
@@ -695,7 +705,7 @@ class ContactObjective:
                     jw,
                     self.triangles,
                     self.shapes,
-                    self.bodies,
+                    self.target_bodies,
                     self.transforms,
                     self.types,
                     self.scales,

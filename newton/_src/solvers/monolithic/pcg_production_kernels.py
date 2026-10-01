@@ -188,6 +188,33 @@ def _masked_q_solve(
 
 
 @wp.kernel
+def _masked_rigid_solve(
+    factor: wp.array3d[float],
+    rows: wp.array2d[int],
+    r: wp.array[float],
+    z: wp.array[float],
+    state: wp.array[_DeviceResult],
+    error: wp.array[int],
+):
+    if state[0].enabled == 0:
+        return
+    body = wp.tid()
+    for i in range(6):
+        value = r[rows[body, i]]
+        for j in range(i):
+            value -= factor[body, i, j] * z[rows[body, j]]
+        z[rows[body, i]] = value / factor[body, i, i]
+    for k in range(6):
+        i = 5 - k
+        value = z[rows[body, i]]
+        for j in range(i + 1, 6):
+            value -= factor[body, j, i] * z[rows[body, j]]
+        z[rows[body, i]] = value / factor[body, i, i]
+        if not wp.isfinite(z[rows[body, i]]):
+            wp.atomic_max(error, 0, 16)
+
+
+@wp.kernel
 def _masked_x_solve(
     lower_blocks: wp.array[wp.mat33],
     x_start: int,

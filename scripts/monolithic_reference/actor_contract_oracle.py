@@ -25,11 +25,12 @@ def rotation(v):
     return np.eye(3) + np.sin(angle) / angle * k + (1 - np.cos(angle)) / angle**2 * k @ k
 
 
-def rigid_terms(com, rot, predicted_com, predicted_rot, mass, inertia, dt, force):
+def rigid_terms(com, rot, predicted_com, predicted_rot, mass, inertia, dt, force, *, initial_com=None):
     """Return conservative COM/rotation inertia and the independently projected PSD B."""
     second = np.trace(inertia) / 2 * np.eye(3) - inertia
     delta, dr = com - predicted_com, rot - predicted_rot
-    energy = (mass * delta @ delta + np.sum((dr @ second) * dr)) / (2 * dt**2) - force @ delta
+    initial_com = predicted_com if initial_com is None else initial_com
+    energy = (mass * delta @ delta + np.sum((dr @ second) * dr)) / (2 * dt**2) - force @ (com - initial_com)
     a = dr @ second @ rot.T / dt**2
     residual = np.r_[mass * delta / dt**2 - force, [a[2, 1] - a[1, 2], a[0, 2] - a[2, 0], a[1, 0] - a[0, 1]]]
     c = rot @ second @ predicted_rot.T

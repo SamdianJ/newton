@@ -18,15 +18,16 @@ class CoupledState(ArticulationState):
     namespace = "_monolithic_coupled"
     version = 4
 
-    def __init__(self, kinematics, actors):
+    def __init__(self, kinematics, actors, rigid=None):
         self.actors = actors
+        self.rigid = rigid
         self.layout_metadata = {
             "layout_version": np.array([1], dtype=np.int32),
             "layout_digest": np.frombuffer(bytes.fromhex(actors.identity), dtype=np.uint8),
             "actor_layout": np.frombuffer(actors.layout_payload(), dtype=np.uint8),
         }
         super().__init__(kinematics)
-        n, b, q = self.model.particle_count, kinematics.bodies, kinematics.count
+        n, b, q = self.model.particle_count, self.model.body_count, self.model.joint_dof_count
         self.schema.update(
             bound_x=((n,), self.vector),
             bound_v=((n,), self.vector),
@@ -39,14 +40,15 @@ class CoupledState(ArticulationState):
         )
         for name, value in self.layout_metadata.items():
             self.schema[name] = (value.shape, wp.int32 if value.dtype == np.int32 else wp.uint8)
+        count = 0 if rigid is None else rigid.count
         self.schema.update(
-            rigid_com=((0,), self.vector),
-            rigid_rotation=((0,), wp.quatd if self.dtype == wp.float64 else wp.quat),
-            rigid_v_com=((0,), self.vector),
-            rigid_omega=((0,), self.vector),
-            rigid_vsym=((0, 6), self.dtype),
-            rigid_bound_com=((0,), self.vector),
-            rigid_bound_rotation=((0,), wp.quatd if self.dtype == wp.float64 else wp.quat),
+            rigid_com=((count,), self.vector),
+            rigid_rotation=((count,), wp.quatd if self.dtype == wp.float64 else wp.quat),
+            rigid_v_com=((count,), self.vector),
+            rigid_omega=((count,), self.vector),
+            rigid_vsym=((count, 6), self.dtype),
+            rigid_bound_com=((count,), self.vector),
+            rigid_bound_rotation=((count,), wp.quatd if self.dtype == wp.float64 else wp.quat),
         )
         self.fixed = self.model.particle_inv_mass.numpy() == 0
         self.fixed_positions = self.model.particle_q.numpy().astype(kinematics.numpy_dtype)[self.fixed].copy()
@@ -78,6 +80,8 @@ class CoupledState(ArticulationState):
         if not np.array_equal(x[self.fixed], self.fixed_positions) or np.any(v[self.fixed] != 0):
             raise ValueError("Fixed particles must retain their position and zero velocity")
         if bound:
+            if self.rigid is not None and self.rigid.count:
+                self.rigid.validate(state)
             for name, expected in self.layout_metadata.items():
                 if name in self.schema and not np.array_equal(getattr(history, name).numpy(), expected):
                     raise ValueError(f"Incompatible actor layout: {name}")
@@ -91,6 +95,17 @@ class CoupledState(ArticulationState):
         return history
 
     def reset(self, state, *, dt):
+        if self.rigid is not None and self.rigid.count:
+            scratch = self._copy_unchecked(state)
+            self._reset(scratch, dt=dt)
+            self.rigid.initialize(scratch, dt)
+            self.bind(scratch, dt=dt)
+            self.validate(scratch)
+            state.assign(scratch)
+        else:
+            self._reset(state, dt=dt)
+
+    def _reset(self, state, *, dt):
         super().reset(state, dt=dt)
         history = getattr(state, self.namespace)
         for name in (
@@ -151,3 +166,5 @@ class CoupledState(ArticulationState):
             history.precision.fill_(self.precision_bits)
         wp.copy(history.bound_x, state.particle_q)
         wp.copy(history.bound_v, state.particle_qd)
+        for name in ("com", "rotation"):
+            wp.copy(getattr(history, "rigid_bound_" + name), getattr(history, "rigid_" + name))

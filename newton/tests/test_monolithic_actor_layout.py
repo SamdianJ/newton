@@ -155,7 +155,7 @@ def test_local_articulation(test, device):
     np.testing.assert_allclose(k.poses.numpy(), untouched[list(bodies)], atol=2e-7)
     np.testing.assert_allclose(state.body_q.numpy(), untouched, atol=2e-7)
     np.testing.assert_allclose(state.body_qd.numpy(), velocities, atol=2e-7)
-    with test.assertRaisesRegex(ValueError, "FREE.*not yet supported"):
+    with test.assertRaisesRegex(ValueError, "Rigid.*contact"):
         SolverMonolithic(model, contact_model="C-EE", globalization="ResNorm", friction_velocity_scale=0.01)
 
 

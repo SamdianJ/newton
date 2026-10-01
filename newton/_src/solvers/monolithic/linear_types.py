@@ -69,8 +69,21 @@ class MonolithicPcgConfig:
     residual_norm_limits: tuple[float, float, float] | None = None
     """Optional outer-solve caps on global/q/x scaled L2 residuals, applied after rtol/atol.
     None leaves standalone PCG acceptance unchanged. These are per-solve numeric data."""
+    group_norm_limits: tuple[float, ...] | None = None
+    """Private outer-solve caps ordered by the complete actor convergence groups."""
 
     def __post_init__(self):
+        if self.group_norm_limits is not None:
+            if not isinstance(self.group_norm_limits, tuple) or not self.group_norm_limits:
+                raise ValueError("Group residual limits must be a nonempty tuple")
+            for limit in self.group_norm_limits:
+                if (
+                    isinstance(limit, (bool, np.bool_))
+                    or not isinstance(limit, (int, float, np.integer, np.floating))
+                    or not np.isfinite(limit)
+                    or not float(np.finfo(np.float32).smallest_subnormal) <= limit <= float(np.finfo(np.float32).max)
+                ):
+                    raise ValueError("Group residual limits must be positive and finite in float32")
         if self.residual_norm_limits is not None:
             if not isinstance(self.residual_norm_limits, tuple) or len(self.residual_norm_limits) != 3:
                 raise ValueError("residual_norm_limits must be a global/q/x tuple")
@@ -126,6 +139,7 @@ class MonolithicLinearLayout:
     tet_scalar_offset: int | None = None
     identity: str = ""
     actor_ranges: tuple[tuple[str, int, int], ...] = ()
+    rigid_ranges: tuple[tuple[int, int], ...] = ()
 
     def __post_init__(self):
         for value in (self.q_dof_count, self.dynamic_particle_count, self.q_scalar_offset, self.x_scalar_offset):
@@ -137,6 +151,12 @@ class MonolithicLinearLayout:
                 raise ValueError("Layout counts and offsets must be nonnegative int32 integers")
         if self.scalar_dof_count >= 2**31:
             raise ValueError("Actor layout capacity exceeds int32")
+        if any(
+            isinstance(value, (bool, np.bool_)) or not isinstance(value, (int, np.integer)) or not 0 <= value < 2**31
+            for pair in self.rigid_ranges
+            for value in pair
+        ) or len({source for source, _ in self.rigid_ranges}) != len(self.rigid_ranges):
+            raise ValueError("Rigid ranges require unique nonnegative int32 source identities")
         if not self.actor_ranges:
             object.__setattr__(
                 self,
@@ -153,12 +173,14 @@ class MonolithicLinearLayout:
             cursor += count
         if cursor != self.scalar_dof_count:
             raise ValueError("Actor ranges must partition the scalar layout")
+        if sorted((start, count) for kind, start, count in self.actor_ranges if kind == "rigid") != sorted(
+            (start, 6) for _, start in self.rigid_ranges
+        ):
+            raise ValueError("Rigid ranges must match six-dimensional actor blocks")
 
     @classmethod
     def from_actors(cls, table):
         """Derive the supported linear view without imposing an actor order."""
-        if any(actor.kind == "rigid" for actor in table.actors):
-            raise ValueError("FREE rigid dynamics are not yet supported by SolverMonolithic")
         arms = [actor for actor in table.actors if actor.kind == "articulation"]
         tets = [actor for actor in table.actors if actor.kind == "tet"]
         if len(arms) != 1 or len(tets) != 1:
@@ -171,6 +193,7 @@ class MonolithicLinearLayout:
             tet.dof_start,
             table.identity,
             tuple((actor.kind, actor.dof_start, actor.dof_count) for actor in table.actors),
+            tuple((actor.source_index, actor.dof_start) for actor in table.actors if actor.kind == "rigid"),
         )
 
     @property
@@ -180,7 +203,16 @@ class MonolithicLinearLayout:
     @property
     def groups(self) -> tuple[tuple[str, int, int], ...]:
         """Return the global group followed by each nonempty actor range."""
-        return (("global", 0, self.scalar_dof_count), *(item for item in self.actor_ranges if item[2]))
+        groups = [("global", 0, self.scalar_dof_count)]
+        rigid_ids = {start: source for source, start in self.rigid_ranges}
+        for kind, start, count in self.actor_ranges:
+            if kind == "rigid":
+                groups.extend(
+                    ((f"rigid_{rigid_ids[start]}_t", start, 3), (f"rigid_{rigid_ids[start]}_r", start + 3, 3))
+                )
+            elif count:
+                groups.append((kind, start, count))
+        return tuple(groups)
 
     def indices(self, kind):
         """Return local-to-global scalar rows for one supported actor type."""
@@ -190,7 +222,7 @@ class MonolithicLinearLayout:
 
     @property
     def scalar_dof_count(self) -> int:
-        return self.q_dof_count + 3 * self.dynamic_particle_count
+        return self.q_dof_count + 3 * self.dynamic_particle_count + 6 * len(self.rigid_ranges)
 
 
 @dataclass(frozen=True, slots=True)

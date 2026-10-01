@@ -10,6 +10,67 @@ from .linear_types import MonolithicLinearGeneration, MonolithicLinearStatus
 
 
 @wp.kernel
+def _assemble_rigid_preconditioner(
+    offsets: wp.array[int],
+    columns: wp.array[int],
+    values: wp.array[float],
+    rows: wp.array2d[int],
+    scale: wp.array[float],
+    regularization: float,
+    result: wp.array3d[float],
+):
+    body, i, j = wp.tid()
+    row, column = rows[body, i], rows[body, j]
+    value = float(0.0)
+    for k in range(offsets[row], offsets[row + 1]):
+        if columns[k] == column:
+            value = values[k] * scale[row] * scale[column]
+    if i == j:
+        value += regularization
+    result[body, i, j] = value
+
+
+@wp.kernel
+def _factor_rigid_cholesky(
+    matrix: wp.array3d[float], factor: wp.array3d[float], tolerance: float, status: wp.array[int]
+):
+    body = wp.tid()
+    for i in range(6):
+        for j in range(i + 1):
+            value = matrix[body, i, j]
+            for k in range(j):
+                value -= factor[body, i, k] * factor[body, j, k]
+            if not wp.isfinite(value):
+                wp.atomic_max(status, 0, 16)
+                return
+            if i == j:
+                if value <= tolerance:
+                    wp.atomic_max(status, 0, 12)
+                    return
+                factor[body, i, j] = wp.sqrt(value)
+            else:
+                factor[body, i, j] = value / factor[body, j, j]
+
+
+@wp.kernel
+def _apply_rigid_preconditioner(
+    factor: wp.array3d[float], rows: wp.array2d[int], x: wp.array[float], out: wp.array[float]
+):
+    body = wp.tid()
+    for i in range(6):
+        value = x[rows[body, i]]
+        for j in range(i):
+            value -= factor[body, i, j] * out[rows[body, j]]
+        out[rows[body, i]] = value / factor[body, i, i]
+    for k in range(6):
+        i = 5 - k
+        value = out[rows[body, i]]
+        for j in range(i + 1, 6):
+            value -= factor[body, j, i] * out[rows[body, j]]
+        out[rows[body, i]] = value / factor[body, i, i]
+
+
+@wp.kernel
 def _assemble_monolithic_q_preconditioner(
     offsets: wp.array[int],
     columns: wp.array[int],
@@ -157,12 +218,18 @@ def _combine_vectors(x: wp.array[float], y: wp.array[float], z: wp.array[float],
 
 
 def _monolithic_preconditioner_matvec(workspace, x, y, z, alpha, beta) -> None:
-    if not workspace._factor_valid or workspace.layout != workspace._layout_identity:
+    if not workspace._factor_is_current() or workspace.layout != workspace._layout_identity:
         raise ValueError("Preconditioner must be refactored for current scaling and lambda")
     wp.launch(
         _apply_q_preconditioner,
         1,
         [workspace._q_cholesky, workspace.layout.q_scalar_offset, x, workspace._preconditioned],
+        device=workspace.device,
+    )
+    wp.launch(
+        _apply_rigid_preconditioner,
+        len(workspace.layout.rigid_ranges),
+        [workspace._rigid_cholesky, workspace.rigid_rows, x, workspace._preconditioned],
         device=workspace.device,
     )
     if workspace._study_soft is not None:
@@ -208,6 +275,9 @@ def factor_actor_preconditioner(
                 self._x_preconditioner,
                 self._q_cholesky,
                 self._x_cholesky,
+                self._rigid_preconditioner,
+                self._rigid_cholesky,
+                self.rigid_rows,
                 matrix.offsets,
                 matrix.columns,
                 matrix.values,
@@ -216,6 +286,7 @@ def factor_actor_preconditioner(
         )
     status = self._read_status()
     self._factor_valid = status == MonolithicLinearStatus.SUCCESS
+    self._factor_binding = self._factor_storage_binding() if self._factor_valid else None
     self.factor_last_status = status
     self.factor_failure_count += int(not self._factor_valid)
     return status
@@ -224,6 +295,26 @@ def factor_actor_preconditioner(
 def _factor_actor_device(self, pivot_tolerance):
     self._status.zero_()
     matrix = self.k_global_scalar_bsr
+    wp.launch(
+        _assemble_rigid_preconditioner,
+        (len(self.layout.rigid_ranges), 6, 6),
+        [
+            matrix.offsets,
+            matrix.columns,
+            matrix.values,
+            self.rigid_rows,
+            self.scale,
+            self._lambda,
+            self._rigid_preconditioner,
+        ],
+        device=self.device,
+    )
+    wp.launch(
+        _factor_rigid_cholesky,
+        len(self.layout.rigid_ranges),
+        [self._rigid_preconditioner, self._rigid_cholesky, pivot_tolerance, self._status],
+        device=self.device,
+    )
     wp.launch(
         _assemble_monolithic_q_preconditioner,
         self.aq_actor_dense.shape,

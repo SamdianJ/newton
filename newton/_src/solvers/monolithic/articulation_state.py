@@ -130,7 +130,7 @@ class ArticulationState:
         self.kinematics = kinematics
         self.dtype, self.vector = kinematics.dtype, kinematics.vector
         self.model, self.device = kinematics.model, kinematics.device
-        n, j, b = kinematics.count, kinematics.joints, kinematics.bodies
+        j, b = kinematics.joints, kinematics.bodies
         self.schema = {
             "joint_v": ((j,), self.vector),
             "joint_omega": ((j,), self.vector),
@@ -138,8 +138,8 @@ class ArticulationState:
             "link_v_com": ((b,), self.vector),
             "link_omega": ((b,), self.vector),
             "link_vsym": ((b, 6), self.dtype),
-            "bound_q": ((n,), self.dtype),
-            "bound_qd": ((n,), self.dtype),
+            "bound_q": ((self.model.joint_coord_count,), self.dtype),
+            "bound_qd": ((self.model.joint_dof_count,), self.dtype),
             "last_dt": ((1,), self.dtype),
             "schema_version": ((1,), wp.int32),
             "valid": ((1,), wp.int32),
@@ -163,6 +163,9 @@ class ArticulationState:
     def copy(self, source):
         """Allocate an exact continuation without applying initialization rules."""
         self.validate(source)
+        return self._copy_unchecked(source)
+
+    def _copy_unchecked(self, source):
         state = self.model.state()
         self._copy_coordinates(state, source)
         history = Model.AttributeNamespace(self.namespace)
@@ -213,10 +216,11 @@ class ArticulationState:
             raise ValueError("Invalid articulation history schema")
         fields = {name: (getattr(history, name), shape, dtype) for name, (shape, dtype) in self.schema.items()}
         for name in ("joint_q", "joint_qd"):
-            fields[name] = (getattr(state, name, None), (k.count,), self.dtype)
+            count = self.model.joint_coord_count if name == "joint_q" else self.model.joint_dof_count
+            fields[name] = (getattr(state, name, None), (count,), self.dtype)
         standard = {"joint_q", "joint_qd", "body_q", "body_qd", "body_f", "particle_q", "particle_qd", "particle_f"}
         for name, dtype in (("body_q", wp.transform), ("body_qd", wp.spatial_vector), ("body_f", wp.spatial_vector)):
-            fields[name] = (getattr(state, name, None), (k.bodies,), dtype)
+            fields[name] = (getattr(state, name, None), (self.model.body_count,), dtype)
         for name, (shape, dtype) in self._particle_schema().items():
             value = getattr(state, name, None)
             if value is not None:
@@ -245,7 +249,7 @@ class ArticulationState:
                     getattr(state, "joint_" + name).numpy(), getattr(history, "bound_" + name).numpy()
                 ):
                     raise ValueError("Coordinates/rates changed; explicitly reset articulation history")
-        k.evaluate(state.joint_q)
+        k.evaluate(k.gather_q(state))
         k.validate_inertia()
         return history
 
@@ -256,25 +260,26 @@ class ArticulationState:
         k.validate_identity()
         history = self.validate(state, bound=False)
         # Validate before modifying any published state, including on reset failure.
-        omega = np.einsum("bni,n->bi", k.jw.numpy(), state.joint_qd.numpy())
+        local_qd = k.gather_qd(state)
+        omega = np.einsum("bni,n->bi", k.jw.numpy(), local_qd.numpy())
         if (
             not np.isfinite(omega).all()
             or np.any(dt * np.linalg.norm(omega, axis=1) >= 1)
             or np.any(
-                dt * abs(state.joint_qd.numpy()[k.values["joint_type"][k.dof_joint.numpy()] == JointType.REVOLUTE]) >= 1
+                dt * abs(local_qd.numpy()[k.values["joint_type"][k.dof_joint.numpy()] == JointType.REVOLUTE]) >= 1
             )
         ):
             raise ValueError("Initial angular velocity requires dt * |omega| < 1")
         wp.launch(
             _initial_link_rates,
             k.bodies,
-            [k.jt, k.jw, state.joint_qd, history.link_v_com, history.link_omega],
+            [k.jt, k.jw, local_qd, history.link_v_com, history.link_omega],
             device=self.device,
         )
         wp.launch(
             _initial_joint_rates,
             k.joints,
-            [k.types, k.starts, k.axes, state.joint_qd, history.joint_v, history.joint_omega],
+            [k.types, k.starts, k.axes, local_qd, history.joint_v, history.joint_omega],
             device=self.device,
         )
         for prefix, count in (("joint", k.joints), ("link", k.bodies)):
@@ -284,7 +289,7 @@ class ArticulationState:
                 [getattr(history, prefix + "_omega"), self.dtype(dt), getattr(history, prefix + "_vsym")],
                 device=self.device,
             )
-        k.evaluate(state.joint_q, state=state)
+        k.evaluate(k.gather_q(state), state=state)
         self.bind(state, dt=dt)
 
     def bind(self, state, *, dt):

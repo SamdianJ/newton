@@ -527,7 +527,7 @@ def _solve_pcg_diagnostic(self, rhs_hat, y, *, generation, warm_start, config):
 
     if not self._current(generation) or not self._scaling_valid:
         return result(MonolithicLinearStatus.STALE_GENERATION)
-    if not self._factor_valid:
+    if not self._factor_is_current():
         return result(MonolithicLinearStatus.PRECONDITIONER_NOT_FACTORED)
     if (
         not isinstance(config, MonolithicPcgConfig)

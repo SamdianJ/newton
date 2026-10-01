@@ -24,11 +24,50 @@ from scripts.monolithic_reference.contact_oracle import local
 from scripts.monolithic_reference.tet_oracle import TetOracle, material
 
 
-def scene(device, *, contact=True, fixed=False, particles=True, articulation=True):
+def scene(device, *, contact=True, fixed=False, particles=True, articulation=True, rigid_specs=(), rigids_before=False):
     builder = newton.ModelBuilder(gravity=(0, 0, -9.81))
+    deferred = []
+
+    def add_free(body, parent, child, spec):
+        joint = builder.add_joint_free(body, parent_xform=parent, child_xform=child)
+        builder.add_articulation([joint])
+        start = builder.joint_qd_start[joint]
+        rotation = wp.transform_get_rotation(parent)
+        builder.joint_qd[start : start + 6] = [
+            *wp.quat_rotate_inv(rotation, wp.vec3(spec["velocity"])),
+            *wp.quat_rotate_inv(rotation, wp.vec3(spec["omega"])),
+        ]
+
+    def add_rigids():
+        for spec in rigid_specs:
+
+            def quaternion(vector):
+                angle = np.linalg.norm(vector)
+                return wp.quat_from_axis_angle(wp.vec3(np.asarray(vector) / angle), float(angle))
+
+            dimensions = np.asarray(spec["dimensions"])
+            moments = spec["mass"] / 12 * (np.sum(dimensions**2) - dimensions**2)
+            body = builder.add_link(
+                mass=spec["mass"],
+                inertia=wp.diag(wp.vec3(moments)),
+                com=spec["com"],
+                xform=wp.transform(spec["origin"], quaternion(spec["rotation"])),
+                label=spec["label"],
+            )
+            parent = wp.transform(spec["parent_position"], quaternion(spec["parent_rotation"]))
+            child = wp.transform(spec["child_position"], quaternion(spec["child_rotation"]))
+            if rigids_before:
+                add_free(body, parent, child, spec)
+            else:
+                deferred.append((body, parent, child, spec))
+
+    if rigids_before:
+        add_rigids()
     if articulation:
         inertia = wp.mat33(0.01, 0, 0, 0, 0.01, 0, 0, 0, 0.01)
         root = builder.add_link(mass=1.0, inertia=inertia)
+        if not rigids_before:
+            add_rigids()
         body = builder.add_link(mass=1.0, inertia=inertia)
         joints = [
             builder.add_joint_revolute(-1, root, axis=(0, 1, 0)),
@@ -36,6 +75,8 @@ def scene(device, *, contact=True, fixed=False, particles=True, articulation=Tru
         ]
         builder.add_articulation(joints)
         builder.add_shape_plane(body=body, width=0, length=0, cfg=builder.ShapeConfig(density=0))
+    for args in deferred:
+        add_free(*args)
     if particles:
         builder.add_soft_mesh(
             pos=(0, 0, 0.0008),
@@ -74,7 +115,15 @@ def solver(model, law="C-EE", *, graph=False, mode="diagnostic", globalization="
         tet_rest_density=wp.full(model.tet_count, 1000, dtype=float, device=model.device),
         pcg_mode=mode,
         use_cuda_graph=graph,
-        joint_terms=SolverMonolithic.JointTerms(limits=True, limit_width=(0.01,) * model.joint_dof_count),
+        joint_terms=SolverMonolithic.JointTerms(
+            limits=True,
+            limit_width=(0.01,)
+            * int(
+                np.count_nonzero(
+                    np.isin(model.joint_type.numpy(), [newton.JointType.REVOLUTE, newton.JointType.PRISMATIC])
+                )
+            ),
+        ),
         **kwargs,
     )
 

@@ -205,9 +205,16 @@ class MonolithicLinearWorkspace:
         self._q_cholesky = wp.zeros_like(self.aq_actor_dense)
         self._x_preconditioner = wp.zeros(layout.dynamic_particle_count, dtype=wp.mat33, device=device)
         self._x_cholesky = wp.zeros_like(self._x_preconditioner)
+        rigid_rows = np.array([range(start, start + 6) for _, start in layout.rigid_ranges], dtype=np.int32).reshape(
+            -1, 6
+        )
+        self.rigid_rows = wp.array(rigid_rows, dtype=int, device=device)
+        self._rigid_preconditioner = wp.zeros((len(layout.rigid_ranges), 6, 6), dtype=float, device=device)
+        self._rigid_cholesky = wp.zeros_like(self._rigid_preconditioner)
         self._study_soft = None  # Private PR8F research entry; no public solver option.
         self._scaling_valid = False
         self._factor_valid = False
+        self._factor_binding = None
         self._lambda = 0.0
         self._warm_start_key = None
         self.operator = LinearOperator((n, n), wp.float32, self.device, partial(_monolithic_scaled_matvec, self))
@@ -454,6 +461,8 @@ class MonolithicLinearWorkspace:
             self.scale,
             self._q_cholesky,
             self._x_cholesky,
+            self._rigid_cholesky,
+            self.rigid_rows,
             self.row_groups,
         )
         return (
@@ -462,6 +471,13 @@ class MonolithicLinearWorkspace:
             self.layout,
             tuple((a.ptr, a.shape, a.strides, str(a.dtype), str(a.device)) for a in arrays),
         )
+
+    def _factor_is_current(self):
+        return self._factor_valid and self._factor_binding == self._factor_storage_binding()
+
+    def _factor_storage_binding(self):
+        arrays = (self.scale, self._q_cholesky, self._x_cholesky, self._rigid_cholesky, self.rigid_rows)
+        return self._generation, self.layout, tuple((a.ptr, a.shape, a.strides, a.dtype, a.device) for a in arrays)
 
     def _vector_valid(self, vector) -> bool:
         return (

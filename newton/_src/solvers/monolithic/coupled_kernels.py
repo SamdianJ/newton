@@ -14,7 +14,7 @@ def combine(q: wp.array[Any], x: wp.array[Any], contact: wp.array[Any], q_start:
     value = contact[i]
     if i >= q_start and i < q_start + q.shape[0]:
         value += q[i - q_start]
-    else:
+    elif i >= x_start and i < x_start + 3 * x.shape[0]:
         j = i - x_start
         value += x[j / 3][j % 3]
     out[i] = value
@@ -90,8 +90,10 @@ def dynamic_diagonal(
             value += mass[body] * wp.dot(jt[body, local], jt[body, local]) + wp.dot(
                 jw[body, local], world * jw[body, local]
             )
-    else:
+    elif i >= x_start and i < x_start + 3 * ids.shape[0]:
         value = type(dt)(particle_mass[ids[(i - x_start) / 3]])
+    else:
+        return
     out[i] = float(value / (dt * dt))
 
 
@@ -118,6 +120,7 @@ def contact_forces(
     local_residual: wp.array[Any],
     shapes: wp.array[int],
     bodies: wp.array[int],
+    body_local: wp.array[int],
     triangles: wp.array2d[int],
     x: wp.array[Any],
     com: wp.array[Any],
@@ -144,7 +147,7 @@ def contact_forces(
         wp.atomic_add(qforce, dof_map[j], -wp.dot(geometry.jacobian_q[key, j], local))
     body = bodies[shape]
     if body >= 0:
-        torque = wp.cross(point - com[body], world)
+        torque = wp.cross(point - com[body_local[body]], world)
         wp.atomic_add(bforce, body, type(bforce[0])(world[0], world[1], world[2], torque[0], torque[1], torque[2]))
 
 
@@ -165,12 +168,14 @@ def _coordinate_trial(
     alpha: Any,
     qn: wp.array[Any],
     h: Any,
+    coords: wp.array[int],
+    dofs: wp.array[int],
     out: wp.array[Any],
     vout: wp.array[Any],
 ):
     i = wp.tid()
-    out[i] = q[i] + alpha * type(h)(direction[q_start + i])
-    vout[i] = (out[i] - qn[i]) / h
+    out[coords[i]] = q[coords[i]] + alpha * type(h)(direction[q_start + i])
+    vout[dofs[i]] = (out[coords[i]] - qn[i]) / h
 
 
 @wp.kernel
@@ -178,9 +183,11 @@ def _coordinate_predictor(
     q: wp.array[Any],
     v: wp.array[Any],
     h: Any,
+    coords: wp.array[int],
+    dofs: wp.array[int],
     out: wp.array[Any],
     vout: wp.array[Any],
 ):
     i = wp.tid()
-    out[i] = q[i] + h * v[i]
-    vout[i] = (out[i] - q[i]) / h
+    out[coords[i]] = q[i] + h * v[i]
+    vout[dofs[i]] = (out[coords[i]] - q[i]) / h

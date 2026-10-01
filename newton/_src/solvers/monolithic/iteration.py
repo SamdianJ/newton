@@ -44,7 +44,27 @@ def acceptance(
 
 def blocks(solver):
     names = {"articulation": "q", "tet": "x", "global": "global"}
-    return [(names[kind], slice(start, start + count)) for kind, start, count in solver._linear.layout.groups]
+    return [(names.get(kind, kind), slice(start, start + count)) for kind, start, count in solver._linear.layout.groups]
+
+
+def _block_policy(config, prefix, name):
+    if not name.startswith("rigid_"):
+        return getattr(config, prefix + "_" + name)
+    translation = name.endswith("_t")
+    if prefix == "merit_absolute":
+        return 1e-7 if translation else 2.5e-8
+    if prefix == "merit_relative":
+        return 1e-6 if translation else 1e-5
+    if prefix == "step_tolerance":
+        return 1e-10 if translation else 9.100770221088748e-10
+    return getattr(config, prefix + ("_x" if translation else "_q"))
+
+
+def _record_block(solver, name, key, value):
+    if name.startswith("rigid_"):
+        solver._variational.setdefault("rigid_blocks", {}).setdefault(name, {})[key] = value
+    else:
+        solver._metrics[key] = value
 
 
 def measure(solver, residual, reference, scale):
@@ -56,16 +76,16 @@ def measure(solver, residual, reference, scale):
         merit = np.linalg.norm(scale[part] * residual[part]) / np.sqrt(native(size))
         ref = np.linalg.norm(scale[part] * reference[part]) / np.sqrt(native(size))
         goal = (
-            native(getattr(solver._config, "merit_absolute_" + name))
-            + native(getattr(solver._config, "merit_relative_" + name)) * ref
+            native(_block_policy(solver._config, "merit_absolute", name))
+            + native(_block_policy(solver._config, "merit_relative", name)) * ref
         )
         values[name] = (merit, ref, goal, size)
         suffix = "" if name == "global" else "_" + name
-        solver._metrics["merit" + suffix + "_final"] = merit
-        solver._metrics["merit" + suffix + "_reference"] = ref
-        solver._metrics["convergence_ratio" + suffix] = merit / goal
+        _record_block(solver, name, "merit" + suffix + "_final", merit)
+        _record_block(solver, name, "merit" + suffix + "_reference", ref)
+        _record_block(solver, name, "convergence_ratio" + suffix, merit / goal)
         if name != "global":
-            solver._metrics["raw_residual_" + name + "_norm"] = float(np.linalg.norm(residual[part]))
+            _record_block(solver, name, "raw_residual_" + name + "_norm", float(np.linalg.norm(residual[part])))
     return values
 
 
@@ -87,7 +107,7 @@ def iterate(solver, dt):
         self._metrics["nonlinear_iterations"] = iteration
         if iteration == 0:
             for name, (m, _, _, _) in values.items():
-                self._metrics["merit" + ("" if name == "global" else "_" + name) + "_initial"] = m
+                _record_block(self, name, "merit" + ("" if name == "global" else "_" + name) + "_initial", m)
         self._variational.update(objective_total=e, residual=residual.tolist())
         if all(m <= goal for m, _, goal, _ in values.values()):
             return self.Status.SUCCESS
@@ -102,10 +122,16 @@ def iterate(solver, dt):
         caps = {name: native(0.5) * np.sqrt(native(size)) * goal for name, (_, _, goal, size) in values.items()}
         pcg = MonolithicPcgConfig(
             maximum_iterations=self.linear_max_iterations,
-            true_residual_interval=10,
+            # Mixed actors use the same actual-operator checkpoint cadence in
+            # both backends; otherwise bounded batches can oversolve A/T and
+            # give different accepted trajectories at unchanged outer gates.
+            true_residual_interval=1 if self._linear.layout.rigid_ranges else 10,
             linear_tolerance=self.linear_tolerance,
             linear_absolute_tolerance=self.linear_absolute_tolerance,
             residual_norm_limits=tuple(caps.get(name, 1.0) for name in ("global", "q", "x")),
+            group_norm_limits=tuple(caps[name] for name, _ in blocks(self))
+            if self._linear.layout.rigid_ranges
+            else None,
             residual_floor_global=config.residual_floor_global,
             residual_floor_q=config.residual_floor_q,
             residual_floor_x=config.residual_floor_x,
@@ -151,7 +177,7 @@ def iterate(solver, dt):
                     max(
                         native(self.linear_absolute_tolerance),
                         native(self.linear_tolerance)
-                        * max(np.linalg.norm(rhs[part]), native(getattr(config, "residual_floor_" + name))),
+                        * max(np.linalg.norm(rhs[part]), native(_block_policy(config, "residual_floor", name))),
                     ),
                 )
                 postchecks[name] = {"residual": post, "limit": limit}
@@ -227,11 +253,14 @@ def iterate(solver, dt):
                     steps = {}
                     for name, part in blocks(self):
                         steps[name] = native(
-                            np.linalg.norm(effective[part] / scale[part]) / np.sqrt(native(len(effective[part])))
+                            np.linalg.norm(
+                                effective[part] if name.startswith("rigid_") else effective[part] / scale[part]
+                            )
+                            / np.sqrt(native(len(effective[part])))
                         )
-                        self._metrics["scaled_step" + ("" if name == "global" else "_" + name)] = steps[name]
+                        _record_block(self, name, "scaled_step" + ("" if name == "global" else "_" + name), steps[name])
                     small = all(
-                        value <= native(getattr(config, "step_tolerance_" + name)) for name, value in steps.items()
+                        value <= native(_block_policy(config, "step_tolerance", name)) for name, value in steps.items()
                     )
                     self._accepted, self._trial = self._trial, self._accepted
                     self._metrics["accepted_alpha"] = alpha
