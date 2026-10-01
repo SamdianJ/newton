@@ -111,10 +111,10 @@ def test_factor_scaling_and_failures(test, device):
             for a, b in zip((workspace.scale, workspace._q_cholesky, workspace._x_cholesky), expected, strict=True):
                 np.testing.assert_allclose(a.numpy(), b, rtol=1e-6, atol=1e-7)
     before = cache.captures["factor"]
-    workspace.ax_internal_bsr3.values = wp.clone(workspace.ax_internal_bsr3.values)
+    workspace.k_global_scalar_bsr.values = wp.clone(workspace.k_global_scalar_bsr.values)
     test.assertEqual(workspace.factor_actor_preconditioner(generation=generation, pivot_tolerance=0), 0)
     test.assertEqual(cache.captures["factor"], before + 1)
-    workspace.aq_actor_dense.fill_(-1e10)
+    linear_tests._replace_q_block(workspace, np.full((workspace.layout.q_dof_count,) * 2, -1e10, dtype=np.float32))
     test.assertEqual(
         workspace.factor_actor_preconditioner(generation=generation, pivot_tolerance=0),
         linear_types.MonolithicLinearStatus.NON_POSITIVE_PIVOT,

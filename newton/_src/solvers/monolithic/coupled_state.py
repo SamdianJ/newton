@@ -16,9 +16,15 @@ class CoupledState(ArticulationState):
     """Extend PR2 ownership with authoritative native-precision particles and force generations."""
 
     namespace = "_monolithic_coupled"
-    version = 3
+    version = 4
 
-    def __init__(self, kinematics):
+    def __init__(self, kinematics, actors):
+        self.actors = actors
+        self.layout_metadata = {
+            "layout_version": np.array([1], dtype=np.int32),
+            "layout_digest": np.frombuffer(bytes.fromhex(actors.identity), dtype=np.uint8),
+            "actor_layout": np.frombuffer(actors.layout_payload(), dtype=np.uint8),
+        }
         super().__init__(kinematics)
         n, b, q = self.model.particle_count, kinematics.bodies, kinematics.count
         self.schema.update(
@@ -30,6 +36,17 @@ class CoupledState(ArticulationState):
             force_generation=((1,), wp.int64),
             force_valid=((1,), wp.int32),
             precision=((1,), wp.int32),
+        )
+        for name, value in self.layout_metadata.items():
+            self.schema[name] = (value.shape, wp.int32 if value.dtype == np.int32 else wp.uint8)
+        self.schema.update(
+            rigid_com=((0,), self.vector),
+            rigid_rotation=((0,), wp.quatd if self.dtype == wp.float64 else wp.quat),
+            rigid_v_com=((0,), self.vector),
+            rigid_omega=((0,), self.vector),
+            rigid_vsym=((0, 6), self.dtype),
+            rigid_bound_com=((0,), self.vector),
+            rigid_bound_rotation=((0,), wp.quatd if self.dtype == wp.float64 else wp.quat),
         )
         self.fixed = self.model.particle_inv_mass.numpy() == 0
         self.fixed_positions = self.model.particle_q.numpy().astype(kinematics.numpy_dtype)[self.fixed].copy()
@@ -61,6 +78,9 @@ class CoupledState(ArticulationState):
         if not np.array_equal(x[self.fixed], self.fixed_positions) or np.any(v[self.fixed] != 0):
             raise ValueError("Fixed particles must retain their position and zero velocity")
         if bound:
+            for name, expected in self.layout_metadata.items():
+                if name in self.schema and not np.array_equal(getattr(history, name).numpy(), expected):
+                    raise ValueError(f"Incompatible actor layout: {name}")
             if "precision" in self.schema and history.precision.numpy()[0] != self.precision_bits:
                 raise ValueError("Incompatible state precision")
             if not np.array_equal(x, history.bound_x.numpy()) or not np.array_equal(v, history.bound_v.numpy()):
@@ -87,25 +107,37 @@ class CoupledState(ArticulationState):
         return 64 if self.dtype == wp.float64 else 32
 
     def load_checkpoint(self, state, path):
-        """Validate schema-two FP64 history before adding the precision identity."""
+        """Validate the declared old schema before migrating canonical A+T history."""
         with np.load(path, allow_pickle=False) as checkpoint:
-            legacy = "history.precision" not in checkpoint.files
-        if not legacy:
+            if "history.schema_version" not in checkpoint.files:
+                raise ValueError("Missing checkpoint schema version")
+            version = checkpoint["history.schema_version"]
+            if version.shape != (1,) or version.dtype != np.int32 or version[0] not in (2, 3, 4):
+                raise ValueError("Unsupported checkpoint schema version")
+            version = int(version[0])
+        if version == 4:
             return super().load_checkpoint(state, path)
-        if self.dtype != wp.float64:
-            raise ValueError("Legacy checkpoints require FP64")
+        if tuple(actor.kind for actor in self.actors.actors) != ("articulation", "tet"):
+            raise ValueError("Legacy checkpoints require canonical A+T layout")
+        if version == 2 and self.dtype != wp.float64:
+            raise ValueError("Legacy schema 2 checkpoints require FP64")
         scratch = self.copy(state)
         history = getattr(scratch, self.namespace)
-        precision = history.precision
-        del history.precision
         legacy_owner = copy.copy(self)
-        legacy_owner.schema = {name: item for name, item in self.schema.items() if name != "precision"}
-        legacy_owner.version = 2
-        history.schema_version.fill_(2)
-        # The old digest is checked by the old schema validator, never replaced.
+        additions = set(self.layout_metadata) | {name for name in self.schema if name.startswith("rigid_")}
+        if version == 2:
+            additions.add("precision")
+        saved = {name: getattr(history, name) for name in additions}
+        for name in additions:
+            delattr(history, name)
+        legacy_owner.schema = {name: item for name, item in self.schema.items() if name not in additions}
+        legacy_owner.version = version
+        history.schema_version.fill_(version)
+        # Original fields, precision and physical digest are checked in scratch.
         ArticulationState.load_checkpoint(legacy_owner, scratch, path)
-        history.precision = precision
-        history.precision.fill_(64)
+        for name, value in saved.items():
+            setattr(history, name, value)
+        history.precision.fill_(self.precision_bits)
         history.schema_version.fill_(self.version)
         self.validate(scratch)
         state.assign(scratch)
@@ -113,6 +145,8 @@ class CoupledState(ArticulationState):
     def bind(self, state, *, dt):
         super().bind(state, dt=dt)
         history = getattr(state, self.namespace)
+        for name, value in self.layout_metadata.items():
+            getattr(history, name).assign(value)
         if "precision" in self.schema:
             history.precision.fill_(self.precision_bits)
         wp.copy(history.bound_x, state.particle_q)

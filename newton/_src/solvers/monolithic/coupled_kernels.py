@@ -9,13 +9,13 @@ import warp as wp
 
 
 @wp.kernel
-def combine(q: wp.array[Any], x: wp.array[Any], contact: wp.array[Any], out: wp.array[Any]):
+def combine(q: wp.array[Any], x: wp.array[Any], contact: wp.array[Any], q_start: int, x_start: int, out: wp.array[Any]):
     i = wp.tid()
     value = contact[i]
-    if i < q.shape[0]:
-        value += q[i]
+    if i >= q_start and i < q_start + q.shape[0]:
+        value += q[i - q_start]
     else:
-        j = i - q.shape[0]
+        j = i - x_start
         value += x[j / 3][j % 3]
     out[i] = value
 
@@ -26,7 +26,7 @@ def particle_trial(
     xn: wp.array[Any],
     mapping: wp.array[int],
     direction: wp.array[float],
-    nq: int,
+    x_start: int,
     alpha: Any,
     dt: Any,
     out: wp.array[Any],
@@ -38,9 +38,9 @@ def particle_trial(
     velocity[i] = type(x[0])(0.0)
     if j >= 0:
         delta = type(x[0])(
-            type(dt)(direction[nq + 3 * j]),
-            type(dt)(direction[nq + 3 * j + 1]),
-            type(dt)(direction[nq + 3 * j + 2]),
+            type(dt)(direction[x_start + 3 * j]),
+            type(dt)(direction[x_start + 3 * j + 1]),
+            type(dt)(direction[x_start + 3 * j + 2]),
         )
         out[i] = x[i] + alpha * delta
         velocity[i] = (out[i] - xn[i]) / dt
@@ -74,19 +74,24 @@ def dynamic_diagonal(
     ids: wp.array[int],
     particle_mass: wp.array[float],
     dt: Any,
+    q_start: int,
+    x_start: int,
     out: wp.array[float],
 ):
     i = wp.tid()
     value = type(dt)(0.0)
     nq = armature.shape[0]
-    if i < nq:
-        value = armature[i]
+    if i >= q_start and i < q_start + nq:
+        local = i - q_start
+        value = armature[local]
         for body in range(mass.shape[0]):
             inertia = wp.trace(second[body]) * wp.identity(n=3, dtype=type(dt)) - second[body]
             world = rotations[body] * inertia * wp.transpose(rotations[body])
-            value += mass[body] * wp.dot(jt[body, i], jt[body, i]) + wp.dot(jw[body, i], world * jw[body, i])
+            value += mass[body] * wp.dot(jt[body, local], jt[body, local]) + wp.dot(
+                jw[body, local], world * jw[body, local]
+            )
     else:
-        value = type(dt)(particle_mass[ids[(i - nq) / 3]])
+        value = type(dt)(particle_mass[ids[(i - x_start) / 3]])
     out[i] = float(value / (dt * dt))
 
 
@@ -116,6 +121,7 @@ def contact_forces(
     triangles: wp.array2d[int],
     x: wp.array[Any],
     com: wp.array[Any],
+    dof_map: wp.array[int],
     qforce: wp.array[Any],
     pforce: wp.array[Any],
     bforce: wp.array[Any],
@@ -134,8 +140,8 @@ def contact_forces(
         particle = triangles[face, a]
         point += weight * x[particle]
         wp.atomic_add(pforce, particle, -weight * world)
-    for j in range(qforce.shape[0]):
-        wp.atomic_add(qforce, j, -wp.dot(geometry.jacobian_q[key, j], local))
+    for j in range(dof_map.shape[0]):
+        wp.atomic_add(qforce, dof_map[j], -wp.dot(geometry.jacobian_q[key, j], local))
     body = bodies[shape]
     if body >= 0:
         torque = wp.cross(point - com[body], world)
@@ -155,6 +161,7 @@ def _scatter(matrix: wp.array2d[float], actor: wp.array2d[float], values: wp.arr
 def _coordinate_trial(
     q: wp.array[Any],
     direction: wp.array[float],
+    q_start: int,
     alpha: Any,
     qn: wp.array[Any],
     h: Any,
@@ -162,7 +169,7 @@ def _coordinate_trial(
     vout: wp.array[Any],
 ):
     i = wp.tid()
-    out[i] = q[i] + alpha * type(h)(direction[i])
+    out[i] = q[i] + alpha * type(h)(direction[q_start + i])
     vout[i] = (out[i] - qn[i]) / h
 
 

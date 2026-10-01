@@ -16,13 +16,13 @@ def _project(
     scale: wp.array[float],
     blocks: wp.array2d[int],
     local: wp.array2d[int],
-    nq: int,
+    x_start: int,
     width: int,
     regularization: float,
     matrices: wp.array2d[wp.float64],
 ):
     i, level = wp.tid()
-    row = nq + i
+    row = x_start + i
     block = blocks[level, i // 3]
     a = 3 * local[level, i // 3] + i % 3
     wi = wp.float64(1.0)
@@ -31,8 +31,8 @@ def _project(
     wp.atomic_add(matrices, block * width + a, a, wp.float64(regularization) * wi * wi)
     for entry in range(offsets[row], offsets[row + 1]):
         col = columns[entry]
-        j = col - nq
-        if j >= 0:
+        j = col - x_start
+        if 0 <= j < 3 * blocks.shape[1]:
             if blocks[level, j // 3] == block:
                 b = 3 * local[level, j // 3] + j % 3
                 wj = wp.float64(1.0)
@@ -85,16 +85,16 @@ def _restrict(
     scale: wp.array[float],
     blocks: wp.array2d[int],
     local: wp.array2d[int],
-    nq: int,
+    x_start: int,
     width: int,
     rhs: wp.array2d[float],
     active: wp.array[int],
 ):
     i, level = wp.tid()
     if active[0] != 0:
-        value = r[nq + i]
+        value = r[x_start + i]
         if level > 0:
-            value /= scale[nq + i]
+            value /= scale[x_start + i]
         row = width * blocks[level, i // 3] + 3 * local[level, i // 3] + i % 3
         wp.atomic_add(rhs, row, 0, value)
 
@@ -105,7 +105,7 @@ def _prolong(
     scale: wp.array[float],
     blocks: wp.array2d[int],
     local: wp.array2d[int],
-    nq: int,
+    x_start: int,
     width: int,
     out: wp.array[float],
     active: wp.array[int],
@@ -118,11 +118,11 @@ def _prolong(
             row = width * blocks[level, i // 3] + 3 * local[level, i // 3] + i % 3
             term = solution[row, 0]
             if level > 0:
-                term /= scale[nq + i]
+                term /= scale[x_start + i]
             value += term
         if not wp.isfinite(value):
             wp.atomic_max(error, 0, 16)
-        out[nq + i] = value
+        out[x_start + i] = value
 
 
 @wp.func
@@ -188,7 +188,7 @@ class _BlockPreconditioner:
 
     def __init__(self, workspace, hierarchy):
         self.device = workspace.device
-        self.nq = workspace.layout.q_dof_count
+        self.x_start = workspace.layout.x_scalar_offset
         self.nx = workspace.layout.dynamic_particle_count
         if hierarchy.block_ids.shape[1] != self.nx:
             raise ValueError("Hierarchy and workspace dimensions differ")
@@ -248,7 +248,7 @@ class _BlockPreconditioner:
                 self.scale,
                 self.blocks,
                 self.local,
-                self.nq,
+                self.x_start,
                 self.width,
                 workspace._lambda,
                 self.matrices,
@@ -285,7 +285,7 @@ class _BlockPreconditioner:
         wp.launch(
             _restrict,
             (3 * self.nx, self.levels),
-            [residual, self.scale, self.blocks, self.local, self.nq, self.width, self.rhs, mask],
+            [residual, self.scale, self.blocks, self.local, self.x_start, self.width, self.rhs, mask],
             device=self.device,
         )
         wp.launch_tiled(
@@ -298,6 +298,6 @@ class _BlockPreconditioner:
         wp.launch(
             _prolong,
             3 * self.nx,
-            [self.solution, self.scale, self.blocks, self.local, self.nq, self.width, output, mask, status],
+            [self.solution, self.scale, self.blocks, self.local, self.x_start, self.width, output, mask, status],
             device=self.device,
         )

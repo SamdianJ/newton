@@ -14,7 +14,6 @@ import warp as wp
 
 from ...sim import BodyFlags, JointType
 from .collision import _validate_and_collect_boundary_faces
-from .linear_types import MonolithicLinearLayout
 
 
 def _checked_dof_count(counts):
@@ -233,9 +232,8 @@ class ActorTable:
             tuple(map(int, np.flatnonzero(shape_bodies == -1))),
         )
 
-    def legacy_linear_layout(self):
-        """Bridge only the existing canonical A+T path until actor assembly is migrated."""
-        if tuple(a.kind for a in self.actors) != ("articulation", "tet"):
-            raise ValueError("FREE rigid dynamics are not yet supported by SolverMonolithic")
-        arm, tet = self.actors
-        return MonolithicLinearLayout(arm.dof_count, len(tet.dynamic_particle_indices))
+    def layout_payload(self):
+        """Return the complete versioned host description used by the layout digest."""
+        return json.dumps(
+            {"version": 1, "actors": [asdict(a) for a in self.actors], "maps": dict(self.maps)}, sort_keys=True
+        ).encode()

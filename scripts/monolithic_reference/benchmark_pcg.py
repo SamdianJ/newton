@@ -252,7 +252,7 @@ class Runner:
         a = case.arrays
         nx = (case.n - case.nq) // 3
         capacity = linear_types.MonolithicLinearCapacities(
-            0, 0, len(a["factor_weights"]), config.maximum_iterations, config.maximum_iterations + 2
+            0, 0, 0, config.maximum_iterations, config.maximum_iterations + 2
         )
         self.workspace = w = linear.MonolithicLinearWorkspace(
             linear_types.MonolithicLinearLayout(case.nq, nx),
@@ -269,9 +269,6 @@ class Runner:
         for name, key in (("scale", "S"), ("diagonal", "D"), ("dynamic_diagonal", "dynamic_diagonal")):
             getattr(w, name).assign(a[key])
         w._matrix_diagonal.assign(case.matrix().diagonal())
-        for name in ("gq", "gx_columns", "gx_values", "weights", "kind", "candidate_tid"):
-            getattr(w._factors, name).assign(a["factor_" + name])
-        w._factors.count.fill_(len(a["factor_weights"]))
         # This is a sealed offline algebra snapshot, not a resumed physical transaction.
         w._generation = linear_types.MonolithicLinearGeneration(1, 0, 1, 1)
         w._sealed = w._valid = w._scaling_valid = True

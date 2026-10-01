@@ -43,13 +43,8 @@ def acceptance(
 
 
 def blocks(solver):
-    n, q = solver._linear.layout.scalar_dof_count, solver._linear.layout.q_dof_count
-    result = [("global", slice(0, n))]
-    if q:
-        result.append(("q", slice(0, q)))
-    if q < n:
-        result.append(("x", slice(q, n)))
-    return result
+    names = {"articulation": "q", "tet": "x", "global": "global"}
+    return [(names[kind], slice(start, start + count)) for kind, start, count in solver._linear.layout.groups]
 
 
 def measure(solver, residual, reference, scale):

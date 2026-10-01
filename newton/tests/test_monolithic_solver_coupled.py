@@ -74,7 +74,7 @@ def solver(model, law="C-EE", *, graph=False, mode="diagnostic", globalization="
         tet_rest_density=wp.full(model.tet_count, 1000, dtype=float, device=model.device),
         pcg_mode=mode,
         use_cuda_graph=graph,
-        joint_terms=SolverMonolithic.JointTerms(limits=True, limit_width=(0.01, 0.01)),
+        joint_terms=SolverMonolithic.JointTerms(limits=True, limit_width=(0.01,) * model.joint_dof_count),
         **kwargs,
     )
 

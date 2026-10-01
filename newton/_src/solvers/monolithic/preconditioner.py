@@ -6,23 +6,26 @@
 import numpy as np
 import warp as wp
 
-from .bsr import _MonolithicContactFactors
 from .linear_types import MonolithicLinearGeneration, MonolithicLinearStatus
 
 
 @wp.kernel
 def _assemble_monolithic_q_preconditioner(
-    aq: wp.array2d[float],
-    factors: _MonolithicContactFactors,
+    offsets: wp.array[int],
+    columns: wp.array[int],
+    values: wp.array[float],
+    q_start: int,
     scale: wp.array[float],
     regularization: float,
     result: wp.array2d[float],
 ):
     i, j = wp.tid()
-    value = aq[i, j]
-    for c in range(factors.count[0]):
-        value += factors.weights[c] * factors.gq[c, i] * factors.gq[c, j]
-    value *= scale[i] * scale[j]
+    row, column = q_start + i, q_start + j
+    value = float(0.0)
+    for index in range(offsets[row], offsets[row + 1]):
+        if columns[index] == column:
+            value = values[index]
+    value *= scale[row] * scale[column]
     if i == j:
         value += regularization
     result[i, j] = value
@@ -32,28 +35,21 @@ def _assemble_monolithic_q_preconditioner(
 def _assemble_monolithic_x_preconditioner(
     offsets: wp.array[int],
     columns: wp.array[int],
-    values: wp.array[wp.mat33],
-    factors: _MonolithicContactFactors,
-    q_count: int,
+    values: wp.array[float],
+    x_start: int,
     scale: wp.array[float],
     regularization: float,
     result: wp.array[wp.mat33],
 ):
     particle = wp.tid()
+    base = x_start + 3 * particle
     block = wp.mat33(0.0)
-    for index in range(offsets[particle], offsets[particle + 1]):
-        if columns[index] == particle:
-            block = values[index]
-    for c in range(factors.count[0]):
-        g = wp.vec3(0.0)
-        for slot in range(9):
-            column = factors.gx_columns[c, slot]
-            if column >= 3 * particle and column < 3 * particle + 3:
-                g[column - 3 * particle] += factors.gx_values[c, slot]
-        block += factors.weights[c] * wp.outer(g, g)
     for i in range(3):
-        for j in range(3):
-            block[i, j] *= scale[q_count + 3 * particle + i] * scale[q_count + 3 * particle + j]
+        row = base + i
+        for index in range(offsets[row], offsets[row + 1]):
+            column = columns[index]
+            if column >= base and column < base + 3:
+                block[i, column - base] = values[index] * scale[row] * scale[column]
         block[i, i] += regularization
     result[particle] = block
 
@@ -110,31 +106,31 @@ def _factor_monolithic_x_cholesky(
 
 
 @wp.kernel
-def _apply_q_preconditioner(factor: wp.array2d[float], x: wp.array[float], temporary: wp.array[float]):
+def _apply_q_preconditioner(factor: wp.array2d[float], q_start: int, x: wp.array[float], temporary: wp.array[float]):
     n = factor.shape[0]
     for i in range(n):
-        value = x[i]
+        value = x[q_start + i]
         for j in range(i):
-            value -= factor[i, j] * temporary[j]
-        temporary[i] = value / factor[i, i]
+            value -= factor[i, j] * temporary[q_start + j]
+        temporary[q_start + i] = value / factor[i, i]
     for reverse_i in range(n):
         i = n - 1 - reverse_i
-        value = temporary[i]
+        value = temporary[q_start + i]
         for j in range(i + 1, n):
-            value -= factor[j, i] * temporary[j]
-        temporary[i] = value / factor[i, i]
+            value -= factor[j, i] * temporary[q_start + j]
+        temporary[q_start + i] = value / factor[i, i]
 
 
 @wp.kernel
 def _apply_x_preconditioner(
     factor: wp.array[wp.mat33],
-    q_count: int,
+    x_start: int,
     x: wp.array[float],
     temporary: wp.array[float],
 ):
     particle = wp.tid()
     lower = factor[particle]
-    base = q_count + 3 * particle
+    base = x_start + 3 * particle
     result = wp.vec3(0.0)
     for i in range(3):
         value = x[base + i]
@@ -161,10 +157,13 @@ def _combine_vectors(x: wp.array[float], y: wp.array[float], z: wp.array[float],
 
 
 def _monolithic_preconditioner_matvec(workspace, x, y, z, alpha, beta) -> None:
-    if not workspace._factor_valid:
+    if not workspace._factor_valid or workspace.layout != workspace._layout_identity:
         raise ValueError("Preconditioner must be refactored for current scaling and lambda")
     wp.launch(
-        _apply_q_preconditioner, 1, [workspace._q_cholesky, x, workspace._preconditioned], device=workspace.device
+        _apply_q_preconditioner,
+        1,
+        [workspace._q_cholesky, workspace.layout.q_scalar_offset, x, workspace._preconditioned],
+        device=workspace.device,
     )
     if workspace._study_soft is not None:
         workspace._study_soft.apply(x, workspace._preconditioned)
@@ -172,7 +171,7 @@ def _monolithic_preconditioner_matvec(workspace, x, y, z, alpha, beta) -> None:
         wp.launch(
             _apply_x_preconditioner,
             workspace.layout.dynamic_particle_count,
-            [workspace._x_cholesky, workspace.layout.q_dof_count, x, workspace._preconditioned],
+            [workspace._x_cholesky, workspace.layout.x_scalar_offset, x, workspace._preconditioned],
             device=workspace.device,
         )
     wp.launch(_combine_vectors, x.size, [workspace._preconditioned, y, z, alpha, beta], device=workspace.device)
@@ -190,10 +189,17 @@ def factor_actor_preconditioner(
     if self._segment_graphs is None or self._study_soft is not None:
         self._factor_actor_device(pivot_tolerance)
     else:
-        matrix, factors = self.ax_internal_bsr3, self._factors
+        matrix = self.k_global_scalar_bsr
         self._segment_graphs.run(
             "factor",
-            (matrix.nrow, self.layout.q_dof_count, self._lambda, pivot_tolerance),
+            (
+                self.layout.identity,
+                matrix.nrow,
+                self.layout.q_scalar_offset,
+                self.layout.x_scalar_offset,
+                self._lambda,
+                pivot_tolerance,
+            ),
             (
                 self._status,
                 self.aq_actor_dense,
@@ -205,11 +211,6 @@ def factor_actor_preconditioner(
                 matrix.offsets,
                 matrix.columns,
                 matrix.values,
-                factors.count,
-                factors.weights,
-                factors.gq,
-                factors.gx_columns,
-                factors.gx_values,
             ),
             lambda: self._factor_actor_device(pivot_tolerance),
         )
@@ -222,23 +223,30 @@ def factor_actor_preconditioner(
 
 def _factor_actor_device(self, pivot_tolerance):
     self._status.zero_()
+    matrix = self.k_global_scalar_bsr
     wp.launch(
         _assemble_monolithic_q_preconditioner,
         self.aq_actor_dense.shape,
-        [self.aq_actor_dense, self._factors, self.scale, self._lambda, self._q_preconditioner],
+        [
+            matrix.offsets,
+            matrix.columns,
+            matrix.values,
+            self.layout.q_scalar_offset,
+            self.scale,
+            self._lambda,
+            self._q_preconditioner,
+        ],
         device=self.device,
     )
-    matrix = self.ax_internal_bsr3
-    if matrix.nrow and self._study_soft is None:
+    if self.layout.dynamic_particle_count and self._study_soft is None:
         wp.launch(
             _assemble_monolithic_x_preconditioner,
-            matrix.nrow,
+            self.layout.dynamic_particle_count,
             [
                 matrix.offsets,
                 matrix.columns,
                 matrix.values,
-                self._factors,
-                self.layout.q_dof_count,
+                self.layout.x_scalar_offset,
                 self.scale,
                 self._lambda,
                 self._x_preconditioner,
@@ -253,10 +261,10 @@ def _factor_actor_device(self, pivot_tolerance):
     )
     if self._study_soft is not None:
         self._study_soft.factor(self, pivot_tolerance)
-    elif matrix.nrow:
+    elif self.layout.dynamic_particle_count:
         wp.launch(
             _factor_monolithic_x_cholesky,
-            matrix.nrow,
+            self.layout.dynamic_particle_count,
             [self._x_preconditioner, self._x_cholesky, pivot_tolerance, self._status],
             device=self.device,
         )

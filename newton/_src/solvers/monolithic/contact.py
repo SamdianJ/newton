@@ -22,9 +22,9 @@ from .bsr import (
     _append_monolithic_contact_factor_triplets,
     _MonolithicContactFactors,
     _MonolithicScalarTriplets,
-    _reserve_monolithic_contact_factor,
 )
 from .contact_geometry import _shape64
+from .linear_types import MonolithicLinearLayout
 from .smooth_sdf import _sdf_type, smooth_query
 
 
@@ -193,6 +193,8 @@ def _law(
     triangles: wp.array2d[int],
     area: wp.array[Any],
     mapping: wp.array[int],
+    q_start: int,
+    x_start: int,
     radius: Any,
     stiffness: Any,
     smoothing: Any,
@@ -303,7 +305,7 @@ def _law(
     weights[key, 2] = radial
     nq = current.jacobian_q.shape[1]
     for j in range(nq):
-        wp.atomic_add(residual, j, wp.dot(current.jacobian_q[key, j], r))
+        wp.atomic_add(residual, q_start + j, wp.dot(current.jacobian_q[key, j], r))
     world_r = current.rotation[key] * r
     for a in range(3):
         node = mapping[triangles[face, a]]
@@ -312,15 +314,13 @@ def _law(
             if a == slot:
                 weight = type(radius)(2.0) / type(radius)(3.0)
             for j in range(3):
-                wp.atomic_add(residual, nq + 3 * node + j, weight * world_r[j])
+                wp.atomic_add(residual, x_start + 3 * node + j, weight * world_r[j])
 
 
 @wp.kernel
 def _factors(
     current: Any,
     shapes: wp.array[int],
-    triangles: wp.array2d[int],
-    mapping: wp.array[int],
     normal: wp.array[Any],
     tangent: wp.array[Any],
     weights: wp.array2d[Any],
@@ -331,7 +331,6 @@ def _factors(
     key = wp.tid()
     if flags[0] != 0:
         return
-    face = key / (3 * shapes.shape[0])
     quadrature = (key / shapes.shape[0]) % 3
     n = normal[key]
     axis = type(normal[0])(1.0, 0.0, 0.0)
@@ -352,32 +351,46 @@ def _factors(
             if component == 2:
                 direction = wp.cross(n, t)
                 weight = weights[key, 1]
+        slot = 3 * key + component
+        if slot >= factors.capacity:
+            wp.atomic_max(factors.status, 0, 6)
+            _failure(flags, key, 3)
+            return
+        if factors.active_token[0] != factors.token or triplets.active_token[0] != triplets.token:
+            _failure(flags, key, 4)
+            return
+        # Materialize values so Warp can reassign bounds on the next component.
+        begin, end = factors.offsets[slot] + 0, factors.offsets[slot + 1] + 0
+        if begin < 0 or end < begin or end > factors.values.shape[0] or end > factors.local_indices.shape[0]:
+            wp.atomic_max(factors.status, 0, 6)
+            _failure(flags, key, 3)
+            return
+        factors.weights[slot] = float(weight)
+        factors.kind[slot] = 1
+        if component > 0:
+            factors.kind[slot] = 2
+        factors.candidate_tid[slot] = key
         if weight > type(weights[0, 0])(0.0):
-            slot = _reserve_monolithic_contact_factor(factors)
-            if slot < 0:
-                _failure(flags, key, 3)
+            wp.atomic_add(factors.count, 0, 1)
+        world = current.rotation[key] * direction
+        for index in range(begin, end):
+            local = factors.local_indices[index]
+            if local >= current.jacobian_q.shape[1] or local < -9:
+                wp.atomic_max(factors.status, 0, 3)
+                _failure(flags, key, 4)
                 return
-            nq = current.jacobian_q.shape[1]
-            factors.weights[slot] = float(weight)
-            factors.kind[slot] = 1
-            if component > 0:
-                factors.kind[slot] = 2
-            factors.candidate_tid[slot] = key
-            for j in range(nq):
-                factors.gq[slot, j] = float(wp.dot(current.jacobian_q[key, j], direction))
-            world = current.rotation[key] * direction
-            for a in range(3):
-                node = mapping[triangles[face, a]]
+            value = type(weights[0, 0])(0.0)
+            if local >= 0:
+                value = wp.dot(current.jacobian_q[key, local], direction)
+            else:
+                component_index = -local - 1
+                a, j = component_index / 3, component_index % 3
                 bary = type(weights[0, 0])(1.0) / type(weights[0, 0])(6.0)
                 if a == quadrature:
                     bary = type(weights[0, 0])(2.0) / type(weights[0, 0])(3.0)
-                for j in range(3):
-                    column = int(-1)
-                    if node >= 0:
-                        column = 3 * node + j
-                    factors.gx_columns[slot, 3 * a + j] = column
-                    factors.gx_values[slot, 3 * a + j] = float(bary * world[j])
-            _append_monolithic_contact_factor_triplets(factors, slot, triplets, nq)
+                value = bary * world[j]
+            factors.values[index] = float(value)
+        _append_monolithic_contact_factor_triplets(factors, slot, triplets)
 
 
 @wp.kernel
@@ -415,6 +428,9 @@ class ContactObjective:
         smooth_sdf=None,
         alignment_policy="guard",
         dtype=wp.float64,
+        layout=None,
+        articulation_actor=None,
+        base_triplet_count=0,
     ):
         if dtype not in (wp.float64, wp.float32):
             raise ValueError("Contact requires float64 or float32")
@@ -514,8 +530,63 @@ class ContactObjective:
         if np.any(v["shape_body"][shapes] < -1) or np.any(v["shape_body"][shapes] >= model.body_count):
             raise ValueError("Invalid shape body")
         count = len(triangles) * 3 * len(shapes)
-        if count >= 2**31:
+        if 3 * count >= 2**31:
             raise ValueError("Contact query capacity exceeds int32")
+        self.layout = layout or MonolithicLinearLayout(q_dof_count, len(dynamic))
+        if (self.layout.q_dof_count, self.layout.dynamic_particle_count) != (q_dof_count, len(dynamic)):
+            raise ValueError("Contact layout does not match endpoint DoFs")
+        support_columns, support_local, support_offsets = [], [], [0]
+        ancestors = {}
+        if articulation_actor is not None:
+            parents, children = model.joint_parent.numpy(), model.joint_child.numpy()
+            starts = model.joint_qd_start.numpy()
+            incoming = {int(children[j]): j for j in articulation_actor.joint_indices}
+            local_dofs = {index: i for i, index in enumerate(articulation_actor.dof_indices)}
+            for body in articulation_actor.body_indices:
+                selected, cursor = [], body
+                while cursor >= 0:
+                    joint = incoming[cursor]
+                    selected.extend(local_dofs[i] for i in range(int(starts[joint]), int(starts[joint + 1])))
+                    cursor = int(parents[joint])
+                ancestors[body] = sorted(selected)
+        if type(base_triplet_count) is not int or not 0 <= base_triplet_count < 2**31:
+            raise ValueError("Invalid base triplet capacity")
+        support_count, triplet_count = 0, 0
+        for face in triangles:
+            soft_count = 3 * int(np.count_nonzero(mapping[face] >= 0))
+            for shape in shapes:
+                body = int(v["shape_body"][shape])
+                q_count = (
+                    len(ancestors[body])
+                    if articulation_actor is not None and body >= 0
+                    else (q_dof_count if body >= 0 else 0)
+                )
+                k = q_count + soft_count
+                # Three quadrature samples, each with three stable factors.
+                support_count += 9 * k
+                triplet_count += 9 * k * k
+                if support_count >= 2**31 or base_triplet_count + triplet_count >= 2**31:
+                    raise ValueError("Contact support/triplet capacity exceeds int32")
+        for face in triangles:
+            for _slot in range(3):
+                for shape in shapes:
+                    body = int(v["shape_body"][shape])
+                    q = ancestors.get(body, list(range(q_dof_count))) if body >= 0 else []
+                    columns = [self.layout.q_scalar_offset + i for i in q]
+                    local = list(q)
+                    for a, particle in enumerate(face):
+                        node = int(mapping[particle])
+                        if node >= 0:
+                            columns.extend(self.layout.x_scalar_offset + 3 * node + j for j in range(3))
+                            local.extend(-(3 * a + j + 1) for j in range(3))
+                    for _component in range(3):
+                        support_columns.extend(columns)
+                        support_local.extend(local)
+                        support_offsets.append(len(support_columns))
+        self.factor_support = tuple(
+            np.asarray(a, dtype=np.int32) for a in (support_offsets, support_columns, support_local)
+        )
+        self.triplet_capacity = triplet_count
         self.model, self.contact_model = model, contact_model
         self.parameters, self.nq, self.count = parameters, q_dof_count, count
         self._source_table = table
@@ -691,6 +762,8 @@ class ContactObjective:
                     self.triangles,
                     self.area,
                     self.mapping,
+                    self.layout.q_scalar_offset,
+                    self.layout.x_scalar_offset,
                     self.dtype(radius),
                     self.dtype(stiffness),
                     self.dtype(smoothing),
@@ -716,11 +789,7 @@ class ContactObjective:
 
     def assemble_tangent(self, assembly):
         """Append normal/radial/transverse PSD factors with frozen load/normal; B is FP32."""
-        if (
-            not self._evaluated
-            or assembly.contact_factors.q_dof_count != self.nq
-            or assembly.contact_factors.dynamic_particle_count * 3 + self.nq != self.residual.size
-        ):
+        if not self._evaluated or assembly.contact_factors.scalar_dof_count != self.residual.size:
             raise ValueError("Evaluate contact first and use the matching linear layout")
         if self.count:
             wp.launch(
@@ -729,8 +798,6 @@ class ContactObjective:
                 [
                     self.current,
                     self.shapes,
-                    self.triangles,
-                    self.mapping,
                     self.normal,
                     self.tangent,
                     self.weights,

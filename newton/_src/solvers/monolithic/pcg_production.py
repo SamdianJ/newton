@@ -28,11 +28,13 @@ import numpy as np
 import warp as wp
 
 from .linear_types import (
+    MonolithicLinearLayout,
     MonolithicLinearSolveResult,
     MonolithicLinearStatus,
     MonolithicPcgConfig,
     MonolithicPcgWarmStart,
 )
+from .pcg_common import group_data, group_policy
 from .pcg_production_kernels import (
     _alpha_guard,
     _begin_slot,
@@ -176,6 +178,7 @@ class MaskedPcgPlan:
         delta=None,
         config: MaskedPcgConfig | None = None,
         _study_soft=None,
+        layout=None,
     ):
         self.config = MaskedPcgConfig() if config is None else config
         if not isinstance(self.config, MaskedPcgConfig):
@@ -189,6 +192,15 @@ class MaskedPcgPlan:
         self.n = y.size
         self.nq = q_cholesky.shape[0]
         self.nx = x_cholesky.size
+        self.layout = layout or MonolithicLinearLayout(self.nq, self.nx)
+        if (self.layout.q_dof_count, self.layout.dynamic_particle_count) != (self.nq, self.nx):
+            raise ValueError("PCG factors do not match the actor layout")
+        membership, aliases = group_data(self.layout)
+        self.group_count = len(self.layout.groups)
+        self.row_groups = wp.array(membership, dtype=int, device=self.device)
+        self.compat_groups = wp.array(aliases, dtype=int, device=self.device)
+        floors, _ = group_policy(self.layout, self.config)
+        self.group_floors = wp.array(floors, dtype=float, device=self.device)
         if self.n <= 0 or self.n != self.nq + 3 * self.nx:
             raise ValueError("Expected n = q_dof_count + 3 * dynamic_particle_count > 0")
         arrays = (offsets, columns, values, scale, q_cholesky, x_cholesky, rhs_hat, y)
@@ -231,15 +243,15 @@ class MaskedPcgPlan:
             setattr(self, name, wp.zeros(self.n, dtype=float, device=self.device))
         self.products = wp.zeros(1, dtype=float, device=self.device)
         self.scalars = wp.zeros(3, dtype=float, device=self.device)
-        self.maxima = wp.zeros(9, dtype=float, device=self.device)
-        self.sums = wp.zeros(9, dtype=float, device=self.device)
-        self.norms = wp.zeros(9, dtype=float, device=self.device)
+        self.maxima = wp.zeros(3 * self.group_count, dtype=float, device=self.device)
+        self.sums = wp.zeros(3 * self.group_count, dtype=float, device=self.device)
+        self.norms = wp.zeros(3 * self.group_count, dtype=float, device=self.device)
         self.error = wp.zeros(1, dtype=int, device=self.device)
         self.state = wp.zeros(1, dtype=_DeviceResult, device=self.device)
         self.regularization = wp.zeros(1, dtype=float, device=self.device)
         self.zero_guess = wp.ones(1, dtype=int, device=self.device)
         self.condition = wp.zeros(1, dtype=int, device=self.device)
-        self.residual_norm_limits = wp.full(3, float("inf"), dtype=float, device=self.device)
+        self.residual_norm_limits = wp.full(self.group_count, float("inf"), dtype=float, device=self.device)
         self._conditional_graph_supported = self.device.is_cuda and wp.is_conditional_graph_supported()
         # Fuse single-tile dots; retain the parallel reduction for larger systems.
         self._products_kernel = (
@@ -253,15 +265,21 @@ class MaskedPcgPlan:
         self._prepared_regularization = None
         self._storage = tuple(value for value in vars(self).values() if isinstance(value, wp.array))
         self._storage_signature = tuple(map(_signature, self._storage))
-        self._schedule_signature = (self.config, self.n, self.nq, self.nx, self._conditional_graph_supported)
+        self._schedule_signature = (
+            self.config,
+            self.n,
+            self.nq,
+            self.nx,
+            self.layout,
+            self._conditional_graph_supported,
+        )
         self._layout_digest = self._layout_signature()
         c = self.config
         self.params = _Parameters()
         self.params.tolerance = float(c.linear_tolerance)
         self.params.absolute_tolerance = float(c.linear_absolute_tolerance)
-        self.params.floors = wp.vec3(
-            float(c.residual_floor_global), float(c.residual_floor_q), float(c.residual_floor_x)
-        )
+        self.params.floors = self.group_floors
+        self.params.aliases = self.compat_groups
         self.params.replacement_threshold = float(c.residual_replacement_threshold)
         self.params.residual_norm_limits = self.residual_norm_limits
 
@@ -282,6 +300,7 @@ class MaskedPcgPlan:
             delta=delta,
             config=config,
             _study_soft=workspace._study_soft,
+            layout=workspace.layout,
         )
         plan._workspace = workspace
         plan._generation = workspace._generation
@@ -307,7 +326,8 @@ class MaskedPcgPlan:
         if (
             self._stream_id() != self._stream
             or tuple(map(_signature, arrays)) != self._storage_signature
-            or (self.config, self.n, self.nq, self.nx, self._conditional_graph_supported) != self._schedule_signature
+            or (self.config, self.n, self.nq, self.nx, self.layout, self._conditional_graph_supported)
+            != self._schedule_signature
         ):
             raise ValueError("Stream, schedule or bound storage changed; construct a new PCG plan")
 
@@ -342,6 +362,7 @@ class MaskedPcgPlan:
             and self._study_soft is workspace._study_soft
             and (self._study_soft is None or self._study_signature == self._study_soft.signature())
             and self._stream == self._stream_id()
+            and self.layout == workspace.layout
             and config == self.config
             and tuple(map(_signature, arrays)) == self._binding_signature
         )
@@ -408,12 +429,20 @@ class MaskedPcgPlan:
 
     def _emit_direction(self, slot):
         if self.nq:  # Static layout test, not a device-dependent branch.
-            self._launch(_masked_q_solve, 1, [self.q_cholesky, self.r, self.temporary, self.z, self.state, self.error])
+            self._launch(
+                _masked_q_solve,
+                1,
+                [self.q_cholesky, self.layout.q_scalar_offset, self.r, self.temporary, self.z, self.state, self.error],
+            )
         if self._study_soft is not None:
             self._launch(_study_mask, 1, [self.state, self._study_active])
             self._study_soft.apply(self.r, self.z, active=self._study_active, error=self.error)
         elif self.nx:
-            self._launch(_masked_x_solve, self.nx, [self.x_cholesky, self.nq, self.r, self.z, self.state, self.error])
+            self._launch(
+                _masked_x_solve,
+                self.nx,
+                [self.x_cholesky, self.layout.x_scalar_offset, self.r, self.z, self.state, self.error],
+            )
         self._emit_products(self.r, self.z)
         self._launch(_gamma_and_beta_guard, 1, [self.products, self.scalars, self.state, self.error, self.params, slot])
         self._launch(_masked_direction, self.n, [self.z, self.p, self.scalars, self.state, self.error])
@@ -421,18 +450,31 @@ class MaskedPcgPlan:
 
     def _emit_checkpoint(self, slot, *, initial=False, final=False):
         self._emit_matvec(self.y, checkpoint=True)
-        self._launch(_clear_norm_work, 9, [self.maxima, self.sums, self.state, initial])
+        self._launch(_clear_norm_work, 3 * self.group_count, [self.maxima, self.sums, self.state, initial])
         self._launch(
             _residual_and_maxima,
             self.n,
-            [self.rhs, self.ap, self.r, self.true_r, self.gap, self.maxima, self.state, self.error, self.nq, initial],
+            [
+                self.rhs,
+                self.ap,
+                self.r,
+                self.true_r,
+                self.gap,
+                self.maxima,
+                self.state,
+                self.error,
+                self.row_groups,
+                initial,
+            ],
         )
         self._launch(
             _residual_norm_sums,
             self.n,
-            [self.rhs, self.true_r, self.gap, self.maxima, self.sums, self.state, self.error, self.nq, initial],
+            [self.rhs, self.true_r, self.gap, self.maxima, self.sums, self.state, self.error, self.row_groups, initial],
         )
-        self._launch(_finish_norms, 9, [self.maxima, self.sums, self.norms, self.state, self.error, initial])
+        self._launch(
+            _finish_norms, 3 * self.group_count, [self.maxima, self.sums, self.norms, self.state, self.error, initial]
+        )
         self._launch(_checkpoint_decision, 1, [self.norms, self.state, self.error, self.params, slot, initial, final])
         self._launch(_replace_recursive, self.n, [self.true_r, self.r, self.state])
 
@@ -586,7 +628,9 @@ def solve_pcg_production(workspace, rhs_hat, y, *, generation, warm_start, confi
         return invalid(MonolithicLinearStatus.INVALID_ARGUMENT)
     if not workspace._vector_valid(rhs_hat) or not workspace._vector_valid(y):
         return invalid(MonolithicLinearStatus.INVALID_ARGUMENT)
-    if warm_start == MonolithicPcgWarmStart.SAME_GENERATION and workspace._warm_start_key != (generation, y.ptr):
+    if warm_start == MonolithicPcgWarmStart.SAME_GENERATION and workspace._warm_start_key != workspace._solve_binding(
+        y
+    ):
         return invalid(MonolithicLinearStatus.STALE_GENERATION)
     prepare_start = time.perf_counter()
     try:
@@ -603,9 +647,7 @@ def solve_pcg_production(workspace, rhs_hat, y, *, generation, warm_start, confi
         # reuse of captured nodes. Bind this request without accepting stale callers.
         plan._generation = generation
         # Per-Newton residual caps change numerically without changing graph bindings.
-        plan.residual_norm_limits.assign(
-            np.asarray(config.residual_norm_limits or (float("inf"),) * 3, dtype=np.float32)
-        )
+        plan.residual_norm_limits.assign(np.asarray(group_policy(workspace.layout, config)[1], dtype=np.float32))
         plan.set_solve_parameters(
             regularization=workspace._lambda, zero_initial_guess=warm_start == MonolithicPcgWarmStart.ZERO
         )
@@ -632,7 +674,7 @@ def solve_pcg_production(workspace, rhs_hat, y, *, generation, warm_start, confi
     result = plan.collect_result()
     workspace._last_masked_pcg_result = result
     if result.status == ProductionStatus.SUCCESS:
-        workspace._warm_start_key = (generation, y.ptr)
+        workspace._warm_start_key = workspace._solve_binding(y)
     # Keep existing rho fields fresh; checkpoint_ratios retain the last valid check.
     ratios = result.ratios if result.residual_matches_y else (math.nan,) * 3
     return MonolithicLinearSolveResult(

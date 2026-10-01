@@ -43,17 +43,17 @@ class _MonolithicMat33Triplets:
 
 @wp.struct
 class _MonolithicContactFactors:
-    gq: wp.array2d[float]
-    gx_columns: wp.array2d[int]
-    gx_values: wp.array2d[float]
+    offsets: wp.array[int]
+    columns: wp.array[int]
+    values: wp.array[float]
+    local_indices: wp.array[int]
     weights: wp.array[float]
     kind: wp.array[int]
     candidate_tid: wp.array[int]
     count: wp.array[int]
     status: wp.array[int]
     capacity: int
-    q_dof_count: int
-    dynamic_particle_count: int
+    scalar_dof_count: int
     active_token: wp.array[int]
     token: int
 
@@ -157,45 +157,33 @@ def _append_monolithic_contact_factor_triplets(
     factors: _MonolithicContactFactors,
     factor_index: int,
     global_triplets: _MonolithicScalarTriplets,
-    x_scalar_offset: int,
 ):
     if factors.active_token[0] != factors.token or global_triplets.active_token[0] != global_triplets.token:
         return
-    if factor_index < 0 or factor_index >= factors.capacity or factor_index >= factors.count[0]:
+    if factor_index < 0 or factor_index >= factors.capacity:
         wp.atomic_max(factors.status, 0, 3)
         return
     weight = factors.weights[factor_index]
-    if not wp.isfinite(weight) or weight <= 0.0:
+    if not wp.isfinite(weight) or weight < 0.0:
         wp.atomic_max(factors.status, 0, 8)
         return
-    for i in range(factors.q_dof_count + 9):
-        row = i
-        gi = float(0.0)
-        if i < factors.q_dof_count:
-            gi = factors.gq[factor_index, i]
-        else:
-            local_row = factors.gx_columns[factor_index, i - factors.q_dof_count]
-            if local_row == -1:
-                continue
-            if local_row < 0 or local_row >= 3 * factors.dynamic_particle_count:
-                wp.atomic_max(factors.status, 0, 3)
-                return
-            row = x_scalar_offset + local_row
-            gi = factors.gx_values[factor_index, i - factors.q_dof_count]
-        for j in range(factors.q_dof_count + 9):
-            column = j
-            gj = float(0.0)
-            if j < factors.q_dof_count:
-                gj = factors.gq[factor_index, j]
-            else:
-                local_column = factors.gx_columns[factor_index, j - factors.q_dof_count]
-                if local_column == -1:
-                    continue
-                if local_column < 0 or local_column >= 3 * factors.dynamic_particle_count:
-                    wp.atomic_max(factors.status, 0, 3)
-                    return
-                column = x_scalar_offset + local_column
-                gj = factors.gx_values[factor_index, j - factors.q_dof_count]
+    begin, end = factors.offsets[factor_index], factors.offsets[factor_index + 1]
+    if begin < 0 or end < begin or end > factors.values.shape[0] or end > factors.columns.shape[0]:
+        wp.atomic_max(factors.status, 0, 6)
+        return
+    for i in range(begin, end):
+        if factors.columns[i] < 0 or factors.columns[i] >= factors.scalar_dof_count:
+            wp.atomic_max(factors.status, 0, 3)
+            return
+        if not wp.isfinite(factors.values[i]):
+            wp.atomic_max(factors.status, 0, 7)
+            return
+    if weight == 0.0:
+        return
+    for i in range(begin, end):
+        row, gi = factors.columns[i], factors.values[i]
+        for j in range(begin, end):
+            column, gj = factors.columns[j], factors.values[j]
             _append_monolithic_scalar_triplet(global_triplets, row, column, weight * gi * gj)
 
 
@@ -313,7 +301,7 @@ def _scaled_matvec_finish(
 
 
 def _monolithic_scaled_matvec(workspace, x, y, z, alpha, beta) -> None:
-    if not workspace._scaling_valid:
+    if not workspace._scaling_valid or workspace.layout != workspace._layout_identity:
         raise ValueError("Scaled operator requires current valid scaling")
     wp.launch(_scale_vector, x.size, [workspace.scale, x, workspace._scaled_x], device=workspace.device)
     sparse.bsr_mv(workspace.k_global_scalar_bsr, workspace._scaled_x, workspace._k_scaled)
@@ -342,7 +330,7 @@ def build_scaling(
         matrix = self.k_global_scalar_bsr
         self._segment_graphs.run(
             "scaling",
-            (matrix.nrow, epsilon_d),
+            (self.layout.identity, matrix.nrow, epsilon_d),
             (
                 dynamic_diagonal,
                 self.dynamic_diagonal,

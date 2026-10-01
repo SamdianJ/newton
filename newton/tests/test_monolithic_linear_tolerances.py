@@ -76,7 +76,17 @@ def test_block_acceptance(test, device):
             wp.launch(
                 pcg._pack_monolithic_pcg_residual,
                 1,
-                [plan.error, ratios, diagnostic_norms, plan.params.floors, 1e-4, 1e-6, wp.vec3(*limits), packet],
+                [
+                    plan.error,
+                    ratios,
+                    diagnostic_norms,
+                    plan.params.floors,
+                    1e-4,
+                    1e-6,
+                    plan.residual_norm_limits,
+                    plan.compat_groups,
+                    packet,
+                ],
                 device=device,
             )
             test.assertEqual(bool(packet.numpy()[0]["check"]), expected)
