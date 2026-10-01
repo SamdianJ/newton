@@ -17,6 +17,7 @@ import warp as wp
 from ...sim import JointType
 from ..solver import SolverBase
 from . import coupled_kernels as kernels
+from .actors import ActorTable
 from .articulation import ArticulationObjective, _TreeKinematics
 from .articulation_state import _predict, _recover_history
 from .collision import _validate_and_collect_boundary_faces
@@ -29,7 +30,6 @@ from .linear import MonolithicLinearWorkspace
 from .linear_types import (
     MonolithicLinearCapacities,
     MonolithicLinearGeneration,
-    MonolithicLinearLayout,
     MonolithicLinearStatus,
 )
 from .segment_graph import _SegmentGraphCache
@@ -110,6 +110,9 @@ class SolverMonolithic(SolverBase):
         precision=Precision.FP64,
         fp32_absolute_tolerance=None,
     ):
+        self._actors = ActorTable.from_model(model)
+        layout = self._actors.legacy_linear_layout()
+        self._articulation_actor = self._actors.actors[0]
         self._precision = self.Precision(precision)
         self._dtype = wp.float64 if self._precision == self.Precision.FP64 else wp.float32
         self._numpy_dtype = np.float64 if self._precision == self.Precision.FP64 else np.float32
@@ -157,7 +160,7 @@ class SolverMonolithic(SolverBase):
         self._contact = ContactObjective(
             model,
             self._tet.mapping.numpy(),
-            q_dof_count=model.joint_dof_count,
+            q_dof_count=self._articulation_actor.dof_count,
             contact_model=contact_model,
             normal_stiffness=contact_stiffness,
             friction_coefficient=friction_coefficient,
@@ -229,7 +232,7 @@ class SolverMonolithic(SolverBase):
         if not isinstance(joint_terms, self.JointTerms):
             raise ValueError("joint_terms must be SolverMonolithic.JointTerms")
         options = {name: getattr(joint_terms, name) for name in joint_terms.__dataclass_fields__}
-        self._joint_terms = JointParameters(model, **options)
+        self._joint_terms = JointParameters(model, actor=self._articulation_actor, **options)
         for name in ("joint_target_ke", "joint_target_kd", "joint_limit_ke", "joint_limit_kd", "joint_friction"):
             if name not in self._joint_terms.allowed_properties and np.any(getattr(model, name).numpy() != 0):
                 raise ValueError(f"Disabled joint term has nonzero parameters: {name}")
@@ -288,13 +291,15 @@ class SolverMonolithic(SolverBase):
                 merit_absolute_q=fp32_absolute_tolerance,
                 merit_absolute_x=fp32_absolute_tolerance,
             )
-        n, nq, device = self._tet.ids.size, model.joint_dof_count, model.device
-        pattern = build_tet_triplet_pattern(model.tet_indices.numpy(), self._tet.mapping.numpy(), x_dof_start=nq)
+        n, nq, device = layout.dynamic_particle_count, layout.q_dof_count, model.device
+        pattern = build_tet_triplet_pattern(
+            model.tet_indices.numpy(), self._tet.mapping.numpy(), x_dof_start=layout.x_scalar_offset
+        )
         self._tet_assembly = create_tet_assembly_workspace(
             pattern, tet_count=model.tet_count, device=device, physics=self._tet.physics
         )
         self._linear = MonolithicLinearWorkspace(
-            MonolithicLinearLayout(nq, n),
+            layout,
             MonolithicLinearCapacities(
                 nq * nq + len(pattern.global_rows) + capacity * (nq + 9) ** 2,
                 len(pattern.ax_rows),
@@ -355,7 +360,7 @@ class SolverMonolithic(SolverBase):
         fields.update(self._contact.values)
         fields.update(self._coupled_config)
         fields.update(self._sdf_fields)
-        return _TreeKinematics(model, extra_config=fields, dtype=self._dtype)
+        return _TreeKinematics(model, actor=self._articulation_actor, extra_config=fields, dtype=self._dtype)
 
     def _make_states(self):
         return CoupledState(self._kinematics)
