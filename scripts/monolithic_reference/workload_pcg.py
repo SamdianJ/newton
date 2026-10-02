@@ -1,0 +1,138 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 The Newton Developers
+# SPDX-License-Identifier: Apache-2.0
+
+"""Snapshot and replay the existing production PCG core with explicit inputs."""
+
+import dataclasses
+import time
+
+import numpy as np
+import warp as wp
+
+from newton._src.solvers.monolithic.pcg_production import MaskedPcgConfig, MaskedPcgPlan
+from newton.examples.softbody.monolithic_recording import serial
+from scripts.monolithic_reference.workload_scene import compare_arrays
+
+
+def pcg_input(workspace, rhs, y, *, config, warm_start, delta, **kwargs):
+    """Capture live inputs before the production adapter mutates its outputs."""
+    if workspace.pcg_mode != "production" or workspace._study_soft is not None or delta is None:
+        raise ValueError("Only ordinary production PCG with explicit delta is supported")
+    matrix = workspace.k_global_scalar_bsr
+    offsets = matrix.offsets.numpy().copy()
+    count = int(offsets[-1])
+    arrays = {
+        "offsets": offsets,
+        "columns": matrix.columns.numpy()[:count].copy(),
+        "values": matrix.values.numpy()[:count].copy(),
+        "scale": workspace.scale.numpy().copy(),
+        "q_cholesky": workspace._q_cholesky.numpy().copy(),
+        "x_cholesky": workspace._x_cholesky.numpy().copy(),
+        "rhs_hat": rhs.numpy().copy(),
+        "y": y.numpy().copy(),
+        "delta": delta.numpy().copy(),
+        "limits": np.asarray(config.residual_norm_limits or (float("inf"),) * 3, dtype=np.float32),
+    }
+    metadata = {
+        "config": dataclasses.asdict(MaskedPcgConfig.from_monolithic(config)),
+        "regularization": workspace._lambda,
+        "zero_initial_guess": int(warm_start) == 0,
+        "graph": workspace.use_cuda_graph,
+        "storage_capacity": matrix.values.size,
+        "generation": dataclasses.asdict(workspace._generation),
+        "boundary": "production_pcg_core",
+    }
+    return arrays, metadata
+
+
+def pcg_output(workspace, y, delta):
+    """Include actual work and validity flags, independent of wall-time noise."""
+    return {"y": y.numpy().copy(), "delta": delta.numpy().copy()}, serial(workspace._last_masked_pcg_result)
+
+
+def validate_pcg(arrays):
+    """Reject corrupted sparse structure and nonfinite live input."""
+    n = arrays["rhs_hat"].size
+    offsets, columns = arrays["offsets"], arrays["columns"]
+    if offsets.dtype != np.int32 or offsets.shape != (n + 1,) or offsets[0] != 0:
+        raise ValueError("Invalid PCG offsets")
+    if np.any(np.diff(offsets.astype(np.int64)) < 0) or offsets[-1] != len(columns):
+        raise ValueError("Invalid PCG active count")
+    if columns.dtype != np.int32 or np.any(columns < 0) or np.any(columns >= n):
+        raise ValueError("Invalid PCG columns")
+    for name, value in arrays.items():
+        if name != "limits" and not np.isfinite(value).all():
+            raise ValueError(f"Nonfinite PCG input: {name}")
+    if arrays["limits"].shape != (3,) or np.any(np.isnan(arrays["limits"])) or np.any(arrays["limits"] <= 0):
+        raise ValueError("Invalid PCG limits")
+
+
+def true_residual(arrays, y, regularization):
+    """Evaluate scaled CSR residual independently on the host in float64."""
+    scaled = arrays["scale"].astype(np.float64) * y
+    product = np.zeros_like(scaled)
+    for i, (start, end) in enumerate(zip(arrays["offsets"][:-1], arrays["offsets"][1:], strict=True)):
+        product[i] = arrays["values"][start:end].astype(np.float64) @ scaled[arrays["columns"][start:end]]
+    return arrays["rhs_hat"].astype(np.float64) - arrays["scale"] * product - regularization * y
+
+
+def replay_pcg(arrays, metadata, expected, expected_result, *, device, repeat=5):
+    """Restore every live input before warmup and each timed core invocation."""
+    if repeat < 1:
+        raise ValueError("repeat must be positive")
+    validate_pcg(arrays)
+    types = {"offsets": wp.int32, "columns": wp.int32, "x_cholesky": wp.mat33}
+    buffers = {
+        name: wp.array(value, dtype=types.get(name, wp.float32), device=device)
+        for name, value in arrays.items()
+        if name != "limits"
+    }
+    plan = MaskedPcgPlan(**buffers, config=MaskedPcgConfig(**metadata["config"]))
+    times, restore_times = [], []
+    for index in range(repeat + 1):
+        start = time.perf_counter()
+        for name, buffer in buffers.items():
+            buffer.assign(arrays[name])
+        plan.residual_norm_limits.assign(arrays["limits"])
+        plan.set_solve_parameters(
+            regularization=metadata["regularization"], zero_initial_guess=metadata["zero_initial_guess"]
+        )
+        if metadata["graph"] and plan.graph is None:
+            plan.capture()
+        wp.synchronize_device(plan.device)
+        restore = time.perf_counter() - start
+        start = time.perf_counter()
+        if metadata["graph"]:
+            plan.replay()
+        else:
+            plan.enqueue_solve()
+        result = plan.collect_result()
+        elapsed = time.perf_counter() - start
+        output = {"y": plan.y.numpy().copy(), "delta": plan.delta.numpy().copy()}
+        compare_arrays(output, expected)
+        actual_result = serial(result)
+        for key in (
+            "status",
+            "output_valid",
+            "iterations",
+            "iteration_slots",
+            "true_residual_checks",
+            "residual_replacements",
+        ):
+            if actual_result[key] != expected_result[key]:
+                raise ValueError(f"PCG execution differs: {key}")
+        residual = true_residual(arrays, output["y"], metadata["regularization"])
+        reference = true_residual(arrays, expected["y"], metadata["regularization"])
+        np.testing.assert_allclose(residual, reference, rtol=2e-5, atol=2e-6)
+        if index:
+            times.append(elapsed)
+            restore_times.append(restore)
+    return {
+        "status": "PASS",
+        "boundary": metadata["boundary"],
+        "seconds": times,
+        "restore_seconds": restore_times,
+        "result": actual_result,
+        "true_residual_norm": float(np.linalg.norm(residual)),
+        "warmup_samples": 1,
+    }
