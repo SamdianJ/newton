@@ -62,6 +62,33 @@ def test_segment_warm_replay(test, device):
     test.assertEqual(cache.replays["copy"], 8)
 
 
+def test_objective_candidate_reuse(test, device):
+    """Retain all candidate/tangent bindings without repeating graph capture."""
+    model = coupled.scene(device)
+    solver = coupled.solver(model, mode="production", graph=True)
+    state = solver.create_state(dt=0.001)
+    solver.step(state, state, model.control(), dt=0.001)
+    candidates = (solver._original, solver._accepted, solver._trial)
+    expected = [
+        solver._evaluate(candidate, 0.001, build_tangent=tangent)
+        for candidate in candidates
+        for tangent in (False, True)
+    ]
+    captures = solver._graphs.captures["coupled_objective"]
+    for _ in range(3):
+        with patch.object(wp, "launch", side_effect=AssertionError("warm objective recaptured")):
+            actual = [
+                solver._evaluate(candidate, 0.001, build_tangent=tangent)
+                for candidate in candidates
+                for tangent in (False, True)
+            ]
+        for got, wanted in zip(actual, expected, strict=True):
+            np.testing.assert_allclose(got[0], wanted[0], rtol=2e-5, atol=2e-6)
+            np.testing.assert_allclose(got[1], wanted[1], rtol=2e-5, atol=2e-6)
+            np.testing.assert_allclose(got[2], wanted[2], rtol=2e-5, atol=2e-6)
+    test.assertEqual(solver._graphs.captures["coupled_objective"], captures)
+
+
 def test_binding_and_stream_changes(test, device):
     """Rebind replaced buffers and streams while bounding retained graph allocations."""
     cache = _SegmentGraphCache(device, enabled=True)
@@ -76,14 +103,14 @@ def test_binding_and_stream_changes(test, device):
         cache.run("copy", (2.0,), (source, result), execute)
         np.testing.assert_array_equal(result.numpy(), 2 * source.numpy())
     test.assertEqual(cache.captures["copy"], 7)
-    test.assertEqual(len(cache.entries["copy"]), 4)
-    test.assertEqual(cache.evictions["copy"], 3)
+    test.assertEqual(len(cache.entries["copy"]), 6)
+    test.assertEqual(cache.evictions["copy"], 1)
     wp.synchronize_device(device)
     with wp.ScopedStream(wp.Stream(device)):
         cache.run("copy", (2.0,), (source, result), execute)
     wp.synchronize_device(device)
     test.assertEqual(cache.captures["copy"], 8)
-    test.assertEqual(cache.evictions["copy"], 4)
+    test.assertEqual(cache.evictions["copy"], 2)
     np.testing.assert_array_equal(result.numpy(), 2 * source.numpy())
 
 
@@ -166,6 +193,7 @@ class TestMonolithicSegmentGraphs(unittest.TestCase):
 for function in (
     test_segments_continuous,
     test_segment_warm_replay,
+    test_objective_candidate_reuse,
     test_binding_and_stream_changes,
     test_factor_scaling_and_failures,
     test_graph_transactions,

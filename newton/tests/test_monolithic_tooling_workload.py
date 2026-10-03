@@ -4,16 +4,20 @@
 """Exercise computational replay, not visual trajectory playback."""
 
 import json
+import os
 import subprocess
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
 import numpy as np
 
 from newton.examples.softbody.monolithic_recording import state_arrays
 from newton.tests.unittest_utils import add_function_test, get_test_devices
+from scripts.monolithic_reference.benchmark_workload import benchmark, check_gpu_idle
 from scripts.monolithic_reference.profiling import ROOT
 from scripts.monolithic_reference.record_workload import record
 from scripts.monolithic_reference.replay_workload import replay
@@ -86,7 +90,34 @@ def test_window_and_pcg(test, device):
             replay(root, device=device)
 
 
+def test_repeated_window_measurement(test, device):
+    """Restore physical states repeatedly while preserving monotonic workspace epochs."""
+    with tempfile.TemporaryDirectory() as temporary:
+        root = Path(temporary) / "bundle"
+        record(root, device=device, graph=device.is_cuda, steps=3, windows=[(1, 3)])
+        # CI may share the GPU; this checks correctness, not performance.
+        with patch("scripts.monolithic_reference.benchmark_workload.check_gpu_idle"):
+            result = benchmark(root, device=device, warmup=1, repeat=2)
+        test.assertEqual(result["status"], "PASS")
+        samples = result["results"][0]["samples"]
+        test.assertEqual([sample["generation_offset"] for sample in samples], [0, 3, 6, 9, 12, 15])
+        test.assertEqual(sum(not sample["warmup"] for sample in samples), 4)
+        test.assertTrue(all(sample["seconds"] > 0 for sample in samples))
+
+
 class TestWorkload(unittest.TestCase):
+    def test_benchmark_contention(self):
+        """Reject foreign GPU processes while allowing the measuring process itself."""
+        with patch("scripts.monolithic_reference.benchmark_workload.subprocess.check_output") as query:
+            query.return_value = str(os.getpid())
+            check_gpu_idle(SimpleNamespace(is_cuda=True))
+            query.return_value += f"\n{os.getpid() + 1}"
+            with self.assertRaises(RuntimeError):
+                check_gpu_idle(SimpleNamespace(is_cuda=True))
+            query.reset_mock()
+            check_gpu_idle(SimpleNamespace(is_cuda=False))
+            query.assert_not_called()
+
     def test_schema_rejection(self):
         """Reject incomplete bundles, object data and shape/dtype drift."""
         with tempfile.TemporaryDirectory() as temporary:
@@ -106,9 +137,15 @@ class TestWorkload(unittest.TestCase):
         for windows in ([], [(0, 1)], [(2, 1)], [(1, 11)], [(1, 3), (3, 4)]):
             with self.assertRaises(ValueError):
                 record("must-not-be-created", windows=windows)
+        for warmup, repeat in ((0, 1), (1, 0)):
+            with self.assertRaises(ValueError):
+                benchmark("does-not-exist", warmup=warmup, repeat=repeat)
 
 
 add_function_test(TestWorkload, "test_window_and_pcg", test_window_and_pcg, devices=get_test_devices())
+add_function_test(
+    TestWorkload, "test_repeated_window_measurement", test_repeated_window_measurement, devices=get_test_devices()
+)
 
 
 if __name__ == "__main__":

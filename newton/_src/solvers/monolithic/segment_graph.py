@@ -45,7 +45,8 @@ class _SegmentGraphCache:
             entries[key] = (graph, buffers, stream)
             self.captures[name] += 1
             self.capture_seconds[name] += time.perf_counter() - start
-            if len(entries) > 4:
+            # Three candidate buffers with/without tangents must coexist.
+            if len(entries) > 6:
                 entries.popitem(last=False)
                 self.evictions[name] += 1
         else:
@@ -56,7 +57,7 @@ class _SegmentGraphCache:
     def summary(self):
         return {
             "enabled": self.enabled,
-            "max_bindings_per_segment": 4,
+            "max_bindings_per_segment": 6,
             "segments": {
                 name: {
                     "captures": self.captures[name],
