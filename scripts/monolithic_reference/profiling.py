@@ -27,6 +27,7 @@ def provenance():
         raise RuntimeError("Newton import does not belong to the tested worktree")
     paths = sorted((ROOT / "newton/_src/solvers/monolithic").glob("*.py"))
     paths += sorted((ROOT / "scripts/monolithic_reference").glob("*.py"))
+    paths += sorted((ROOT / "newton/examples/softbody").glob("monolithic_*.py"))
     hashes = {str(p.relative_to(ROOT)): hashlib.sha256(p.read_bytes()).hexdigest() for p in paths}
     result = {
         "root": str(ROOT),

@@ -6,19 +6,27 @@
 import argparse
 import json
 import time
+from contextlib import nullcontext
 from pathlib import Path
 
 import warp as wp
 
 from newton.examples.softbody.monolithic_recording import state_arrays
-from scripts.monolithic_reference.profiling import provenance
+from scripts.monolithic_reference.profiling import SolverProfiler, provenance
 from scripts.monolithic_reference.record_workload import apply_inputs
-from scripts.monolithic_reference.workload_io import load_arrays, open_bundle, write_json
+from scripts.monolithic_reference.workload_io import digest, load_arrays, open_bundle, write_json
+from scripts.monolithic_reference.workload_objective import replay_objective
 from scripts.monolithic_reference.workload_pcg import replay_pcg
 from scripts.monolithic_reference.workload_scene import build_scene, compare_arrays
 
 
-def replay(root, *, mode="window", device="cuda:0", repeat=5):
+def acceptance_trace(trials):
+    """Preserve rejected domain evaluations as well as ordinary trial decisions."""
+    fields = ("iteration", "retry", "alpha", "accepted", "domain_failure")
+    return [tuple(row.get(name) for name in fields) for row in trials]
+
+
+def replay(root, *, mode="window", device="cuda:0", repeat=5, profile=False):
     """Validate the entire bundle before constructing any GPU objects."""
     root = Path(root)
     manifest = open_bundle(root)
@@ -31,16 +39,22 @@ def replay(root, *, mode="window", device="cuda:0", repeat=5):
                 raise ValueError("Unauthenticated hotspot metadata")
             path = root / name
             metadata = json.loads((path / "call.json").read_text())
-            if metadata["boundary"] != "production_pcg_core":
+            arrays = load_arrays(path / "input.npz", metadata["input_schema"])
+            expected = load_arrays(path / "output.npz", metadata["output_schema"])
+            if metadata["boundary"] == "production_pcg_core":
+                result = replay_pcg(arrays, metadata, expected, metadata["result"], device=device, repeat=repeat)
+            elif metadata["boundary"] in ("objective", "assembly"):
+                result = replay_objective(
+                    arrays,
+                    metadata,
+                    expected,
+                    scene=manifest["scene"],
+                    device=device,
+                    graph=manifest["graph"],
+                    repeat=repeat,
+                )
+            else:
                 raise ValueError("Unsupported hotspot boundary")
-            result = replay_pcg(
-                load_arrays(path / "input.npz", metadata["input_schema"]),
-                metadata,
-                load_arrays(path / "output.npz", metadata["output_schema"]),
-                metadata["result"],
-                device=device,
-                repeat=repeat,
-            )
             results.append({"snapshot": name, **result})
     elif mode == "window":
         trace = [json.loads(line) for line in (root / "trace.jsonl").read_text().splitlines()]
@@ -53,36 +67,46 @@ def replay(root, *, mode="window", device="cuda:0", repeat=5):
             run.load_checkpoint(state, root / f"checkpoint-{first}.npz")
             control = model.control()
             times = []
-            for step in range(first, last + 1):
-                key = f"inputs-{step}.npz"
-                apply_inputs(load_arrays(root / key, manifest["array_schemas"][key]), model, state, control)
-                wp.synchronize_device(model.device)
-                start = time.perf_counter()
-                run.step(state, state, control, dt=manifest["dt"])
-                wp.synchronize_device(model.device)
-                times.append(time.perf_counter() - start)
-                key = f"state-{step}.npz"
-                compare_arrays(
-                    state_arrays(state),
-                    load_arrays(root / key, manifest["array_schemas"][key]),
-                    **manifest["comparison"],
-                )
-                expected = trace[step - 1]["stats"]
-                for name in (
-                    "converged",
-                    "rolled_back",
-                    "nonlinear_iterations",
-                    "linear_iterations",
-                    "line_search_iterations",
-                ):
-                    if getattr(run.last_stats, name) != expected[name]:
-                        raise ValueError(f"Execution trace differs at step {step}: {name}")
-                # Recompute acceptance; do not force recorded branch outcomes.
-                actual = [(r["iteration"], r["retry"], r["alpha"], r["accepted"]) for r in run._variational["trials"]]
-                wanted = [(r["iteration"], r["retry"], r["alpha"], r["accepted"]) for r in trace[step - 1]["trials"]]
-                if actual != wanted:
-                    raise ValueError(f"Acceptance trace differs at step {step}")
-            results.append({"window": [first, last], "seconds_including_capture": times, "status": "PASS"})
+            profiler = SolverProfiler(run) if profile else None
+            with profiler if profile else nullcontext():
+                for step in range(first, last + 1):
+                    key = f"inputs-{step}.npz"
+                    apply_inputs(load_arrays(root / key, manifest["array_schemas"][key]), model, state, control)
+                    wp.synchronize_device(model.device)
+                    start = time.perf_counter()
+                    run.step(state, state, control, dt=manifest["dt"])
+                    wp.synchronize_device(model.device)
+                    times.append(time.perf_counter() - start)
+                    key = f"state-{step}.npz"
+                    compare_arrays(
+                        state_arrays(state),
+                        load_arrays(root / key, manifest["array_schemas"][key]),
+                        **manifest["comparison"],
+                    )
+                    expected = trace[step - 1]["stats"]
+                    for name in (
+                        "converged",
+                        "rolled_back",
+                        "nonlinear_iterations",
+                        "linear_iterations",
+                        "line_search_iterations",
+                    ):
+                        if getattr(run.last_stats, name) != expected[name]:
+                            raise ValueError(f"Execution trace differs at step {step}: {name}")
+                    # Recompute acceptance; do not force recorded branch outcomes.
+                    actual = acceptance_trace(run._variational["trials"])
+                    wanted = acceptance_trace(trace[step - 1]["trials"])
+                    if actual != wanted:
+                        raise ValueError(f"Acceptance trace differs at step {step}")
+            results.append(
+                {
+                    "window": [first, last],
+                    "seconds_including_capture": times,
+                    "status": "PASS",
+                    "instrumented": profile,
+                    "profile": profiler.report() if profiler else None,
+                }
+            )
     else:
         raise ValueError("Unknown replay mode")
     return {
@@ -90,6 +114,7 @@ def replay(root, *, mode="window", device="cuda:0", repeat=5):
         "mode": mode,
         "source": provenance(),
         "recorded_source": manifest["source"],
+        "bundle_manifest_sha256": digest(root / "manifest.json"),
         "results": results,
     }
 
@@ -100,13 +125,14 @@ def main():
     parser.add_argument("--mode", choices=("window", "hotspot"), default="window")
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--repeat", type=int, default=5)
+    parser.add_argument("--profile", action="store_true", help="Instrument window replay; timings are diagnostic")
     parser.add_argument("--verify", action="store_true", help="Compatibility flag; verification is always required")
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
     if args.repeat < 1:
         parser.error("--repeat must be positive")
     args.output.mkdir(parents=True, exist_ok=False)
-    result = replay(args.bundle, mode=args.mode, device=args.device, repeat=args.repeat)
+    result = replay(args.bundle, mode=args.mode, device=args.device, repeat=args.repeat, profile=args.profile)
     write_json(args.output / "receipt.json", result)
     print(json.dumps({"status": result["status"], "output": str(args.output)}))
 

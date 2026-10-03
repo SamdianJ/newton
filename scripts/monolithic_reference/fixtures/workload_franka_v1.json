@@ -1,0 +1,47 @@
+{
+  "scene": "franka-default",
+  "steps": 5250,
+  "windows": [
+    [
+      1,
+      5
+    ],
+    [
+      1750,
+      1754
+    ],
+    [
+      3250,
+      3254
+    ],
+    [
+      4500,
+      4504
+    ]
+  ],
+  "phases": [
+    "settle",
+    "close",
+    "hold",
+    "release"
+  ],
+  "schema": "monolithic-workload-selection/1",
+  "call_ordinals": {
+    "objective": [
+      0,
+      1,
+      2
+    ],
+    "assembly": [
+      0
+    ],
+    "pcg": [
+      0
+    ]
+  },
+  "comparison": {
+    "rtol": 2e-05,
+    "atol": 2e-06
+  },
+  "selection_basis": "Frozen control phases before performance optimization; contact activity validated from recorded trace"
+}

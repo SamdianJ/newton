@@ -17,6 +17,7 @@ import numpy as np
 from newton.examples.softbody.monolithic_recording import serial, state_arrays
 from scripts.monolithic_reference.profiling import provenance
 from scripts.monolithic_reference.workload_io import complete_bundle, save_arrays, write_json
+from scripts.monolithic_reference.workload_objective import capture_input, capture_output
 from scripts.monolithic_reference.workload_pcg import pcg_input, pcg_output
 from scripts.monolithic_reference.workload_scene import build_scene, set_control
 
@@ -57,10 +58,18 @@ def apply_inputs(arrays, model, state, control):
 class CallRecorder:
     """Capture selected calls while preserving the original host decisions."""
 
-    def __init__(self, run, root, *, boundaries=("pcg",)):
-        if set(boundaries) - {"pcg"}:
+    def __init__(self, run, root, *, boundaries=("pcg",), call_ordinals=None):
+        if set(boundaries) - {"pcg", "objective", "assembly"}:
             raise ValueError("Unsupported hotspot boundary")
+        if call_ordinals is not None and any(
+            name not in {"pcg", "objective", "assembly"}
+            or not isinstance(values, list)
+            or any(type(value) is not int or value < 0 for value in values)
+            for name, values in call_ordinals.items()
+        ):
+            raise ValueError("Call ordinals must be nonnegative integer lists for supported boundaries")
         self.run, self.root, self.boundaries = run, root, boundaries
+        self.call_ordinals = call_ordinals or {name: [0] for name in boundaries}
         self.step = 0
         self.capture = False
         self.calls = []
@@ -79,15 +88,26 @@ class CallRecorder:
                 row["alpha"] = float(args[0])
             if boundary == "assembly":
                 row["iteration"] = int(args[0])
-            capture = self.capture and boundary in self.boundaries and ordinal == 0
+            capture = self.capture and boundary in self.boundaries and ordinal in self.call_ordinals.get(boundary, [0])
             if capture:
                 directory = self.root / "snapshots" / f"{self.step:06d}-{boundary}-{ordinal}"
                 directory.mkdir(parents=True)
-                data, metadata = pcg_input(owner, *args, **kwargs)
+                data, metadata = (
+                    pcg_input(owner, *args, **kwargs)
+                    if boundary == "pcg"
+                    else capture_input(self.run, boundary, args, kwargs)
+                )
                 metadata["input_schema"] = save_arrays(directory / "input.npz", data)
             start = time.perf_counter()
-            result = original(*args, **kwargs)
-            row["host_seconds_with_recording"] = time.perf_counter() - start
+            try:
+                result = original(*args, **kwargs)
+            except Exception as error:
+                row["failure"] = type(error).__name__
+                row["message"] = str(error)
+                raise
+            finally:
+                row["host_seconds_with_recording"] = time.perf_counter() - start
+                self.calls.append(row)
             if boundary == "pcg":
                 row.update(
                     status=int(result.status),
@@ -96,13 +116,15 @@ class CallRecorder:
                     graph_rebuilt=result.graph_rebuilt,
                 )
             if capture:
-                output, expected_result = pcg_output(owner, args[1], kwargs["delta"])
+                if boundary == "pcg":
+                    output, expected_result = pcg_output(owner, args[1], kwargs["delta"])
+                else:
+                    output, expected_result = capture_output(self.run, boundary, result), None
                 metadata["output_schema"] = save_arrays(directory / "output.npz", output)
                 metadata["result"] = expected_result
                 metadata["step"] = self.step
                 write_json(directory / "call.json", metadata)
                 self.snapshots.append(str(directory.relative_to(self.root)))
-            self.calls.append(row)
             return result
 
         self.patches.enter_context(patch.object(owner, method, observed))
@@ -117,7 +139,17 @@ class CallRecorder:
         self.patches.close()
 
 
-def record(root, *, scene="tiny-contact", device="cuda:0", graph=True, steps=10, windows=None, boundaries=("pcg",)):
+def record(
+    root,
+    *,
+    scene="tiny-contact",
+    device="cuda:0",
+    graph=True,
+    steps=10,
+    windows=None,
+    boundaries=("pcg",),
+    call_ordinals=None,
+):
     """Advance the original scene once; retain only explicitly selected windows."""
     windows = [(6, 10)] if windows is None else [tuple(w) for w in windows]
     if steps < 1 or not windows or any(a < 1 or b < a or b > steps for a, b in windows):
@@ -146,7 +178,10 @@ def record(root, *, scene="tiny-contact", device="cuda:0", graph=True, steps=10,
         "comparison": {"rtol": 2e-5, "atol": 2e-6},
     }
     starts = {a for a, _ in windows}
-    with CallRecorder(run, root, boundaries=boundaries) as recorder, (root / "trace.jsonl").open("w") as trace:
+    with (
+        CallRecorder(run, root, boundaries=boundaries, call_ordinals=call_ordinals) as recorder,
+        (root / "trace.jsonl").open("w") as trace,
+    ):
         for step in range(1, steps + 1):
             selected = any(a <= step <= b for a, b in windows)
             set_control(control, samples, step)
@@ -187,11 +222,32 @@ def main():
     parser.add_argument("--no-graph", action="store_true")
     parser.add_argument("--steps", type=int, default=10)
     parser.add_argument("--start", type=int, default=6)
+    parser.add_argument(
+        "--boundaries", nargs="+", choices=("pcg", "objective", "assembly"), default=["pcg", "objective", "assembly"]
+    )
     parser.add_argument("--selection", type=Path, help="JSON containing ordered inclusive windows")
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
-    windows = json.loads(args.selection.read_text())["windows"] if args.selection else [(args.start, args.steps)]
-    record(args.output, scene=args.case, device=args.device, graph=not args.no_graph, steps=args.steps, windows=windows)
+    selection = json.loads(args.selection.read_text()) if args.selection else {}
+    for key, expected in (
+        ("schema", "monolithic-workload-selection/1"),
+        ("scene", args.case),
+        ("steps", args.steps),
+        ("comparison", {"rtol": 2e-5, "atol": 2e-6}),
+    ):
+        if key in selection and selection[key] != expected:
+            parser.error(f"Selection {key} differs from the requested workload")
+    windows = selection.get("windows", [(args.start, args.steps)])
+    record(
+        args.output,
+        scene=args.case,
+        device=args.device,
+        graph=not args.no_graph,
+        steps=args.steps,
+        windows=windows,
+        boundaries=args.boundaries,
+        call_ordinals=selection.get("call_ordinals"),
+    )
     print(json.dumps({"status": "COMPLETE", "output": str(args.output)}))
 
 

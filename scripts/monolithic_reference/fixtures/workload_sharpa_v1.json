@@ -1,0 +1,47 @@
+{
+  "scene": "sharpa-default",
+  "steps": 8667,
+  "windows": [
+    [
+      1,
+      5
+    ],
+    [
+      1500,
+      1504
+    ],
+    [
+      5000,
+      5004
+    ],
+    [
+      7500,
+      7504
+    ]
+  ],
+  "phases": [
+    "initial",
+    "closing",
+    "late-closing",
+    "hold"
+  ],
+  "schema": "monolithic-workload-selection/1",
+  "call_ordinals": {
+    "objective": [
+      0,
+      1,
+      2
+    ],
+    "assembly": [
+      0
+    ],
+    "pcg": [
+      0
+    ]
+  },
+  "comparison": {
+    "rtol": 2e-05,
+    "atol": 2e-06
+  },
+  "selection_basis": "Frozen control phases before performance optimization; contact activity validated from recorded trace"
+}
