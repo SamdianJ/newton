@@ -361,6 +361,20 @@ def compare(
     }
 
 
+def check_actor(directory, **kwargs):
+    """Audit complete native mixed actors without applying the legacy bridge."""
+    from scripts.monolithic_reference.actor_recording import check_actor as audit  # noqa: PLC0415
+
+    return audit(directory, **kwargs)
+
+
+def compare_actor(reference, actual, **kwargs):
+    """Explicitly compare authenticated mixed-actor physical roles."""
+    from scripts.monolithic_reference.actor_recording import compare_actor as compare_roles  # noqa: PLC0415
+
+    return compare_roles(reference, actual, **kwargs)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("directory", type=Path)

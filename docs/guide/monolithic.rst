@@ -105,6 +105,43 @@ solver does not accept external Contacts or collision scheduling configuration.
 Examples and validation
 -----------------------
 
+The experimental repository runner ``scripts.monolithic_reference.run_actor_coupling``
+uses one prismatic pusher, two FREE boxes and a connected tet with a fixed face.
+Its versioned input is ``scripts/monolithic_reference/fixtures/actor_coupling_v1.json``:
+zero gravity, 1 ms timesteps, an 8 mm quintic loading/hold/unloading target,
+FP64 C-IE/ArmijoOrResNorm and strict production/graph execution on CUDA.
+Run it explicitly from the checkout::
+
+   uv run --no-sync python -B -m scripts.monolithic_reference.run_actor_coupling --output /path/to/new-output
+
+This command advances 2000 primary steps, restores the complete schema-4
+checkpoint at step 1000 for another 1000 steps, then advances 2000 steps with
+rigids created before the articulation. It authenticates each Model and Actor
+layout before comparing native state, integration history and forces by physical
+role. There is no cross-layout checkpoint migration. The old recording bridge
+continues to accept only canonical articulation-plus-tet inputs.
+Recordings contain both analytic targets and the actual FP32 Control targets;
+control frames must match exactly across continuations and creation orders.
+
+Every step must converge; Stopped and hard failures stop the dependent runs.
+The final 100 hold steps require all three interfaces to carry at least 0.1 N,
+tet displacement of at least 2 mm and relative force variation of at most 5%.
+Native state, determinant, penetration, per-actor residual and reaction balance
+guards also apply. Known Armijo limitations do not waive these gates.
+The recording audit recomputes box gaps, tet determinants, native/display
+bindings and force balance. It uses the promoted Model rest matrices and
+normalized joint anchors; device-specific BVH caches are excluded from physical
+Model identity. Dense cross-block diagnostics are intended for this small
+acceptance scene, not performance measurement.
+
+Review the batch ``summary.json``, ``RESULTS.md`` and per-case ``receipt.json``.
+``--retain-recordings failures`` is the default: successful recordings are removed
+only after all audits and comparisons pass; failed batches retain recordings.
+``--retain-recordings all`` preserves all new recordings. Short component tests
+do not establish complete hold qualification. This runner does not launch the
+nightly matrix; both complete scene qualification and nightly regression are
+manual gates, and stage qualification remains partial until they pass.
+
 See :doc:`monolithic_franka_grasp` for the complete Franka demonstration and
 :doc:`monolithic_sharpa_assets` for asset preparation. Sharpa's recorded scenario
 checks complete advancement and state safety; successful grasping is not certified.
