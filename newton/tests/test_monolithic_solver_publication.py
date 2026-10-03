@@ -54,13 +54,6 @@ def test_policy_binding(test, device):
     ):
         with test.assertRaises(ValueError):
             solver(model, **options)
-    run = candidate(model)
-    before = run.create_state(dt=0.001)
-    expected = snapshot(before)
-    run._globalization = "ResNorm"
-    with test.assertRaises(ValueError):
-        run.step(before, before, model.control(), dt=0.001)
-    assert_snapshot(test, before, expected)
 
 
 def test_mask_contact(test, device):
@@ -243,7 +236,7 @@ def test_current_iterate_publication(test, device):
 
 
 def test_publication_checkpoint_identity(test, device):
-    """Reject cross-policy checkpoints and policy mutation before touching output."""
+    """Reject cross-policy checkpoints before touching output."""
     model = scene(device)
     runs = {
         policy: candidate(model, publish_policy=policy) for policy in ("strict", "last_accepted", "current_iterate")
@@ -263,12 +256,6 @@ def test_publication_checkpoint_identity(test, device):
                 assert_snapshot(test, output, expected)
                 with test.assertRaises(ValueError):
                     other._states.validate(state)
-        expected = snapshot(state)
-        run._coupled_publish_policy = "strict" if policy != "strict" else "current_iterate"
-        with test.assertRaisesRegex(ValueError, "policies changed"):
-            run.step(state, state, model.control(), dt=0.001)
-        assert_snapshot(test, state, expected)
-        run._coupled_publish_policy = policy
 
 
 class TestCoupledProduction(unittest.TestCase):

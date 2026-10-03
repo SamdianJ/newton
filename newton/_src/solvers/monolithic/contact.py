@@ -470,8 +470,7 @@ class ContactObjective:
             "tri_indices",
             "particle_q",
         )
-        self.sources = {name: getattr(model, name) for name in names}
-        self.values = {name: array.numpy().copy() for name, array in self.sources.items()}
+        self.values = {name: getattr(model, name).numpy().copy() for name in names}
         v = self.values
         shapes = np.flatnonzero(v["shape_flags"] & int(ShapeFlags.COLLIDE_PARTICLES)).astype(np.int32)
         if not np.isin(
@@ -518,12 +517,10 @@ class ContactObjective:
             raise ValueError("Contact query capacity exceeds int32")
         self.model, self.contact_model = model, contact_model
         self.parameters, self.nq, self.count = parameters, q_dof_count, count
-        self._source_table = table
         self._descriptors = descriptors.copy() if descriptors is not None else None
         self.conservative_energy = contact_model == "C-EE" and alignment_policy == "guard"
         self.table = table if table is not None else wp.empty(0, dtype=TextureSDFData, device=model.device)
         self.smooth_sdf = smooth_sdf
-        self._smooth_sdf = smooth_sdf
         if smooth_sdf is not None:
             if (
                 smooth_sdf.dtype != dtype
@@ -538,7 +535,6 @@ class ContactObjective:
             if smooth_sdf is not None
             else wp.empty(0, dtype=_sdf_type(self.dtype), device=model.device)
         )
-        self._smooth_table = self.smooth_table
         self.shapes = wp.array(shapes, dtype=int, device=model.device)
         self.mapping = wp.array(mapping.astype(np.int32), device=model.device)
         self.triangles = wp.clone(model.tri_indices)
@@ -578,27 +574,7 @@ class ContactObjective:
         value.jacobian_q = wp.zeros((self.count, self.nq), dtype=self.vector, device=self.model.device)
         return value
 
-    def validate_identity(self):
-        """Validate immutable geometry at step boundaries, outside graph replay."""
-        if self.alignment_policy != self._alignment_policy:
-            raise ValueError("Contact alignment policy changed; rebuild contact component")
-        if self.smooth_sdf is not self._smooth_sdf or self.smooth_table is not self._smooth_table:
-            raise ValueError("Smooth SDF representation replaced; rebuild contact component")
-        if self.smooth_sdf is not None:
-            self.smooth_sdf.validate_identity()
-        if self.model._texture_sdf_data is not self._source_table:
-            raise ValueError("SDF table replaced; rebuild contact component")
-        if self._source_table is not None and not np.array_equal(self._source_table.numpy(), self._descriptors):
-            raise ValueError("SDF descriptors changed; rebuild contact component")
-        for name, source in self.sources.items():
-            if getattr(self.model, name) is not source or not np.array_equal(source.numpy(), self.values[name]):
-                raise ValueError(f"Contact geometry changed: {name}")
-
     def _query(self, x, poses, com, jt, jw, output, flags):
-        if self.smooth_sdf is not self._smooth_sdf or self.smooth_table is not self._smooth_table:
-            raise ValueError("Cannot switch SDF representation during a step")
-        if self.smooth_sdf is not None:
-            self.smooth_sdf.validate_binding()
         for array, dtype, shape in (
             (x, self.vector, (self.model.particle_count,)),
             (poses, self.transform, (self.model.body_count,)),
@@ -640,7 +616,6 @@ class ContactObjective:
 
     def begin_step(self, x, poses, com, jt, jw):
         """Freeze geometry for the complete deterministic key set, including inactive pairs."""
-        self.validate_identity()
         self.mask_seen.zero_()
         wp.launch(_reset_flags, 1, [self.start_flags], device=self.model.device)
         self._query(x, poses, com, jt, jw, self.start, self.start_flags)

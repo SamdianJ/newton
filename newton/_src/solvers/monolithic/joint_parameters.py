@@ -67,7 +67,6 @@ class JointParameters:
         self.implicit_pd = implicit_pd
         nq = self.count
         allowed = set()
-        self._sources = {}
 
         def read(name):
             array = getattr(model, name)
@@ -76,7 +75,6 @@ class JointParameters:
             values = array.numpy()
             if not np.isfinite(values).all():
                 raise ValueError(f"Nonfinite joint parameter: {name}")
-            self._sources[name] = array
             return values
 
         def scale(values, enabled, name):
@@ -110,7 +108,6 @@ class JointParameters:
                 )
             ):
                 raise ValueError("Implicit PD requires POSITION_VELOCITY mode")
-            self._sources["joint_target_mode"] = modes
             effort, speed = read("joint_effort_limit"), read("joint_velocity_limit")
             if np.any(effort[driven != 0] <= 0) or np.any(speed[driven != 0] <= 0):
                 raise ValueError("Driven joint effort/velocity limits must be positive")
@@ -142,7 +139,6 @@ class JointParameters:
         target_ids = starts.numpy()[:-1][moving]
         if not np.array_equal(starts.numpy(), model.joint_q_start.numpy()):
             raise ValueError("Invalid scalar joint target layout")
-        self._sources["joint_target_q_start"] = starts
         self.target_map = wp.array(target_ids, dtype=int, device=model.device)
         self.params = wp.array(parameters, dtype=float, device=model.device)
         self.driven = wp.array(driven, dtype=int, device=model.device)
@@ -152,9 +148,6 @@ class JointParameters:
 
     def snapshot_targets(self, control) -> None:
         """Validate before copying inputs; no public/candidate state is mutated."""
-        for name, array in self._sources.items():
-            if getattr(self.model, name) is not array:
-                raise ValueError(f"Stale joint parameter storage: {name}")
         if not self.implicit_pd:
             return
         for name, count in (

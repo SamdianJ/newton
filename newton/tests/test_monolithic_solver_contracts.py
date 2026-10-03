@@ -80,16 +80,13 @@ def test_final_residual_gate(test, device):
 
 
 def test_muscle_scope(test, device):
-    """Reject unsupported muscle forces at construction and after model mutation."""
-    model, solver = model_and_solver(device)
-    state = solver.create_state(dt=0.001)
+    """Reject unsupported muscle forces when constructing a solver."""
+    model, _ = model_and_solver(device)
     model.muscle_count = 1
     with test.assertRaisesRegex(ValueError, "muscle"):
         SolverMonolithic(
             model, contact_model="C-EE", friction_velocity_scale=0.01, mass_mode="lumped", globalization="Armijo"
         )
-    with test.assertRaisesRegex(ValueError, "configuration|muscle"):
-        solver.step(state, state, model.control(), dt=0.001)
 
 
 def test_zero_effective_inertia(test, device):

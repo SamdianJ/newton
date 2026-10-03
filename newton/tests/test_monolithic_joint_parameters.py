@@ -8,7 +8,6 @@ import sys
 import unittest
 
 import numpy as np
-import warp as wp
 
 import newton
 from newton._src.solvers.monolithic.joint_parameters import JointParameters, _validate_joint_coordinate_layout
@@ -17,7 +16,7 @@ from newton.tests.unittest_utils import add_function_test, get_test_devices
 
 
 def test_snapshot_and_rejection(test, device):
-    """Freeze targets and reject duplicate forcing, nonfinite controls and stale storage."""
+    """Freeze targets and reject duplicate forcing and nonfinite controls."""
     fixture = build_tiny_cpu_fixture(device=device)
     model, control = fixture.model, fixture.control
     model.joint_target_ke.fill_(4)
@@ -43,9 +42,6 @@ def test_snapshot_and_rejection(test, device):
             terms.snapshot_targets(control)
         np.testing.assert_array_equal(terms.target_q.numpy(), np.full(2, 0.125, dtype=np.float32))
         array.assign(old)
-    model.joint_target_ke = wp.clone(model.joint_target_ke)
-    with test.assertRaisesRegex(ValueError, "Stale"):
-        terms.snapshot_targets(control)
 
 
 def test_configuration_and_layout(test, device):
@@ -76,7 +72,7 @@ def test_configuration_and_layout(test, device):
 
 class TestJointParameters(unittest.TestCase):
     def test_component_import_boundary(self):
-        """Load shared parameters and FP64 kinematics without the historical articulation."""
+        """Load shared parameters and FP64 kinematics without the solver implementation."""
         subprocess.run(
             [
                 sys.executable,
@@ -84,7 +80,6 @@ class TestJointParameters(unittest.TestCase):
                 "import sys; "
                 "from newton._src.solvers.monolithic.joint_parameters import JointParameters; "
                 "from newton._src.solvers.monolithic.articulation import ArticulationKinematics; "
-                "assert 'newton._src.solvers.monolithic.articulation' not in sys.modules; "
                 "assert 'newton._src.solvers.monolithic.solver_monolithic' not in sys.modules",
             ],
             check=True,

@@ -46,6 +46,21 @@ production policy is not convergence. Reset with ``reset_state(state, dt=...)``.
 Checkpoint restoration validates complete state and configuration identity before
 replacing the destination state.
 
+Model topology, static physics and geometry (including SDF buffers and texels),
+and solver policies must remain unchanged for the solver's lifetime. Changes
+require a new solver and compatible state initialization. Runtime modification
+of these values is unsupported and is not detected by stepping or checkpoint
+operations. Construction validates the model and records its configuration
+identity; loading a checkpoint still validates that recorded identity and the
+complete state. There is no hot-update or model-validation mode.
+
+Control targets and joint forces, state external forces, gravity and ``dt`` are
+step inputs. Update them between calls; they must remain stable within a step.
+Monolithic reads gravity each step without a model-change notification;
+``notify_model_changed`` continues to reject model updates. Supported force,
+control, finite-value and state-history checks remain active. To reposition
+coordinates externally, use ``reset_state`` before continuation.
+
 The experimental constructor parameter ``precision`` accepts
 ``SolverMonolithic.Precision.FP64`` / ``FP32`` or ``"fp64"`` / ``"fp32"``.
 It cannot change after construction. FP32 selects native state, history,
@@ -63,7 +78,8 @@ is a new start, not a conversion of integration history.
 
 Smooth SDF construction still produces common offline FP64 coefficients.
 The FP32 solver derives a separately identified coefficient copy and retains
-validation of the reference source. Force snapshots use the selected precision.
+construction-time validation of the reference source. Both fields must remain
+unchanged during simulation. Force snapshots use the selected precision.
 
 For mesh contact, attach the official mesh SDF before model finalization and use
 ``build_smooth_sdf(model)`` for the derived C2 field. A qualified frozen node

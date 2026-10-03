@@ -245,11 +245,6 @@ def test_modes_integration(test, device):
             recovered = oracle.scale * solution.numpy()
             expected_delta = np.linalg.solve(oracle.regularized_matrix, rhs.numpy() / oracle.scale)
             test.assertLess(np.linalg.norm(recovered - expected_delta) / np.linalg.norm(expected_delta), 1e-4)
-            old = model.tet_materials
-            model.tet_materials = wp.clone(old)
-            with test.assertRaises(ValueError):
-                solver.step(state, out, fixture.control, dt=0.01)
-            model.tet_materials = old
 
 
 def test_density_and_lifecycle(test, device):

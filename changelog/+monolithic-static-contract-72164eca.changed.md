@@ -1,0 +1,1 @@
+Require immutable Monolithic model topology, physics, geometry and solver policies after construction, and remove their repeated runtime mutation checks while retaining dynamic-input, state and numerical validation.

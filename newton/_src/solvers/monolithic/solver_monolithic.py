@@ -55,6 +55,12 @@ from .tet_precision import TetObjective
 class SolverMonolithic(SolverBase):
     """Keep strict defaults; opt in to masked contact and stopped publication.
 
+    Model topology, physics, geometry (including SDF storage), and solver
+    policies must remain unchanged for this solver's lifetime. Rebuild after
+    changes; runtime mutation of these inputs is unsupported and not checked.
+    Control targets/forces, state external forces, gravity and dt are step inputs.
+    Edit coordinates through reset_state or load_checkpoint to keep history valid.
+
     Nonconservative energy acceptance is heuristic, not a variational guarantee.
     ``fp32_absolute_tolerance`` optionally overrides the global/q/x absolute
     scaled RMS residual goals for an FP32 experiment. Relative goals and trial
@@ -113,7 +119,6 @@ class SolverMonolithic(SolverBase):
         self._precision = self.Precision(precision)
         self._dtype = wp.float64 if self._precision == self.Precision.FP64 else wp.float32
         self._numpy_dtype = np.float64 if self._precision == self.Precision.FP64 else np.float32
-        self._precision_identity = (self._precision, self._dtype, self._numpy_dtype)
         if fp32_absolute_tolerance is not None:
             if self._dtype != wp.float32 or isinstance(fp32_absolute_tolerance, (bool, np.bool_)):
                 raise ValueError("fp32_absolute_tolerance requires FP32 and a positive finite scalar")
@@ -139,7 +144,6 @@ class SolverMonolithic(SolverBase):
             raise ValueError("Nonconservative energy acceptance requires explicit opt-in")
         self._coupled_publish_policy = publish_policy
         self._allow_nonconservative_energy = allow_nonconservative_energy
-        self._policy_identity = (globalization, publish_policy, alignment_policy, allow_nonconservative_energy)
         self._stopped_failure = None
         if not np.isfinite(min_det_f_guard) or min_det_f_guard <= 0:
             raise ValueError("Invalid detF guard")
@@ -172,7 +176,7 @@ class SolverMonolithic(SolverBase):
         if type(capacity) is not int or capacity < 0:
             raise ValueError("Contact factor capacity must be a nonnegative integer")
         self._guard = min_det_f_guard
-        self._physics_sources = dict(self._tet.physics.sources)
+        physics_sources = dict(self._tet.physics.sources)
         for name in (
             "particle_radius",
             "particle_flags",
@@ -181,10 +185,8 @@ class SolverMonolithic(SolverBase):
             "edge_bending_properties",
         ):
             if getattr(model, name) is not None:
-                self._physics_sources[name] = getattr(model, name)
-        self._physics_values = {name: value.numpy().copy() for name, value in self._physics_sources.items()}
-        self._textures = []
-        self._sdf_slots = tuple(model._texture_sdf_subgrid_start_slots)
+                physics_sources[name] = getattr(model, name)
+        self._physics_values = {name: value.numpy().copy() for name, value in physics_sources.items()}
         self._sdf_fields = self._freeze_sdf(model)
         self._coupled_config = {
             "contact_parameters": np.asarray(self._contact.parameters, dtype=float),
@@ -215,7 +217,6 @@ class SolverMonolithic(SolverBase):
                 linear_absolute_tolerance,
             ]
         )
-        self._scope_counts = tuple(getattr(model, name) for name in ("spring_count", "tri_count", "edge_count"))
         if globalization not in ("Armijo", "ResNorm", "ArmijoOrResNorm"):
             raise ValueError("Unknown articulation globalization/publication policy")
         for value in (newton_max_iterations, line_search_max_iterations, linear_max_iterations):
@@ -343,7 +344,6 @@ class SolverMonolithic(SolverBase):
                     shape += (texture.num_channels,)
                 pixels = np.empty(shape, dtype=np.float32)
                 texture.copy_to(pixels)
-                self._textures.append((name, i, texture, pixels))
                 fields[f"{name}.{i}"] = pixels
         for i, slots in enumerate(model._texture_sdf_subgrid_start_slots):
             fields[f"sdf.slots.{i}"] = slots.numpy().copy()
@@ -362,20 +362,14 @@ class SolverMonolithic(SolverBase):
 
     def create_state(self, *, dt, source=None):
         """Initialize full integration history with positive dt, optionally from ordinary model state."""
-        self._validate_components()
-        self._kinematics.validate_identity()
         return self._states.create(dt=dt, source=source)
 
     def reset_state(self, state, *, dt):
         """Reinitialize history at current coordinates and clear published contact forces."""
-        self._validate_components()
-        self._kinematics.validate_identity()
         self._states.reset(state, dt=dt)
 
     def save_checkpoint(self, state, path):
         """Atomically save complete NPZ state, appending .npz as in NumPy's path API."""
-        self._validate_components()
-        self._kinematics.validate_identity()
         path = Path(path)
         if not str(path).endswith(".npz"):
             path = Path(str(path) + ".npz")
@@ -391,14 +385,10 @@ class SolverMonolithic(SolverBase):
 
     def load_checkpoint(self, state, path):
         """Validate a checkpoint in scratch before replacing the target state."""
-        self._validate_components()
-        self._kinematics.validate_identity()
         self._states.load_checkpoint(state, path)
 
     def get_contact_forces(self, state):
         """Return an independent, read-only snapshot of this state's final contact forces."""
-        self._validate_components()
-        self._kinematics.validate_identity()
         history = self._states.validate(state)
         return MonolithicContactForces(
             history.contact_particle_force.numpy(),
@@ -440,49 +430,11 @@ class SolverMonolithic(SolverBase):
         """Return the immutable nonlinear precision; rebuild to change it."""
         return self._precision
 
-    def _validate_components(self):
-        if self._precision_identity != (self._precision, self._dtype, self._numpy_dtype):
-            raise ValueError("Precision changed; rebuild solver")
-        if self._policy_identity != (
-            self._globalization,
-            self._coupled_publish_policy,
-            self._contact.alignment_policy,
-            self._allow_nonconservative_energy,
-        ):
-            raise ValueError("Coupled policies changed; rebuild solver and rebind state")
-        self._contact.validate_identity()
-        if (
-            tuple(getattr(self.model, name) for name in ("spring_count", "tri_count", "edge_count"))
-            != self._scope_counts
-        ):
-            raise ValueError("Coupled model scope changed")
-        for name, source in self._physics_sources.items():
-            if getattr(self.model, name) is not source or not np.array_equal(
-                source.numpy(), self._physics_values[name]
-            ):
-                raise ValueError(f"Coupled physics changed: {name}")
-        for name, i, texture, pixels in self._textures:
-            if getattr(self.model, name)[i] is not texture:
-                raise ValueError("SDF texture replaced")
-            actual = np.empty_like(pixels)
-            texture.copy_to(actual)
-            if not np.array_equal(actual, pixels):
-                raise ValueError("SDF texels changed")
-        if len(self.model._texture_sdf_subgrid_start_slots) != len(self._sdf_slots):
-            raise ValueError("SDF indirection layout changed")
-        for i, slots in enumerate(self.model._texture_sdf_subgrid_start_slots):
-            if slots is not self._sdf_slots[i]:
-                raise ValueError("SDF indirection replaced")
-            if not np.array_equal(slots.numpy(), self._sdf_fields[f"sdf.slots.{i}"]):
-                raise ValueError("SDF indirection changed")
-
     def step(self, state_in, state_out, control, contacts=None, dt=0.0):
-        self._validate_components()
         self._stopped_failure = None
         if contacts is not None or not math.isfinite(dt) or dt <= 0:
             raise ValueError("Articulation step requires no contacts and finite positive dt")
         dt = self._kinematics.timestep(dt)
-        self._kinematics.validate_identity()
         self._states.validate(state_in)
         self._states.validate(state_out)
         for name in ("joint_f", "joint_target_q", "joint_target_qd"):

@@ -168,7 +168,6 @@ class TetObjective:
             ):
                 raise ValueError("Incompatible native tet inputs")
         physics = self.physics
-        physics.validate_identity()
         self.flags.zero_()
         self.parts.zero_()
         self.min_det_f.fill_(float("inf"))

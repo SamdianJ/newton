@@ -293,11 +293,38 @@ def test_binding_and_resume(test, device):
     state.particle_q = wp.clone(state.particle_q)
     resumed.step(state, state, model.control(), dt=0.001)
     test.assertTrue(resumed.last_stats.converged)
-    model.tet_materials.assign(model.tet_materials.numpy() * 1.01)
-    before = snapshot(state)
+    rebuilt_model = scene(device)
+    rebuilt_model.tet_materials.assign(rebuilt_model.tet_materials.numpy() * 1.01)
+    rebuilt = solver(rebuilt_model)
     with test.assertRaises(ValueError):
-        resumed.step(state, state, model.control(), dt=0.001)
-    assert_snapshot(test, state, before)
+        rebuilt._states.validate(state)
+
+
+def test_static_model_readback(test, device):
+    """Advance with immutable model payloads without reading them back each step."""
+    model = scene(device)
+    run = solver(model, mode="production", graph=device.is_cuda)
+    state = run.create_state(dt=0.001)
+    control = model.control()
+    run.step(state, state, control, dt=0.001)
+    static_pointers = {
+        value.ptr
+        for name, value in vars(model).items()
+        if isinstance(value, wp.array) and name not in ("gravity", "joint_f", "joint_target_q", "joint_target_qd")
+    }
+    numpy = wp.array.numpy
+
+    def read(array, *args, **kwargs):
+        if array.size and array.ptr in static_pointers:
+            raise AssertionError("Static model payload read back during step")
+        return numpy(array, *args, **kwargs)
+
+    for index in range(3):
+        model.gravity.assign(np.array([[0, 0, -9.81 - index]], dtype=np.float32))
+        with patch.object(wp.array, "numpy", read):
+            run.step(state, state, control, dt=0.001)
+        test.assertTrue(run.last_stats.converged, run.last_stats)
+        test.assertEqual(run.get_contact_forces(state).force_generation, index + 2)
 
 
 def test_contact_off(test, device):
@@ -506,18 +533,10 @@ def test_mesh_binding_graph(test, device):
     for _ in range(2):
         run.step(state, state, model.control(), dt=0.001)
         test.assertTrue(run.last_stats.converged, run.last_stats)
-    expected = snapshot(state)
-    _name, _index, texture, pixels = run._textures[0]
-    texture.copy_from(pixels + np.float32(0.001))
-    with test.assertRaisesRegex(ValueError, "texels changed"):
+    # SDF payload validation belongs to construction, not warmed stepping.
+    with patch.object(type(coarse), "copy_to", side_effect=AssertionError("Static texture read back during step")):
         run.step(state, state, model.control(), dt=0.001)
-    assert_snapshot(test, state, expected)
-    texture.copy_from(pixels)
-    slots = model._texture_sdf_subgrid_start_slots[0]
-    model._texture_sdf_subgrid_start_slots[0] = wp.clone(slots)
-    with test.assertRaisesRegex(ValueError, "indirection replaced"):
-        run.step(state, state, model.control(), dt=0.001)
-    assert_snapshot(test, state, expected)
+    test.assertTrue(run.last_stats.converged, run.last_stats)
 
 
 class TestCoupled(unittest.TestCase):
@@ -531,6 +550,7 @@ for _device in get_test_devices():
         test_modes_and_sparse_posterior,
         test_failure_gates,
         test_binding_and_resume,
+        test_static_model_readback,
         test_contact_off,
         test_complete_oracle_and_noise,
         test_mesh_binding_graph,

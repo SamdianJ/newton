@@ -253,7 +253,6 @@ class ArticulationState:
         """Explicitly initialize discrete velocities from physical q/qd and dt."""
         k = self.kinematics
         dt = k.timestep(dt)
-        k.validate_identity()
         history = self.validate(state, bound=False)
         # Validate before modifying any published state, including on reset failure.
         omega = np.einsum("bni,n->bi", k.jw.numpy(), state.joint_qd.numpy())

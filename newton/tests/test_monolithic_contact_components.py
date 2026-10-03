@@ -310,11 +310,6 @@ def test_law_branches_and_failures(test, device):
             obj.evaluate(*state(model, xn, q), dt=0.001)
             test.assertGreater(obj.weights.numpy()[:, 0].max(), 0)
             test.assertEqual(obj.weights.numpy()[:, 1].max(), 0)
-        scale = model.shape_scale.numpy()
-        scale[-1] *= 2
-        model.shape_scale.assign(scale)
-        with test.assertRaisesRegex(ValueError, "changed"):
-            obj.begin_step(*state(model, xn, q))
     model, xn = fixture(device, "plane")
     obj = contact(model, "C-II", mu=0)
     obj.begin_step(*state(model, xn, q))

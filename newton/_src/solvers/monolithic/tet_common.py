@@ -98,11 +98,6 @@ class TetPhysicsWorkspace:
             digest.update(values.tobytes())
         self.identity = digest.hexdigest()
 
-    def validate_identity(self):
-        for name, source in self.sources.items():
-            if getattr(self.model, name) is not source:
-                raise ValueError(f"Tet source array replaced: {name}; rebuild solver")
-
 
 def _validate_mapping(tet_indices: np.ndarray, particle_to_dynamic: np.ndarray) -> int:
     if tet_indices.ndim != 2 or tet_indices.shape[1] != 4 or not np.issubdtype(tet_indices.dtype, np.integer):
@@ -243,5 +238,3 @@ def _validate_evaluation(model, args):
     ):
         if array.dtype != dtype or array.shape != shape or array.device != model.device:
             raise ValueError("tet workspace has incompatible dtype, shape or device")
-    if workspace.physics is not None:
-        workspace.physics.validate_identity()
