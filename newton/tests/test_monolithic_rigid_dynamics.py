@@ -470,7 +470,7 @@ def test_rigid_force_channels(test, device):
 
 
 def test_rigid_eligibility(test, device):
-    """Reject unsupported FREE terms and new contacts before state publication."""
+    """Reject unsupported FREE terms and changes to frozen collision eligibility."""
     for field in (
         "joint_target_ke",
         "joint_target_kd",
@@ -488,13 +488,14 @@ def test_rigid_eligibility(test, device):
         with test.assertRaisesRegex(ValueError, "Unsupported FREE"):
             rigid_solver(model)
     model = mixed_model(device)[0]
-    with test.assertRaisesRegex(ValueError, "Rigid-tet"):
-        rigid_solver(model)
+    run = rigid_solver(model)
+    test.assertGreater(run._contact.actor_samples.count, 0)
     model.shape_flags.zero_()
     test.assertGreater(model.shape_contact_pairs.size, 0)
-    with test.assertRaisesRegex(ValueError, "Rigid shape"):
+    with test.assertRaisesRegex(ValueError, "pair conflicts"):
         rigid_solver(model)
     model.shape_contact_pairs = wp.empty(0, dtype=wp.vec2i, device=device)
+    model.shape_contact_pair_count = 0
     run = rigid_solver(model)
     state = run.create_state(dt=0.001)
     run.step(state, state, model.control(), dt=0.001)

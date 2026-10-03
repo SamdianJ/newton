@@ -24,6 +24,7 @@ from .bsr import (
     _MonolithicScalarTriplets,
 )
 from .contact_geometry import _shape64
+from .contact_sampling import ContactSamples, _checked_contact_capacity
 from .linear_types import MonolithicLinearLayout
 from .smooth_sdf import _sdf_type, smooth_query
 
@@ -211,6 +212,12 @@ def _law(
     local_r: wp.array[Any],
     omitted: wp.array2d[Any],
     mask_seen: wp.array[int],
+    direct: int,
+    key_offset: int,
+    gap_offsets: wp.array[Any],
+    support_offsets: wp.array[int],
+    support_columns: wp.array[int],
+    jacobians: wp.array[Any],
 ):
     key = wp.tid()
     if flags[0] != 0:
@@ -221,6 +228,11 @@ def _law(
     k = stiffness * area[face] / type(radius)(3.0)
     gap = current.distance[key] - radius - margins[shape]
     old_gap = start.distance[key] - radius - margins[shape]
+    if direct != 0:
+        k = stiffness * area[key]
+        gap = current.distance[key] - gap_offsets[key]
+        old_gap = start.distance[key] - gap_offsets[key]
+    output_key = key + key_offset
     g = current.gradient[key]
     u = current.y[key] - start.y[key]
     en, load_normal, curvature = _penalty64(gap, k, smoothing)
@@ -235,15 +247,15 @@ def _law(
         load = type(radius)(0.0)
     if load_normal > type(radius)(0.0) or load > type(radius)(0.0):
         if current.uncertified[key] != 0 or (load > type(radius)(0.0) and start.uncertified[key] != 0):
-            _failure(flags, key, 5)
+            _failure(flags, output_key, 5)
             return
         if wp.length(g) == type(radius)(0.0) or (
             load > type(radius)(0.0) and wp.length(direction) == type(radius)(0.0)
         ):
-            _failure(flags, key, 2)
+            _failure(flags, output_key, 2)
             return
         if alignment_mask == 0 and gap < type(radius)(0.0) and wp.dot(current.soft_normal[key], g) > type(radius)(0.0):
-            _failure(flags, key, 2)
+            _failure(flags, output_key, 2)
             return
     n = type(current.y[0])(0.0)
     if wp.length(direction) > type(radius)(0.0):
@@ -271,7 +283,7 @@ def _law(
         or not wp.isfinite(radial)
         or not wp.isfinite(curvature)
     ):
-        _failure(flags, key, 1)
+        _failure(flags, output_key, 1)
         return
     if alignment_mask != 0:
         # Select the entire contact term with the law's explicit/implicit collider normal.
@@ -280,29 +292,33 @@ def _law(
             bit = int(1)
             if masked:
                 bit = 2
-            wp.atomic_or(mask_seen, key, bit)
+            wp.atomic_or(mask_seen, output_key, bit)
         if masked:
-            omitted[key, 0] = en
-            omitted[key, 1] = dissipative
-            omitted[key, 2] = load_normal
-            omitted[key, 3] = load
-            normal[key] = type(current.y[0])(0.0)
-            tangent[key] = type(current.y[0])(0.0)
+            omitted[output_key, 0] = en
+            omitted[output_key, 1] = dissipative
+            omitted[output_key, 2] = load_normal
+            omitted[output_key, 3] = load
+            normal[output_key] = type(current.y[0])(0.0)
+            tangent[output_key] = type(current.y[0])(0.0)
             return
-    energy[key, 0] = en
-    energy[key, 1] = dissipative
-    normal[key] = n
-    tangent[key] = type(current.y[0])(0.0)
+    energy[output_key, 0] = en
+    energy[output_key, 1] = dissipative
+    normal[output_key] = n
+    tangent[output_key] = type(current.y[0])(0.0)
     # Reproject before normalization: near zero slip, cancellation can leave
     # a roundoff vector almost parallel to n instead of a tangent direction.
     transverse = wp.cross(n, v)
     transverse_length = wp.length(transverse)
     if transverse_length > type(radius)(0.0):
-        tangent[key] = wp.cross(transverse / transverse_length, n)
-    local_r[key] = r
-    weights[key, 0] = curvature
-    weights[key, 1] = beta
-    weights[key, 2] = radial
+        tangent[output_key] = wp.cross(transverse / transverse_length, n)
+    local_r[output_key] = r
+    weights[output_key, 0] = curvature
+    weights[output_key, 1] = beta
+    weights[output_key, 2] = radial
+    if direct != 0:
+        for index in range(support_offsets[3 * output_key], support_offsets[3 * output_key + 1]):
+            wp.atomic_add(residual, support_columns[index], wp.dot(jacobians[index], r))
+        return
     nq = current.jacobian_q.shape[1]
     for j in range(nq):
         wp.atomic_add(residual, q_start + j, wp.dot(current.jacobian_q[key, j], r))
@@ -327,31 +343,35 @@ def _factors(
     flags: wp.array[int],
     factors: _MonolithicContactFactors,
     triplets: _MonolithicScalarTriplets,
+    direct: int,
+    key_offset: int,
+    jacobians: wp.array[Any],
 ):
     key = wp.tid()
     if flags[0] != 0:
         return
     quadrature = (key / shapes.shape[0]) % 3
-    n = normal[key]
+    output_key = key + key_offset
+    n = normal[output_key]
     axis = type(normal[0])(1.0, 0.0, 0.0)
     if wp.abs(n[1]) < wp.abs(n[0]) and wp.abs(n[1]) <= wp.abs(n[2]):
         axis = type(normal[0])(0.0, 1.0, 0.0)
     elif wp.abs(n[2]) < wp.abs(n[0]):
         axis = type(normal[0])(0.0, 0.0, 1.0)
-    t = tangent[key]
-    if weights[key, 1] > type(weights[0, 0])(0.0) and wp.length(t) == type(weights[0, 0])(0.0):
+    t = tangent[output_key]
+    if weights[output_key, 1] > type(weights[0, 0])(0.0) and wp.length(t) == type(weights[0, 0])(0.0):
         # At zero slip both tangent eigenvalues coincide; any basis is valid.
         t = wp.normalize(wp.cross(n, axis))
     for component in range(3):
         direction = current.gradient[key]
-        weight = weights[key, 0]
+        weight = weights[output_key, 0]
         if component > 0:
             direction = t
-            weight = weights[key, 2]
+            weight = weights[output_key, 2]
             if component == 2:
                 direction = wp.cross(n, t)
-                weight = weights[key, 1]
-        slot = 3 * key + component
+                weight = weights[output_key, 1]
+        slot = 3 * output_key + component
         if slot >= factors.capacity:
             wp.atomic_max(factors.status, 0, 6)
             _failure(flags, key, 3)
@@ -369,11 +389,14 @@ def _factors(
         factors.kind[slot] = 1
         if component > 0:
             factors.kind[slot] = 2
-        factors.candidate_tid[slot] = key
+        factors.candidate_tid[slot] = output_key
         if weight > type(weights[0, 0])(0.0):
             wp.atomic_add(factors.count, 0, 1)
         world = current.rotation[key] * direction
         for index in range(begin, end):
+            if direct != 0:
+                factors.values[index] = float(wp.dot(jacobians[index], direction))
+                continue
             local = factors.local_indices[index]
             if local >= current.jacobian_q.shape[1] or local < -9:
                 wp.atomic_max(factors.status, 0, 3)
@@ -431,6 +454,7 @@ class ContactObjective:
         layout=None,
         articulation_actor=None,
         base_triplet_count=0,
+        actors=None,
     ):
         if dtype not in (wp.float64, wp.float32):
             raise ValueError("Contact requires float64 or float32")
@@ -489,7 +513,14 @@ class ContactObjective:
         self.sources = {name: getattr(model, name) for name in names}
         self.values = {name: array.numpy().copy() for name, array in self.sources.items()}
         v = self.values
+        self.actor_samples = (
+            None
+            if actors is None
+            else ContactSamples(model, actors, radius=particle_radius, base_triplet_count=base_triplet_count)
+        )
         shapes = np.flatnonzero(v["shape_flags"] & int(ShapeFlags.COLLIDE_PARTICLES)).astype(np.int32)
+        if self.actor_samples is not None:
+            shapes = shapes[~np.isin(shapes, self.actor_samples.rigid_shapes)]
         if not np.isin(
             v["shape_type"][shapes], [int(GeoType.PLANE), int(GeoType.SPHERE), int(GeoType.BOX), int(GeoType.MESH)]
         ).all():
@@ -567,6 +598,17 @@ class ContactObjective:
                 triplet_count += 9 * k * k
                 if support_count >= 2**31 or base_triplet_count + triplet_count >= 2**31:
                     raise ValueError("Contact support/triplet capacity exceeds int32")
+        self.legacy_count = count
+        samples = self.actor_samples
+        if samples is not None:
+            _checked_contact_capacity(
+                count + samples.count,
+                support_count + samples.support_size,
+                triplet_count + samples.triplet_capacity,
+                base_triplet_count,
+            )
+            count += samples.count
+            triplet_count += samples.triplet_capacity
         for face in triangles:
             for _slot in range(3):
                 for shape in shapes:
@@ -583,6 +625,12 @@ class ContactObjective:
                         support_columns.extend(columns)
                         support_local.extend(local)
                         support_offsets.append(len(support_columns))
+        if samples is not None:
+            for columns in samples.supports:
+                for _component in range(3):
+                    support_columns.extend(columns)
+                    support_local.extend([0] * len(columns))
+                    support_offsets.append(len(support_columns))
         self.factor_support = tuple(
             np.asarray(a, dtype=np.int32) for a in (support_offsets, support_columns, support_local)
         )
@@ -642,6 +690,11 @@ class ContactObjective:
         self.omitted = wp.zeros((count, 4), dtype=self.dtype, device=model.device)
         self.mask_seen = wp.zeros(count, dtype=int, device=model.device)
         self._started, self._evaluated = False, False
+        self.actor_contact = None
+        if samples is not None and samples.count:
+            from .contact_actor import ActorContact  # noqa: PLC0415
+
+            self.actor_contact = ActorContact(self, samples)
 
     @property
     def quaternion_norm_tolerance(self):
@@ -650,13 +703,13 @@ class ContactObjective:
 
     def _geometry_storage(self):
         value = _geometry_type(self.dtype)()
-        value.y = wp.zeros(self.count, dtype=self.vector, device=self.model.device)
+        value.y = wp.zeros(self.legacy_count, dtype=self.vector, device=self.model.device)
         value.gradient = wp.zeros_like(value.y)
         value.soft_normal = wp.zeros_like(value.y)
-        value.uncertified = wp.zeros(self.count, dtype=int, device=self.model.device)
-        value.distance = wp.zeros(self.count, dtype=self.dtype, device=self.model.device)
-        value.rotation = wp.zeros(self.count, dtype=self.matrix, device=self.model.device)
-        value.jacobian_q = wp.zeros((self.count, self.nq), dtype=self.vector, device=self.model.device)
+        value.uncertified = wp.zeros(self.legacy_count, dtype=int, device=self.model.device)
+        value.distance = wp.zeros(self.legacy_count, dtype=self.dtype, device=self.model.device)
+        value.rotation = wp.zeros(self.legacy_count, dtype=self.matrix, device=self.model.device)
+        value.jacobian_q = wp.zeros((self.legacy_count, self.nq), dtype=self.vector, device=self.model.device)
         return value
 
     def validate_identity(self):
@@ -674,6 +727,10 @@ class ContactObjective:
         for name, source in self.sources.items():
             if getattr(self.model, name) is not source or not np.array_equal(source.numpy(), self.values[name]):
                 raise ValueError(f"Contact geometry changed: {name}")
+        if self.actor_samples is not None:
+            self.actor_samples.validate_identity()
+        if self.actor_contact is not None:
+            self.actor_contact.validate_identity()
 
     def _query(self, x, poses, com, jt, jw, output, flags):
         if self.smooth_sdf is not self._smooth_sdf or self.smooth_table is not self._smooth_table:
@@ -693,10 +750,10 @@ class ContactObjective:
                 self.model.device,
             ):
                 raise ValueError("Contact geometry requires native state and Jacobians on the model device")
-        if self.count:
+        if self.legacy_count:
             wp.launch(
                 _geometry,
-                self.count,
+                self.legacy_count,
                 [
                     x,
                     poses,
@@ -719,16 +776,16 @@ class ContactObjective:
                 device=self.model.device,
             )
 
-    def begin_step(self, x, poses, com, jt, jw):
+    def begin_step(self, x, poses, com, jt, jw, *, rigid_com=None, rigid_rotation=None):
         """Freeze geometry for the complete deterministic key set, including inactive pairs."""
         self.validate_identity()
         self.mask_seen.zero_()
         wp.launch(_reset_flags, 1, [self.start_flags], device=self.model.device)
         self._query(x, poses, com, jt, jw, self.start, self.start_flags)
-        if self.count:
+        if self.legacy_count:
             wp.launch(
                 _validate_start,
-                self.count,
+                self.legacy_count,
                 [
                     self.start,
                     self.shapes,
@@ -740,9 +797,11 @@ class ContactObjective:
                 ],
                 device=self.model.device,
             )
+        if self.actor_contact is not None:
+            self.actor_contact.begin_step(x, poses, com, jt, jw, rigid_com=rigid_com, rigid_rotation=rigid_rotation)
         self._started, self._evaluated = True, False
 
-    def evaluate(self, x, poses, com, jt, jw, *, dt):
+    def evaluate(self, x, poses, com, jt, jw, *, dt, rigid_com=None, rigid_rotation=None):
         """Overwrite trial E/r without changing step-start geometry or tangent storage."""
         if not self._started or not math.isfinite(dt) or dt <= 0:
             raise ValueError("A frozen step and positive finite dt are required")
@@ -760,10 +819,10 @@ class ContactObjective:
         self.local_residual.zero_()
         self.omitted.zero_()
         self._query(x, poses, com, jt, jw, self.current, self.flags)
-        if self.count:
+        if self.legacy_count:
             wp.launch(
                 _law,
-                self.count,
+                self.legacy_count,
                 [
                     self.current,
                     self.start,
@@ -790,8 +849,18 @@ class ContactObjective:
                     self.local_residual,
                     self.omitted,
                     self.mask_seen,
+                    0,
+                    0,
+                    self.margins,
+                    self.mapping,
+                    self.mapping,
+                    self.normal,
                 ],
                 device=self.model.device,
+            )
+        if self.actor_contact is not None:
+            self.actor_contact.evaluate(
+                x, poses, com, jt, jw, rigid_com=rigid_com, rigid_rotation=rigid_rotation, dt=dt
             )
         if self.residual.size:
             wp.launch(_check_residual, self.residual.size, [self.residual, self.flags], device=self.model.device)
@@ -801,10 +870,10 @@ class ContactObjective:
         """Append normal/radial/transverse PSD factors with frozen load/normal; B is FP32."""
         if not self._evaluated or assembly.contact_factors.scalar_dof_count != self.residual.size:
             raise ValueError("Evaluate contact first and use the matching linear layout")
-        if self.count:
+        if self.legacy_count:
             wp.launch(
                 _factors,
-                self.count,
+                self.legacy_count,
                 [
                     self.current,
                     self.shapes,
@@ -814,9 +883,14 @@ class ContactObjective:
                     self.flags,
                     assembly.contact_factors,
                     assembly.global_scalar_triplets,
+                    0,
+                    0,
+                    self.normal,
                 ],
                 device=self.model.device,
             )
+        if self.actor_contact is not None:
+            self.actor_contact.assemble(assembly)
 
         wp.launch(
             _check_assembly,

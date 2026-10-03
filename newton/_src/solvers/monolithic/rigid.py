@@ -8,7 +8,6 @@ from typing import Any
 import numpy as np
 import warp as wp
 
-from ...geometry import ShapeFlags
 from .articulation import _inner
 from .articulation_state import _initial_symmetric, _predict, _recover_history, _skew
 
@@ -224,14 +223,6 @@ class RigidObjective:
             for name in ("shape_flags", "shape_contact_pairs"):
                 self.sources[name] = getattr(model, name)
             self.values = {name: value.numpy().copy() for name, value in self.sources.items()}
-            flags = model.shape_flags.numpy()
-            if any(flags[s] & int(ShapeFlags.COLLIDE_PARTICLES) for a in self.actors for s in a.shape_indices):
-                raise ValueError("Rigid-tet contact requires the later actor contact implementation")
-            owner = np.asarray(actors.maps["shape_owner"])
-            rigid_owner = {i for i, a in enumerate(actors.actors) if a.kind == "rigid"}
-            for a, b in model.shape_contact_pairs.numpy():
-                if owner[a] != owner[b] and (owner[a] in rigid_owner or owner[b] in rigid_owner):
-                    raise ValueError("Rigid shape contact is not yet supported")
             for name in (
                 "joint_target_ke",
                 "joint_target_kd",

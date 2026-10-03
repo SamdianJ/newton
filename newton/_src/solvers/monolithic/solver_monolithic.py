@@ -173,6 +173,7 @@ class SolverMonolithic(SolverBase):
             q_dof_count=self._articulation_actor.dof_count,
             layout=layout,
             articulation_actor=self._articulation_actor,
+            actors=self._actors,
             base_triplet_count=base_triplets,
             contact_model=contact_model,
             normal_stiffness=contact_stiffness,
@@ -382,6 +383,8 @@ class SolverMonolithic(SolverBase):
         fields = dict(extra_config)
         fields.update(self._physics_values)
         fields.update(self._contact.values)
+        if self._contact.actor_samples is not None:
+            fields.update(self._contact.actor_samples.fields)
         fields.update(self._coupled_config)
         fields.update(self._sdf_fields)
         return _TreeKinematics(model, actor=self._articulation_actor, extra_config=fields, dtype=self._dtype)
@@ -676,6 +679,7 @@ class SolverMonolithic(SolverBase):
         finally:
             if not published:
                 self._restore(state_out)
+                self._variational.pop("actor_contact_pairs", None)
             self._variational["graphs"] = self._graphs.summary()
             self._last_stats = self.Stats(
                 status=status,
@@ -759,7 +763,16 @@ class SolverMonolithic(SolverBase):
         wp.copy(self._frozen_gravity, self.model.gravity)
         k = self._kinematics
         k.evaluate(k.gather_q(state_in))
-        self._contact.begin_step(state_in.particle_q, k.poses, k.com, k.jt, k.jw)
+        history = state_in._monolithic_coupled
+        self._contact.begin_step(
+            state_in.particle_q,
+            k.poses,
+            k.com,
+            k.jt,
+            k.jw,
+            rigid_com=history.rigid_com,
+            rigid_rotation=history.rigid_rotation,
+        )
         wp.launch(
             kernels.particle_predict,
             self.model.particle_count,
@@ -790,6 +803,8 @@ class SolverMonolithic(SolverBase):
         buffers.extend([rigid_history.rigid_com, rigid_history.rigid_rotation])
         for owner in (self._objective, k, tet, contact, contact.start, contact.current, self._rigid):
             buffers.extend(value for value in vars(owner).values() if isinstance(value, wp.array))
+        if contact.actor_contact is not None:
+            buffers.extend(contact.actor_contact.buffers())
 
         def evaluate():
             self._objective.evaluate(local_q, dt, build_tangent=build_tangent)
@@ -803,7 +818,16 @@ class SolverMonolithic(SolverBase):
                 dt=dt,
                 min_det_f_guard=self._guard,
             )
-            contact.evaluate(state.particle_q, k.poses, k.com, k.jt, k.jw, dt=dt)
+            contact.evaluate(
+                state.particle_q,
+                k.poses,
+                k.com,
+                k.jt,
+                k.jw,
+                dt=dt,
+                rigid_com=rigid_history.rigid_com,
+                rigid_rotation=rigid_history.rigid_rotation,
+            )
             wp.launch(
                 kernels.combine,
                 self._complete_r.size,
@@ -1045,10 +1069,10 @@ class SolverMonolithic(SolverBase):
         arrays = [history.contact_joint_force, history.contact_particle_force, history.contact_body_force]
         for array in arrays:
             array.zero_()
-        if contact.count:
+        if contact.legacy_count:
             wp.launch(
                 kernels.contact_forces,
-                contact.count,
+                contact.legacy_count,
                 [
                     contact.current,
                     contact.local_residual,
@@ -1063,6 +1087,10 @@ class SolverMonolithic(SolverBase):
                 ],
                 device=self.model.device,
             )
+        if contact.actor_contact is not None:
+            self._variational["actor_contact_pairs"] = contact.actor_contact.publish(state, k)
+            for pair in self._variational["actor_contact_pairs"]:
+                pair["force_generation"] = self._step_generation
         if any(not np.isfinite(array.numpy()).all() for array in arrays):
             raise _StepFailure(self.Status.NONFINITE, "Final contact force is nonfinite")
         history.force_generation.fill_(self._step_generation)

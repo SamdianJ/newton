@@ -70,10 +70,20 @@ and velocity segments remain synchronized through their Model mappings; FREE
 velocity is COM linear/angular velocity in the parent joint frame.
 Each rigid translation and rotation block must pass its own convergence gate.
 
-Rigid contact is not yet supported. Disable particle collision on rigid shapes
-and filter all allowed shape pairs involving rigid actors before finalization;
-otherwise construction fails even when the shapes are initially separated.
-Existing articulation-tet and tet-static contact remains available.
+Rigid contact uses Model-selected shape pairs and fixed directed surface queries.
+Articulation-rigid and rigid-rigid pairs sample both surfaces at half area;
+rigid-static pairs sample the rigid surface at full area. Rigid-tet contact
+samples tet faces when the rigid shape enables particle collision. Both dynamic
+endpoints contribute to the coupled residual, tangent and published COM wrench.
+Box, sphere and mesh sources are supported; mesh targets require CUDA and a
+bound C2 SDF. New plane targets must be infinite and static. Changing collision
+flags, pair storage or participating geometry requires rebuilding the solver.
+Mixed-contact numerical qualification remains partial. Some Armijo cases stop
+at the existing descent-slope noise floor while a rigid rotation residual still
+exceeds its target. Strict publication rolls back those steps; they are a known
+limitation, not converged results. Existing numerical and publication gates
+apply. Articulation-tet and tet-static contact keep their original sampling and
+behavior.
 FREE PD, limit gains, friction, damping and armature must be zero.
 Rigid ``body_f`` and FREE ``control.joint_f`` each contribute a world COM wrench
 [N, N·m] once. Convert off-center loads to COM wrenches before calling ``step``.
