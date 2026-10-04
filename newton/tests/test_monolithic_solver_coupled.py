@@ -327,6 +327,61 @@ def test_static_model_readback(test, device):
         test.assertEqual(run.get_contact_forces(state).force_generation, index + 2)
 
 
+def test_device_step_inputs(test, device):
+    """Freeze changing controls on device without rereading immutable solver arrays."""
+    for precision in ("fp64", "fp32"):
+        model = scene(device)
+        run = SolverMonolithic(
+            model,
+            contact_model="C-EE",
+            globalization="ResNorm",
+            friction_velocity_scale=0.01,
+            tet_rest_density=wp.full(model.tet_count, 1000, dtype=float, device=device),
+            pcg_mode="production",
+            use_cuda_graph=device.is_cuda,
+            precision=precision,
+            joint_terms=SolverMonolithic.JointTerms(implicit_pd=True, limits=True, limit_width=(0.01, 0.01)),
+        )
+        state = run.create_state(dt=0.001)
+        control = model.control()
+        run.step(state, state, control, dt=0.001)
+        arrays = [
+            run._tet.ids,
+            run._kinematics.dof_joint,
+            run._objective.params,
+            run._joint_terms.target_q,
+            run._joint_terms.target_qd,
+            control.joint_f,
+            control.joint_target_q,
+            control.joint_target_qd,
+            model.gravity,
+        ]
+        pointers = {a.ptr for a in arrays if a.size}
+        numpy = wp.array.numpy
+
+        def read(array, *args, pointers=pointers, numpy=numpy, **kwargs):
+            if array.size and array.ptr in pointers:
+                raise AssertionError("Step input or static solver payload read back")
+            return numpy(array, *args, **kwargs)
+
+        for i in (1, 2):
+            q = np.array([0.02, -0.01], dtype=np.float32) * i
+            v = q * np.float32(0.1)
+            force = np.array([0.001, -0.002], dtype=np.float32) * i
+            gravity = np.array([[0, 0, -9.81 - i]], dtype=np.float32)
+            control.joint_target_q.assign(q)
+            control.joint_target_qd.assign(v)
+            control.joint_f.assign(force)
+            model.gravity.assign(gravity)
+            with patch.object(wp.array, "numpy", read):
+                run.step(state, state, control, dt=0.001)
+            np.testing.assert_array_equal(run._objective.qt.numpy(), q.astype(run._numpy_dtype))
+            np.testing.assert_array_equal(run._objective.vt.numpy(), v.astype(run._numpy_dtype))
+            np.testing.assert_array_equal(run._objective.joint_force.numpy(), force.astype(run._numpy_dtype))
+            expected = model.body_mass.numpy().astype(run._numpy_dtype)[:, None] * gravity.astype(run._numpy_dtype)
+            np.testing.assert_array_equal(run._objective.force.numpy(), expected)
+
+
 def test_contact_off(test, device):
     """Contact-off agrees with independent q/x equations at fixed physics."""
     from scipy.optimize import root
@@ -551,6 +606,7 @@ for _device in get_test_devices():
         test_failure_gates,
         test_binding_and_resume,
         test_static_model_readback,
+        test_device_step_inputs,
         test_contact_off,
         test_complete_oracle_and_noise,
         test_mesh_binding_graph,

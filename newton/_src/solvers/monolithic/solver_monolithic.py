@@ -247,6 +247,10 @@ class SolverMonolithic(SolverBase):
         SolverBase.__init__(self, model)
         self._states = self._make_states()
         self._objective = ArticulationObjective(self._kinematics, parameters)
+        self._joint_parameters_host = parameters.astype(self._numpy_dtype)
+        self._dynamic_ids_host = self._tet.ids.numpy().copy()
+        self._moving_types_host = self._kinematics.values["joint_type"][self._kinematics.dof_joint.numpy()].copy()
+        self._input_status = wp.zeros(4, dtype=int, device=model.device)
         self._config = _SolverMonolithicInternalConfig()
         # Sharpa refinement certifies these tighter goals within the existing budgets.
         self._config = replace(
@@ -439,23 +443,37 @@ class SolverMonolithic(SolverBase):
         self._states.validate(state_out)
         for name in ("joint_f", "joint_target_q", "joint_target_qd"):
             array = getattr(control, name, None)
-            if (
-                not isinstance(array, wp.array)
-                or (array.shape, array.dtype, array.device)
-                != ((self._kinematics.count,), wp.float32, self.model.device)
-                or not np.isfinite(array.numpy()).all()
+            if not isinstance(array, wp.array) or (array.shape, array.dtype, array.device) != (
+                (self._kinematics.count,),
+                wp.float32,
+                self.model.device,
             ):
                 raise ValueError(f"Invalid articulation control: {name}")
+        k, obj = self._kinematics, self._objective
+        self._input_status.zero_()
+        wp.launch(
+            kernels.freeze_step_forces,
+            max(k.count, k.bodies, self.model.gravity.size),
+            [
+                state_in.body_f,
+                self.model.gravity,
+                k.mass,
+                self.model.body_world,
+                control.joint_f,
+                control.joint_target_q,
+                control.joint_target_qd,
+                obj.force,
+                obj.joint_force,
+                self._input_status,
+            ],
+            device=self.model.device,
+        )
+        input_status = self._input_status.numpy()
+        for index, name in enumerate(("joint_f", "joint_target_q", "joint_target_qd")):
+            if input_status[index]:
+                raise ValueError(f"Invalid articulation control: {name}")
         self._joint_terms.snapshot_targets(control)
-        force = state_in.body_f.numpy().astype(self._numpy_dtype)
-        joint_force = control.joint_f.numpy().astype(self._numpy_dtype)
-        gravity = self.model.gravity.numpy().astype(self._numpy_dtype)
-        if (
-            not np.isfinite(force).all()
-            or not np.isfinite(joint_force).all()
-            or not np.isfinite(gravity).all()
-            or np.any(force[:, 3:] != 0)
-        ):
+        if input_status[3]:
             raise ValueError("Articulation requires finite forces and zero spatial torque")
         if self._original is None:
             self._original = self._states.copy(state_in)
@@ -502,10 +520,8 @@ class SolverMonolithic(SolverBase):
             ],
             device=self.model.device,
         )
-        obj.force.assign(force[:, :3] + k.values["body_mass"][:, None] * gravity[k.values["body_world"]])
-        obj.joint_force.assign(joint_force)
-        obj.qt.assign(self._joint_terms.target_q.numpy().astype(self._numpy_dtype))
-        obj.vt.assign(self._joint_terms.target_qd.numpy().astype(self._numpy_dtype))
+        wp.utils.array_cast(self._joint_terms.target_q, obj.qt)
+        wp.utils.array_cast(self._joint_terms.target_qd, obj.vt)
         wp.launch(
             kernels._coordinate_predictor,
             k.count,
@@ -772,7 +788,7 @@ class SolverMonolithic(SolverBase):
         )
 
     def _effective_displacement(self):
-        ids = self._tet.ids.numpy()
+        ids = self._dynamic_ids_host
         return np.r_[
             self._trial.joint_q.numpy() - self._accepted.joint_q.numpy(),
             (self._trial.particle_q.numpy()[ids] - self._accepted.particle_q.numpy()[ids]).ravel(),
@@ -911,7 +927,7 @@ class SolverMonolithic(SolverBase):
     def _domain(self, state):
         k, obj = self._kinematics, self._objective
         delta = state.joint_q.numpy() - obj.qn.numpy()
-        moving_types = k.values["joint_type"][k.dof_joint.numpy()]
+        moving_types = self._moving_types_host
         if np.any(abs(delta[moving_types == JointType.REVOLUTE]) >= math.pi / 2):
             return False
         # The caller has evaluated this candidate's private FK.
@@ -919,7 +935,7 @@ class SolverMonolithic(SolverBase):
 
     def _joint_force_metrics(self, state):
         """Bind scalar force diagnostics to the successfully published state."""
-        p = self._objective.params.numpy()
+        p = self._joint_parameters_host
         q, v = state.joint_q.numpy(), state.joint_qd.numpy()
         raw = p[:, 0] * (q - self._objective.qt.numpy()) + p[:, 1] * (v - self._objective.vt.numpy())
         pd = -np.clip(raw, -p[:, 2], p[:, 2])

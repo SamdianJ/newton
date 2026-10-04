@@ -8,6 +8,41 @@ from typing import Any
 import warp as wp
 
 
+@wp.kernel(module="unique", module_options={"fuse_fp": False})
+def freeze_step_forces(
+    body_f: wp.array[wp.spatial_vector],
+    gravity: wp.array[wp.vec3],
+    mass: wp.array[Any],
+    worlds: wp.array[int],
+    joint_f: wp.array[float],
+    target_q: wp.array[float],
+    target_qd: wp.array[float],
+    force: wp.array[Any],
+    joint_force: wp.array[Any],
+    status: wp.array[int],
+):
+    i = wp.tid()
+    if i < joint_f.shape[0]:
+        if not wp.isfinite(joint_f[i]):
+            wp.atomic_max(status, 0, 1)
+        if not wp.isfinite(target_q[i]):
+            wp.atomic_max(status, 1, 1)
+        if not wp.isfinite(target_qd[i]):
+            wp.atomic_max(status, 2, 1)
+        joint_force[i] = type(joint_force[0])(joint_f[i])
+    if i < gravity.shape[0]:
+        if not wp.isfinite(gravity[i]):
+            wp.atomic_max(status, 3, 1)
+    if i < body_f.shape[0]:
+        f = body_f[i]
+        if not wp.isfinite(f) or f[3] != 0.0 or f[4] != 0.0 or f[5] != 0.0:
+            wp.atomic_max(status, 3, 1)
+        g = gravity[worlds[i]]
+        external = type(force[0])(type(mass[0])(f[0]), type(mass[0])(f[1]), type(mass[0])(f[2]))
+        acceleration = type(force[0])(type(mass[0])(g[0]), type(mass[0])(g[1]), type(mass[0])(g[2]))
+        force[i] = external + mass[i] * acceleration
+
+
 @wp.kernel
 def combine(q: wp.array[Any], x: wp.array[Any], contact: wp.array[Any], out: wp.array[Any]):
     i = wp.tid()
