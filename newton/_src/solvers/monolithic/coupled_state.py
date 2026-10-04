@@ -9,6 +9,7 @@ import numpy as np
 import warp as wp
 
 from ...sim import Model
+from . import state_checks
 from .articulation_state import ArticulationState
 
 
@@ -33,6 +34,9 @@ class CoupledState(ArticulationState):
         )
         self.fixed = self.model.particle_inv_mass.numpy() == 0
         self.fixed_positions = self.model.particle_q.numpy().astype(kinematics.numpy_dtype)[self.fixed].copy()
+        self._fixed_ids = wp.array(np.flatnonzero(self.fixed), dtype=int, device=self.device)
+        self._fixed_positions = wp.array(self.fixed_positions, dtype=self.vector, device=self.device)
+        self._particle_status = wp.zeros(4, dtype=int, device=self.device)
 
     def create(self, *, dt, source=None):
         if source is not None:
@@ -57,17 +61,45 @@ class CoupledState(ArticulationState):
             if getattr(state, name, None) is None:
                 raise ValueError(f"Missing coupled state array: {name}")
         history = super().validate(state, bound=bound)
-        x, v = state.particle_q.numpy(), state.particle_qd.numpy()
-        if not np.array_equal(x[self.fixed], self.fixed_positions) or np.any(v[self.fixed] != 0):
-            raise ValueError("Fixed particles must retain their position and zero velocity")
-        if bound:
-            if "precision" in self.schema and history.precision.numpy()[0] != self.precision_bits:
-                raise ValueError("Incompatible state precision")
-            if not np.array_equal(x, history.bound_x.numpy()) or not np.array_equal(v, history.bound_v.numpy()):
-                raise ValueError("Particle coordinates/rates changed; explicitly reset coupled history")
-            valid, generation = int(history.force_valid.numpy()[0]), int(history.force_generation.numpy()[0])
-            if valid not in (0, 1) or generation < 0 or (valid and generation == 0):
-                raise ValueError("Invalid coupled force generation")
+        bits = self.precision_bits if "precision" in self.schema else 0
+        precision = history.precision if bits else history.force_valid
+        buffers = [
+            state.particle_q,
+            state.particle_qd,
+            self._fixed_ids,
+            self._fixed_positions,
+            history.bound_x,
+            history.bound_v,
+            precision,
+            history.force_valid,
+            history.force_generation,
+            self._particle_status,
+        ]
+
+        def validate_device():
+            self._particle_status.zero_()
+            wp.launch(
+                state_checks.particle_check,
+                max(1, self.model.particle_count),
+                [*buffers[:7], bits, *buffers[7:9], bound, self._particle_status],
+                device=self.device,
+            )
+
+        if self._graphs is None:
+            validate_device()
+        else:
+            self._graphs.run("particle_state_validate", (bound, bits), buffers, validate_device)
+        result = self._particle_status.numpy()
+        for index, message in enumerate(
+            (
+                "Fixed particles must retain their position and zero velocity",
+                "Incompatible state precision",
+                "Particle coordinates/rates changed; explicitly reset coupled history",
+                "Invalid coupled force generation",
+            )
+        ):
+            if result[index]:
+                raise ValueError(message)
         return history
 
     def reset(self, state, *, dt):

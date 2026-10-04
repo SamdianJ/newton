@@ -17,6 +17,7 @@ import warp as wp
 from ...sim import JointType
 from ..solver import SolverBase
 from . import coupled_kernels as kernels
+from . import state_checks
 from .articulation import ArticulationObjective, _TreeKinematics
 from .articulation_state import _predict, _recover_history
 from .collision import _validate_and_collect_boundary_faces
@@ -268,6 +269,8 @@ class SolverMonolithic(SolverBase):
         self._use_cuda_graph = use_cuda_graph
         device = model.device
         self._graphs = _SegmentGraphCache(device, enabled=use_cuda_graph)
+        self._states._graphs = self._graphs
+        self._force_status = wp.zeros(3, dtype=int, device=device)
         # Scratch states are allocated on first use, with the caller's legal initial dt.
         self._original = self._accepted = self._trial = None
         self._step_generation = self._assembly_sequence = 0
@@ -913,7 +916,14 @@ class SolverMonolithic(SolverBase):
                 ],
                 device=self.model.device,
             )
-        if any(not np.isfinite(array.numpy()).all() for array in arrays):
+        self._force_status.zero_()
+        for index, array in enumerate(arrays):
+            values = state_checks.scalar_view(array)
+            if values.size:
+                wp.launch(
+                    state_checks.finite, values.size, [values, self._force_status, index], device=self.model.device
+                )
+        if self._force_status.numpy().any():
             raise _StepFailure(self.Status.NONFINITE, "Final contact force is nonfinite")
         history.force_generation.fill_(self._step_generation)
         history.force_valid.fill_(1)

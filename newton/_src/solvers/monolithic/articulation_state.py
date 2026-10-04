@@ -9,6 +9,7 @@ import numpy as np
 import warp as wp
 
 from ...sim import JointType, Model
+from . import state_checks
 
 
 @wp.func
@@ -131,6 +132,11 @@ class ArticulationState:
         self.dtype, self.vector = kinematics.dtype, kinematics.vector
         self.model, self.device = kinematics.model, kinematics.device
         n, j, b = kinematics.count, kinematics.joints, kinematics.bodies
+        self._validation_status = None
+        self._validation_digest = wp.array(
+            np.frombuffer(kinematics.digest, dtype=np.uint8), dtype=wp.uint8, device=self.device
+        )
+        self._graphs = None
         self.schema = {
             "joint_v": ((j,), self.vector),
             "joint_omega": ((j,), self.vector),
@@ -233,18 +239,60 @@ class ArticulationState:
                 self.device,
             ):
                 raise ValueError(f"Invalid articulation state array: {name}")
-            if not np.isfinite(array.numpy()).all():
+        size = len(fields)
+        if self._validation_status is None or self._validation_status.size != size + 3:
+            self._validation_status = wp.zeros(size + 3, dtype=int, device=self.device)
+        status = self._validation_status
+        checks = [
+            (index, state_checks.scalar_view(array))
+            for index, (array, _, _) in enumerate(fields.values())
+            if getattr(array.dtype, "_wp_scalar_type_", array.dtype) in (wp.float32, wp.float64)
+        ]
+
+        def validate_device():
+            status.zero_()
+            for index, values in checks:
+                if values.size:
+                    wp.launch(state_checks.finite, values.size, [values, status, index], device=self.device)
+            if bound:
+                wp.launch(
+                    state_checks.history_check,
+                    max(32, k.count),
+                    [
+                        history.schema_version,
+                        history.valid,
+                        history.last_dt,
+                        history.config_digest,
+                        self._validation_digest,
+                        self.version,
+                        state.joint_q,
+                        state.joint_qd,
+                        history.bound_q,
+                        history.bound_qd,
+                        status,
+                        size,
+                    ],
+                    device=self.device,
+                )
+
+        if self._graphs is None:
+            validate_device()
+        else:
+            buffers = [status, self._validation_digest, *(item[0] for item in fields.values()), *(v for _, v in checks)]
+            self._graphs.run("state_validate", (bound, self.version), buffers, validate_device)
+        result = status.numpy()
+        for index, name in enumerate(fields):
+            if result[index]:
                 raise ValueError(f"Nonfinite articulation state: {name}")
-        if bound:
-            if history.schema_version.numpy()[0] != self.version or history.valid.numpy()[0] != 1:
-                raise ValueError("Invalid articulation state version/validity")
-            if history.last_dt.numpy()[0] <= 0 or history.config_digest.numpy().tobytes() != k.digest:
-                raise ValueError("Incompatible articulation state configuration")
-            for name in ("q", "qd"):
-                if not np.array_equal(
-                    getattr(state, "joint_" + name).numpy(), getattr(history, "bound_" + name).numpy()
-                ):
-                    raise ValueError("Coordinates/rates changed; explicitly reset articulation history")
+        for index, message in enumerate(
+            (
+                "Invalid articulation state version/validity",
+                "Incompatible articulation state configuration",
+                "Coordinates/rates changed; explicitly reset articulation history",
+            )
+        ):
+            if result[size + index]:
+                raise ValueError(message)
         k.evaluate(state.joint_q)
         k.validate_inertia()
         return history
