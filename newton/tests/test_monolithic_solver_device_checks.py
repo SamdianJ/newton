@@ -6,8 +6,10 @@
 import unittest
 from unittest.mock import patch
 
+import numpy as np
 import warp as wp
 
+from newton._src.solvers.monolithic.solver_types import _StepFailure
 from newton.tests.test_monolithic_solver_coupled import scene, solver
 from newton.tests.unittest_utils import add_function_test, get_test_devices
 
@@ -57,11 +59,75 @@ def test_device_validation(test, device):
         history.bound_x.assign(x)
 
 
+def test_device_iteration(test, device):
+    """Keep nonlinear vectors on device throughout production iteration."""
+    for precision in ("fp64", "fp32"):
+        run = solver(scene(device), precision=precision, mode="production", graph=device.is_cuda)
+        state = run.create_state(dt=0.001)
+        original = run._iterate_articulation
+        numpy = wp.array.numpy
+        pointers = {
+            a.ptr
+            for a in (
+                run._complete_r,
+                run._linear.scale,
+                run._delta,
+                run._post_error,
+                run._accepted_r,
+                run._reference_device,
+                run._effective_device,
+                run._stats_residual,
+            )
+        }
+
+        def read(array, *args, pointers=pointers, numpy=numpy, **kwargs):
+            if array.size and array.ptr in pointers:
+                raise AssertionError("Nonlinear iteration read a complete vector")
+            return numpy(array, *args, **kwargs)
+
+        def iterate(dt, original=original, read=read, run=run, pointers=pointers):
+            pointers.update(a.ptr for state in (run._accepted, run._trial) for a in (state.joint_q, state.particle_q))
+            with patch.object(wp.array, "numpy", read):
+                return original(dt)
+
+        with patch.object(run, "_iterate_articulation", iterate):
+            run.step(state, state, run.model.control(), dt=0.001)
+        test.assertTrue(run.last_stats.converged, run.last_stats)
+        test.assertIsInstance(run.last_stats.variational["residual"], list)
+        test.assertEqual(len(run.last_stats.variational["residual"]), run._complete_r.size)
+
+
+def test_failed_iteration_stats(test, device):
+    """Preserve the last reported residual if a later assembly fails."""
+    run = solver(scene(device), mode="production", graph=device.is_cuda)
+    state = run.create_state(dt=0.001)
+    assemble = run._assemble
+    expected = {}
+
+    def fail(iteration, **kwargs):
+        if iteration == 1:
+            expected["residual"] = run._stats_residual.numpy().copy()
+            raise _StepFailure(run.Status.NONFINITE, "injected later assembly failure")
+        return assemble(iteration, **kwargs)
+
+    with patch.object(run, "_assemble", fail):
+        run.step(state, state, run.model.control(), dt=0.001)
+    test.assertTrue(run.last_stats.rolled_back)
+    test.assertIn("residual", expected)
+    np.testing.assert_array_equal(run.last_stats.variational["residual"], expected["residual"])
+
+
 class TestDeviceChecks(unittest.TestCase):
     pass
 
 
 add_function_test(TestDeviceChecks, "test_device_validation", test_device_validation, devices=get_test_devices())
+
+add_function_test(TestDeviceChecks, "test_device_iteration", test_device_iteration, devices=get_test_devices())
+
+add_function_test(
+    TestDeviceChecks, "test_failed_iteration_stats", test_failed_iteration_stats, devices=get_test_devices()
+)
 
 if __name__ == "__main__":
     unittest.main()

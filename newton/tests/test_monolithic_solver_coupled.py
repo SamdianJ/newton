@@ -534,9 +534,12 @@ def test_complete_oracle_and_noise(test, device):
             energy_errors = []
             residual_errors = []
             for _ in range(32):
-                energy, residual, _ = run._evaluate(candidate, 0.001)
-                energy_errors.append(abs(energy - expected_e))
-                residual_errors.append(abs(residual - expected_r))
+                for device_result in (False, True):
+                    energy, residual, _ = run._evaluate(candidate, 0.001, device_result=device_result)
+                    if device_result:
+                        residual = residual.numpy()
+                    energy_errors.append(abs(energy - expected_e))
+                    residual_errors.append(abs(residual - expected_r))
             run._assemble(0)
             scale = run._linear.scale.numpy().astype(float)
             actual_b = run._linear.densify_for_test(generation=run._generation).raw_matrix
@@ -545,7 +548,9 @@ def test_complete_oracle_and_noise(test, device):
             envelope = 8 * np.max(residual_errors, axis=0)
             test.assertLessEqual(envelope.max(), 2.0935893019213836e-9)
             for name, part in [("global", slice(None)), ("q", slice(0, 2)), ("x", slice(2, None))]:
-                reference = np.linalg.norm(scale[part] * run._reference_residual[part]) / np.sqrt(len(expected_r[part]))
+                reference = np.linalg.norm(scale[part] * run._reference_residual.numpy()[part]) / np.sqrt(
+                    len(expected_r[part])
+                )
                 goal = (
                     getattr(run._config, "merit_absolute_" + name)
                     + getattr(run._config, "merit_relative_" + name) * reference

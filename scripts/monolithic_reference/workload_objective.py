@@ -62,6 +62,7 @@ def capture_input(run, boundary, args, kwargs):
         "dt": float(run._dt),
         "iteration": int(args[0]) if boundary == "assembly" else None,
         "build_tangent": kwargs.get("build_tangent", True),
+        "device_result": kwargs.get("device_result", False),
         "step_generation": run._step_generation,
         "assembly_sequence": run._assembly_sequence,
         "contact_started": run._contact._started,
@@ -84,7 +85,7 @@ def capture_output(run, boundary, result):
     if boundary == "objective":
         arrays.update(
             energy=np.asarray([result[0], result[2]]),
-            returned_residual=result[1].copy(),
+            returned_residual=result[1].numpy().copy() if isinstance(result[1], wp.array) else result[1].copy(),
             tangent=run._objective.tangent32.numpy().copy(),
             tet_parts=run._tet.parts.numpy().copy(),
             contact_energy=run._contact.energy.numpy().copy(),
@@ -207,10 +208,15 @@ def replay_objective(arrays, metadata, expected, *, scene, device, graph, repeat
         before = sum(run._graphs.captures.values())
         start = time.perf_counter()
         if metadata["boundary"] == "objective":
-            result = run._evaluate(run._current_state, metadata["dt"], build_tangent=metadata["build_tangent"])
+            result = run._evaluate(
+                run._current_state,
+                metadata["dt"],
+                build_tangent=metadata["build_tangent"],
+                device_result=metadata.get("device_result", False),
+            )
         else:
             # Fresh assembly generations remain monotonic; never disable guards.
-            result = run._assemble(metadata["iteration"])
+            result = run._assemble(metadata["iteration"], device_result=metadata.get("device_result", False))
         wp.synchronize_device(model.device)
         elapsed = time.perf_counter() - start
         output = capture_output(run, metadata["boundary"], result)
@@ -227,9 +233,14 @@ def replay_objective(arrays, metadata, expected, *, scene, device, graph, repeat
         target.assign(arrays[name])
     with SolverProfiler(run) as profiler:
         if metadata["boundary"] == "objective":
-            run._evaluate(run._current_state, metadata["dt"], build_tangent=metadata["build_tangent"])
+            run._evaluate(
+                run._current_state,
+                metadata["dt"],
+                build_tangent=metadata["build_tangent"],
+                device_result=metadata.get("device_result", False),
+            )
         else:
-            run._assemble(metadata["iteration"])
+            run._assemble(metadata["iteration"], device_result=metadata.get("device_result", False))
     return {
         "status": "PASS",
         "boundary": metadata["boundary"],

@@ -6,7 +6,9 @@
 import math
 
 import numpy as np
+import warp as wp
 
+from . import iteration_device
 from .linear_types import MonolithicPcgConfig, MonolithicPcgWarmStart
 from .solver_types import _StepFailure
 
@@ -56,10 +58,16 @@ def measure(solver, residual, reference, scale):
     """Use the same current scale for the frozen physical reference and candidate."""
     native = getattr(solver, "_numpy_dtype", np.float64)
     values = {}
+    norms = iteration_device.measure(solver, residual, reference) if isinstance(residual, wp.array) else None
     for name, part in blocks(solver):
-        size = len(residual[part])
-        merit = np.linalg.norm(scale[part] * residual[part]) / np.sqrt(native(size))
-        ref = np.linalg.norm(scale[part] * reference[part]) / np.sqrt(native(size))
+        index = ("global", "q", "x").index(name)
+        size = part.stop - part.start
+        merit = (norms[index, 0] if norms is not None else np.linalg.norm(scale[part] * residual[part])) / np.sqrt(
+            native(size)
+        )
+        ref = (norms[index, 1] if norms is not None else np.linalg.norm(scale[part] * reference[part])) / np.sqrt(
+            native(size)
+        )
         goal = (
             native(getattr(solver._config, "merit_absolute_" + name))
             + native(getattr(solver._config, "merit_relative_" + name)) * ref
@@ -70,7 +78,9 @@ def measure(solver, residual, reference, scale):
         solver._metrics["merit" + suffix + "_reference"] = ref
         solver._metrics["convergence_ratio" + suffix] = merit / goal
         if name != "global":
-            solver._metrics["raw_residual_" + name + "_norm"] = float(np.linalg.norm(residual[part]))
+            solver._metrics["raw_residual_" + name + "_norm"] = float(
+                norms[index, 2] if norms is not None else np.linalg.norm(residual[part])
+            )
     return values
 
 
@@ -79,13 +89,13 @@ def iterate(solver, dt):
     self = solver
     native = getattr(self, "_numpy_dtype", np.float64)
     config = self._config
-    reference = self._initial_reference(dt)
+    reference = self._initial_reference(dt, device_result=True)
     small = False
     for iteration in range(self.newton_max_iterations + 1):
-        e, residual, absolute = self._evaluate(self._accepted, dt)
-        b, scale = self._assemble(iteration)
-        if reference is None:
-            reference = residual.copy()
+        e, evaluated, absolute = self._evaluate(self._accepted, dt, device_result=True)
+        wp.copy(self._accepted_r, evaluated)
+        residual = self._accepted_r
+        b, scale = self._assemble(iteration, device_result=True)
         self._reference_residual = reference
         values = measure(self, residual, reference, scale)
         merit = values["global"][0]
@@ -93,7 +103,8 @@ def iterate(solver, dt):
         if iteration == 0:
             for name, (m, _, _, _) in values.items():
                 self._metrics["merit" + ("" if name == "global" else "_" + name) + "_initial"] = m
-        self._variational.update(objective_total=e, residual=residual.tolist())
+        wp.copy(self._stats_residual, residual)
+        self._variational.update(objective_total=e, residual=self._stats_residual)
         if all(m <= goal for m, _, goal, _ in values.values()):
             return self.Status.SUCCESS
         if small:
@@ -102,8 +113,6 @@ def iterate(solver, dt):
             )
         if iteration == self.newton_max_iterations:
             return self.Status.NONLINEAR_MAX_ITERATIONS
-        rhs = -scale * residual
-        self._rhs.assign(rhs.astype(np.float32))
         caps = {name: native(0.5) * np.sqrt(native(size)) * goal for name, (_, _, goal, size) in values.items()}
         pcg = MonolithicPcgConfig(
             maximum_iterations=self.linear_max_iterations,
@@ -146,17 +155,19 @@ def iterate(solver, dt):
                     raise _StepFailure(self.Status.NONFINITE, "Invalid PCG output")
             except _StepFailure:
                 continue
-            direction = self._delta.numpy().astype(native)
-            error = self._physical_linear_error(b, direction, residual, scale)
+            direction = self._delta
+            error = self._physical_linear_error(b, direction, residual, scale, device_result=True)
+            norms = iteration_device.norms(self, error) if isinstance(error, wp.array) else None
             postchecks = {}
             for name, part in blocks(self):
-                post = np.linalg.norm(error[part])
+                index = ("global", "q", "x").index(name)
+                post = norms[index] if norms is not None else np.linalg.norm(error[part])
                 limit = min(
                     caps[name],
                     max(
                         native(self.linear_absolute_tolerance),
                         native(self.linear_tolerance)
-                        * max(np.linalg.norm(rhs[part]), native(getattr(config, "residual_floor_" + name))),
+                        * max(self._rhs_norms_host[index], native(getattr(config, "residual_floor_" + name))),
                     ),
                 )
                 postchecks[name] = {"residual": post, "limit": limit}
@@ -174,25 +185,26 @@ def iterate(solver, dt):
                 alpha = native(0.5**search)
                 self._metrics["line_search_iterations"] += 1
                 self._take_trial(alpha, dt)
-                trial = self._trial_evaluation(dt)
+                trial = self._trial_evaluation(dt, device_result=True)
                 if trial is None or not self._domain(self._trial):
                     continue
                 te, tr, ta = trial
-                effective = self._effective_displacement()
-                slope = (residual @ effective) / alpha
-                trial_merit = np.linalg.norm(scale * tr) / np.sqrt(native(len(tr)))
+                effective = self._effective_displacement(device_result=True)
+                terms = iteration_device.trial(self, residual, tr, effective)
+                slope = terms[0] / alpha
+                trial_merit = np.sqrt(terms[1]) / np.sqrt(native(tr.size))
                 # Keep the PR2 common envelope; the coupled entry qualifies the
                 # complete E/r against it before any physical trajectory use.
                 eps = native(128 * np.finfo(float).eps)
                 en = max(native(5.820766091346741e-11), eps * max(native(1.0), absolute, ta))
                 rn = max(
-                    native(2.0935893019213836e-9) * np.linalg.norm(scale) / np.sqrt(native(len(scale))),
+                    native(2.0935893019213836e-9) * np.sqrt(terms[2]) / np.sqrt(native(scale.size)),
                     eps * max(native(1.0), merit, trial_merit),
                 )
                 sn = max(
-                    native(1.5498947892952669e-9) * np.linalg.norm(direction),
-                    native(2.0935893019213836e-9) * abs(direction).sum(),
-                    eps * max(native(1.0), abs(residual * direction).sum()),
+                    native(1.5498947892952669e-9) * np.sqrt(terms[3]),
+                    native(2.0935893019213836e-9) * terms[4],
+                    eps * max(native(1.0), terms[5]),
                 )
                 passes, a, r, improved = acceptance(
                     self._globalization,
@@ -232,7 +244,8 @@ def iterate(solver, dt):
                     steps = {}
                     for name, part in blocks(self):
                         steps[name] = native(
-                            np.linalg.norm(effective[part] / scale[part]) / np.sqrt(native(len(effective[part])))
+                            np.sqrt(terms[6 + ("global", "q", "x").index(name)])
+                            / np.sqrt(native(part.stop - part.start))
                         )
                         self._metrics["scaled_step" + ("" if name == "global" else "_" + name)] = steps[name]
                     small = all(

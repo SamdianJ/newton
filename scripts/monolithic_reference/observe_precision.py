@@ -81,9 +81,9 @@ class Observer:
         np.savez_compressed(path, **data)
         return {"file": path.name, "sha256": runner.sha(path)}
 
-    def _assemble(self, iteration):
-        result = self._assemble_native(iteration)
-        self.scale = result[1].copy()
+    def _assemble(self, iteration, *, device_result=False):
+        result = self._assemble_native(iteration, device_result=device_result)
+        self.scale = result[1].numpy().astype(self.run._numpy_dtype) if device_result else result[1].copy()
         self.rows[-1]["scale"] = self.snapshot(
             f"scale-{len(self.rows):04d}",
             {
@@ -96,11 +96,15 @@ class Observer:
         )
         return result
 
-    def _physical_linear_error(self, matrix, direction, residual, scale):
-        result = self._physical_linear_error_native(matrix, direction, residual, scale)
-        self.direction = direction.copy()
+    def _physical_linear_error(self, matrix, direction, residual, scale, *, device_result=False):
+        result = self._physical_linear_error_native(matrix, direction, residual, scale, device_result=device_result)
+        self.direction = direction.numpy().astype(self.run._numpy_dtype) if device_result else direction.copy()
         # Capture actual B32 storage; offline audit applies the matrix independently.
-        data = {"direction": direction, "residual": residual, "scale": scale, "native_error": result}
+        data = {"direction": self.direction, "residual": residual, "scale": scale, "native_error": result}
+        data = {
+            name: value.numpy().astype(self.run._numpy_dtype) if isinstance(value, wp.array) else value
+            for name, value in data.items()
+        }
         for name in ("offsets", "columns", "values"):
             data[name] = getattr(self.run._linear.k_global_scalar_bsr, name).numpy()
         item = self.snapshot(f"linear-{len(self.linear):04d}", data)
@@ -112,12 +116,12 @@ class Observer:
         self.base = state_arrays(self.run._accepted)
         return self._take_trial_native(alpha, dt)
 
-    def _evaluate(self, state, dt, *, build_tangent=True):
+    def _evaluate(self, state, dt, *, build_tangent=True, device_result=False):
         run = self.run
         role = "original" if state is run._original else "trial" if state is run._trial else "accepted"
         error, result = None, None
         try:
-            result = self._evaluate_native(state, dt, build_tangent=build_tangent)
+            result = self._evaluate_native(state, dt, build_tangent=build_tangent, device_result=device_result)
             return result
         except Exception as exc:
             error = str(exc)
@@ -144,6 +148,8 @@ class Observer:
             data["native.gravity"] = run._frozen_gravity.numpy()
             if result is not None:
                 data["native.energy"], data["native.residual"], data["native.absolute"] = result
+                if device_result:
+                    data["native.residual"] = result[1].numpy().copy()
             if self.scale is not None:
                 data["native.scale"] = self.scale
             if self.direction is not None:

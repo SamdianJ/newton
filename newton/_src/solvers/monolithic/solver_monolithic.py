@@ -17,7 +17,7 @@ import warp as wp
 from ...sim import JointType
 from ..solver import SolverBase
 from . import coupled_kernels as kernels
-from . import state_checks
+from . import iteration_device, state_checks
 from .articulation import ArticulationObjective, _TreeKinematics
 from .articulation_state import _predict, _recover_history
 from .collision import _validate_and_collect_boundary_faces
@@ -250,7 +250,6 @@ class SolverMonolithic(SolverBase):
         self._objective = ArticulationObjective(self._kinematics, parameters)
         self._joint_parameters_host = parameters.astype(self._numpy_dtype)
         self._dynamic_ids_host = self._tet.ids.numpy().copy()
-        self._moving_types_host = self._kinematics.values["joint_type"][self._kinematics.dof_joint.numpy()].copy()
         self._input_status = wp.zeros(4, dtype=int, device=model.device)
         self._config = _SolverMonolithicInternalConfig()
         # Sharpa refinement certifies these tighter goals within the existing budgets.
@@ -330,6 +329,7 @@ class SolverMonolithic(SolverBase):
         self._frozen_gravity = wp.zeros_like(model.gravity)
         self._out_backup = None
         self._dt = None
+        iteration_device.initialize(self)
 
     def _freeze_sdf(self, model):
         """Bind actual texels and indirection, excluding process-specific GPU handles."""
@@ -593,6 +593,8 @@ class SolverMonolithic(SolverBase):
         finally:
             if not published:
                 self._restore(state_out)
+            if isinstance(self._variational.get("residual"), wp.array):
+                self._variational["residual"] = self._variational["residual"].numpy().tolist()
             self._variational["graphs"] = self._graphs.summary()
             self._last_stats = self.Stats(
                 status=status,
@@ -691,7 +693,7 @@ class SolverMonolithic(SolverBase):
             device=self.model.device,
         )
 
-    def _evaluate(self, state, dt, *, build_tangent=True):
+    def _evaluate(self, state, dt, *, build_tangent=True, device_result=False):
         k, contact, tet = self._kinematics, self._contact, self._tet
         buffers = [
             state.joint_q,
@@ -702,6 +704,8 @@ class SolverMonolithic(SolverBase):
             self._frozen_gravity,
             self._complete_r,
         ]
+        if device_result:
+            buffers.extend((self._energy_terms, self._energy_sums, self._evaluation_status, self._evaluation_packet))
         for owner in (self._objective, k, tet, contact, contact.start, contact.current):
             buffers.extend(value for value in vars(owner).values() if isinstance(value, wp.array))
 
@@ -724,8 +728,25 @@ class SolverMonolithic(SolverBase):
                 device=self.model.device,
             )
 
-        self._graphs.run("coupled_objective", (self.precision.value, dt, build_tangent), buffers, evaluate)
+            if device_result:
+                iteration_device.evaluate(self)
+
+        self._graphs.run(
+            "coupled_objective", (self.precision.value, dt, build_tangent, device_result), buffers, evaluate
+        )
         self._current_state = state
+        if device_result:
+            packet = self._evaluation_packet.numpy()
+            if packet[0]:
+                status = self.Status.TET_INVERSION if packet[0] == 1 else self.Status.NONFINITE
+                raise _StepFailure(status, "Invalid tet candidate")
+            if packet[1]:
+                raise _StepFailure(self.Status.NONFINITE, f"Invalid contact geometry: {[int(packet[1])]}")
+            contact._evaluated = True
+            if packet[2] or not np.isfinite(packet[3]):
+                raise _StepFailure(self.Status.NONFINITE, "Nonfinite coupled E/r")
+            self._metrics["min_det_f"] = float(packet[5])
+            return packet[3], self._complete_r, packet[4]
         if tet.flags.numpy()[0]:
             status = self.Status.TET_INVERSION if tet.flags.numpy()[0] == 1 else self.Status.NONFINITE
             raise _StepFailure(status, "Invalid tet candidate")
@@ -745,15 +766,19 @@ class SolverMonolithic(SolverBase):
         self._metrics["min_det_f"] = float(tet.min_det_f.numpy()[0])
         return parts.sum(), residual, abs(parts).sum()
 
-    def _initial_reference(self, dt):
-        return self._evaluate(self._original, dt, build_tangent=False)[1]
+    def _initial_reference(self, dt, *, device_result=False):
+        residual = self._evaluate(self._original, dt, build_tangent=False, device_result=device_result)[1]
+        if device_result:
+            wp.copy(self._reference_device, residual)
+            return self._reference_device
+        return residual
 
     def _conservative_energy(self):
         return self._contact.conservative_energy
 
-    def _trial_evaluation(self, dt):
+    def _trial_evaluation(self, dt, *, device_result=False):
         try:
-            return self._evaluate(self._trial, dt, build_tangent=False)
+            return self._evaluate(self._trial, dt, build_tangent=False, device_result=device_result)
         except _StepFailure as error:
             self._variational["trials"].append({"accepted": False, "domain_failure": str(error)})
             return None
@@ -790,14 +815,29 @@ class SolverMonolithic(SolverBase):
             device=self.model.device,
         )
 
-    def _effective_displacement(self):
+    def _effective_displacement(self, *, device_result=False):
+        if device_result:
+            wp.launch(
+                iteration_device.effective_displacement,
+                self._effective_device.size,
+                [
+                    self._trial.joint_q,
+                    self._accepted.joint_q,
+                    self._trial.particle_q,
+                    self._accepted.particle_q,
+                    self._tet.ids,
+                    self._effective_device,
+                ],
+                device=self.model.device,
+            )
+            return self._effective_device
         ids = self._dynamic_ids_host
         return np.r_[
             self._trial.joint_q.numpy() - self._accepted.joint_q.numpy(),
             (self._trial.particle_q.numpy()[ids] - self._accepted.particle_q.numpy()[ids]).ravel(),
         ]
 
-    def _assemble(self, iteration):
+    def _assemble(self, iteration, *, device_result=False):
         k, linear, obj = self._kinematics, self._linear, self._objective
         self._assembly_sequence += 1
         self._generation = MonolithicLinearGeneration(
@@ -866,10 +906,13 @@ class SolverMonolithic(SolverBase):
             linear.build_scaling(self._diagonal, epsilon_d=self._config.epsilon_d, generation=self._generation)
         )
         self._metrics["matrix_assembly_count"] += 1
-        return None, linear.scale.numpy().astype(self._numpy_dtype)
+        return None, linear.scale if device_result else linear.scale.numpy().astype(self._numpy_dtype)
 
-    def _physical_linear_error(self, matrix, direction, residual, scale):
-        self._post_r.assign(residual)
+    def _physical_linear_error(self, matrix, direction, residual, scale, *, device_result=False):
+        if isinstance(residual, wp.array):
+            wp.copy(self._post_r, residual)
+        else:
+            self._post_r.assign(residual)
         b = self._linear.k_global_scalar_bsr
         buffers = [b.offsets, b.columns, b.values, self._delta, self._post_r, self._linear.scale, self._post_error]
         self._graphs.run(
@@ -878,14 +921,17 @@ class SolverMonolithic(SolverBase):
             buffers,
             lambda: wp.launch(kernels.sparse_posterior, self._post_error.size, buffers, device=self.model.device),
         )
-        return self._post_error.numpy().copy()
+        return self._post_error if device_result else self._post_error.numpy().copy()
 
     def _validate_final(self, dt, status):
-        energy, residual, _ = self._evaluate(self._accepted, dt)
-        _, scale = self._assemble(self._metrics["nonlinear_iterations"])
-        values = measure(self, residual, self._reference_residual, scale)
-        self._variational.update(objective_total=energy, residual=residual.tolist())
-        if not np.isfinite(energy) or not np.isfinite(residual).all() or not np.isfinite(scale).all():
+        energy, residual, _ = self._evaluate(self._accepted, dt, device_result=True)
+        wp.copy(self._accepted_r, residual)
+        _, scale = self._assemble(self._metrics["nonlinear_iterations"], device_result=True)
+        values = measure(self, self._accepted_r, self._reference_residual, scale)
+        wp.copy(self._stats_residual, self._accepted_r)
+        self._variational.update(objective_total=energy, residual=self._stats_residual)
+        # Objective/scaling boundaries already check every residual/scale entry on device.
+        if not np.isfinite(energy):
             raise _StepFailure(self.Status.NONFINITE, "Final coupled candidate contains nonfinite E/r/scale")
         if not self._domain(self._accepted):
             raise _StepFailure(self.Status.NONFINITE, "Final coupled candidate left the local domain")
@@ -935,13 +981,7 @@ class SolverMonolithic(SolverBase):
         state.assign(self._out_backup)
 
     def _domain(self, state):
-        k, obj = self._kinematics, self._objective
-        delta = state.joint_q.numpy() - obj.qn.numpy()
-        moving_types = self._moving_types_host
-        if np.any(abs(delta[moving_types == JointType.REVOLUTE]) >= math.pi / 2):
-            return False
-        # The caller has evaluated this candidate's private FK.
-        return bool(np.all(np.einsum("bij,bij->b", k.rotations.numpy(), obj.rn.numpy()) > 1.0))
+        return iteration_device.domain(self, state, int(JointType.REVOLUTE))
 
     def _joint_force_metrics(self, state):
         """Bind scalar force diagnostics to the successfully published state."""
