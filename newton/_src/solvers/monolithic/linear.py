@@ -18,6 +18,8 @@ from .bsr import (
     _MonolithicContactFactors,
     _MonolithicMat33Triplets,
     _MonolithicScalarTriplets,
+    _pack_assembly_counts,
+    _pack_assembly_result,
     _scale_vector,
     _validate_aq_finite,
     _validate_bsr_finite,
@@ -128,6 +130,8 @@ class MonolithicLinearWorkspace:
         factors.active_token = self._active_token
         factors.token = 0
         self._factors = factors
+        self._assembly_counts = wp.zeros(6, dtype=int, device=device)
+        self._assembly_result = wp.zeros(3, dtype=int, device=device)
         n = layout.scalar_dof_count
         for name in (
             "dynamic_diagonal",
@@ -340,7 +344,15 @@ class MonolithicLinearWorkspace:
             return MonolithicLinearBuildResult(MonolithicLinearStatus.STALE_GENERATION, generation, 0, 0, 0, 0, 0)
         self._sealed = True
         self._active_token.zero_()
-        counts = [int(buffer.count.numpy()[0]) for buffer in (self._global, self._internal, self._factors)]
+        wp.launch(
+            _pack_assembly_counts,
+            1,
+            [self._global, self._internal, self._factors, self._assembly_counts],
+            device=self.device,
+        )
+        packet = self._assembly_counts.numpy()
+        counts = [int(value) for value in packet[:3]]
+        nnz = (0, 0)
         status = MonolithicLinearStatus.SUCCESS
         for index, (buffer, overflow) in enumerate(
             [
@@ -349,7 +361,7 @@ class MonolithicLinearWorkspace:
                 (self._factors, MonolithicLinearStatus.CONTACT_FACTOR_OVERFLOW),
             ]
         ):
-            code = int(buffer.status.numpy()[0])
+            code = int(packet[3 + index])
             if code:
                 status = MonolithicLinearStatus(code)
                 break
@@ -402,14 +414,27 @@ class MonolithicLinearWorkspace:
                 [self.aq_actor_dense, self._global.status],
                 device=self.device,
             )
-            status = MonolithicLinearStatus(int(self._global.status.numpy()[0]))
+            wp.launch(
+                _pack_assembly_result,
+                1,
+                [
+                    self._global.status,
+                    self.k_global_scalar_bsr.offsets,
+                    self.ax_internal_bsr3.offsets,
+                    self._assembly_result,
+                ],
+                device=self.device,
+            )
+            result = self._assembly_result.numpy()
+            status = MonolithicLinearStatus(int(result[0]))
+            if status == MonolithicLinearStatus.SUCCESS:
+                nnz = (int(result[1]), int(result[2]))
         self._valid = status == MonolithicLinearStatus.SUCCESS
         return MonolithicLinearBuildResult(
             status,
             generation,
             *counts,
-            int(self.k_global_scalar_bsr.offsets.numpy()[-1]) if self._valid else 0,
-            int(self.ax_internal_bsr3.offsets.numpy()[-1]) if self._valid else 0,
+            *nnz,
         )
 
     def _current(self, generation) -> bool:

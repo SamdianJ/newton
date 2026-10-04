@@ -58,6 +58,30 @@ class _MonolithicContactFactors:
     token: int
 
 
+@wp.kernel
+def _pack_assembly_counts(
+    global_triplets: _MonolithicScalarTriplets,
+    internal_triplets: _MonolithicMat33Triplets,
+    factors: _MonolithicContactFactors,
+    packet: wp.array[int],
+):
+    packet[0] = global_triplets.count[0]
+    packet[1] = internal_triplets.count[0]
+    packet[2] = factors.count[0]
+    packet[3] = global_triplets.status[0]
+    packet[4] = internal_triplets.status[0]
+    packet[5] = factors.status[0]
+
+
+@wp.kernel
+def _pack_assembly_result(
+    status: wp.array[int], global_offsets: wp.array[int], internal_offsets: wp.array[int], packet: wp.array[int]
+):
+    packet[0] = status[0]
+    packet[1] = global_offsets[global_offsets.shape[0] - 1]
+    packet[2] = internal_offsets[internal_offsets.shape[0] - 1]
+
+
 @wp.func
 def _append_monolithic_scalar_triplet(triplets: _MonolithicScalarTriplets, row: int, column: int, value: float):
     if triplets.active_token[0] != triplets.token:

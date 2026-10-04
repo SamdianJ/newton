@@ -63,8 +63,10 @@ def test_prefix_views_and_parity(test, device):
             result = ws.finalize_assembly(generation=generation)
         test.assertEqual(result.status, MonolithicLinearStatus.SUCCESS)
         test.assertEqual(calls, [199, 8])
-        # Existing protocol: 3 counts, 3 statuses, 2 validation statuses, 2 offsets.
-        test.assertEqual(reads, [(1,)] * 8 + [(12,), (4,)])
+        # Counts/statuses and final status/nnz cross each boundary together.
+        test.assertEqual(reads, [(6,), (1,), (3,)])
+        test.assertEqual(result.global_nnz, int(ws.k_global_scalar_bsr.offsets.numpy()[-1]))
+        test.assertEqual(result.internal_nnz, int(ws.ax_internal_bsr3.offsets.numpy()[-1]))
         for (matrix, _, _), oracle in zip(expected, oracles, strict=True):
             actual = _dense_bsr(matrix)
             np.testing.assert_array_equal(actual, oracle)
