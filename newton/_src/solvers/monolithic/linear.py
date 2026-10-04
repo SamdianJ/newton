@@ -23,6 +23,7 @@ from .bsr import (
     _validate_bsr_finite,
     _validate_triplets,
 )
+from .bsr_reduction import _ScalarBsrReduction
 from .linear_types import (
     MonolithicDenseLinearOracle,
     MonolithicLinearBuildResult,
@@ -66,6 +67,8 @@ class MonolithicLinearWorkspace:
             raise ValueError("use_cuda_graph requires CUDA production PCG and a bool")
         if contact_support is None and capacities.contact_factor_count * (layout.q_dof_count + 9) >= 2**31:
             raise ValueError("Contact scalar support exceeds int32 capacity")
+        if capacities.global_scalar_triplet_count >= 2**30:
+            raise ValueError("Scalar sort scratch exceeds int32 capacity")
         self.use_cuda_graph = use_cuda_graph
         self._pcg_mode = pcg_mode
         self._pcg_active = False
@@ -114,6 +117,9 @@ class MonolithicLinearWorkspace:
             device,
             self._active_token,
             0,
+        )
+        self._scalar_reduction = _ScalarBsrReduction(
+            capacities.global_scalar_triplet_count, self.device, use_cuda_graph=use_cuda_graph
         )
         self._internal = _create_triplets(
             _MonolithicMat33Triplets,
@@ -414,6 +420,15 @@ class MonolithicLinearWorkspace:
                     counts[:2],
                     strict=True,
                 ):
+                    if matrix is self.k_global_scalar_bsr:
+                        self._scalar_reduction.build(
+                            matrix,
+                            triplets,
+                            count,
+                            layout_identity=self.layout.identity,
+                            graphs=self._segment_graphs,
+                        )
+                        continue
                     arrays = (triplets.rows, triplets.columns, triplets.values)
                     # Warp sorts by array length; device count only masks the tail.
                     # Keep empty-capacity arrays intact: slicing them is unsupported.

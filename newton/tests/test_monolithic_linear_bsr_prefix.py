@@ -12,6 +12,7 @@ from warp import sparse
 
 from newton._src.solvers.monolithic.linear_types import MonolithicLinearGeneration, MonolithicLinearStatus
 from newton.tests.test_monolithic_linear_assembly import _contact, _dense_bsr, _owners, _workspace
+from newton.tests.test_monolithic_linear_reduction import _reference
 from newton.tests.unittest_utils import add_function_test, get_test_devices
 
 
@@ -38,7 +39,16 @@ def test_prefix_views_and_parity(test, device):
             buffer.values[count:].fill_(float("nan") if buffer.values.dtype == wp.float32 else wp.mat33(float("nan")))
             oracle = sparse.bsr_zeros(matrix.nrow, matrix.ncol, matrix.values.dtype, device=device)
             original(oracle, buffer.rows, buffer.columns, buffer.values, count=buffer.count)
-            oracles.append(_dense_bsr(oracle))
+            oracles.append(
+                _reference(
+                    buffer.rows.numpy()[:count],
+                    buffer.columns.numpy()[:count],
+                    buffer.values.numpy()[:count],
+                    matrix.nrow,
+                ).astype(np.float64)
+                if matrix is ws.k_global_scalar_bsr
+                else _dense_bsr(oracle)
+            )
         calls = []
         reads = []
         original_numpy = wp.array.numpy
@@ -47,10 +57,15 @@ def test_prefix_views_and_parity(test, device):
             _reads.append(array.shape)
             return _numpy(array)
 
-        def build(matrix, rows, columns, values, _expected=expected, _calls=calls, **kwargs):
+        def build(matrix, rows, columns, values=None, _expected=expected, _calls=calls, **kwargs):
             _, buffer, count = _expected[len(_calls)]
             test.assertEqual(rows.size, count, "Builder still sorts unused capacity")
-            for view, base in zip((rows, columns, values), (buffer.rows, buffer.columns, buffer.values), strict=True):
+            if matrix is ws.k_global_scalar_bsr:
+                test.assertIsNone(values, "Global builder must only construct topology")
+                pairs = ((rows, ws._scalar_reduction.rows), (columns, buffer.columns))
+            else:
+                pairs = zip((rows, columns, values), (buffer.rows, buffer.columns, buffer.values), strict=True)
+            for view, base in pairs:
                 test.assertEqual(view.ptr, base.ptr)
                 test.assertEqual(view.strides, base.strides)
                 test.assertTrue(view.is_contiguous)

@@ -53,6 +53,10 @@ It cannot change after construction. FP32 selects native state, history,
 contact forces, E/r, posterior checks and host acceptance arithmetic; B/PCG
 arrays and directions remain FP32 in both modes. Existing PCG scalar threshold
 and restart checks retain their original FP64 arithmetic in both modes.
+Global scalar B assembly orders duplicate contributions by row, column and
+unsigned FP32 value bits, then sums them with a fixed pairwise FP32 tree on CPU
+and CUDA. This removes insertion-order dependence for identical triplet values;
+it does not guarantee bitwise determinism of residuals, forces or full trajectories.
 FP32 numerical qualification is pending: unchanged
 physical guards and noise envelopes may reject a candidate.
 

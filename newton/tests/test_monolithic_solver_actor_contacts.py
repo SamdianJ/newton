@@ -497,6 +497,26 @@ def test_contact_transactions(test, device):
             assert_snapshot(test, state, source)
             assert_snapshot(test, output, target)
             test.assertNotIn("actor_contact_pairs", run.last_stats.variational)
+        with patch.object(
+            run._linear._scalar_reduction, "build", side_effect=RuntimeError("injected reduction failure")
+        ):
+            run.step(state, output, control, dt=0.001)
+        test.assertTrue(run.last_stats.rolled_back)
+        assert_snapshot(test, state, source)
+        assert_snapshot(test, output, target)
+        np.testing.assert_array_equal(run.get_contact_forces(state).body_wrench, previous_forces)
+        build = run._linear._scalar_reduction.build
+
+        def overflow_reduction(matrix, triplets, count, build=build, **kwargs):
+            triplets.values.fill_(np.finfo(np.float32).max)
+            return build(matrix, triplets, count, **kwargs)
+
+        with patch.object(run._linear._scalar_reduction, "build", overflow_reduction):
+            run.step(state, output, control, dt=0.001)
+        test.assertTrue(run.last_stats.rolled_back)
+        assert_snapshot(test, state, source)
+        assert_snapshot(test, output, target)
+        np.testing.assert_array_equal(run.get_contact_forces(state).body_wrench, previous_forces)
         with patch.object(run, "_physical_linear_error", return_value=np.full(run._layout.scalar_dof_count, np.nan)):
             run.step(state, output, control, dt=0.001)
         test.assertTrue(run.last_stats.rolled_back)

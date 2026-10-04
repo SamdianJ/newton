@@ -38,7 +38,7 @@ def test_segments_continuous(test, device):
         test.assertEqual(first.keys(), second.keys())
         for name in first:
             np.testing.assert_allclose(first[name], second[name], rtol=2e-5, atol=2e-6, err_msg=name)
-    test.assertEqual(set(cache.captures), {"assembly_initialize", "scaling", "factor"})
+    test.assertEqual(set(cache.captures), {"assembly_initialize", "scalar_reduction", "scaling", "factor"})
     test.assertGreater(cache.replays["assembly_initialize"], cache.captures["assembly_initialize"])
     test.assertEqual(cache.captures["assembly_initialize"], 1)
 
