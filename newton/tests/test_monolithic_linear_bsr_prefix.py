@@ -11,7 +11,7 @@ import warp as wp
 from warp import sparse
 
 from newton._src.solvers.monolithic.linear_types import MonolithicLinearGeneration, MonolithicLinearStatus
-from newton.tests.test_monolithic_linear_assembly import _contact, _dense_bsr, _owners, _workspace
+from newton.tests.test_monolithic_linear_assembly import _contact, _dense_bsr, _fixed_pattern, _owners, _workspace
 from newton.tests.unittest_utils import add_function_test, get_test_devices
 
 
@@ -117,6 +117,36 @@ def test_count_guards_before_builder(test, device):
             )
 
 
+def test_count_bounded_initialization(test, device):
+    """Clear reserved slots only and ignore poisoned tails across contact count changes."""
+    for fixed in (False, True):
+        ws = _workspace(device, global_capacity=256, internal_capacity=8)
+        if fixed:
+            ws._set_fixed_triplet_pattern(**_fixed_pattern())
+        for sequence, contact in enumerate((True, False, True), 1):
+            for buffer in (ws._global, ws._internal):
+                value = float("nan") if buffer.values.dtype == wp.float32 else wp.mat33(float("nan"))
+                buffer.values.fill_(value)
+            generation = MonolithicLinearGeneration(1, 0, 1, sequence)
+            with patch.object(
+                wp.array, "numpy", side_effect=AssertionError("Initialization must not read back counts")
+            ):
+                assembly = ws.begin_assembly(generation)
+            for buffer, count in ((ws._global, 10 if fixed else 0), (ws._internal, 1 if fixed else 0)):
+                values = buffer.values.numpy()
+                np.testing.assert_array_equal(values[:count], 0)
+                test.assertTrue(np.isnan(values[count:]).all(), "Initialization cleared unused capacity")
+            if contact:
+                wp.launch(_contact, 1, [assembly.contact_factors, assembly.global_scalar_triplets], device=device)
+            result = ws.finalize_assembly(generation=generation)
+            test.assertEqual(result.status, MonolithicLinearStatus.SUCCESS)
+            test.assertEqual(result.global_triplet_count, (10 if fixed else 0) + (121 if contact else 0))
+            g = np.r_[2.0, -1.0, np.arange(1, 10) * 0.1]
+            expected = 3 * np.outer(g, g) if contact else np.zeros((11, 11))
+            np.testing.assert_allclose(_dense_bsr(ws.k_global_scalar_bsr), expected, atol=8e-7)
+            np.testing.assert_array_equal(_dense_bsr(ws.ax_internal_bsr3), 0)
+
+
 class TestMonolithicBsrPrefix(unittest.TestCase):
     pass
 
@@ -126,6 +156,7 @@ for device in get_test_devices():
         test_prefix_views_and_parity,
         test_empty_and_full_prefix,
         test_count_guards_before_builder,
+        test_count_bounded_initialization,
     ):
         add_function_test(TestMonolithicBsrPrefix, function.__name__, function, devices=[device])
 

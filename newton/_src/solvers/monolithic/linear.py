@@ -321,11 +321,12 @@ class MonolithicLinearWorkspace:
             buffer.count.zero_()
             buffer.status.zero_()
         for index, buffer in enumerate((self._global, self._internal)):
-            buffer.values.zero_()
             if self._fixed_patterns is not None:
                 rows, columns = self._fixed_patterns[index]
                 count = rows.size
                 if count:
+                    # Appended entries overwrite their values; only reserved slots need clearing.
+                    buffer.values[:count].zero_()
                     wp.copy(buffer.rows, rows, count=count)
                     wp.copy(buffer.columns, columns, count=count)
                 buffer.count.fill_(count)
