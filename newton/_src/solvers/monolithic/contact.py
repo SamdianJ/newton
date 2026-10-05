@@ -26,6 +26,7 @@ from .bsr import (
 from .contact_geometry import _shape64
 from .contact_sampling import ContactSamples, _checked_contact_capacity
 from .linear_types import MonolithicLinearLayout
+from .residual import _accumulate_rows, _row_gather_map
 from .smooth_sdf import _sdf_type, smooth_query
 
 
@@ -191,11 +192,7 @@ def _law(
     start: Any,
     shapes: wp.array[int],
     margins: wp.array[Any],
-    triangles: wp.array2d[int],
     area: wp.array[Any],
-    mapping: wp.array[int],
-    q_start: int,
-    x_start: int,
     radius: Any,
     stiffness: Any,
     smoothing: Any,
@@ -205,7 +202,7 @@ def _law(
     alignment_mask: int,
     flags: wp.array[int],
     energy: wp.array2d[Any],
-    residual: wp.array[Any],
+    terms: wp.array[Any],
     normal: wp.array[Any],
     tangent: wp.array[Any],
     weights: wp.array2d[Any],
@@ -216,7 +213,7 @@ def _law(
     key_offset: int,
     gap_offsets: wp.array[Any],
     support_offsets: wp.array[int],
-    support_columns: wp.array[int],
+    support_local: wp.array[int],
     jacobians: wp.array[Any],
 ):
     key = wp.tid()
@@ -315,22 +312,22 @@ def _law(
     weights[output_key, 0] = curvature
     weights[output_key, 1] = beta
     weights[output_key, 2] = radial
-    if direct != 0:
-        for index in range(support_offsets[3 * output_key], support_offsets[3 * output_key + 1]):
-            wp.atomic_add(residual, support_columns[index], wp.dot(jacobians[index], r))
-        return
-    nq = current.jacobian_q.shape[1]
-    for j in range(nq):
-        wp.atomic_add(residual, q_start + j, wp.dot(current.jacobian_q[key, j], r))
+    first = support_offsets[3 * output_key]
     world_r = current.rotation[key] * r
-    for a in range(3):
-        node = mapping[triangles[face, a]]
-        if node >= 0:
+    for index in range(first, support_offsets[3 * output_key + 1]):
+        value = type(radius)(0.0)
+        if direct != 0:
+            value = wp.dot(jacobians[index], r)
+        elif support_local[index] >= 0:
+            value = wp.dot(current.jacobian_q[key, support_local[index]], r)
+        else:
+            coordinate = -support_local[index] - 1
             weight = type(radius)(1.0) / type(radius)(6.0)
-            if a == slot:
+            if coordinate / 3 == slot:
                 weight = type(radius)(2.0) / type(radius)(3.0)
-            for j in range(3):
-                wp.atomic_add(residual, x_start + 3 * node + j, weight * world_r[j])
+            value = weight * world_r[coordinate % 3]
+        # Three factor supports share one residual contribution per sample/DoF.
+        terms[first / 3 + (index - first)] = value
 
 
 @wp.kernel
@@ -634,6 +631,18 @@ class ContactObjective:
         self.factor_support = tuple(
             np.asarray(a, dtype=np.int32) for a in (support_offsets, support_columns, support_local)
         )
+        offsets, columns, local = self.factor_support
+        residual_columns = (
+            np.concatenate([columns[offsets[3 * key] : offsets[3 * key + 1]] for key in range(count)])
+            if count
+            else np.empty(0, dtype=np.int32)
+        )
+        self._residual_offsets, self._residual_slots = _row_gather_map(
+            residual_columns, self.layout.scalar_dof_count, model.device
+        )
+        self._residual_terms = wp.zeros(len(residual_columns), dtype=self.dtype, device=model.device)
+        self._support_offsets = wp.array(offsets, dtype=int, device=model.device)
+        self._support_local = wp.array(local, dtype=int, device=model.device)
         self.triplet_capacity = triplet_count
         self.model, self.contact_model = model, contact_model
         self.body_count = model.body_count if articulation_actor is None else len(articulation_actor.body_indices)
@@ -815,6 +824,7 @@ class ContactObjective:
         wp.copy(self.flags, self.start_flags)
         self.energy.zero_()
         self.residual.zero_()
+        self._residual_terms.zero_()
         self.weights.zero_()
         self.local_residual.zero_()
         self.omitted.zero_()
@@ -828,11 +838,7 @@ class ContactObjective:
                     self.start,
                     self.shapes,
                     self.margins,
-                    self.triangles,
                     self.area,
-                    self.mapping,
-                    self.layout.q_scalar_offset,
-                    self.layout.x_scalar_offset,
                     self.dtype(radius),
                     self.dtype(stiffness),
                     self.dtype(smoothing),
@@ -842,7 +848,7 @@ class ContactObjective:
                     int(self._alignment_policy == "mask"),
                     self.flags,
                     self.energy,
-                    self.residual,
+                    self._residual_terms,
                     self.normal,
                     self.tangent,
                     self.weights,
@@ -852,8 +858,8 @@ class ContactObjective:
                     0,
                     0,
                     self.margins,
-                    self.mapping,
-                    self.mapping,
+                    self._support_offsets,
+                    self._support_local,
                     self.normal,
                 ],
                 device=self.model.device,
@@ -863,6 +869,12 @@ class ContactObjective:
                 x, poses, com, jt, jw, rigid_com=rigid_com, rigid_rotation=rigid_rotation, dt=dt
             )
         if self.residual.size:
+            wp.launch(
+                _accumulate_rows,
+                self.residual.size,
+                [self._residual_offsets, self._residual_slots, self._residual_terms, self.residual],
+                device=self.model.device,
+            )
             wp.launch(_check_residual, self.residual.size, [self.residual, self.flags], device=self.model.device)
         self._evaluated = True
 

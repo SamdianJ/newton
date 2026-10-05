@@ -9,6 +9,7 @@ from typing import Any
 import numpy as np
 import warp as wp
 
+from .residual import _accumulate_rows, _row_gather_map
 from .tet_common import TetPhysicsWorkspace, _validate_candidate_particles, validate_tet_scope
 from .tet_material import _evaluate_energy_stress
 
@@ -65,7 +66,7 @@ def _elements(
     consistent: bool,
     dt: Any,
     guard: Any,
-    residual: wp.array[Any],
+    terms: wp.array[Any],
     parts: wp.array[Any],
     min_det: wp.array[Any],
     flags: wp.array[int],
@@ -111,7 +112,7 @@ def _elements(
                 r += weight * db / (dt * dt)
                 inertia += weight * wp.dot(da, db) / (type(dt)(2.0) * dt * dt)
         if mapping[ia] >= 0:
-            wp.atomic_add(residual, mapping[ia], r)
+            terms[4 * e + a] = r
     if not wp.isfinite(inertia):
         wp.atomic_max(flags, 0, 2)
     wp.atomic_add(parts, 0, inertia)
@@ -136,10 +137,16 @@ class TetObjective:
         mapping = np.full(model.particle_count, -1, dtype=np.int32)
         mapping[ids] = np.arange(len(ids))
         validate_tet_scope(model, dynamic_particle_ids=ids, particle_to_dynamic=mapping)
+        if 4 * model.tet_count >= 2**31:
+            raise ValueError("Tet residual contribution capacity exceeds int32")
         self.model = model
         self.physics = TetPhysicsWorkspace(model, material_model=material_model, mass_mode=mass_mode, density=density)
         self.ids = wp.array(ids, dtype=int, device=model.device)
         self.mapping = wp.array(mapping, dtype=int, device=model.device)
+        self._residual_offsets, self._residual_slots = _row_gather_map(
+            mapping[self.physics.indices.numpy().ravel()], len(ids), model.device
+        )
+        self._residual_terms = wp.zeros(4 * model.tet_count, dtype=self.vector, device=model.device)
         self.residual = wp.zeros(len(ids), dtype=self.vector, device=model.device)
         self.parts = wp.zeros(3, dtype=self.dtype, device=model.device)
         self.min_det_f = wp.zeros(1, dtype=self.dtype, device=model.device)
@@ -171,6 +178,7 @@ class TetObjective:
         physics.validate_identity()
         self.flags.zero_()
         self.parts.zero_()
+        self._residual_terms.zero_()
         self.min_det_f.fill_(float("inf"))
         wp.launch(
             _validate_candidate_particles,
@@ -215,11 +223,17 @@ class TetObjective:
                 physics.mass_mode == "consistent",
                 self.dtype(dt),
                 self.dtype(min_det_f_guard),
-                self.residual,
+                self._residual_terms,
                 self.parts,
                 self.min_det_f,
                 self.flags,
             ],
+            device=self.model.device,
+        )
+        wp.launch(
+            _accumulate_rows,
+            self.residual.size,
+            [self._residual_offsets, self._residual_slots, self._residual_terms, self.residual],
             device=self.model.device,
         )
         wp.launch(_finite, self.residual.size, [self.residual, self.flags], device=self.model.device)
