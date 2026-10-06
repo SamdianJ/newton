@@ -33,7 +33,8 @@ _MAX_ITERATIONS = wp.constant(17)
 class _Parameters:
     tolerance: float
     absolute_tolerance: float
-    floors: wp.vec3
+    floors: wp.array[float]
+    aliases: wp.array[int]
     replacement_threshold: wp.float64
     residual_norm_limits: wp.array[float]
 
@@ -160,6 +161,7 @@ def _masked_scaled_csr_mv(
 @wp.kernel
 def _masked_q_solve(
     lower: wp.array2d[float],
+    q_start: int,
     r: wp.array[float],
     temporary: wp.array[float],
     z: wp.array[float],
@@ -170,25 +172,52 @@ def _masked_q_solve(
         return
     n = lower.shape[0]
     for i in range(n):
-        value = r[i]
+        value = r[q_start + i]
         for j in range(i):
-            value -= lower[i, j] * temporary[j]
-        temporary[i] = value / lower[i, i]
+            value -= lower[i, j] * temporary[q_start + j]
+        temporary[q_start + i] = value / lower[i, i]
     for k in range(n):
         i = n - 1 - k
-        value = temporary[i]
+        value = temporary[q_start + i]
         for j in range(i + 1, n):
-            value -= lower[j, i] * z[j]
+            value -= lower[j, i] * z[q_start + j]
         value = value / lower[i, i]
-        z[i] = value
+        z[q_start + i] = value
         if not wp.isfinite(value):
             wp.atomic_max(error, 0, _NONFINITE)
 
 
 @wp.kernel
+def _masked_rigid_solve(
+    factor: wp.array3d[float],
+    rows: wp.array2d[int],
+    r: wp.array[float],
+    z: wp.array[float],
+    state: wp.array[_DeviceResult],
+    error: wp.array[int],
+):
+    if state[0].enabled == 0:
+        return
+    body = wp.tid()
+    for i in range(6):
+        value = r[rows[body, i]]
+        for j in range(i):
+            value -= factor[body, i, j] * z[rows[body, j]]
+        z[rows[body, i]] = value / factor[body, i, i]
+    for k in range(6):
+        i = 5 - k
+        value = z[rows[body, i]]
+        for j in range(i + 1, 6):
+            value -= factor[body, j, i] * z[rows[body, j]]
+        z[rows[body, i]] = value / factor[body, i, i]
+        if not wp.isfinite(z[rows[body, i]]):
+            wp.atomic_max(error, 0, 16)
+
+
+@wp.kernel
 def _masked_x_solve(
     lower_blocks: wp.array[wp.mat33],
-    q_count: int,
+    x_start: int,
     r: wp.array[float],
     z: wp.array[float],
     state: wp.array[_DeviceResult],
@@ -198,7 +227,7 @@ def _masked_x_solve(
         return
     particle = wp.tid()
     lower = lower_blocks[particle]
-    base = q_count + 3 * particle
+    base = x_start + 3 * particle
     v = wp.vec3(0.0)
     for i in range(3):
         value = r[base + i]
@@ -421,7 +450,7 @@ def _clear_norm_work(
         return
     i = wp.tid()
     # Layout: true(g,q,x), gap(g,q,x), rhs(g,q,x). RHS norms are cached.
-    if i < 6 or initial:
+    if i < 2 * maxima.shape[0] / 3 or initial:
         maxima[i] = 0.0
         sums[i] = 0.0
 
@@ -436,15 +465,14 @@ def _residual_and_maxima(
     maxima: wp.array[float],
     state: wp.array[_DeviceResult],
     error: wp.array[int],
-    q_count: int,
+    groups: wp.array[int],
     initial: bool,
 ):
     if state[0].status != _RUNNING:
         return  # A pending checkpoint must still run even though enabled=0.
     i = wp.tid()
-    block = int(2)
-    if i < q_count:
-        block = 1
+    block = groups[i]
+    group_count = maxima.shape[0] / 3
     value = rhs[i] - ay[i]
     difference = float(0.0)
     if not initial:
@@ -456,11 +484,11 @@ def _residual_and_maxima(
     gap[i] = difference
     wp.atomic_max(maxima, 0, wp.abs(value))
     wp.atomic_max(maxima, block, wp.abs(value))
-    wp.atomic_max(maxima, 3, wp.abs(difference))
-    wp.atomic_max(maxima, 3 + block, wp.abs(difference))
+    wp.atomic_max(maxima, group_count, wp.abs(difference))
+    wp.atomic_max(maxima, group_count + block, wp.abs(difference))
     if initial:
-        wp.atomic_max(maxima, 6, wp.abs(rhs[i]))
-        wp.atomic_max(maxima, 6 + block, wp.abs(rhs[i]))
+        wp.atomic_max(maxima, 2 * group_count, wp.abs(rhs[i]))
+        wp.atomic_max(maxima, 2 * group_count + block, wp.abs(rhs[i]))
 
 
 @wp.kernel
@@ -472,15 +500,14 @@ def _residual_norm_sums(
     sums: wp.array[float],
     state: wp.array[_DeviceResult],
     error: wp.array[int],
-    q_count: int,
+    groups: wp.array[int],
     initial: bool,
 ):
     if state[0].status != _RUNNING or error[0] != 0:
         return
     i = wp.tid()
-    block = int(2)
-    if i < q_count:
-        block = 1
+    block = groups[i]
+    group_count = maxima.shape[0] / 3
     for k in range(2):
         part = int(0)
         if k == 1:
@@ -488,12 +515,12 @@ def _residual_norm_sums(
         if maxima[part] > 0.0:
             v = true_r[i] / maxima[part]
             wp.atomic_add(sums, part, v * v)
-        if maxima[3 + part] > 0.0:
-            v = gap[i] / maxima[3 + part]
-            wp.atomic_add(sums, 3 + part, v * v)
-        if initial and maxima[6 + part] > 0.0:
-            v = rhs[i] / maxima[6 + part]
-            wp.atomic_add(sums, 6 + part, v * v)
+        if maxima[group_count + part] > 0.0:
+            v = gap[i] / maxima[group_count + part]
+            wp.atomic_add(sums, group_count + part, v * v)
+        if initial and maxima[2 * group_count + part] > 0.0:
+            v = rhs[i] / maxima[2 * group_count + part]
+            wp.atomic_add(sums, 2 * group_count + part, v * v)
 
 
 @wp.kernel
@@ -508,7 +535,7 @@ def _finish_norms(
     if state[0].status != _RUNNING or error[0] != 0:
         return
     i = wp.tid()
-    if i < 6 or initial:
+    if i < 2 * norms.shape[0] / 3 or initial:
         value = maxima[i] * wp.sqrt(sums[i])
         norms[i] = value
         if not wp.isfinite(value):
@@ -538,18 +565,17 @@ def _checkpoint_decision(
     ratios = wp.vec3(0.0)
     drifts = wp.vec3(0.0)
     valid = bool(True)
-    max_drift64 = max_block_drift(
-        wp.vec3(norms[3], norms[4], norms[5]), wp.vec3(norms[0], norms[1], norms[2]), params.floors
-    )
-    for k in range(3):
-        ratios[k] = norms[k] / wp.max(norms[6 + k], params.floors[k])
-        # The host diagnostic path uses double arithmetic for this decision.
-        # Clamp only the report field, not the comparison; a huge finite gap
-        # ratio requests replacement instead of overflowing its float32 field.
-        drift64 = block_drift(norms[3 + k], norms[k], params.floors[k])
-        drifts[k] = float(wp.min(drift64, wp.float64(3.4028234663852886e38)))
-        if not wp.isfinite(ratios[k]):
+    group_count = params.floors.shape[0]
+    max_drift64 = max_block_drift(norms, group_count, params.floors)
+    for k in range(group_count):
+        if not wp.isfinite(norms[k] / wp.max(norms[2 * group_count + k], params.floors[k])):
             valid = False
+    for k in range(3):
+        group = params.aliases[k]
+        if group >= 0:
+            ratios[k] = norms[group] / wp.max(norms[2 * group_count + group], params.floors[group])
+            drift64 = block_drift(norms[group_count + group], norms[group], params.floors[group])
+            drifts[k] = float(wp.min(drift64, wp.float64(3.4028234663852886e38)))
     if not valid or not wp.isfinite(max_drift64):
         state[0] = _failed(s, _NONFINITE, slot)
         return
@@ -558,12 +584,12 @@ def _checkpoint_decision(
     s.last_true_slot = slot
     s.residual_current = 1
     if residual_converged(
-        wp.vec3(norms[0], norms[1], norms[2]),
-        wp.vec3(norms[6], norms[7], norms[8]),
+        norms,
+        2 * group_count,
         params.floors,
         params.tolerance,
         params.absolute_tolerance,
-        wp.vec3(params.residual_norm_limits[0], params.residual_norm_limits[1], params.residual_norm_limits[2]),
+        params.residual_norm_limits,
     ):
         s.status = _SUCCESS
         s.enabled = 0

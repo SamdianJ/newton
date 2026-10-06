@@ -1,0 +1,1 @@
+Integrate actor coupling with Monolithic device checks and canonical articulation–tet performance optimizations; retain native actor reductions for mixed or permuted layouts and reject unsupported performance replay layouts.

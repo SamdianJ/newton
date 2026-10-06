@@ -18,6 +18,9 @@ def pcg_input(workspace, rhs, y, *, config, warm_start, delta, **kwargs):
     """Capture live inputs before the production adapter mutates its outputs."""
     if workspace.pcg_mode != "production" or workspace._study_soft is not None or delta is None:
         raise ValueError("Only ordinary production PCG with explicit delta is supported")
+    layout = workspace.layout
+    if layout.rigid_ranges or layout.q_scalar_offset != 0 or layout.x_scalar_offset != layout.q_dof_count:
+        raise ValueError("PCG replay requires canonical A+T; mixed/permuted layouts need a new adapter")
     matrix = workspace.k_global_scalar_bsr
     offsets = matrix.offsets.numpy().copy()
     count = int(offsets[-1])

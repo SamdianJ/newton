@@ -38,7 +38,7 @@ def test_segments_continuous(test, device):
         test.assertEqual(first.keys(), second.keys())
         for name in first:
             np.testing.assert_allclose(first[name], second[name], rtol=2e-5, atol=2e-6, err_msg=name)
-    test.assertEqual(set(cache.captures), {"assembly_initialize", "scaling", "factor"})
+    test.assertEqual(set(cache.captures), {"assembly_initialize", "scalar_reduction", "scaling", "factor"})
     test.assertGreater(cache.replays["assembly_initialize"], cache.captures["assembly_initialize"])
     test.assertEqual(cache.captures["assembly_initialize"], 1)
 
@@ -138,10 +138,10 @@ def test_factor_scaling_and_failures(test, device):
             for a, b in zip((workspace.scale, workspace._q_cholesky, workspace._x_cholesky), expected, strict=True):
                 np.testing.assert_allclose(a.numpy(), b, rtol=1e-6, atol=1e-7)
     before = cache.captures["factor"]
-    workspace.ax_internal_bsr3.values = wp.clone(workspace.ax_internal_bsr3.values)
+    workspace.k_global_scalar_bsr.values = wp.clone(workspace.k_global_scalar_bsr.values)
     test.assertEqual(workspace.factor_actor_preconditioner(generation=generation, pivot_tolerance=0), 0)
     test.assertEqual(cache.captures["factor"], before + 1)
-    workspace.aq_actor_dense.fill_(-1e10)
+    linear_tests._replace_q_block(workspace, np.full((workspace.layout.q_dof_count,) * 2, -1e10, dtype=np.float32))
     test.assertEqual(
         workspace.factor_actor_preconditioner(generation=generation, pivot_tolerance=0),
         linear_types.MonolithicLinearStatus.NON_POSITIVE_PIVOT,

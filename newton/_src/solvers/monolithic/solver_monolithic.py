@@ -18,6 +18,7 @@ from ...sim import JointType
 from ..solver import SolverBase
 from . import coupled_kernels as kernels
 from . import iteration_device, state_checks
+from .actors import ActorTable
 from .articulation import ArticulationObjective, _TreeKinematics
 from .articulation_state import _predict, _recover_history
 from .collision import _validate_and_collect_boundary_faces
@@ -33,6 +34,7 @@ from .linear_types import (
     MonolithicLinearLayout,
     MonolithicLinearStatus,
 )
+from .rigid import RigidObjective, _scatter_residual, _scatter_tangent
 from .segment_graph import _SegmentGraphCache
 from .solver_types import (
     JointTerms,
@@ -117,9 +119,14 @@ class SolverMonolithic(SolverBase):
         precision=Precision.FP64,
         fp32_absolute_tolerance=None,
     ):
+        self._actors = ActorTable.from_model(model)
+        layout = MonolithicLinearLayout.from_actors(self._actors)
+        self._layout = layout
+        self._articulation_actor = next(actor for actor in self._actors.actors if actor.kind == "articulation")
         self._precision = self.Precision(precision)
         self._dtype = wp.float64 if self._precision == self.Precision.FP64 else wp.float32
         self._numpy_dtype = np.float64 if self._precision == self.Precision.FP64 else np.float32
+        self._rigid = RigidObjective(model, self._actors, dtype=self._dtype)
         if fp32_absolute_tolerance is not None:
             if self._dtype != wp.float32 or isinstance(fp32_absolute_tolerance, (bool, np.bool_)):
                 raise ValueError("fp32_absolute_tolerance requires FP32 and a positive finite scalar")
@@ -159,10 +166,20 @@ class SolverMonolithic(SolverBase):
         self._tet = TetObjective(
             model, material_model=material_model, mass_mode=mass_mode, density=tet_rest_density, dtype=self._dtype
         )
+        dynamic_counts = np.count_nonzero(self._tet.mapping.numpy()[model.tet_indices.numpy()] >= 0, axis=1)
+        base_triplets = (
+            layout.q_dof_count**2
+            + 36 * self._rigid.count
+            + 9 * (layout.dynamic_particle_count + sum(int(k) ** 2 for k in dynamic_counts))
+        )
         self._contact = ContactObjective(
             model,
             self._tet.mapping.numpy(),
-            q_dof_count=model.joint_dof_count,
+            q_dof_count=self._articulation_actor.dof_count,
+            layout=layout,
+            articulation_actor=self._articulation_actor,
+            actors=self._actors,
+            base_triplet_count=base_triplets,
             contact_model=contact_model,
             normal_stiffness=contact_stiffness,
             friction_coefficient=friction_coefficient,
@@ -201,6 +218,11 @@ class SolverMonolithic(SolverBase):
             "alignment_policy": np.frombuffer(alignment_policy.encode(), dtype=np.uint8),
             "heuristic_energy": np.array([allow_nonconservative_energy], dtype=np.uint8),
         }
+        if self._rigid.count:
+            self._coupled_config.update(
+                rigid_contact_pairs=self._rigid.values["shape_contact_pairs"],
+                rigid_policy=np.array([1e-7, 1e-6, 2.5e-8, 1e-5, 1e-10, 9.100770221088748e-10, 1]),
+            )
         if self._dtype == wp.float32:
             self._coupled_config["quaternion_norm_tolerance"] = np.array([self._contact.quaternion_norm_tolerance])
         if fp32_absolute_tolerance is not None:
@@ -231,9 +253,11 @@ class SolverMonolithic(SolverBase):
         if not isinstance(joint_terms, self.JointTerms):
             raise ValueError("joint_terms must be SolverMonolithic.JointTerms")
         options = {name: getattr(joint_terms, name) for name in joint_terms.__dataclass_fields__}
-        self._joint_terms = JointParameters(model, **options)
+        self._joint_terms = JointParameters(model, actor=self._articulation_actor, **options)
         for name in ("joint_target_ke", "joint_target_kd", "joint_limit_ke", "joint_limit_kd", "joint_friction"):
-            if name not in self._joint_terms.allowed_properties and np.any(getattr(model, name).numpy() != 0):
+            if name not in self._joint_terms.allowed_properties and np.any(
+                getattr(model, name).numpy()[list(self._articulation_actor.dof_indices)] != 0
+            ):
                 raise ValueError(f"Disabled joint term has nonzero parameters: {name}")
         parameters = self._joint_terms.params.numpy()
         self._kinematics = self._make_kinematics(
@@ -295,15 +319,17 @@ class SolverMonolithic(SolverBase):
                 merit_absolute_q=fp32_absolute_tolerance,
                 merit_absolute_x=fp32_absolute_tolerance,
             )
-        n, nq, device = self._tet.ids.size, model.joint_dof_count, model.device
-        pattern = build_tet_triplet_pattern(model.tet_indices.numpy(), self._tet.mapping.numpy(), x_dof_start=nq)
+        n, nq, device = layout.dynamic_particle_count, layout.q_dof_count, model.device
+        pattern = build_tet_triplet_pattern(
+            model.tet_indices.numpy(), self._tet.mapping.numpy(), x_dof_start=layout.x_scalar_offset
+        )
         self._tet_assembly = create_tet_assembly_workspace(
             pattern, tet_count=model.tet_count, device=device, physics=self._tet.physics
         )
         self._linear = MonolithicLinearWorkspace(
-            MonolithicLinearLayout(nq, n),
+            layout,
             MonolithicLinearCapacities(
-                nq * nq + len(pattern.global_rows) + capacity * (nq + 9) ** 2,
+                nq * nq + len(pattern.global_rows) + 36 * self._rigid.count + self._contact.triplet_capacity,
                 len(pattern.ax_rows),
                 capacity,
                 self.linear_max_iterations,
@@ -313,22 +339,32 @@ class SolverMonolithic(SolverBase):
             device=device,
             pcg_mode=self.pcg_mode.value,
             use_cuda_graph=self._use_cuda_graph,
+            contact_support=self._contact.factor_support,
         )
+        rigid_rows = np.repeat(self._rigid.rows_numpy, 6, axis=1).ravel()
+        rigid_columns = np.tile(self._rigid.rows_numpy, (1, 6)).ravel()
+        self._rigid_triplet_offset = nq * nq + len(pattern.global_rows)
         self._linear._set_fixed_triplet_pattern(
-            global_rows=np.r_[np.repeat(np.arange(nq, dtype=np.int32), nq), pattern.global_rows],
-            global_columns=np.r_[np.tile(np.arange(nq, dtype=np.int32), nq), pattern.global_columns],
+            global_rows=np.r_[np.repeat(layout.indices("articulation"), nq), pattern.global_rows, rigid_rows],
+            global_columns=np.r_[np.tile(layout.indices("articulation"), nq), pattern.global_columns, rigid_columns],
             internal_rows=pattern.ax_rows,
             internal_columns=pattern.ax_columns,
         )
         for name in ("_rhs", "_y", "_delta", "_diagonal"):
-            setattr(self, name, wp.zeros(nq + 3 * n, dtype=float, device=device))
-        self._complete_r = wp.zeros(nq + 3 * n, dtype=self._dtype, device=device)
+            setattr(self, name, wp.zeros(layout.scalar_dof_count, dtype=float, device=device))
+        self._complete_r = wp.zeros(layout.scalar_dof_count, dtype=self._dtype, device=device)
         self._post_r, self._post_error = wp.zeros_like(self._complete_r), wp.zeros_like(self._complete_r)
         self._tet_r32 = wp.zeros(n, dtype=wp.vec3, device=device)
         self._frozen_force = wp.zeros(model.particle_count, dtype=wp.vec3, device=device)
         self._frozen_gravity = wp.zeros_like(model.gravity)
         self._out_backup = None
         self._dt = None
+        # P6a reductions assume contiguous A -> T with no rigid blocks.
+        self._device_iteration = (
+            not self._rigid.count
+            and self._layout.q_scalar_offset == 0
+            and self._layout.x_scalar_offset == self._kinematics.count
+        )
         iteration_device.initialize(self)
 
     def _freeze_sdf(self, model):
@@ -360,12 +396,14 @@ class SolverMonolithic(SolverBase):
         fields = dict(extra_config)
         fields.update(self._physics_values)
         fields.update(self._contact.values)
+        if self._contact.actor_samples is not None:
+            fields.update(self._contact.actor_samples.fields)
         fields.update(self._coupled_config)
         fields.update(self._sdf_fields)
-        return _TreeKinematics(model, extra_config=fields, dtype=self._dtype)
+        return _TreeKinematics(model, actor=self._articulation_actor, extra_config=fields, dtype=self._dtype)
 
     def _make_states(self):
-        return CoupledState(self._kinematics)
+        return CoupledState(self._kinematics, self._actors, self._rigid)
 
     def create_state(self, *, dt, source=None):
         """Initialize full integration history with positive dt, optionally from ordinary model state."""
@@ -373,7 +411,12 @@ class SolverMonolithic(SolverBase):
 
     def reset_state(self, state, *, dt):
         """Reinitialize history at current coordinates and clear published contact forces."""
-        self._states.reset(state, dt=dt)
+        backup = self._states._copy_unchecked(state)
+        try:
+            self._states.reset(state, dt=dt)
+        except Exception:
+            state.assign(backup)
+            raise
 
     def save_checkpoint(self, state, path):
         """Atomically save complete NPZ state, appending .npz as in NumPy's path API."""
@@ -392,7 +435,12 @@ class SolverMonolithic(SolverBase):
 
     def load_checkpoint(self, state, path):
         """Validate a checkpoint in scratch before replacing the target state."""
-        self._states.load_checkpoint(state, path)
+        backup = self._states.copy(state)
+        try:
+            self._states.load_checkpoint(state, path)
+        except Exception:
+            state.assign(backup)
+            raise
 
     def get_contact_forces(self, state):
         """Return an independent, read-only snapshot of this state's final contact forces."""
@@ -437,7 +485,16 @@ class SolverMonolithic(SolverBase):
         """Return the immutable nonlinear precision; rebuild to change it."""
         return self._precision
 
+    def _validate_components(self):
+        """Guard solver-owned storage without rereading immutable Model inputs."""
+        if self._layout != self._linear.layout or self._layout.identity != self._actors.identity:
+            raise ValueError("Actor layout changed; rebuild solver")
+        for name, source in self._rigid._maps.items():
+            if getattr(self._rigid, name) is not source:
+                raise ValueError(f"Rigid mapping changed: {name}")
+
     def step(self, state_in, state_out, control, contacts=None, dt=0.0):
+        self._validate_components()
         self._stopped_failure = None
         if contacts is not None or not math.isfinite(dt) or dt <= 0:
             raise ValueError("Articulation step requires no contacts and finite positive dt")
@@ -447,7 +504,7 @@ class SolverMonolithic(SolverBase):
         for name in ("joint_f", "joint_target_q", "joint_target_qd"):
             array = getattr(control, name, None)
             if not isinstance(array, wp.array) or (array.shape, array.dtype, array.device) != (
-                (self._kinematics.count,),
+                (self.model.joint_target_q.size if name == "joint_target_q" else self.model.joint_dof_count,),
                 wp.float32,
                 self.model.device,
             ):
@@ -456,12 +513,14 @@ class SolverMonolithic(SolverBase):
         self._input_status.zero_()
         wp.launch(
             kernels.freeze_step_forces,
-            max(k.count, k.bodies, self.model.gravity.size),
+            max(self.model.joint_dof_count, self.model.joint_target_q.size, k.bodies, self.model.gravity.size),
             [
                 state_in.body_f,
                 self.model.gravity,
                 k.mass,
                 self.model.body_world,
+                k.body_map,
+                k.dof_map,
                 control.joint_f,
                 control.joint_target_q,
                 control.joint_target_qd,
@@ -478,6 +537,9 @@ class SolverMonolithic(SolverBase):
         self._joint_terms.snapshot_targets(control)
         if input_status[3]:
             raise ValueError("Articulation requires finite forces and zero spatial torque")
+        self._rigid.prepare(state_in, control, dt)
+        if self._rigid.has_torque and self._globalization != "ResNorm" and not self._allow_nonconservative_energy:
+            raise ValueError("Rigid torque energy requires allow_nonconservative_energy=True")
         if self._original is None:
             self._original = self._states.copy(state_in)
             self._accepted = self._states.copy(state_in)
@@ -500,13 +562,13 @@ class SolverMonolithic(SolverBase):
             "configuration": self._kinematics.digest.hex(),
         }
         k, obj = self._kinematics, self._objective
-        k.evaluate(state_in.joint_q)
+        k.evaluate(k.gather_q(state_in))
         wp.copy(obj.tn, k.com)
         wp.copy(obj.rn, k.rotations)
         wp.copy(self._old_joint_t, k.joint_translations)
         wp.copy(self._old_joint_r, k.joint_rotations)
-        wp.copy(obj.qn, state_in.joint_q)
-        wp.copy(obj.vn, state_in.joint_qd)
+        wp.copy(obj.qn, k.gather_q(state_in))
+        wp.copy(obj.vn, k.gather_qd(state_in))
         history = getattr(state_in, self._states.namespace)
         wp.launch(
             _predict,
@@ -528,13 +590,18 @@ class SolverMonolithic(SolverBase):
         wp.launch(
             kernels._coordinate_predictor,
             k.count,
-            [obj.qn, obj.vn, self._dtype(dt), self._accepted.joint_q, self._accepted.joint_qd],
+            [obj.qn, obj.vn, self._dtype(dt), k.coord_map, k.dof_map, self._accepted.joint_q, self._accepted.joint_qd],
             device=self.model.device,
         )
-        k.evaluate(self._accepted.joint_q)
+        if self._rigid.count:
+            wp.copy(self._accepted._monolithic_coupled.rigid_com, self._rigid.predicted_t)
+        k.evaluate(k.gather_q(self._accepted))
         if not self._domain(self._accepted):
-            wp.copy(self._accepted.joint_q, obj.qn)
-            self._accepted.joint_qd.zero_()
+            if self._rigid.count:
+                self._accepted.assign(self._original)
+            else:
+                wp.copy(self._accepted.joint_q, obj.qn)
+                self._accepted.joint_qd.zero_()
         failure = None
         status = self.Status.NONFINITE
         published = False
@@ -578,7 +645,7 @@ class SolverMonolithic(SolverBase):
                     ],
                     device=self.model.device,
                 )
-                k.evaluate(self._accepted.joint_q, state=self._accepted)
+                k.evaluate(k.gather_q(self._accepted), state=self._accepted)
                 self._finish_candidate(self._accepted, dt)
                 self._states.bind(self._accepted, dt=dt)
                 self._states.validate(self._accepted)
@@ -593,6 +660,7 @@ class SolverMonolithic(SolverBase):
         finally:
             if not published:
                 self._restore(state_out)
+                self._variational.pop("actor_contact_pairs", None)
             if isinstance(self._variational.get("residual"), wp.array):
                 self._variational["residual"] = self._variational["residual"].numpy().tolist()
             self._variational["graphs"] = self._graphs.summary()
@@ -677,8 +745,17 @@ class SolverMonolithic(SolverBase):
         wp.copy(self._frozen_force, state_in.particle_f)
         wp.copy(self._frozen_gravity, self.model.gravity)
         k = self._kinematics
-        k.evaluate(state_in.joint_q)
-        self._contact.begin_step(state_in.particle_q, k.poses, k.com, k.jt, k.jw)
+        k.evaluate(k.gather_q(state_in))
+        history = state_in._monolithic_coupled
+        self._contact.begin_step(
+            state_in.particle_q,
+            k.poses,
+            k.com,
+            k.jt,
+            k.jw,
+            rigid_com=history.rigid_com,
+            rigid_rotation=history.rigid_rotation,
+        )
         wp.launch(
             kernels.particle_predict,
             self.model.particle_count,
@@ -695,6 +772,7 @@ class SolverMonolithic(SolverBase):
 
     def _evaluate(self, state, dt, *, build_tangent=True, device_result=False):
         k, contact, tet = self._kinematics, self._contact, self._tet
+        local_q = k.gather_q(state)
         buffers = [
             state.joint_q,
             state.particle_q,
@@ -706,11 +784,16 @@ class SolverMonolithic(SolverBase):
         ]
         if device_result:
             buffers.extend((self._energy_terms, self._energy_sums, self._evaluation_status, self._evaluation_packet))
-        for owner in (self._objective, k, tet, contact, contact.start, contact.current):
+        rigid_history = state._monolithic_coupled
+        buffers.extend([rigid_history.rigid_com, rigid_history.rigid_rotation])
+        for owner in (self._objective, k, tet, contact, contact.start, contact.current, self._rigid):
             buffers.extend(value for value in vars(owner).values() if isinstance(value, wp.array))
+        if contact.actor_contact is not None:
+            buffers.extend(contact.actor_contact.buffers())
 
         def evaluate():
-            self._objective.evaluate(state.joint_q, dt, build_tangent=build_tangent)
+            self._objective.evaluate(local_q, dt, build_tangent=build_tangent)
+            self._rigid.evaluate(state, dt, build_tangent)
             tet.evaluate(
                 state.particle_q,
                 self._original.particle_q,
@@ -720,11 +803,33 @@ class SolverMonolithic(SolverBase):
                 dt=dt,
                 min_det_f_guard=self._guard,
             )
-            contact.evaluate(state.particle_q, k.poses, k.com, k.jt, k.jw, dt=dt)
+            contact.evaluate(
+                state.particle_q,
+                k.poses,
+                k.com,
+                k.jt,
+                k.jw,
+                dt=dt,
+                rigid_com=rigid_history.rigid_com,
+                rigid_rotation=rigid_history.rigid_rotation,
+            )
             wp.launch(
                 kernels.combine,
                 self._complete_r.size,
-                [self._objective.residual, tet.residual, contact.residual, self._complete_r],
+                [
+                    self._objective.residual,
+                    tet.residual,
+                    contact.residual,
+                    self._layout.q_scalar_offset,
+                    self._layout.x_scalar_offset,
+                    self._complete_r,
+                ],
+                device=self.model.device,
+            )
+            wp.launch(
+                _scatter_residual,
+                (self._rigid.count, 6),
+                [self._rigid.rows, self._rigid.residual, self._complete_r],
                 device=self.model.device,
             )
 
@@ -732,7 +837,10 @@ class SolverMonolithic(SolverBase):
                 iteration_device.evaluate(self)
 
         self._graphs.run(
-            "coupled_objective", (self.precision.value, dt, build_tangent, device_result), buffers, evaluate
+            "coupled_objective",
+            (self._layout.identity, self.precision.value, dt, build_tangent, device_result),
+            buffers,
+            evaluate,
         )
         self._current_state = state
         if device_result:
@@ -756,6 +864,7 @@ class SolverMonolithic(SolverBase):
         contact._evaluated = True
         residual = self._complete_r.numpy().copy()
         parts = np.r_[
+            self._rigid.energy.numpy(),
             self._objective.link_energy.numpy(),
             self._objective.joint_energy.numpy(),
             tet.parts.numpy(),
@@ -774,7 +883,7 @@ class SolverMonolithic(SolverBase):
         return residual
 
     def _conservative_energy(self):
-        return self._contact.conservative_energy
+        return self._contact.conservative_energy and not self._rigid.has_torque
 
     def _trial_evaluation(self, dt, *, device_result=False):
         try:
@@ -790,14 +899,18 @@ class SolverMonolithic(SolverBase):
             [
                 self._accepted.joint_q,
                 self._delta,
+                self._layout.q_scalar_offset,
                 self._dtype(alpha),
                 self._objective.qn,
                 self._dtype(dt),
+                self._kinematics.coord_map,
+                self._kinematics.dof_map,
                 self._trial.joint_q,
                 self._trial.joint_qd,
             ],
             device=self.model.device,
         )
+        self._rigid.trial(self._accepted, self._trial, self._delta, alpha)
         wp.launch(
             kernels.particle_trial,
             self.model.particle_count,
@@ -806,7 +919,7 @@ class SolverMonolithic(SolverBase):
                 self._original.particle_q,
                 self._tet.mapping,
                 self._delta,
-                self._kinematics.count,
+                self._layout.x_scalar_offset,
                 self._dtype(alpha),
                 self._dtype(dt),
                 self._trial.particle_q,
@@ -832,10 +945,29 @@ class SolverMonolithic(SolverBase):
             )
             return self._effective_device
         ids = self._dynamic_ids_host
-        return np.r_[
-            self._trial.joint_q.numpy() - self._accepted.joint_q.numpy(),
-            (self._trial.particle_q.numpy()[ids] - self._accepted.particle_q.numpy()[ids]).ravel(),
-        ]
+        displacement = np.empty(self._layout.scalar_dof_count, dtype=self._numpy_dtype)
+        displacement[self._layout.indices("articulation")] = (
+            self._trial.joint_q.numpy()[list(self._articulation_actor.coord_indices)]
+            - self._accepted.joint_q.numpy()[list(self._articulation_actor.coord_indices)]
+        )
+        displacement[self._layout.indices("tet")] = (
+            self._trial.particle_q.numpy()[ids] - self._accepted.particle_q.numpy()[ids]
+        ).ravel()
+        if self._rigid.count:
+            a, b = self._accepted._monolithic_coupled, self._trial._monolithic_coupled
+            displacement[self._rigid.rows_numpy[:, :3]] = b.rigid_com.numpy() - a.rigid_com.numpy()
+            # Each trial is exactly the left Exp(alpha*delta) retraction within the local domain.
+            qa, qb = a.rigid_rotation.numpy(), b.rigid_rotation.numpy()
+            vector = qb[:, 3:] * -qa[:, :3] + qa[:, 3:] * qb[:, :3] + np.cross(qb[:, :3], -qa[:, :3])
+            scalar = np.sum(qb * qa, axis=1)
+            sign = np.where(scalar < 0, -1, 1)
+            vector *= sign[:, None]
+            length = np.linalg.norm(vector, axis=1)
+            factor = np.divide(
+                2 * np.arctan2(length, abs(scalar)), length, out=np.full_like(length, 2), where=length > 0
+            )
+            displacement[self._rigid.rows_numpy[:, 3:]] = vector * factor[:, None]
+        return displacement
 
     def _assemble(self, iteration, *, device_result=False):
         k, linear, obj = self._kinematics, self._linear, self._objective
@@ -877,6 +1009,19 @@ class SolverMonolithic(SolverBase):
         if self._tet_assembly.failure_flags.numpy()[0]:
             raise _StepFailure(self.Status.TET_PROJECTION_FAILURE, "Invalid tet tangent")
         self._contact.assemble_tangent(assembly)
+        wp.launch(
+            _scatter_tangent,
+            (self._rigid.count, 6, 6),
+            [
+                self._rigid.tangent,
+                self._rigid.rows,
+                self._rigid.diagonal,
+                self._rigid_triplet_offset,
+                assembly.global_scalar_triplets.values,
+                self._diagonal,
+            ],
+            device=self.model.device,
+        )
         if self._contact.flags.numpy()[0]:
             status = (
                 self.Status.CONTACT_OVERFLOW
@@ -898,6 +1043,8 @@ class SolverMonolithic(SolverBase):
                 self._tet.ids,
                 self._tet.physics.dynamic_mass_diagonal,
                 self._dtype(self._dt),
+                self._layout.q_scalar_offset,
+                self._layout.x_scalar_offset,
                 self._diagonal,
             ],
             device=self.model.device,
@@ -917,19 +1064,26 @@ class SolverMonolithic(SolverBase):
         buffers = [b.offsets, b.columns, b.values, self._delta, self._post_r, self._linear.scale, self._post_error]
         self._graphs.run(
             "coupled_posterior",
-            (self.precision.value,),
+            (
+                self._layout.identity,
+                self.precision.value,
+            ),
             buffers,
             lambda: wp.launch(kernels.sparse_posterior, self._post_error.size, buffers, device=self.model.device),
         )
         return self._post_error if device_result else self._post_error.numpy().copy()
 
     def _validate_final(self, dt, status):
-        energy, residual, _ = self._evaluate(self._accepted, dt, device_result=True)
-        wp.copy(self._accepted_r, residual)
-        _, scale = self._assemble(self._metrics["nonlinear_iterations"], device_result=True)
-        values = measure(self, self._accepted_r, self._reference_residual, scale)
-        wp.copy(self._stats_residual, self._accepted_r)
-        self._variational.update(objective_total=energy, residual=self._stats_residual)
+        device = self._device_iteration
+        energy, residual, _ = self._evaluate(self._accepted, dt, device_result=device)
+        if device:
+            wp.copy(self._accepted_r, residual)
+            residual = self._accepted_r
+        _, scale = self._assemble(self._metrics["nonlinear_iterations"], device_result=device)
+        values = measure(self, residual, self._reference_residual, scale)
+        if device:
+            wp.copy(self._stats_residual, residual)
+        self._variational.update(objective_total=energy, residual=self._stats_residual if device else residual.tolist())
         # Objective/scaling boundaries already check every residual/scale entry on device.
         if not np.isfinite(energy):
             raise _StepFailure(self.Status.NONFINITE, "Final coupled candidate contains nonfinite E/r/scale")
@@ -941,27 +1095,34 @@ class SolverMonolithic(SolverBase):
             raise _StepFailure(self.Status.NONLINEAR_STAGNATION, "Final coupled candidate failed strict physical gates")
 
     def _finish_candidate(self, state, dt):
+        self._rigid.recover(state, dt)
         contact, k = self._contact, self._kinematics
         history = getattr(state, self._states.namespace)
         arrays = [history.contact_joint_force, history.contact_particle_force, history.contact_body_force]
         for array in arrays:
             array.zero_()
-        if contact.count:
+        if contact.legacy_count:
             wp.launch(
                 kernels.contact_forces,
-                contact.count,
+                contact.legacy_count,
                 [
                     contact.current,
                     contact.local_residual,
                     contact.shapes,
                     contact.bodies,
+                    contact.body_local,
                     contact.triangles,
                     state.particle_q,
                     k.com,
+                    k.dof_map,
                     *arrays,
                 ],
                 device=self.model.device,
             )
+        if contact.actor_contact is not None:
+            self._variational["actor_contact_pairs"] = contact.actor_contact.publish(state, k)
+            for pair in self._variational["actor_contact_pairs"]:
+                pair["force_generation"] = self._step_generation
         self._force_status.zero_()
         for index, array in enumerate(arrays):
             values = state_checks.scalar_view(array)
@@ -981,12 +1142,12 @@ class SolverMonolithic(SolverBase):
         state.assign(self._out_backup)
 
     def _domain(self, state):
-        return iteration_device.domain(self, state, int(JointType.REVOLUTE))
+        return iteration_device.domain(self, state, int(JointType.REVOLUTE)) and self._rigid.domain(state)
 
     def _joint_force_metrics(self, state):
         """Bind scalar force diagnostics to the successfully published state."""
         p = self._joint_parameters_host
-        q, v = state.joint_q.numpy(), state.joint_qd.numpy()
+        q, v = self._kinematics.gather_q(state).numpy(), self._kinematics.gather_qd(state).numpy()
         raw = p[:, 0] * (q - self._objective.qt.numpy()) + p[:, 1] * (v - self._objective.vt.numpy())
         pd = -np.clip(raw, -p[:, 2], p[:, 2])
         limit, power = np.zeros_like(q), np.zeros_like(q)

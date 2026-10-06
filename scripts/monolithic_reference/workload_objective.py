@@ -31,6 +31,8 @@ TOPOLOGY = {
 
 def arrays_for(run):
     """Enumerate a bounded set of numerical buffers; exclude texture descriptors."""
+    if not run._device_iteration:
+        raise ValueError("Objective/assembly replay requires canonical A+T; mixed/permuted layouts need a new adapter")
     arrays = {"solver." + name: getattr(run, name) for name in SOLVER_ARRAYS}
     owners = {name: getattr(run, name) for name in OWNERS}
     owners.update({"contact.start": run._contact.start, "contact.current": run._contact.current})

@@ -11,7 +11,7 @@ from .linear_types import (
     MonolithicPcgConfig,
     MonolithicPcgWarmStart,
 )
-from .pcg_common import decide_restart, residual_converged
+from .pcg_common import decide_restart, group_policy, residual_converged
 from .preconditioner import _combine_vectors
 
 
@@ -128,26 +128,26 @@ def _pack_monolithic_pcg_residual(
     status: wp.array[int],
     ratios: wp.array[float],
     norms: wp.array[float],
-    floors: wp.vec3,
+    floors: wp.array[float],
     rtol: float,
     atol: float,
-    limits: wp.vec3,
+    limits: wp.array[float],
+    aliases: wp.array[int],
     packet: wp.array[_MonolithicPcgPacket],
 ):
     value = _MonolithicPcgPacket()
     value.status = status[0]
-    value.ratios = wp.vec3(ratios[0], ratios[1], ratios[2])
-    value.check = int(
-        residual_converged(
-            wp.vec3(norms[0], norms[1], norms[2]), wp.vec3(norms[3], norms[4], norms[5]), floors, rtol, atol, limits
-        )
-    )
+    value.ratios = wp.vec3(0.0)
+    for k in range(3):
+        if aliases[k] >= 0:
+            value.ratios[k] = ratios[aliases[k]]
+    value.check = int(residual_converged(norms, floors.shape[0], floors, rtol, atol, limits))
     packet[0] = value
 
 
 @wp.kernel
 def _cache_monolithic_pcg_denominator(norms: wp.array[float], floor: wp.float64, denominator: wp.array[wp.float64]):
-    denominator[0] = wp.max(wp.float64(norms[3]), floor)
+    denominator[0] = wp.max(wp.float64(norms[norms.shape[0] / 2]), floor)
 
 
 @wp.kernel
@@ -178,13 +178,17 @@ def _record_monolithic_pcg_product(products: wp.array[float], summary: wp.array[
 
 
 @wp.kernel
-def _record_monolithic_pcg_norms(norms: wp.array[float], summary: wp.array[float], initial: bool, first: bool):
+def _record_monolithic_pcg_norms(
+    norms: wp.array[float], aliases: wp.array[int], summary: wp.array[float], initial: bool, first: bool
+):
     if initial:
         summary[2] = norms[0]
     else:
         for i in range(3):
             old = float(summary[3 + i])
-            value = float(norms[i])
+            value = float(0.0)
+            if aliases[i] >= 0:
+                value = float(norms[aliases[i]])
             if first:
                 summary[3 + i] = value
             elif not wp.isfinite(old) or not wp.isfinite(value):
@@ -197,7 +201,7 @@ def _record_monolithic_pcg_norms(norms: wp.array[float], summary: wp.array[float
 def _true_residual_maxima(
     ay: wp.array[float],
     rhs: wp.array[float],
-    q_count: int,
+    groups: wp.array[int],
     residual: wp.array[float],
     maxima: wp.array[float],
     status: wp.array[int],
@@ -209,21 +213,20 @@ def _true_residual_maxima(
     if not wp.isfinite(value) or not wp.isfinite(rhs[i]):
         wp.atomic_max(status, 0, 16)
         return
-    block = int(1)
-    if i >= q_count:
-        block = 2
+    block = groups[i]
+    group_count = maxima.shape[0] / 2
     wp.atomic_max(maxima, 0, wp.abs(value))
     wp.atomic_max(maxima, block, wp.abs(value))
     if compute_rhs:
-        wp.atomic_max(maxima, 3, wp.abs(rhs[i]))
-        wp.atomic_max(maxima, block + 3, wp.abs(rhs[i]))
+        wp.atomic_max(maxima, group_count, wp.abs(rhs[i]))
+        wp.atomic_max(maxima, block + group_count, wp.abs(rhs[i]))
 
 
 @wp.kernel
 def _true_residual_sums(
     residual: wp.array[float],
     rhs: wp.array[float],
-    q_count: int,
+    groups: wp.array[int],
     maxima: wp.array[float],
     sums: wp.array[float],
     status: wp.array[int],
@@ -232,9 +235,8 @@ def _true_residual_sums(
     i = wp.tid()
     if status[0] != 0:
         return
-    block = int(1)
-    if i >= q_count:
-        block = 2
+    block = groups[i]
+    group_count = maxima.shape[0] / 2
     # Each slice has its own scale so a large x block cannot erase a tiny q block.
     for local in range(2):
         index = int(0)
@@ -243,9 +245,9 @@ def _true_residual_sums(
         if maxima[index] > 0.0:
             value = residual[i] / maxima[index]
             wp.atomic_add(sums, index, value * value)
-        if compute_rhs and maxima[index + 3] > 0.0:
-            value = rhs[i] / maxima[index + 3]
-            wp.atomic_add(sums, index + 3, value * value)
+        if compute_rhs and maxima[index + group_count] > 0.0:
+            value = rhs[i] / maxima[index + group_count]
+            wp.atomic_add(sums, index + group_count, value * value)
 
 
 @wp.kernel
@@ -268,21 +270,14 @@ def _compute_true_residual_norms(
 @wp.kernel
 def _compute_monolithic_true_residual_ratios(
     norms: wp.array[float],
-    floor_global: float,
-    floor_q: float,
-    floor_x: float,
+    floors: wp.array[float],
     ratios: wp.array[float],
     status: wp.array[int],
 ):
     i = wp.tid()
     if status[0] != 0:
         return
-    floor = floor_global
-    if i == 1:
-        floor = floor_q
-    elif i == 2:
-        floor = floor_x
-    value = norms[i] / wp.max(norms[i + 3], floor)
+    value = norms[i] / wp.max(norms[i + floors.shape[0]], floors[i])
     ratios[i] = value
     if not wp.isfinite(value):
         wp.atomic_max(status, 0, 16)
@@ -302,7 +297,7 @@ def _diagnostic_block_norms(self, vector) -> None:
         [
             self._diagnostic_zero,
             self._diagnostic_vector,
-            self.layout.q_dof_count,
+            self.row_groups,
             self._diagnostic_vector,
             self._diagnostic_maxima,
             self._diagnostic_status,
@@ -316,7 +311,7 @@ def _diagnostic_block_norms(self, vector) -> None:
         [
             self._diagnostic_vector,
             self._diagnostic_vector,
-            self.layout.q_dof_count,
+            self.row_groups,
             self._diagnostic_maxima,
             self._diagnostic_sums,
             self._diagnostic_status,
@@ -326,7 +321,7 @@ def _diagnostic_block_norms(self, vector) -> None:
     )
     wp.launch(
         _compute_true_residual_norms,
-        6,
+        2 * self.group_count,
         [self._diagnostic_maxima, self._diagnostic_sums, self._diagnostic_norms, self._diagnostic_status],
         device=self.device,
     )
@@ -346,7 +341,7 @@ def _compute_gap_norms_for_restart(self, gap_vector) -> None:
         [
             self._gap_zero,
             self._gap_vector,
-            self.layout.q_dof_count,
+            self.row_groups,
             self._gap_vector,
             self._gap_maxima,
             self._gap_status,
@@ -360,7 +355,7 @@ def _compute_gap_norms_for_restart(self, gap_vector) -> None:
         [
             self._gap_vector,
             self._gap_vector,
-            self.layout.q_dof_count,
+            self.row_groups,
             self._gap_maxima,
             self._gap_sums,
             self._gap_status,
@@ -370,20 +365,21 @@ def _compute_gap_norms_for_restart(self, gap_vector) -> None:
     )
     wp.launch(
         _compute_true_residual_norms,
-        6,
+        2 * self.group_count,
         [self._gap_maxima, self._gap_sums, self._gap_norms, self._gap_status],
         device=self.device,
     )
 
 
 def _should_restart(self, config):
+    self.group_floors.assign(group_policy(self.layout, config)[0])
     wp.launch(
         decide_restart,
         1,
         [
             self._gap_norms,
             self._true_norms,
-            wp.vec3(config.residual_floor_global, config.residual_floor_q, config.residual_floor_x),
+            self.group_floors,
             wp.float64(config.residual_replacement_threshold),
             self._gap_status,
             self._restart_decision,
@@ -400,6 +396,10 @@ def _products_of(self, a, b):
 
 
 def _true_residual(self, rhs, y, config):
+    if not self._pcg_active:
+        floors, limits = group_policy(self.layout, config)
+        self.group_floors.assign(floors)
+        self.group_limits.assign(limits)
     self._status.zero_()
     self.operator.matvec(y, self._ap, self._ap, 1.0, 0.0)
     self._true_sums.zero_()
@@ -413,29 +413,27 @@ def _true_residual(self, rhs, y, config):
     wp.launch(
         _true_residual_maxima,
         y.size,
-        [self._ap, rhs, self.layout.q_dof_count, self._true_r, self._true_maxima, self._status, compute_rhs],
+        [self._ap, rhs, self.row_groups, self._true_r, self._true_maxima, self._status, compute_rhs],
         device=self.device,
     )
     wp.launch(
         _true_residual_sums,
         y.size,
-        [self._true_r, rhs, self.layout.q_dof_count, self._true_maxima, self._true_sums, self._status, compute_rhs],
+        [self._true_r, rhs, self.row_groups, self._true_maxima, self._true_sums, self._status, compute_rhs],
         device=self.device,
     )
     wp.launch(
         _compute_true_residual_norms,
-        6 if compute_rhs else 3,
+        2 * self.group_count if compute_rhs else self.group_count,
         [self._true_maxima, self._true_sums, self._true_norms, self._status],
         device=self.device,
     )
     wp.launch(
         _compute_monolithic_true_residual_ratios,
-        3,
+        self.group_count,
         [
             self._true_norms,
-            config.residual_floor_global,
-            config.residual_floor_q,
-            config.residual_floor_x,
+            self.group_floors,
             self._ratios,
             self._status,
         ],
@@ -456,10 +454,11 @@ def _true_residual(self, rhs, y, config):
             self._status,
             self._ratios,
             self._true_norms,
-            wp.vec3(config.residual_floor_global, config.residual_floor_q, config.residual_floor_x),
+            self.group_floors,
             config.linear_tolerance,
             config.linear_absolute_tolerance,
-            wp.vec3(*(config.residual_norm_limits or (float("inf"),) * 3)),
+            self.group_limits,
+            self.compat_groups,
             self._pcg_packet,
         ],
         device=self.device,
@@ -521,14 +520,14 @@ def _solve_pcg_diagnostic(self, rhs_hat, y, *, generation, warm_start, config):
             wp.launch(
                 _record_monolithic_pcg_norms,
                 1,
-                [self._gap_norms, self._diagnostic_summary, False, gap_samples == 0],
+                [self._gap_norms, self.compat_groups, self._diagnostic_summary, False, gap_samples == 0],
                 device=self.device,
             )
         gap_samples += 1
 
     if not self._current(generation) or not self._scaling_valid:
         return result(MonolithicLinearStatus.STALE_GENERATION)
-    if not self._factor_valid:
+    if not self._factor_is_current():
         return result(MonolithicLinearStatus.PRECONDITIONER_NOT_FACTORED)
     if (
         not isinstance(config, MonolithicPcgConfig)
@@ -540,9 +539,12 @@ def _solve_pcg_diagnostic(self, rhs_hat, y, *, generation, warm_start, config):
         or config.maximum_iterations + 2 > self.capacities.pcg_true_residual_check_count
     ):
         return result(MonolithicLinearStatus.INVALID_ARGUMENT)
-    if warm_start == MonolithicPcgWarmStart.SAME_GENERATION and self._warm_start_key != (generation, y.ptr):
+    if warm_start == MonolithicPcgWarmStart.SAME_GENERATION and self._warm_start_key != self._solve_binding(y):
         return result(MonolithicLinearStatus.STALE_GENERATION)
     self._warm_start_key = None
+    floors, limits = group_policy(self.layout, config)
+    self.group_floors.assign(floors)
+    self.group_limits.assign(limits)
     self._status.zero_()
     if warm_start == MonolithicPcgWarmStart.ZERO:
         y.zero_()
@@ -556,7 +558,7 @@ def _solve_pcg_diagnostic(self, rhs_hat, y, *, generation, warm_start, config):
         wp.launch(
             _record_monolithic_pcg_norms,
             1,
-            [self._diagnostic_norms, self._diagnostic_summary, True, True],
+            [self._diagnostic_norms, self.compat_groups, self._diagnostic_summary, True, True],
             device=self.device,
         )
     stagnation_window = config.stagnation_window
@@ -566,7 +568,7 @@ def _solve_pcg_diagnostic(self, rhs_hat, y, *, generation, warm_start, config):
     if status != MonolithicLinearStatus.SUCCESS:
         return result(status)
     if self._pcg_converged:
-        self._warm_start_key = (generation, y.ptr)
+        self._warm_start_key = self._solve_binding(y)
         return result(MonolithicLinearStatus.SUCCESS)
     wp.copy(self._r, self._true_r)
     self.preconditioner.matvec(self._r, self._z, self._z, 1.0, 0.0)
@@ -641,7 +643,7 @@ def _solve_pcg_diagnostic(self, rhs_hat, y, *, generation, warm_start, config):
             if status != MonolithicLinearStatus.SUCCESS:
                 break
             if self._pcg_converged:
-                self._warm_start_key = (generation, y.ptr)
+                self._warm_start_key = self._solve_binding(y)
                 return result(MonolithicLinearStatus.SUCCESS)
             history.append(max(ratios))
             if (

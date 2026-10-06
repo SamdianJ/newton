@@ -124,7 +124,14 @@ class TestSolverPrecision(unittest.TestCase):
                 run.load_checkpoint(state, path)
             # Simulate the exact old field schema, including its original physical digest.
             legacy = snapshot(state64)
-            del legacy["history.precision"]
+            for name in list(legacy):
+                if name in {
+                    "history.precision",
+                    "history.layout_version",
+                    "history.layout_digest",
+                    "history.actor_layout",
+                } or name.startswith("history.rigid_"):
+                    del legacy[name]
             legacy["history.schema_version"][:] = 2
             np.savez(path, **legacy)
             run64.load_checkpoint(state64, path)

@@ -44,8 +44,10 @@ def history_check(
     if i < digest.shape[0] and digest[i] != expected[i]:
         wp.atomic_max(flags, base + 1, 1)
     if i < q.shape[0]:
-        if q[i] != bound_q[i] or qd[i] != bound_qd[i]:
+        if q[i] != bound_q[i]:
             wp.atomic_max(flags, base + 2, 1)
+    if i < qd.shape[0] and qd[i] != bound_qd[i]:
+        wp.atomic_max(flags, base + 2, 1)
 
 
 @wp.kernel
@@ -83,3 +85,10 @@ def particle_check(
             for axis in range(3):
                 if x[i][axis] != bound_x[i][axis] or v[i][axis] != bound_v[i][axis]:
                     wp.atomic_max(flags, 2, 1)
+
+
+@wp.kernel
+def equal(values: wp.array[Any], expected: wp.array[Any], flags: wp.array[int], slot: int):
+    i = wp.tid()
+    if values[i] != expected[i]:
+        wp.atomic_max(flags, slot, 1)

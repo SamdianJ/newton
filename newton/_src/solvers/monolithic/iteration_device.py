@@ -283,7 +283,7 @@ def domain(solver, state, revolute):
     """Check the local coordinate and rotation domain without host matrices."""
     self, k, obj = solver, solver._kinematics, solver._objective
     flags = self._evaluation_status
-    buffers = [state.joint_q, obj.qn, k.dof_joint, k.types, k.rotations, obj.rn, flags]
+    buffers = [k.gather_q(state), obj.qn, k.dof_joint, k.types, k.rotations, obj.rn, flags]
 
     def execute():
         flags.zero_()

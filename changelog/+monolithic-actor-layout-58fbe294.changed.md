@@ -1,0 +1,1 @@
+Use actor layouts throughout the experimental Monolithic A+T solver and write schema 4 checkpoints; migrate validated canonical A+T schema 2/3 checkpoints on load and enable `--actor-layout-migration` explicitly when comparing old recordings.

@@ -232,7 +232,18 @@ def test_objective(test, device):
                     wp.launch(
                         _coordinate_trial,
                         3,
-                        [base, direction, wp.float64(sign * eps), objective.qn, wp.float64(h), trial, velocity],
+                        [
+                            base,
+                            direction,
+                            0,
+                            wp.float64(sign * eps),
+                            objective.qn,
+                            wp.float64(h),
+                            k.coord_map,
+                            k.dof_map,
+                            trial,
+                            velocity,
+                        ],
                         device=device,
                     )
                     objective.evaluate(trial, h, build_tangent=False)
@@ -418,7 +429,7 @@ def test_fork_alias_and_variable_dt(test, device):
                 getattr(state._monolithic_coupled, name).numpy(),
             )
         np.savez(path, joint_q=state.joint_q.numpy(), joint_qd=state.joint_qd.numpy())
-        with test.assertRaisesRegex(ValueError, "complete articulation"):
+        with test.assertRaisesRegex(ValueError, "Missing checkpoint schema version"):
             solver.load_checkpoint(restored, path)
     # A factory source is initialization; assign is the exact continuation operation.
     reset = solver.create_state(dt=0.001, source=state)

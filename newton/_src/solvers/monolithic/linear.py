@@ -25,6 +25,7 @@ from .bsr import (
     _validate_bsr_finite,
     _validate_triplets,
 )
+from .bsr_reduction import _ScalarBsrReduction
 from .linear_types import (
     MonolithicDenseLinearOracle,
     MonolithicLinearBuildResult,
@@ -37,6 +38,7 @@ from .linear_types import (
     MonolithicPcgWarmStart,
 )
 from .pcg import _MonolithicPcgPacket
+from .pcg_common import group_data
 from .preconditioner import _monolithic_preconditioner_matvec
 
 
@@ -57,6 +59,7 @@ class MonolithicLinearWorkspace:
         device: wp.DeviceLike,
         pcg_mode: str = "diagnostic",
         use_cuda_graph: bool = False,
+        contact_support=None,
     ):
         if pcg_mode not in ("diagnostic", "production"):
             raise ValueError("pcg_mode must be diagnostic or production")
@@ -64,11 +67,22 @@ class MonolithicLinearWorkspace:
             use_cuda_graph and (pcg_mode != "production" or not wp.get_device(device).is_cuda)
         ):
             raise ValueError("use_cuda_graph requires CUDA production PCG and a bool")
+        if contact_support is None and capacities.contact_factor_count * (layout.q_dof_count + 9) >= 2**31:
+            raise ValueError("Contact scalar support exceeds int32 capacity")
+        if capacities.global_scalar_triplet_count >= 2**30:
+            raise ValueError("Scalar sort scratch exceeds int32 capacity")
         self.use_cuda_graph = use_cuda_graph
         self._pcg_mode = pcg_mode
         self._pcg_active = False
         self._rhs_norms_cached = False
         self.layout = layout
+        self._layout_identity = layout
+        membership, aliases = group_data(layout)
+        self.group_count = len(layout.groups)
+        self.row_groups = wp.array(membership, dtype=int, device=device)
+        self.compat_groups = wp.array(aliases, dtype=int, device=device)
+        self.group_floors = wp.ones(self.group_count, dtype=float, device=device)
+        self.group_limits = wp.full(self.group_count, float("inf"), dtype=float, device=device)
         self.capacities = capacities
         self.device = wp.get_device(device)
         if (
@@ -106,6 +120,9 @@ class MonolithicLinearWorkspace:
             self._active_token,
             0,
         )
+        self._scalar_reduction = _ScalarBsrReduction(
+            capacities.global_scalar_triplet_count, self.device, use_cuda_graph=use_cuda_graph
+        )
         self._internal = _create_triplets(
             _MonolithicMat33Triplets,
             capacities.internal_mat33_triplet_count,
@@ -116,17 +133,33 @@ class MonolithicLinearWorkspace:
             0,
         )
         factors = _MonolithicContactFactors()
-        factors.gq = wp.zeros((capacities.contact_factor_count, layout.q_dof_count), dtype=float, device=device)
-        factors.gx_columns = wp.full((capacities.contact_factor_count, 9), -1, dtype=int, device=device)
-        factors.gx_values = wp.zeros((capacities.contact_factor_count, 9), dtype=float, device=device)
+        if contact_support is None:
+            # Standalone component producers declare their own factor support.
+            width = layout.q_dof_count + 9
+            offsets = np.arange(capacities.contact_factor_count + 1, dtype=np.int64) * width
+            columns = np.zeros(int(offsets[-1]), dtype=np.int32)
+            local_indices = np.zeros_like(columns)
+        else:
+            offsets, columns, local_indices = contact_support
+            slots = capacities.contact_factor_count
+            if slots < len(offsets) - 1:
+                columns, local_indices = columns[: offsets[slots]], local_indices[: offsets[slots]]
+                offsets = offsets[: slots + 1]
+            elif slots > len(offsets) - 1:
+                offsets = np.r_[offsets, np.full(slots - len(offsets) + 1, offsets[-1])]
+        if offsets[-1] >= 2**31:
+            raise ValueError("Contact scalar support exceeds int32 capacity")
+        factors.offsets = wp.array(offsets.astype(np.int32), dtype=int, device=device)
+        factors.columns = wp.array(columns, dtype=int, device=device)
+        factors.local_indices = wp.array(local_indices, dtype=int, device=device)
+        factors.values = wp.zeros(len(columns), dtype=float, device=device)
         factors.weights = wp.zeros(capacities.contact_factor_count, dtype=float, device=device)
         factors.kind = wp.zeros(capacities.contact_factor_count, dtype=int, device=device)
         factors.candidate_tid = wp.full(capacities.contact_factor_count, -1, dtype=int, device=device)
         factors.count = wp.zeros(1, dtype=int, device=device)
         factors.status = wp.zeros(1, dtype=int, device=device)
         factors.capacity = capacities.contact_factor_count
-        factors.q_dof_count = layout.q_dof_count
-        factors.dynamic_particle_count = layout.dynamic_particle_count
+        factors.scalar_dof_count = layout.scalar_dof_count
         factors.active_token = self._active_token
         factors.token = 0
         self._factors = factors
@@ -151,23 +184,23 @@ class MonolithicLinearWorkspace:
         for name in ("_r_z", "_old_r_z", "_alpha", "_beta"):
             setattr(self, name, wp.zeros(1, dtype=float, device=device))
         self._products = wp.zeros(3, dtype=float, device=device)
-        self._true_sums = wp.zeros(6, dtype=float, device=device)
-        self._true_maxima = wp.zeros(6, dtype=float, device=device)
-        self._true_norms = wp.zeros(6, dtype=float, device=device)
-        self._true_residual_norms = self._true_norms[:3]
+        self._true_sums = wp.zeros(2 * self.group_count, dtype=float, device=device)
+        self._true_maxima = wp.zeros(2 * self.group_count, dtype=float, device=device)
+        self._true_norms = wp.zeros(2 * self.group_count, dtype=float, device=device)
+        self._true_residual_norms = self._true_norms[: self.group_count]
         if self.pcg_mode == "diagnostic":
             self._diagnostic_vector = wp.zeros(n, dtype=float, device=device)
             self._diagnostic_zero = wp.zeros(n, dtype=float, device=device)
-            self._diagnostic_maxima = wp.zeros(6, dtype=float, device=device)
-            self._diagnostic_sums = wp.zeros(6, dtype=float, device=device)
-            self._diagnostic_norms = wp.zeros(6, dtype=float, device=device)
+            self._diagnostic_maxima = wp.zeros(2 * self.group_count, dtype=float, device=device)
+            self._diagnostic_sums = wp.zeros(2 * self.group_count, dtype=float, device=device)
+            self._diagnostic_norms = wp.zeros(2 * self.group_count, dtype=float, device=device)
             self._diagnostic_status = wp.zeros(1, dtype=int, device=device)
             self._diagnostic_summary = wp.zeros(6, dtype=float, device=device)
         self._gap_vector = wp.zeros(n, dtype=float, device=device)
         self._gap_zero = wp.zeros(n, dtype=float, device=device)
-        self._gap_maxima = wp.zeros(6, dtype=float, device=device)
-        self._gap_sums = wp.zeros(6, dtype=float, device=device)
-        self._gap_norms = wp.zeros(6, dtype=float, device=device)
+        self._gap_maxima = wp.zeros(2 * self.group_count, dtype=float, device=device)
+        self._gap_sums = wp.zeros(2 * self.group_count, dtype=float, device=device)
+        self._gap_norms = wp.zeros(2 * self.group_count, dtype=float, device=device)
         self._gap_status = wp.zeros(1, dtype=int, device=device)
         self._restart_decision = wp.zeros(1, dtype=int, device=device)
         self._pcg_packet = wp.zeros(1, dtype=_MonolithicPcgPacket, device=device)
@@ -175,16 +208,23 @@ class MonolithicLinearWorkspace:
         self.factor_setup_count = 0
         self.factor_failure_count = 0
         self.factor_last_status = None
-        self._ratios = wp.zeros(3, dtype=float, device=device)
+        self._ratios = wp.zeros(self.group_count, dtype=float, device=device)
         self._status = wp.zeros(1, dtype=int, device=device)
         self.floor_count = wp.zeros(1, dtype=int, device=device)
         self._q_preconditioner = wp.zeros_like(self.aq_actor_dense)
         self._q_cholesky = wp.zeros_like(self.aq_actor_dense)
         self._x_preconditioner = wp.zeros(layout.dynamic_particle_count, dtype=wp.mat33, device=device)
         self._x_cholesky = wp.zeros_like(self._x_preconditioner)
+        rigid_rows = np.array([range(start, start + 6) for _, start in layout.rigid_ranges], dtype=np.int32).reshape(
+            -1, 6
+        )
+        self.rigid_rows = wp.array(rigid_rows, dtype=int, device=device)
+        self._rigid_preconditioner = wp.zeros((len(layout.rigid_ranges), 6, 6), dtype=float, device=device)
+        self._rigid_cholesky = wp.zeros_like(self._rigid_preconditioner)
         self._study_soft = None  # Private PR8F research entry; no public solver option.
         self._scaling_valid = False
         self._factor_valid = False
+        self._factor_binding = None
         self._lambda = 0.0
         self._warm_start_key = None
         self.operator = LinearOperator((n, n), wp.float32, self.device, partial(_monolithic_scaled_matvec, self))
@@ -227,6 +267,8 @@ class MonolithicLinearWorkspace:
         )
 
     def begin_assembly(self, generation: MonolithicLinearGeneration) -> MonolithicLinearAssembly:
+        if self.layout != self._layout_identity:
+            raise ValueError("Actor layout changed; rebuild the linear workspace")
         if self._generation is not None and (generation.step_index, generation.assembly_sequence) <= (
             self._generation.step_index,
             self._generation.assembly_sequence,
@@ -279,17 +321,17 @@ class MonolithicLinearWorkspace:
                 "_factors",
                 _MonolithicContactFactors,
                 (
-                    "gq",
-                    "gx_columns",
-                    "gx_values",
+                    "offsets",
+                    "columns",
+                    "local_indices",
+                    "values",
                     "weights",
                     "kind",
                     "candidate_tid",
                     "count",
                     "status",
                     "capacity",
-                    "q_dof_count",
-                    "dynamic_particle_count",
+                    "scalar_dof_count",
                     "active_token",
                 ),
             ),
@@ -305,9 +347,10 @@ class MonolithicLinearWorkspace:
         else:
             buffers = [
                 self.aq_actor_dense,
-                self._factors.gq,
-                self._factors.gx_columns,
-                self._factors.gx_values,
+                self._factors.offsets,
+                self._factors.columns,
+                self._factors.local_indices,
+                self._factors.values,
                 self._factors.weights,
                 self._factors.count,
                 self._factors.status,
@@ -316,7 +359,9 @@ class MonolithicLinearWorkspace:
                 buffers.extend((buffer.rows, buffer.columns, buffer.values, buffer.count, buffer.status))
             if self._fixed_patterns is not None:
                 buffers.extend(array for pattern in self._fixed_patterns for array in pattern)
-            self._segment_graphs.run("assembly_initialize", (), buffers, self._initialize_assembly_device)
+            self._segment_graphs.run(
+                "assembly_initialize", (self.layout.identity,), buffers, self._initialize_assembly_device
+            )
         return MonolithicLinearAssembly(generation, self.aq_actor_dense, self._internal, self._factors, self._global)
 
     def _initialize_assembly_device(self):
@@ -334,9 +379,7 @@ class MonolithicLinearWorkspace:
                     wp.copy(buffer.rows, rows, count=count)
                     wp.copy(buffer.columns, columns, count=count)
                 buffer.count.fill_(count)
-        self._factors.gq.zero_()
-        self._factors.gx_columns.fill_(-1)
-        self._factors.gx_values.zero_()
+        self._factors.values.zero_()
         self._factors.weights.zero_()
 
     def finalize_assembly(self, *, generation: MonolithicLinearGeneration) -> MonolithicLinearBuildResult:
@@ -390,6 +433,15 @@ class MonolithicLinearWorkspace:
                     counts[:2],
                     strict=True,
                 ):
+                    if matrix is self.k_global_scalar_bsr:
+                        self._scalar_reduction.build(
+                            matrix,
+                            triplets,
+                            count,
+                            layout_identity=self.layout.identity,
+                            graphs=self._segment_graphs,
+                        )
+                        continue
                     arrays = (triplets.rows, triplets.columns, triplets.values)
                     # Warp sorts by array length; device count only masks the tail.
                     # Keep empty-capacity arrays intact: slicing them is unsupported.
@@ -438,7 +490,35 @@ class MonolithicLinearWorkspace:
         )
 
     def _current(self, generation) -> bool:
-        return generation == self._generation and self._sealed and self._valid
+        return self.layout == self._layout_identity and generation == self._generation and self._sealed and self._valid
+
+    def _solve_binding(self, y):
+        """Bind warm starts to layout, precision and actual operator/factor storage."""
+        matrix = self.k_global_scalar_bsr
+        arrays = (
+            matrix.offsets,
+            matrix.columns,
+            matrix.values,
+            self.scale,
+            self._q_cholesky,
+            self._x_cholesky,
+            self._rigid_cholesky,
+            self.rigid_rows,
+            self.row_groups,
+        )
+        return (
+            self._generation,
+            y.ptr,
+            self.layout,
+            tuple((a.ptr, a.shape, a.strides, str(a.dtype), str(a.device)) for a in arrays),
+        )
+
+    def _factor_is_current(self):
+        return self._factor_valid and self._factor_binding == self._factor_storage_binding()
+
+    def _factor_storage_binding(self):
+        arrays = (self.scale, self._q_cholesky, self._x_cholesky, self._rigid_cholesky, self.rigid_rows)
+        return self._generation, self.layout, tuple((a.ptr, a.shape, a.strides, a.dtype, a.device) for a in arrays)
 
     def _vector_valid(self, vector) -> bool:
         return (

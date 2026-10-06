@@ -1,0 +1,1 @@
+Add native single-body FREE rigid dynamics, per-body convergence checks and transactional schema-4 continuation to the experimental Monolithic solver; require disabled rigid contact and zero unsupported FREE joint terms.

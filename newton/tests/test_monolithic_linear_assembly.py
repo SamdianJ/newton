@@ -54,13 +54,16 @@ def _contact(factors: _MonolithicContactFactors, triplets: _MonolithicScalarTrip
     slot = _reserve_monolithic_contact_factor(factors)
     if slot < 0:
         return
-    factors.gq[slot, 0] = 2.0
-    factors.gq[slot, 1] = -1.0
+    begin = factors.offsets[slot]
+    factors.columns[begin] = 0
+    factors.values[begin] = 2.0
+    factors.columns[begin + 1] = 1
+    factors.values[begin + 1] = -1.0
     factors.weights[slot] = 3.0
     for j in range(9):
-        factors.gx_columns[slot, j] = j
-        factors.gx_values[slot, j] = float(j + 1) * 0.1
-    _append_monolithic_contact_factor_triplets(factors, slot, triplets, 2)
+        factors.columns[begin + 2 + j] = 2 + j
+        factors.values[begin + 2 + j] = float(j + 1) * 0.1
+    _append_monolithic_contact_factor_triplets(factors, slot, triplets)
 
 
 @wp.kernel
@@ -225,23 +228,28 @@ def _masked_contact(
     if slot < 0:
         return
     factors.weights[slot] = weight
-    factors.gq[slot, 0] = 1.0
-    # Repeated columns must sum; unused fixed-node slots retain -1/0.
-    factors.gx_columns[slot, 0] = column
-    factors.gx_columns[slot, 1] = column
-    factors.gx_values[slot, 0] = 2.0
-    factors.gx_values[slot, 1] = 3.0
-    _append_monolithic_contact_factor_triplets(factors, slot, triplets, 2)
+    begin = factors.offsets[slot]
+    for i in range(factors.offsets[slot], factors.offsets[slot + 1]):
+        factors.columns[i] = 0
+        factors.values[i] = 0.0
+    factors.values[begin] = 1.0
+    # Duplicate global columns must sum, including their cross terms.
+    factors.columns[begin + 1] = 2 + column
+    factors.columns[begin + 2] = 2 + column
+    factors.values[begin + 1] = 2.0
+    factors.values[begin + 2] = 3.0
+    _append_monolithic_contact_factor_triplets(factors, slot, triplets)
 
 
 def test_fixed_contact_and_weight(test, device):
     """Expand repeated columns and fixed-node sentinels, and reject invalid factors."""
     for weight, column, status in [
         (2.0, 0, MonolithicLinearStatus.SUCCESS),
-        (0.0, 0, MonolithicLinearStatus.INVALID_CONTACT_WEIGHT),
+        (0.0, 0, MonolithicLinearStatus.SUCCESS),
         (-1.0, 0, MonolithicLinearStatus.INVALID_CONTACT_WEIGHT),
         (float("nan"), 0, MonolithicLinearStatus.INVALID_CONTACT_WEIGHT),
         (2.0, 9, MonolithicLinearStatus.TRIPLET_INDEX_OUT_OF_RANGE),
+        (0.0, 9, MonolithicLinearStatus.TRIPLET_INDEX_OUT_OF_RANGE),
     ]:
         workspace = _workspace(device)
         generation = MonolithicLinearGeneration(1, 0, 1, 1)
@@ -257,7 +265,7 @@ def test_fixed_contact_and_weight(test, device):
             g = np.zeros(11)
             g[0], g[2] = 1, 5
             np.testing.assert_array_equal(
-                workspace.densify_for_test(generation=generation).raw_matrix, 2 * np.outer(g, g)
+                workspace.densify_for_test(generation=generation).raw_matrix, weight * np.outer(g, g)
             )
 
 
@@ -583,12 +591,9 @@ def _rescale_system(
             for j in range(3):
                 block[i, j] *= scale[2 + 3 * ax.rows[slot] + i] * scale[2 + 3 * ax.columns[slot] + j]
         ax.values[slot] = block
-    for c in range(factors.count[0]):
-        for i in range(2):
-            factors.gq[c, i] = factors.gq[c, i] * scale[i]
-        for i in range(9):
-            if factors.gx_columns[c, i] >= 0:
-                factors.gx_values[c, i] = factors.gx_values[c, i] * scale[2 + factors.gx_columns[c, i]]
+    for c in range(factors.capacity):
+        for i in range(factors.offsets[c], factors.offsets[c + 1]):
+            factors.values[i] = factors.values[i] * scale[factors.columns[i]]
 
 
 def test_pcg_dense_and_allocations(test, device):
@@ -803,11 +808,23 @@ def test_pcg_nonfinite_and_zero(test, device):
     test.assertTrue(np.isnan(result.rho))
 
 
+def _replace_q_block(workspace, block):
+    matrix = workspace.k_global_scalar_bsr
+    offsets, columns, values = matrix.offsets.numpy(), matrix.columns.numpy(), matrix.values.numpy()
+    rows = workspace.layout.indices("articulation")
+    for i, row in enumerate(rows):
+        for index in range(offsets[row], offsets[row + 1]):
+            if columns[index] in rows:
+                j = int(np.flatnonzero(rows == columns[index])[0])
+                values[index] = block[i, j]
+    matrix.values.assign(values)
+
+
 def test_preconditioner_pivots_and_repeated_factor(test, device):
     """Include repeated contact columns and reject indefinite owner Cholesky pivots."""
     workspace, generation = _ready_system(device, contact=False)
-    # Bad owner values cannot be hidden by the independent valid global diagonal.
-    workspace.aq_actor_dense.assign(np.array([[1.0, 2.0], [2.0, 1.0]], dtype=np.float32))
+    # The authoritative BSR diagonal block must expose an indefinite pivot.
+    _replace_q_block(workspace, np.array([[1.0, 2.0], [2.0, 1.0]], dtype=np.float32))
     test.assertEqual(
         workspace.factor_actor_preconditioner(generation=generation, pivot_tolerance=0.0),
         MonolithicLinearStatus.NON_POSITIVE_PIVOT,
@@ -1010,7 +1027,7 @@ def test_factor_diagnostics(test, device):
     test.assertEqual(workspace.factor_setup_count, 1)
     test.assertEqual(workspace.factor_failure_count, 0)
     test.assertEqual(workspace.factor_last_status, MonolithicLinearStatus.SUCCESS)
-    workspace.aq_actor_dense.fill_(-100.0)
+    _replace_q_block(workspace, np.full((2, 2), -100.0, dtype=np.float32))
     workspace.factor_actor_preconditioner(generation=generation, pivot_tolerance=0.0)
     test.assertEqual(workspace.factor_setup_count, 2)
     test.assertEqual(workspace.factor_failure_count, 1)
@@ -1046,6 +1063,21 @@ class TestMonolithicLinear(unittest.TestCase):
         for count in (True, -1, 1.5, 2**31):
             with self.subTest(count=count), self.assertRaises(ValueError):
                 MonolithicLinearCapacities(count, 0, 0, 1, 2)
+
+    def test_layout_capacity_overflow(self):
+        """Reject oversized layouts and fallback CSR support before allocating rows."""
+        for q, particles in ((True, 0), (-1, 0), (1.5, 0), (2**31, 0), (0, 2**30)):
+            with self.subTest(q=q, particles=particles), self.assertRaises(ValueError):
+                MonolithicLinearLayout(q, particles)
+        with self.assertRaises(ValueError):
+            MonolithicLinearLayout(2, 1, q_scalar_offset=1)
+        with self.assertRaisesRegex(ValueError, "Contact scalar support"):
+            MonolithicLinearWorkspace(
+                MonolithicLinearLayout(1, 0),
+                MonolithicLinearCapacities(0, 0, 2**30, 1, 2),
+                None,
+                device="cpu",
+            )
 
 
 for device in get_test_devices():

@@ -223,7 +223,12 @@ def worker(case, output):
                 raise ValueError("Sharpa did not publish its complete trajectory")
         receipt["recording"] = check(recording, case["steps"])
         receipt["comparison"] = compare(
-            reference, recording, envelopes, legacy_fp64=True, native_controls=native_controls
+            reference,
+            recording,
+            envelopes,
+            legacy_fp64=True,
+            native_controls=native_controls,
+            actor_layout_migration=True,
         )
         if receipt["comparison"]["status"] not in ("PASS_EXACT", "PASS_FROZEN_ENVELOPE"):
             raise ValueError("Recording differs outside the frozen envelope")

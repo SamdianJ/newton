@@ -4,7 +4,9 @@
 """Guard exact profile expansion and qualification labels."""
 
 import gzip
+import importlib.util
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -215,6 +217,128 @@ class TestSceneRunner(unittest.TestCase):
         with patch.dict(baseline.sys.modules, {"newton": module}, clear=True):
             with self.assertRaisesRegex(ValueError, "Unexpected module origin"):
                 baseline.module_origins(ROOT, {})
+
+
+class TestManualAcceptance(unittest.TestCase):
+    def setUp(self):
+        path = ROOT.parent.parent / "dev/monolithic/test/run_manual_acceptance.py"
+        if not path.is_file():
+            self.skipTest("Manual launcher belongs to the external Monolithic workspace")
+        spec = importlib.util.spec_from_file_location("manual_acceptance", path)
+        self.launcher = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(self.launcher)
+
+    def test_dry_run(self):
+        """Print the full fixed plan without creating output or starting subprocesses."""
+        with tempfile.TemporaryDirectory() as directory, patch.object(self.launcher.subprocess, "run") as run:
+            output = Path(directory) / "not-created"
+            self.assertEqual(self.launcher.main(["--worktree", str(ROOT), "--output", str(output), "--dry-run"]), 0)
+            run.assert_not_called()
+            self.assertFalse(output.exists())
+
+    def test_collection_and_failures(self):
+        """Preserve failure receipts and launch nightly only after complete actor qualification."""
+        identity = {"commit": "tested", "dirty": False}
+        for failure in (
+            None,
+            "actor_exit",
+            "actor_summary",
+            "nightly_filtered",
+            "nightly_incomplete",
+            "missing",
+            "interrupt",
+            "source",
+        ):
+            with self.subTest(failure=failure), tempfile.TemporaryDirectory() as directory:
+                output = Path(directory) / "batch"
+                calls = []
+
+                def execute(command, failure=failure, calls=calls, **kwargs):
+                    calls.append(command)
+                    self.assertEqual(kwargs["cwd"], ROOT)
+                    self.assertEqual(kwargs["env"]["PYTHONPATH"], str(ROOT))
+                    self.assertNotIn("VIRTUAL_ENV", kwargs["env"])
+                    self.assertEqual(
+                        Path(kwargs["env"]["UV_PROJECT_ENVIRONMENT"]), ROOT.parent / "monolithic-integration/.venv"
+                    )
+                    destination = Path(command[command.index("--output") + 1])
+                    destination.mkdir()
+                    if failure == "interrupt":
+                        raise KeyboardInterrupt()
+                    if destination.name == "actor_coupling":
+                        summary = {
+                            "status": "FAIL" if failure == "actor_summary" else "PASS",
+                            "cases": {n: {"status": "PASS"} for n in ("primary", "restored", "reordered")},
+                        }
+                    else:
+                        self.assertIn("nightly", command)
+                        self.assertNotIn("--case", command)
+                        summary = {
+                            "status": "PASS",
+                            "profile": "nightly",
+                            "filtered": failure == "nightly_filtered",
+                            "complete": True,
+                            "cases": [{"status": "PASS"} for _ in range(9 if failure == "nightly_incomplete" else 10)],
+                        }
+                    if failure != "missing":
+                        (destination / "summary.json").write_text(json.dumps(summary))
+                    return types.SimpleNamespace(returncode=int(failure == "actor_exit"))
+
+                identities = [identity] * 5
+                if failure == "source":
+                    identities[2] = {**identity, "commit": "changed"}
+                with (
+                    patch.object(self.launcher, "source_identity", side_effect=identities),
+                    patch.object(self.launcher.subprocess, "run", side_effect=execute),
+                    patch.dict(
+                        "os.environ",
+                        {"VIRTUAL_ENV": "/wrong", "UV_PROJECT_ENVIRONMENT": "../monolithic-integration/.venv"},
+                    ),
+                ):
+                    code = self.launcher.main(["--worktree", str(ROOT), "--output", str(output)])
+                self.assertEqual(code, 0 if failure is None else 130 if failure == "interrupt" else 1)
+                report = json.loads((output / "summary.json").read_text())
+                self.assertEqual(report["status"], "PASS" if failure is None else "FAIL")
+                self.assertEqual(report["stage_acceptance"], "REVIEW_REQUIRED")
+                expected_calls = 2 if failure in (None, "nightly_filtered", "nightly_incomplete") else 1
+                self.assertEqual(len(calls), expected_calls)
+                if expected_calls == 1:
+                    self.assertEqual(report["phases"]["nightly"]["status"], "NOT_RUN")
+                self.assertTrue((output / "actor_coupling").is_dir())
+                self.assertTrue((output / "RESULTS.md").is_file())
+
+    def test_identity_and_output_refusals(self):
+        """Refuse dirty checkouts and existing output without starting a long test."""
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "existing"
+            output.mkdir()
+            with (
+                patch.object(self.launcher, "source_identity", return_value={"dirty": True}),
+                self.assertRaises(SystemExit),
+            ):
+                self.launcher.main(["--worktree", str(ROOT), "--output", str(output)])
+            with (
+                patch.object(self.launcher, "source_identity", return_value={"dirty": False}),
+                self.assertRaises(FileExistsError),
+            ):
+                self.launcher.main(["--worktree", str(ROOT), "--output", str(output)])
+
+    def test_relative_environment_from_workspace(self):
+        """Resolve an inherited environment relative to the caller before changing checkout."""
+        previous = Path.cwd()
+        shared = ROOT.parent / "monolithic-integration/.venv"
+        try:
+            os.chdir(ROOT.parent.parent)
+            with (
+                tempfile.TemporaryDirectory() as directory,
+                patch.dict("os.environ", {"UV_PROJECT_ENVIRONMENT": os.path.relpath(shared)}),
+                patch.object(self.launcher, "source_identity", return_value={"dirty": False}),
+                patch.object(self.launcher.subprocess, "run", side_effect=ValueError("environment probe")) as run,
+            ):
+                self.assertEqual(self.launcher.main(["--worktree", str(ROOT), "--output", directory + "/batch"]), 1)
+                self.assertEqual(run.call_args.kwargs["env"]["UV_PROJECT_ENVIRONMENT"], str(shared))
+        finally:
+            os.chdir(previous)
 
 
 if __name__ == "__main__":

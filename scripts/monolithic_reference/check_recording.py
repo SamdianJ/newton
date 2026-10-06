@@ -8,6 +8,7 @@ import gzip
 import hashlib
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 
@@ -107,13 +108,199 @@ def check(directory, expected_steps):
     }
 
 
-def compare(reference, actual, envelopes=None, *, legacy_fp64=False, native_controls=None):
+_LAYOUT_FIELDS = {"layout_version", "layout_digest", "actor_layout"}
+_RIGID_FIELDS = {
+    "rigid_com": 3,
+    "rigid_rotation": 4,
+    "rigid_v_com": 3,
+    "rigid_omega": 3,
+    "rigid_vsym": 6,
+    "rigid_bound_com": 3,
+    "rigid_bound_rotation": 4,
+}
+
+
+def _recording_layout(reference, actual, *, native=False):
+    """Authenticate canonical ownership from matching saved Model arrays."""
+    import warp as wp  # noqa: PLC0415
+
+    from newton._src.solvers.monolithic.actors import ActorTable  # noqa: PLC0415
+
+    class ArrayView:
+        def __init__(self, array):
+            self.array, self.shape, self.size = array, array.shape, array.size
+            self.dtype = wp.int32 if array.dtype == np.int32 else array.dtype
+
+        def numpy(self):
+            return self.array
+
+    with np.load(actual / "model.npz", allow_pickle=False) as right:
+        if native and not (reference / "model.npz").exists():
+            # Native Sharpa references retain input digests and states, not Model
+            # arrays. The original digest covers indexed joints, bodies, tet and
+            # collision inputs; verify its declaration and the old Model dimensions.
+            receipt = json.loads((reference / "receipt.json").read_text())
+            with np.load(reference / "initial.npz", allow_pickle=False) as initial:
+                if initial["history.config_digest"].tobytes().hex() != receipt["config_digest"]:
+                    raise ValueError("Native reference physical identity differs")
+                for state_name, model_name in (
+                    ("joint_q", "joint_q"),
+                    ("joint_qd", "joint_qd"),
+                    ("body_q", "body_q"),
+                    ("body_qd", "body_qd"),
+                    ("particle_q", "particle_q"),
+                    ("particle_qd", "particle_qd"),
+                ):
+                    if initial[state_name].shape != right[model_name].shape:
+                        raise ValueError(f"Native reference Model dimensions differ: {state_name}")
+        else:
+            with np.load(reference / "model.npz", allow_pickle=False) as left:
+                if set(left.files) != set(right.files):
+                    raise ValueError("Recording Model schemas differ")
+                for name in left.files:
+                    a, b = left[name], right[name]
+                    if a.shape != b.shape or a.dtype != b.dtype:
+                        raise ValueError(f"Recording Model layouts differ: {name}")
+                    if name in {"particle_colors", "bvh_shape_enabled"}:
+                        # Monolithic does not consume graph coloring or the ray BVH
+                        # index cache. Their contents may be uninitialized or ordered
+                        # by GPU scheduling; retain schema/layout checks above.
+                        same = True
+                    elif name == "shape_source_ptr":
+                        # Mesh handles vary by process; the physical SDF digest
+                        # below authenticates the geometry consumed by this solver.
+                        same = True
+                    elif name == "_texture_sdf_data":
+                        fields = set(a.dtype.names) - {"coarse_texture", "subgrid_texture", "subgrid_start_slots"}
+                        same = all(np.array_equal(a[field], b[field]) for field in fields)
+                    else:
+                        same = np.array_equal(a, b)
+                    if not same:
+                        raise ValueError(f"Recording physical Model differs: {name}")
+        model = SimpleNamespace(**{name: ArrayView(right[name].copy()) for name in right.files})
+    model.joint_count = len(model.joint_type.array)
+    model.joint_coord_count, model.joint_dof_count = model.joint_q.size, model.joint_qd.size
+    model.joint_target_q_start = (
+        model.joint_q_start if model.joint_target_q.size == model.joint_coord_count else model.joint_qd_start
+    )
+    model.articulation_count = model.articulation_end.size
+    model.body_count, model.particle_count = model.body_mass.size, model.particle_inv_mass.size
+    model.shape_count = model.shape_body.size
+    model.world_count = max(0, int(model.body_world.array.max()) + 1)
+    model.device = wp.get_device("cpu")
+    table = ActorTable.from_model(model)
+    if tuple(actor.kind for actor in table.actors) != ("articulation", "tet"):
+        raise ValueError("Recording migration requires canonical A+T without rigid actors")
+    return table
+
+
+def _migrate_actor_frame(left, right, table, physical_digest):
+    """Audit every new field before projecting schema four onto the old physical fields."""
+    added = {"history." + name for name in _LAYOUT_FIELDS | _RIGID_FIELDS.keys()}
+    if not added | {"history.schema_version", "history.precision", "history.config_digest"} <= right.keys():
+        raise ValueError("Missing actor recording metadata")
+    version = left["history.schema_version"]
+    if (
+        version.dtype != np.int32
+        or version.shape[1:] != (1,)
+        or not np.all(version == version[0])
+        or version[0, 0] not in (2, 3)
+    ):
+        raise ValueError("Invalid legacy actor recording schema")
+    old_version = int(version[0, 0])
+    dtype = left["joint_q"].dtype
+    if dtype not in (np.dtype(np.float32), np.dtype(np.float64)) or (old_version == 2 and dtype != np.float64):
+        raise ValueError("Invalid legacy actor recording precision")
+    precision = 64 if dtype == np.float64 else 32
+    n = len(version)
+    if old_version == 3 and not np.array_equal(left["history.precision"], np.full((n, 1), precision, np.int32)):
+        raise ValueError("Invalid schema three precision")
+    metadata = {
+        "history.schema_version": np.array([4], np.int32),
+        "history.precision": np.array([precision], np.int32),
+        "history.layout_version": np.array([1], np.int32),
+        "history.layout_digest": np.frombuffer(bytes.fromhex(table.identity), dtype=np.uint8),
+        "history.actor_layout": np.frombuffer(table.layout_payload(), dtype=np.uint8),
+    }
+    for name, expected in metadata.items():
+        value = right[name]
+        if value.dtype != expected.dtype or value.shape != (n, *expected.shape) or not np.all(value == expected):
+            raise ValueError(f"Invalid actor recording metadata: {name}")
+    for name, width in _RIGID_FIELDS.items():
+        value = right["history." + name]
+        if value.shape != (n, 0, width) or value.dtype != dtype:
+            raise ValueError(f"Actor recording requires empty native rigid field: {name}")
+    extra = {"history." + name for name in _LAYOUT_FIELDS | _RIGID_FIELDS.keys()}
+    if old_version == 2:
+        extra.add("history.precision")
+    known = {
+        "joint_q",
+        "joint_qd",
+        "body_q",
+        "body_qd",
+        "body_f",
+        "particle_q",
+        "particle_qd",
+        "particle_f",
+        "frame_steps",
+        "frame_times",
+        "frame_publication",
+        "frame_target_q",
+        "frame_target_qd",
+    } | {
+        "history." + name
+        for name in (
+            "joint_v",
+            "joint_omega",
+            "joint_vsym",
+            "link_v_com",
+            "link_omega",
+            "link_vsym",
+            "bound_q",
+            "bound_qd",
+            "last_dt",
+            "schema_version",
+            "valid",
+            "config_digest",
+            "bound_x",
+            "bound_v",
+            "contact_particle_force",
+            "contact_body_force",
+            "contact_joint_force",
+            "force_generation",
+            "force_valid",
+            "precision",
+        )
+    }
+    required = {name for name in known if not name.startswith("frame_") and name != "history.precision"}
+    if not required <= left.keys() or not left.keys() <= known or right.keys() != left.keys() | extra:
+        raise ValueError("Unexpected actor recording fields")
+    digest = left["history.config_digest"]
+    if (
+        digest.dtype != np.uint8
+        or digest.shape != (n, 32)
+        or not np.all(digest == physical_digest)
+        or not np.array_equal(digest, right["history.config_digest"])
+    ):
+        raise ValueError("Recording physical input digest differs")
+    projected = {name: value for name, value in right.items() if name not in extra}
+    projected["history.schema_version"] = version.copy()
+    return projected, f"{old_version} -> 4 (canonical A+T, FP{precision})"
+
+
+def compare(
+    reference, actual, envelopes=None, *, legacy_fp64=False, native_controls=None, actor_layout_migration=False
+):
     """Compare every same-configuration frame; never infer a trajectory tolerance."""
+    if type(actor_layout_migration) is not bool:
+        raise ValueError("actor_layout_migration must be bool")
     errors = {}
     exact = True
     within_envelope = True
     count = 0
     migrated = False
+    actor_migration = None
+    table = None
     if native_controls is None:
         reference_frames = frames(reference)
     else:
@@ -122,6 +309,16 @@ def compare(reference, actual, envelopes=None, *, legacy_fp64=False, native_cont
         reference_frames = native_frames(reference, native_controls)
     for left, right_block in zip(reference_frames, frames(actual), strict=True):
         right = right_block
+        if (
+            actor_layout_migration
+            and np.all(right["history.schema_version"] == 4)
+            and np.all(left["history.schema_version"] < 4)
+        ):
+            if table is None:
+                table = _recording_layout(reference, actual, native=native_controls is not None)
+                with np.load(reference / "initial.npz", allow_pickle=False) as initial:
+                    physical_digest = initial["history.config_digest"].copy()
+            right, actor_migration = _migrate_actor_frame(left, right, table, physical_digest)
         if legacy_fp64 and "history.precision" not in left:
             if right.keys() != left.keys() | {"history.precision"}:
                 raise ValueError("Unexpected legacy FP64 comparison fields")
@@ -165,8 +362,22 @@ def compare(reference, actual, envelopes=None, *, legacy_fp64=False, native_cont
         "status": status,
         "frames": count,
         "fields": errors,
-        "schema_migration": "2 -> 3 (FP64)" if migrated else None,
+        "schema_migration": actor_migration or ("2 -> 3 (FP64)" if migrated else None),
     }
+
+
+def check_actor(directory, **kwargs):
+    """Audit complete native mixed actors without applying the legacy bridge."""
+    from scripts.monolithic_reference.actor_recording import check_actor as audit  # noqa: PLC0415
+
+    return audit(directory, **kwargs)
+
+
+def compare_actor(reference, actual, **kwargs):
+    """Explicitly compare authenticated mixed-actor physical roles."""
+    from scripts.monolithic_reference.actor_recording import compare_actor as compare_roles  # noqa: PLC0415
+
+    return compare_roles(reference, actual, **kwargs)
 
 
 def main():
@@ -176,6 +387,9 @@ def main():
     parser.add_argument("--reference", type=Path)
     parser.add_argument("--protocol", type=Path, help="Previously frozen default-only comparison protocol")
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument(
+        "--actor-layout-migration", action="store_true", help="Audit and bridge canonical A+T schema 2/3 to 4"
+    )
     args = parser.parse_args()
     result = check(args.directory, args.steps)
     if args.reference:
@@ -186,7 +400,9 @@ def main():
             scene = "franka" if args.steps == 5250 else "sharpa"
             envelopes = protocol["default_absolute_envelopes"][scene]
             result["protocol_sha256"] = sha(args.protocol)
-        result["comparison"] = compare(args.reference, args.directory, envelopes)
+        result["comparison"] = compare(
+            args.reference, args.directory, envelopes, actor_layout_migration=args.actor_layout_migration
+        )
     args.output.write_text(json.dumps(result, indent=2) + "\n")
     print(json.dumps({key: result[key] for key in ("status", "frames", "counts")}))
     return int(not result.get("comparison", {}).get("status", "PASS_EXACT").startswith("PASS"))

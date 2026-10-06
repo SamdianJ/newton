@@ -9,25 +9,16 @@ import numpy as np
 import warp as wp
 
 from ...sim import JointTargetMode, JointType, Model
+from .actors import _joint_layout
 
 
-def _validate_joint_coordinate_layout(model: Model) -> np.ndarray:
-    """Validate the complete supported joint prefix layout and return the DOF-to-coordinate map."""
-    types = model.joint_type.numpy()
-    if not np.isin(types, [JointType.FIXED, JointType.REVOLUTE, JointType.PRISMATIC]).all():
+def _validate_joint_coordinate_layout(model: Model, actor=None) -> np.ndarray:
+    """Return mechanical DOF-to-Model coordinates, keeping FREE outside scalar terms."""
+    types, starts, _, _ = _joint_layout(model)
+    joints = np.arange(model.joint_count) if actor is None else np.asarray(actor.joint_indices)
+    if not np.isin(types[joints], [JointType.FIXED, JointType.REVOLUTE, JointType.PRISMATIC]).all():
         raise ValueError("Monolithic supports only FIXED, REVOLUTE and PRISMATIC joints")
-    moving = types != JointType.FIXED
-    expected = np.concatenate((np.zeros(1, dtype=np.int32), np.cumsum(moving, dtype=np.int32)))
-    if expected[-1] != model.joint_coord_count or expected[-1] != model.joint_dof_count:
-        raise ValueError("Invalid revolute/prismatic joint coordinate counts")
-    for name in ("joint_q_start", "joint_qd_start"):
-        starts = getattr(model, name)
-        if starts.dtype != wp.int32 or not np.array_equal(starts.numpy(), expected):
-            raise ValueError(f"Invalid joint coordinate prefix layout: {name}")
-    dimensions = np.stack((types == JointType.PRISMATIC, types == JointType.REVOLUTE), axis=1)
-    if not np.array_equal(model.joint_dof_dim.numpy(), dimensions):
-        raise ValueError("Invalid joint_dof_dim for FIXED/REVOLUTE/PRISMATIC joints")
-    return expected[:-1][moving]
+    return starts[joints[types[joints] != JointType.FIXED]].astype(np.int32)
 
 
 @wp.kernel(enable_backward=False)
@@ -36,14 +27,30 @@ def _validate_joint_term_inputs(
     v_target: wp.array[float],
     joint_f: wp.array[float],
     target_map: wp.array[int],
+    dof_map: wp.array[int],
     driven: wp.array[int],
     status: wp.array[int],
 ):
     i = wp.tid()
-    if not wp.isfinite(q_target[target_map[i]]) or not wp.isfinite(v_target[i]) or not wp.isfinite(joint_f[i]):
+    dof = dof_map[i]
+    if not wp.isfinite(q_target[target_map[i]]) or not wp.isfinite(v_target[dof]) or not wp.isfinite(joint_f[dof]):
         wp.atomic_max(status, 0, 1)
-    if driven[i] != 0 and joint_f[i] != 0.0:
+    if driven[i] != 0 and joint_f[dof] != 0.0:
         wp.atomic_max(status, 0, 2)
+
+
+@wp.kernel(enable_backward=False)
+def _gather_joint_targets(
+    q: wp.array[float],
+    v: wp.array[float],
+    targets: wp.array[int],
+    dofs: wp.array[int],
+    local_q: wp.array[float],
+    local_v: wp.array[float],
+):
+    i = wp.tid()
+    local_q[i] = q[targets[i]]
+    local_v[i] = v[dofs[i]]
 
 
 class JointParameters:
@@ -53,6 +60,7 @@ class JointParameters:
         self,
         model: Model,
         *,
+        actor=None,
         implicit_pd: bool = False,
         limits: bool = False,
         friction: bool = False,
@@ -62,17 +70,23 @@ class JointParameters:
         for value in (implicit_pd, limits, friction):
             if type(value) is not bool:
                 raise ValueError("Joint term switches must be bool")
-        _validate_joint_coordinate_layout(model)
-        self.model, self.device, self.count = model, model.device, model.joint_dof_count
+        coordinates = _validate_joint_coordinate_layout(model, actor)
+        dofs = tuple(range(model.joint_dof_count)) if actor is None else actor.dof_indices
+        self.model, self.device, self.count = model, model.device, len(dofs)
+        self.dof_map = wp.array(dofs, dtype=int, device=model.device)
         self.implicit_pd = implicit_pd
         nq = self.count
         allowed = set()
 
         def read(name):
             array = getattr(model, name)
-            if array is None or (array.shape, array.dtype, array.device) != ((nq,), wp.float32, model.device):
+            if array is None or (array.shape, array.dtype, array.device) != (
+                (model.joint_dof_count,),
+                wp.float32,
+                model.device,
+            ):
                 raise ValueError(f"Invalid joint parameter array: {name}")
-            values = array.numpy()
+            values = array.numpy()[list(dofs)]
             if not np.isfinite(values).all():
                 raise ValueError(f"Nonfinite joint parameter: {name}")
             return values
@@ -99,9 +113,13 @@ class JointParameters:
                 raise ValueError("PD gains must be nonnegative")
             driven = ((kp > 0) | (kd > 0)).astype(np.int32)
             modes = model.joint_target_mode
-            if modes is None or (modes.shape, modes.dtype, modes.device) != ((nq,), wp.int32, model.device):
+            if modes is None or (modes.shape, modes.dtype, modes.device) != (
+                (model.joint_dof_count,),
+                wp.int32,
+                model.device,
+            ):
                 raise ValueError("Invalid joint_target_mode")
-            mode = modes.numpy()
+            mode = modes.numpy()[list(dofs)]
             if np.any(mode[driven != 0] != int(JointTargetMode.POSITION_VELOCITY)) or np.any(
                 ~np.isin(
                     mode[driven == 0], [JointTargetMode.NONE, JointTargetMode.EFFORT, JointTargetMode.POSITION_VELOCITY]
@@ -135,14 +153,11 @@ class JointParameters:
             model.device,
         ):
             raise ValueError("Invalid joint_target_q_start")
-        moving = model.joint_type.numpy() != int(JointType.FIXED)
-        target_ids = starts.numpy()[:-1][moving]
-        if not np.array_equal(starts.numpy(), model.joint_q_start.numpy()):
-            raise ValueError("Invalid scalar joint target layout")
+        target_ids = coordinates if actor is None else actor.target_indices
         self.target_map = wp.array(target_ids, dtype=int, device=model.device)
         self.params = wp.array(parameters, dtype=float, device=model.device)
         self.driven = wp.array(driven, dtype=int, device=model.device)
-        self.target_q = wp.zeros(model.joint_coord_count, dtype=float, device=model.device)
+        self.target_q = wp.zeros(nq, dtype=float, device=model.device)
         self.target_qd = wp.zeros(nq, dtype=float, device=model.device)
         self.status = wp.zeros(1, dtype=int, device=model.device)
 
@@ -151,9 +166,9 @@ class JointParameters:
         if not self.implicit_pd:
             return
         for name, count in (
-            ("joint_target_q", self.model.joint_coord_count),
-            ("joint_target_qd", self.count),
-            ("joint_f", self.count),
+            ("joint_target_q", self.model.joint_target_q.size),
+            ("joint_target_qd", self.model.joint_dof_count),
+            ("joint_f", self.model.joint_dof_count),
         ):
             array = getattr(control, name)
             if array is None or (array.shape, array.dtype, array.device) != ((count,), wp.float32, self.device):
@@ -167,6 +182,7 @@ class JointParameters:
                 control.joint_target_qd,
                 control.joint_f,
                 self.target_map,
+                self.dof_map,
                 self.driven,
                 self.status,
             ],
@@ -175,5 +191,16 @@ class JointParameters:
         code = int(self.status.numpy()[0])
         if code:
             raise ValueError("Duplicate driven joint_f" if code == 2 else "Nonfinite joint control")
-        wp.copy(self.target_q, control.joint_target_q)
-        wp.copy(self.target_qd, control.joint_target_qd)
+        wp.launch(
+            _gather_joint_targets,
+            self.count,
+            [
+                control.joint_target_q,
+                control.joint_target_qd,
+                self.target_map,
+                self.dof_map,
+                self.target_q,
+                self.target_qd,
+            ],
+            device=self.device,
+        )

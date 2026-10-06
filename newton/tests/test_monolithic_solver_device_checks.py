@@ -10,6 +10,7 @@ import numpy as np
 import warp as wp
 
 from newton._src.solvers.monolithic.solver_types import _StepFailure
+from newton.tests.test_monolithic_rigid_dynamics import rigid_scene, rigid_solver
 from newton.tests.test_monolithic_solver_coupled import scene, solver
 from newton.tests.unittest_utils import add_function_test, get_test_devices
 
@@ -117,6 +118,25 @@ def test_failed_iteration_stats(test, device):
     np.testing.assert_array_equal(run.last_stats.variational["residual"], expected["residual"])
 
 
+def test_free_coordinate_history(test, device):
+    """Check all FREE position/rate history entries with unequal 7/6 lengths."""
+    run = rigid_solver(rigid_scene(device, before=True, contact=False), mode="production", graph=device.is_cuda)
+    state = run.create_state(dt=0.001)
+    test.assertGreater(state.joint_q.size, state.joint_qd.size)
+    test.assertFalse(run._device_iteration)
+    history = state._monolithic_coupled
+    for name in ("bound_q", "bound_qd"):
+        array = getattr(history, name)
+        saved = array.numpy().copy()
+        changed = saved.copy()
+        changed[-1] += 0.01
+        array.assign(changed)
+        with test.assertRaisesRegex(ValueError, "Coordinates/rates changed"):
+            run._states.validate(state)
+        array.assign(saved)
+        run._states.validate(state)
+
+
 class TestDeviceChecks(unittest.TestCase):
     pass
 
@@ -127,6 +147,10 @@ add_function_test(TestDeviceChecks, "test_device_iteration", test_device_iterati
 
 add_function_test(
     TestDeviceChecks, "test_failed_iteration_stats", test_failed_iteration_stats, devices=get_test_devices()
+)
+
+add_function_test(
+    TestDeviceChecks, "test_free_coordinate_history", test_free_coordinate_history, devices=get_test_devices()
 )
 
 if __name__ == "__main__":

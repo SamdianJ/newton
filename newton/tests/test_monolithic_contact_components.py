@@ -87,6 +87,7 @@ def tangent(objective, *, capacity=None, triplets=None):
         MonolithicLinearCapacities(4 + count * 121 if triplets is None else triplets, 0, count, 200, 202),
         objective.mapping,
         device=objective.model.device,
+        contact_support=objective.factor_support,
     )
     generation = MonolithicLinearGeneration(1, 1, 1, 1)
     assembly = workspace.begin_assembly(generation)
@@ -173,7 +174,7 @@ def test_friction_radial_tangent(test, device):
                 factors = assembly.contact_factors
                 count = int(factors.count.numpy()[0])
                 test.assertLessEqual(count, 3 * obj.count)
-                test.assertTrue(np.all(factors.weights.numpy()[:count] > 0))
+                test.assertEqual(count, np.count_nonzero(factors.weights.numpy() > 0))
                 for axis in (along, across):
                     direction = np.concatenate((np.zeros(2), np.tile(axis, len(x))))
                     values = []
@@ -279,6 +280,15 @@ def test_law_branches_and_failures(test, device):
         for capacity, triplets in ((0, None), (None, 4)):
             workspace, generation, _ = tangent(obj, capacity=capacity, triplets=triplets)
             test.assertEqual(obj.flags.numpy()[0], ContactStatus.CAPACITY)
+            test.assertNotEqual(workspace.finalize_assembly(generation=generation).status, 0)
+            obj.evaluate(*state(model, x, q), dt=0.001)
+        for field, value in (("offsets", -1), ("offsets", 2**30), ("local_indices", 2), ("local_indices", -10)):
+            workspace, generation, assembly = tangent(obj)
+            data = getattr(assembly.contact_factors, field).numpy()
+            data[0] = value
+            getattr(assembly.contact_factors, field).assign(data)
+            obj.assemble_tangent(assembly)
+            test.assertNotEqual(obj.flags.numpy()[0], 0)
             test.assertNotEqual(workspace.finalize_assembly(generation=generation).status, 0)
             obj.evaluate(*state(model, x, q), dt=0.001)
         for bad in ("nan", "degenerate", "backface", "quaternion"):

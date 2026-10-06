@@ -10,6 +10,7 @@ from types import SimpleNamespace
 import numpy as np
 
 from newton._src.solvers.monolithic.iteration import acceptance, measure
+from newton._src.solvers.monolithic.linear_types import MonolithicLinearLayout
 from newton._src.solvers.monolithic.solver_types import _SolverMonolithicInternalConfig
 
 
@@ -38,7 +39,7 @@ class TestGlobalization(unittest.TestCase):
                 _numpy_dtype=dtype,
                 _metrics={},
                 _config=_SolverMonolithicInternalConfig(),
-                _linear=SimpleNamespace(layout=SimpleNamespace(scalar_dof_count=5, q_dof_count=2)),
+                _linear=SimpleNamespace(layout=MonolithicLinearLayout(2, 1)),
             )
             residual = np.array([0.1, 0.02, -0.5, 3.0, 0.9], dtype=dtype)
             reference = residual * dtype(7)

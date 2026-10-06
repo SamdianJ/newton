@@ -45,13 +45,28 @@ def acceptance(
 
 
 def blocks(solver):
-    n, q = solver._linear.layout.scalar_dof_count, solver._linear.layout.q_dof_count
-    result = [("global", slice(0, n))]
-    if q:
-        result.append(("q", slice(0, q)))
-    if q < n:
-        result.append(("x", slice(q, n)))
-    return result
+    names = {"articulation": "q", "tet": "x", "global": "global"}
+    return [(names.get(kind, kind), slice(start, start + count)) for kind, start, count in solver._linear.layout.groups]
+
+
+def _block_policy(config, prefix, name):
+    if not name.startswith("rigid_"):
+        return getattr(config, prefix + "_" + name)
+    translation = name.endswith("_t")
+    if prefix == "merit_absolute":
+        return 1e-7 if translation else 2.5e-8
+    if prefix == "merit_relative":
+        return 1e-6 if translation else 1e-5
+    if prefix == "step_tolerance":
+        return 1e-10 if translation else 9.100770221088748e-10
+    return getattr(config, prefix + ("_x" if translation else "_q"))
+
+
+def _record_block(solver, name, key, value):
+    if name.startswith("rigid_"):
+        solver._variational.setdefault("rigid_blocks", {}).setdefault(name, {})[key] = value
+    else:
+        solver._metrics[key] = value
 
 
 def measure(solver, residual, reference, scale):
@@ -60,7 +75,7 @@ def measure(solver, residual, reference, scale):
     values = {}
     norms = iteration_device.measure(solver, residual, reference) if isinstance(residual, wp.array) else None
     for name, part in blocks(solver):
-        index = ("global", "q", "x").index(name)
+        index = ("global", "q", "x").index(name) if norms is not None else None
         size = part.stop - part.start
         merit = (norms[index, 0] if norms is not None else np.linalg.norm(scale[part] * residual[part])) / np.sqrt(
             native(size)
@@ -69,17 +84,20 @@ def measure(solver, residual, reference, scale):
             native(size)
         )
         goal = (
-            native(getattr(solver._config, "merit_absolute_" + name))
-            + native(getattr(solver._config, "merit_relative_" + name)) * ref
+            native(_block_policy(solver._config, "merit_absolute", name))
+            + native(_block_policy(solver._config, "merit_relative", name)) * ref
         )
         values[name] = (merit, ref, goal, size)
         suffix = "" if name == "global" else "_" + name
-        solver._metrics["merit" + suffix + "_final"] = merit
-        solver._metrics["merit" + suffix + "_reference"] = ref
-        solver._metrics["convergence_ratio" + suffix] = merit / goal
+        _record_block(solver, name, "merit" + suffix + "_final", merit)
+        _record_block(solver, name, "merit" + suffix + "_reference", ref)
+        _record_block(solver, name, "convergence_ratio" + suffix, merit / goal)
         if name != "global":
-            solver._metrics["raw_residual_" + name + "_norm"] = float(
-                norms[index, 2] if norms is not None else np.linalg.norm(residual[part])
+            _record_block(
+                solver,
+                name,
+                "raw_residual_" + name + "_norm",
+                float(norms[index, 2] if norms is not None else np.linalg.norm(residual[part])),
             )
     return values
 
@@ -89,22 +107,27 @@ def iterate(solver, dt):
     self = solver
     native = getattr(self, "_numpy_dtype", np.float64)
     config = self._config
-    reference = self._initial_reference(dt, device_result=True)
+    device = self._device_iteration
+    reference = self._initial_reference(dt, device_result=True) if device else self._initial_reference(dt)
     small = False
     for iteration in range(self.newton_max_iterations + 1):
-        e, evaluated, absolute = self._evaluate(self._accepted, dt, device_result=True)
-        wp.copy(self._accepted_r, evaluated)
-        residual = self._accepted_r
-        b, scale = self._assemble(iteration, device_result=True)
+        e, evaluated, absolute = (
+            self._evaluate(self._accepted, dt, device_result=True) if device else self._evaluate(self._accepted, dt)
+        )
+        if device:
+            wp.copy(self._accepted_r, evaluated)
+        residual = self._accepted_r if device else evaluated
+        b, scale = self._assemble(iteration, device_result=True) if device else self._assemble(iteration)
         self._reference_residual = reference
         values = measure(self, residual, reference, scale)
         merit = values["global"][0]
         self._metrics["nonlinear_iterations"] = iteration
         if iteration == 0:
             for name, (m, _, _, _) in values.items():
-                self._metrics["merit" + ("" if name == "global" else "_" + name) + "_initial"] = m
-        wp.copy(self._stats_residual, residual)
-        self._variational.update(objective_total=e, residual=self._stats_residual)
+                _record_block(self, name, "merit" + ("" if name == "global" else "_" + name) + "_initial", m)
+        if device:
+            wp.copy(self._stats_residual, residual)
+        self._variational.update(objective_total=e, residual=self._stats_residual if device else residual.tolist())
         if all(m <= goal for m, _, goal, _ in values.values()):
             return self.Status.SUCCESS
         if small:
@@ -113,13 +136,23 @@ def iterate(solver, dt):
             )
         if iteration == self.newton_max_iterations:
             return self.Status.NONLINEAR_MAX_ITERATIONS
+        rhs = None
+        if not device:
+            rhs = -scale * residual
+            self._rhs.assign(rhs.astype(np.float32))
         caps = {name: native(0.5) * np.sqrt(native(size)) * goal for name, (_, _, goal, size) in values.items()}
         pcg = MonolithicPcgConfig(
             maximum_iterations=self.linear_max_iterations,
-            true_residual_interval=10,
+            # Mixed actors use the same actual-operator checkpoint cadence in
+            # both backends; otherwise bounded batches can oversolve A/T and
+            # give different accepted trajectories at unchanged outer gates.
+            true_residual_interval=1 if self._linear.layout.rigid_ranges else 10,
             linear_tolerance=self.linear_tolerance,
             linear_absolute_tolerance=self.linear_absolute_tolerance,
             residual_norm_limits=tuple(caps.get(name, 1.0) for name in ("global", "q", "x")),
+            group_norm_limits=tuple(caps[name] for name, _ in blocks(self))
+            if self._linear.layout.rigid_ranges
+            else None,
             residual_floor_global=config.residual_floor_global,
             residual_floor_q=config.residual_floor_q,
             residual_floor_x=config.residual_floor_x,
@@ -155,19 +188,26 @@ def iterate(solver, dt):
                     raise _StepFailure(self.Status.NONFINITE, "Invalid PCG output")
             except _StepFailure:
                 continue
-            direction = self._delta
-            error = self._physical_linear_error(b, direction, residual, scale, device_result=True)
+            direction = self._delta if device else self._delta.numpy().astype(native)
+            error = (
+                self._physical_linear_error(b, direction, residual, scale, device_result=True)
+                if device
+                else self._physical_linear_error(b, direction, residual, scale)
+            )
             norms = iteration_device.norms(self, error) if isinstance(error, wp.array) else None
             postchecks = {}
             for name, part in blocks(self):
-                index = ("global", "q", "x").index(name)
+                index = ("global", "q", "x").index(name) if device else None
                 post = norms[index] if norms is not None else np.linalg.norm(error[part])
                 limit = min(
                     caps[name],
                     max(
                         native(self.linear_absolute_tolerance),
                         native(self.linear_tolerance)
-                        * max(self._rhs_norms_host[index], native(getattr(config, "residual_floor_" + name))),
+                        * max(
+                            self._rhs_norms_host[index] if device else np.linalg.norm(rhs[part]),
+                            native(_block_policy(config, "residual_floor", name)),
+                        ),
                     ),
                 )
                 postchecks[name] = {"residual": post, "limit": limit}
@@ -185,24 +225,41 @@ def iterate(solver, dt):
                 alpha = native(0.5**search)
                 self._metrics["line_search_iterations"] += 1
                 self._take_trial(alpha, dt)
-                trial = self._trial_evaluation(dt, device_result=True)
+                trial = self._trial_evaluation(dt, device_result=True) if device else self._trial_evaluation(dt)
                 if trial is None or not self._domain(self._trial):
                     continue
                 te, tr, ta = trial
-                effective = self._effective_displacement(device_result=True)
-                terms = iteration_device.trial(self, residual, tr, effective)
+                effective = (
+                    self._effective_displacement(device_result=True) if device else self._effective_displacement()
+                )
+                terms = (
+                    iteration_device.trial(self, residual, tr, effective)
+                    if device
+                    else np.array(
+                        [
+                            residual @ effective,
+                            np.linalg.norm(scale * tr) ** 2,
+                            np.linalg.norm(scale) ** 2,
+                            np.linalg.norm(direction) ** 2,
+                            abs(direction).sum(),
+                            abs(residual * direction).sum(),
+                        ]
+                    )
+                )
                 slope = terms[0] / alpha
-                trial_merit = np.sqrt(terms[1]) / np.sqrt(native(tr.size))
+                trial_merit = (np.sqrt(terms[1]) if device else np.linalg.norm(scale * tr)) / np.sqrt(native(tr.size))
                 # Keep the PR2 common envelope; the coupled entry qualifies the
                 # complete E/r against it before any physical trajectory use.
                 eps = native(128 * np.finfo(float).eps)
                 en = max(native(5.820766091346741e-11), eps * max(native(1.0), absolute, ta))
                 rn = max(
-                    native(2.0935893019213836e-9) * np.sqrt(terms[2]) / np.sqrt(native(scale.size)),
+                    native(2.0935893019213836e-9)
+                    * (np.sqrt(terms[2]) if device else np.linalg.norm(scale))
+                    / np.sqrt(native(scale.size)),
                     eps * max(native(1.0), merit, trial_merit),
                 )
                 sn = max(
-                    native(1.5498947892952669e-9) * np.sqrt(terms[3]),
+                    native(1.5498947892952669e-9) * (np.sqrt(terms[3]) if device else np.linalg.norm(direction)),
                     native(2.0935893019213836e-9) * terms[4],
                     eps * max(native(1.0), terms[5]),
                 )
@@ -244,12 +301,18 @@ def iterate(solver, dt):
                     steps = {}
                     for name, part in blocks(self):
                         steps[name] = native(
-                            np.sqrt(terms[6 + ("global", "q", "x").index(name)])
+                            (
+                                np.sqrt(terms[6 + ("global", "q", "x").index(name)])
+                                if device
+                                else np.linalg.norm(
+                                    effective[part] if name.startswith("rigid_") else effective[part] / scale[part]
+                                )
+                            )
                             / np.sqrt(native(part.stop - part.start))
                         )
-                        self._metrics["scaled_step" + ("" if name == "global" else "_" + name)] = steps[name]
+                        _record_block(self, name, "scaled_step" + ("" if name == "global" else "_" + name), steps[name])
                     small = all(
-                        value <= native(getattr(config, "step_tolerance_" + name)) for name, value in steps.items()
+                        value <= native(_block_policy(config, "step_tolerance", name)) for name, value in steps.items()
                     )
                     self._accepted, self._trial = self._trial, self._accepted
                     self._metrics["accepted_alpha"] = alpha

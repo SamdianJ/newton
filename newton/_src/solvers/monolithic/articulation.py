@@ -94,18 +94,21 @@ def _body_outputs(
     jt: wp.array2d[Any],
     jw: wp.array2d[Any],
     qd: wp.array[Any],
+    body_map: wp.array[int],
+    dof_map: wp.array[int],
     body_q: wp.array[wp.transform],
     body_qd: wp.array[wp.spatial_vector],
 ):
     b = wp.tid()
     linear, angular = type(jt[0, 0])(0.0), type(jt[0, 0])(0.0)
-    for i in range(qd.shape[0]):
-        linear += jt[b, i] * qd[i]
-        angular += jw[b, i] * qd[i]
-    body_q[b] = wp.transform(
+    for i in range(dof_map.shape[0]):
+        rate = type(jt[0, 0][0])(qd[dof_map[i]])
+        linear += jt[b, i] * rate
+        angular += jw[b, i] * rate
+    body_q[body_map[b]] = wp.transform(
         wp.vec3(wp.transform_get_translation(poses[b])), wp.quat(wp.transform_get_rotation(poses[b]))
     )
-    body_qd[b] = wp.spatial_vector(wp.vec3(linear), wp.vec3(angular))
+    body_qd[body_map[b]] = wp.spatial_vector(wp.vec3(linear), wp.vec3(angular))
 
 
 def _configuration_digest(fields):
@@ -122,6 +125,12 @@ def _configuration_digest(fields):
             digest.update(struct.pack("<Q", len(part)))
             digest.update(part)
     return digest.digest()
+
+
+@wp.kernel
+def _gather_native(source: wp.array[Any], mapping: wp.array[int], target: wp.array[Any]):
+    i = wp.tid()
+    target[i] = source[mapping[i]]
 
 
 class _TreeKinematics:
@@ -161,7 +170,7 @@ class _TreeKinematics:
         "shape_flags",
     )
 
-    def __init__(self, model, *, extra_config=None, dtype=wp.float64):
+    def __init__(self, model, *, actor=None, extra_config=None, dtype=wp.float64):
         if dtype not in (wp.float64, wp.float32):
             raise ValueError("Articulation requires float64 or float32")
         self.dtype = dtype
@@ -169,8 +178,8 @@ class _TreeKinematics:
         self.vector = wp.vec3d if dtype == wp.float64 else wp.vec3
         self.matrix = wp.mat33d if dtype == wp.float64 else wp.mat33
         self.transform = wp.transformd if dtype == wp.float64 else wp.transform
-        _validate_joint_coordinate_layout(model)
-        if model.articulation_count != 1 or not model.joint_dof_count:
+        _validate_joint_coordinate_layout(model, actor)
+        if (actor is None and model.articulation_count != 1) or not model.joint_dof_count:
             raise ValueError("Monolithic articulation requires one nonempty tree")
         if model.requires_grad or model.constraint_mimic_count or model.actuators:
             raise ValueError("Monolithic articulation does not support autograd, mimic constraints or model actuators")
@@ -184,6 +193,7 @@ class _TreeKinematics:
                 "particle_count",
                 "tet_count",
                 "joint_dof_count",
+                "joint_coord_count",
                 "joint_count",
                 "body_count",
                 "muscle_count",
@@ -192,15 +202,47 @@ class _TreeKinematics:
             )
         }
         self.sources = {name: getattr(model, name) for name in self._fields}
-        self.values = {name: array.numpy().copy() for name, array in self.sources.items()}
-        v = self.values
-        if v["articulation_start"].tolist() != [0, model.joint_count] or v["articulation_end"].tolist() != [
-            model.joint_count
-        ]:
+        self._source_values = {name: array.numpy().copy() for name, array in self.sources.items()}
+        v = dict(self._source_values)
+        if actor is None and (
+            v["articulation_start"].tolist() != [0, model.joint_count]
+            or v["articulation_end"].tolist() != [model.joint_count]
+        ):
             raise ValueError("Unowned joints are unsupported")
+        body_ids = list(range(model.body_count)) if actor is None else list(actor.body_indices)
+        joint_ids = list(range(model.joint_count)) if actor is None else list(actor.joint_indices)
+        dof_ids = list(range(model.joint_dof_count)) if actor is None else list(actor.dof_indices)
+        if actor is not None:
+            joint_fields = {
+                "joint_type",
+                "joint_parent",
+                "joint_child",
+                "joint_q_start",
+                "joint_qd_start",
+                "joint_dof_dim",
+                "joint_enabled",
+                "joint_X_p",
+                "joint_X_c",
+                "joint_target_q_start",
+            }
+            for name, value in v.items():
+                if name.startswith("body_"):
+                    v[name] = value[body_ids]
+                elif name in joint_fields:
+                    v[name] = value[joint_ids]
+                elif name.startswith("joint_"):
+                    v[name] = value[dof_ids]
+            body_local = {body: i for i, body in enumerate(body_ids)}
+            v["joint_parent"] = np.array([body_local[p] if p >= 0 else -1 for p in v["joint_parent"]], dtype=np.int32)
+            v["joint_child"] = np.array([body_local[b] for b in v["joint_child"]], dtype=np.int32)
+            prefix = np.r_[0, np.cumsum(v["joint_type"] != JointType.FIXED)].astype(np.int32)
+            v["joint_q_start"] = v["joint_qd_start"] = prefix
+        self.values = v
         if not v["joint_enabled"].all() or len(np.unique(v["body_world"])) != 1:
             raise ValueError("Monolithic requires enabled joints in one world")
-        self.count, self.bodies, self.joints = model.joint_dof_count, model.body_count, model.joint_count
+        self.count, self.bodies, self.joints = len(dof_ids), len(body_ids), len(joint_ids)
+        if not self.count:
+            raise ValueError("Monolithic articulation requires one nonempty tree")
         seen, roots = set(), 0
         ancestors = np.zeros((self.bodies, self.count), dtype=np.int32)
         dof_joint = np.zeros(self.count, dtype=np.int32)
@@ -242,7 +284,7 @@ class _TreeKinematics:
         for name in ("joint_armature", "joint_damping"):
             if np.any(v[name] < 0):
                 raise ValueError(f"Negative {name}")
-        fields = dict(v)
+        fields = dict(self._source_values)
         fields.update({} if extra_config is None else extra_config)
         if dtype == wp.float32:
             fields["native_precision"] = np.array([32], dtype=np.int32)
@@ -251,6 +293,8 @@ class _TreeKinematics:
         def array(data, dtype):
             return wp.array(data, dtype=dtype, device=self.device)
 
+        self.body_map = array(body_ids, int)
+        self.dof_map = array(dof_ids, int)
         self.types = array(v["joint_type"], int)
         self.parents = array(v["joint_parent"], int)
         self.children = array(v["joint_child"], int)
@@ -281,8 +325,24 @@ class _TreeKinematics:
         self.joint_translations = wp.zeros(self.joints, dtype=self.vector, device=self.device)
         self.jt = wp.zeros((self.bodies, self.count), dtype=self.vector, device=self.device)
         self.jw = wp.zeros_like(self.jt)
-        self.evaluate(wp.array(model.joint_q.numpy(), dtype=self.dtype, device=self.device))
+        coord_ids = list(range(model.joint_coord_count)) if actor is None else list(actor.coord_indices)
+        self.coord_map = array(coord_ids, int)
+        self.local_q = wp.zeros(self.count, dtype=self.dtype, device=self.device)
+        self.local_qd = wp.zeros_like(self.local_q)
+        self.evaluate(wp.array(model.joint_q.numpy()[coord_ids], dtype=self.dtype, device=self.device))
         self.validate_inertia()
+
+    def gather_q(self, state):
+        if state.joint_q.size == self.count:
+            return state.joint_q
+        wp.launch(_gather_native, self.count, [state.joint_q, self.coord_map, self.local_q], device=self.device)
+        return self.local_q
+
+    def gather_qd(self, state):
+        if state.joint_qd.size == self.count:
+            return state.joint_qd
+        wp.launch(_gather_native, self.count, [state.joint_qd, self.dof_map, self.local_qd], device=self.device)
+        return self.local_qd
 
     def timestep(self, value):
         """Validate a timestep in the arithmetic used by this component."""
@@ -309,7 +369,7 @@ class _TreeKinematics:
             raise ValueError("Articulation configuration changed: unsupported scope or counts")
         for name, original in self.sources.items():
             current = getattr(self.model, name)
-            if current is not original or not np.array_equal(current.numpy(), self.values[name]):
+            if current is not original or not np.array_equal(current.numpy(), self._source_values[name]):
                 raise ValueError(f"Articulation configuration changed: {name}")
 
     def evaluate(self, q, *, state=None):
@@ -349,7 +409,16 @@ class _TreeKinematics:
             wp.launch(
                 _body_outputs,
                 self.bodies,
-                [self.poses, self.jt, self.jw, state.joint_qd, state.body_q, state.body_qd],
+                [
+                    self.poses,
+                    self.jt,
+                    self.jw,
+                    state.joint_qd,
+                    self.body_map,
+                    self.dof_map,
+                    state.body_q,
+                    state.body_qd,
+                ],
                 device=self.device,
             )
 

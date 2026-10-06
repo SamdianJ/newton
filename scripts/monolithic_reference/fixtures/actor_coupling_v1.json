@@ -1,0 +1,104 @@
+{
+  "schema": "actor-coupling/v1",
+  "dt": 0.001,
+  "steps": 2000,
+  "phase_steps": [
+    1000,
+    500,
+    500
+  ],
+  "pusher_travel_m": 0.008,
+  "pusher_mass_kg": 1.0,
+  "pusher_pd": {
+    "ke": 10000.0,
+    "kd": 200.0,
+    "effort_limit": 20.0,
+    "velocity_limit": 0.1
+  },
+  "rigid_mass_kg": 0.01,
+  "box_dimensions_m": [
+    0.02,
+    0.04,
+    0.04
+  ],
+  "centers_m": {
+    "pusher": [
+      -0.0707,
+      0,
+      0
+    ],
+    "rigid_1": [
+      -0.0505,
+      0,
+      0
+    ],
+    "rigid_2": [
+      -0.0303,
+      0,
+      0
+    ],
+    "tet": [
+      0,
+      0,
+      0
+    ]
+  },
+  "tet_asset": "scripts/monolithic_reference/fixtures/soft_cube_40mm/cube_r1.npz",
+  "tet_asset_sha256": "c35a2c4a025db2b3de1c7a679a63b14eb35bfb809d74c0ae65f97786bcf483e9",
+  "tet_edge_m": 0.04,
+  "tet_fixed_face": "+x",
+  "density_kg_m3": 1000.0,
+  "young_modulus_pa": 10000.0,
+  "poisson_ratio": 0.3,
+  "gravity": [
+    0,
+    0,
+    0
+  ],
+  "shape_margin_m": 0.0001,
+  "particle_radius_m": 0.0002,
+  "contact_stiffness": 10000000.0,
+  "normal_smoothing_m": 0.0001,
+  "friction_coefficient": 0.5,
+  "friction_velocity_scale": 0.01,
+  "solver": {
+    "precision": "fp64",
+    "contact_model": "C-IE",
+    "globalization": "ArmijoOrResNorm",
+    "allow_nonconservative_energy": true,
+    "material_model": "smith_log_stabilized",
+    "mass_mode": "consistent",
+    "pcg_mode": "production",
+    "use_cuda_graph": true,
+    "publish_policy": "strict",
+    "newton_max_iterations": 10,
+    "line_search_max_iterations": 8,
+    "linear_max_iterations": 200
+  },
+  "rigid_goals": {
+    "translation_absolute": 1e-07,
+    "rotation_absolute": 2.5e-08,
+    "translation_relative": 1e-06,
+    "rotation_relative": 1e-05,
+    "translation_step_rms_m": 1e-10,
+    "rotation_step_rms_rad": 9.100770221088748e-10
+  },
+  "gates": {
+    "converged_steps": 2000,
+    "hard_failures": 0,
+    "min_det_f": 0.2,
+    "max_penetration_m": 0.002,
+    "hold_min_tet_displacement_m": 0.002,
+    "hold_min_pair_force_n": 0.1,
+    "hold_force_relative_noise": 0.05,
+    "sampling_relative_error": 0.01,
+    "balance_relative_error": 1e-05
+  },
+  "equivalence": {
+    "position_absolute_m": 1e-07,
+    "rotation_absolute_rad": 1e-07,
+    "velocity_absolute": 1e-06,
+    "force_absolute": 0.0001,
+    "force_relative": 1e-05
+  }
+}
