@@ -110,6 +110,26 @@ class TestActorRecording(unittest.TestCase):
                 self.assertEqual(compare(left, right, actor_layout_migration=True)["status"], "PASS_EXACT")
                 np.savez_compressed(right / "model.npz", **model_arrays)
 
+                for field in ("particle_colors", "bvh_shape_enabled"):
+                    auxiliary = {name: value.copy() for name, value in model_arrays.items()}
+                    # These caches are not consumed by Monolithic physics.
+                    auxiliary[field] = np.arange(4, dtype=np.int32)
+                    np.savez_compressed(left / "model.npz", **auxiliary)
+                    auxiliary[field] = auxiliary[field][::-1].copy()
+                    np.savez_compressed(right / "model.npz", **auxiliary)
+                    self.assertEqual(compare(left, right, actor_layout_migration=True)["status"], "PASS_EXACT")
+                    for invalid in (np.zeros(3, np.int32), np.zeros(4, np.float32)):
+                        auxiliary[field] = invalid
+                        np.savez_compressed(right / "model.npz", **auxiliary)
+                        with self.assertRaisesRegex(ValueError, "Model layouts differ"):
+                            compare(left, right, actor_layout_migration=True)
+                    del auxiliary[field]
+                    np.savez_compressed(right / "model.npz", **auxiliary)
+                    with self.assertRaisesRegex(ValueError, "Model schemas differ"):
+                        compare(left, right, actor_layout_migration=True)
+                    for path in (left, right):
+                        np.savez_compressed(path / "model.npz", **model_arrays)
+
                 changed = {name: value.copy() for name, value in current.items()}
                 changed["particle_q"][0, 0] += 1e-5
                 self.write(right, changed)

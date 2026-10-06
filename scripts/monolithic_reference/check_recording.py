@@ -161,7 +161,12 @@ def _recording_layout(reference, actual, *, native=False):
                     a, b = left[name], right[name]
                     if a.shape != b.shape or a.dtype != b.dtype:
                         raise ValueError(f"Recording Model layouts differ: {name}")
-                    if name == "shape_source_ptr":
+                    if name in {"particle_colors", "bvh_shape_enabled"}:
+                        # Monolithic does not consume graph coloring or the ray BVH
+                        # index cache. Their contents may be uninitialized or ordered
+                        # by GPU scheduling; retain schema/layout checks above.
+                        same = True
+                    elif name == "shape_source_ptr":
                         # Mesh handles vary by process; the physical SDF digest
                         # below authenticates the geometry consumed by this solver.
                         same = True
