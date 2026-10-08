@@ -498,3 +498,320 @@ class _FixedScalarBsrReduction:
                 wp.launch(_fixed_bsr_clear_failed, array.size, [array, self.status], device=self.device)
         wp.launch(_fixed_bsr_publish_status, 1, [self.status, triplets.status], device=self.device)
         matrix.notify_nnz_changed(nnz=self.output_capacity, nnz_capacity=self.output_capacity)
+
+
+@wp.kernel
+def _fixed_internal_begin(count: wp.array[int], incoming: wp.array[int], status: wp.array[int], capacity: int):
+    status[0] = incoming[0]
+    if count[0] != capacity:
+        wp.atomic_max(status, 0, int(MonolithicLinearStatus.INTERNAL_TRIPLET_OVERFLOW))
+
+
+@wp.kernel
+def _fixed_internal_validate(
+    rows: wp.array[int],
+    columns: wp.array[int],
+    values: wp.array[wp.mat33],
+    count: wp.array[int],
+    expected_rows: wp.array[int],
+    expected_columns: wp.array[int],
+    active: wp.array[int],
+    status: wp.array[int],
+):
+    i = wp.tid()
+    active[i] = 0
+    if count[0] != active.shape[0]:
+        return
+    if rows[i] != expected_rows[i] or columns[i] != expected_columns[i]:
+        wp.atomic_max(status, 0, int(MonolithicLinearStatus.INVALID_ARGUMENT))
+    nonzero = False
+    for row in range(3):
+        for column in range(3):
+            value = values[i][row, column]
+            if not wp.isfinite(value):
+                wp.atomic_max(status, 0, int(MonolithicLinearStatus.NONFINITE_CONTRIBUTION))
+            nonzero = nonzero or value != 0.0
+    if nonzero:
+        active[i] = 1
+
+
+@wp.kernel
+def _fixed_internal_values(
+    inputs: wp.array[wp.mat33],
+    indices: wp.array[int],
+    offsets: wp.array[int],
+    active: wp.array[int],
+    live: wp.array[int],
+    work: wp.array3d[float],
+    status: wp.array[int],
+):
+    group, row, column = wp.tid()
+    value = float(0)
+    found = int(0)
+    for slot in range(offsets[group], offsets[group + 1]):
+        source = indices[slot]
+        if active[source] != 0:
+            term = inputs[source][row, column]
+            if not found:
+                # Native GPU builder initializes from the first nonzero block;
+                # zero components within that block must still participate.
+                value = term
+                found = 1
+            else:
+                value += term
+                if not wp.isfinite(value):
+                    wp.atomic_max(status, 0, int(MonolithicLinearStatus.NONFINITE_CONTRIBUTION))
+    work[group, row, column] = value
+    if row == 0 and column == 0:
+        live[group] = wp.where(found, 1, 0)
+
+
+@wp.kernel
+def _fixed_internal_seed(live: wp.array[int], prefix: wp.array[int]):
+    i = wp.tid()
+    value = int(0)
+    if i < live.shape[0]:
+        value = live[i]
+    prefix[i] = value
+
+
+@wp.kernel
+def _fixed_internal_offsets(row_groups: wp.array[int], prefix: wp.array[int], offsets: wp.array[int]):
+    row = wp.tid()
+    offsets[row] = prefix[row_groups[row]]
+
+
+@wp.kernel
+def _fixed_internal_entries(
+    live: wp.array[int],
+    prefix: wp.array[int],
+    columns: wp.array[int],
+    work: wp.array[wp.mat33],
+    out_columns: wp.array[int],
+    out_values: wp.array[wp.mat33],
+):
+    i = wp.tid()
+    if live[i] != 0:
+        entry = prefix[i]
+        out_columns[entry] = columns[i]
+        out_values[entry] = work[i]
+
+
+@wp.kernel
+def _fixed_internal_finite(offsets: wp.array[int], values: wp.array[wp.mat33], status: wp.array[int]):
+    row = wp.tid()
+    for entry in range(offsets[row], offsets[row + 1]):
+        for i in range(3):
+            for j in range(3):
+                if not wp.isfinite(values[entry][i, j]):
+                    wp.atomic_max(status, 0, int(MonolithicLinearStatus.NONFINITE_CONTRIBUTION))
+
+
+class _FixedInternalBsrReduction:
+    """Reserve immutable owner-block groups and preserve native backend arithmetic.
+
+    CUDA's stable coordinate sort followed by serial nonzero-block addition is
+    reproduced from original slot order. CPU keeps the installed native builder:
+    its std::sort ties are not stable and cannot be silently replaced by a tree.
+    GPU evaluation uses fixed arrays and device counts, with no native builder.
+    This component is only for the complete static tet owner pattern, not contact.
+    """
+
+    def __init__(self, size, rows, columns, device, *, use_cuda_graph):
+        if isinstance(size, (bool, np.bool_)) or not isinstance(size, (int, np.integer)) or not 0 <= size <= 2**31 - 2:
+            raise ValueError("Invalid fixed internal BSR size")
+        rows, columns = np.asarray(rows), np.asarray(columns)
+        if (
+            rows.ndim != 1
+            or columns.shape != rows.shape
+            or not np.issubdtype(rows.dtype, np.integer)
+            or not np.issubdtype(columns.dtype, np.integer)
+            or rows.size >= 2**30
+            or 9 * rows.size >= 2**31
+            or np.any(rows < 0)
+            or np.any(rows >= size)
+            or np.any(columns < 0)
+            or np.any(columns >= size)
+        ):
+            raise ValueError("Invalid fixed internal BSR pattern")
+        rows, columns = rows.astype(np.int32), columns.astype(np.int32)
+        capacity = len(rows)
+        keys = rows.astype(np.uint64) * int(size) + columns.astype(np.uint64)
+        order = np.argsort(keys, kind="stable").astype(np.int32)
+        starts = (
+            np.r_[0, np.flatnonzero(np.diff(keys[order]) != 0) + 1].astype(np.int32)
+            if capacity
+            else np.empty(0, np.int32)
+        )
+        group_rows, group_columns = rows[order[starts]], columns[order[starts]]
+        groups = len(starts)
+        row_groups = np.r_[0, np.cumsum(np.bincount(group_rows, minlength=size))].astype(np.int32)
+        p = 1 << groups.bit_length()
+        self.device = wp.get_device(device)
+        self.size, self.capacity, self.group_count = int(size), capacity, groups
+        self.output_capacity = groups if self.device.is_cuda else capacity
+        byte_count = 16 * capacity + 48 * groups + 8 * (int(size) + 1) + 4 * p + 8 + 40 * self.output_capacity
+        if byte_count >= 2**63:
+            raise ValueError("Fixed internal BSR byte capacity exceeds int64")
+        self._spec = dict.fromkeys(("expected_rows", "expected_columns", "indices", "active"), (capacity, wp.int32))
+        self._spec.update(dict.fromkeys(("group_columns", "live"), (groups, wp.int32)))
+        self._spec.update(
+            group_offsets=(groups + 1, wp.int32),
+            row_groups=(int(size) + 1, wp.int32),
+            work=(groups, wp.mat33),
+            prefix=(p, wp.int32),
+            status=(1, wp.int32),
+        )
+        for name, (length, scalar) in self._spec.items():
+            setattr(self, name, wp.zeros(length, dtype=scalar, device=self.device))
+        for name, data in (
+            ("expected_rows", rows),
+            ("expected_columns", columns),
+            ("indices", order),
+            ("group_columns", group_columns),
+            ("group_offsets", np.r_[starts, capacity].astype(np.int32)),
+            ("row_groups", row_groups),
+        ):
+            getattr(self, name).assign(data)
+        self.matrix = sparse.bsr_zeros(size, size, wp.mat33, device=self.device, nnz_capacity=self.output_capacity)
+        self.matrix.notify_nnz_changed(nnz=self.output_capacity, nnz_capacity=self.output_capacity)
+        self.graphs = _SegmentGraphCache(self.device, enabled=use_cuda_graph and self.device.is_cuda)
+        self.payload_bytes = byte_count
+
+    def buffers(self):
+        return (
+            *(getattr(self, name) for name in self._spec),
+            self.matrix.offsets,
+            self.matrix.columns,
+            self.matrix.values,
+        )
+
+    def build(self, triplets, *, layout_identity=""):
+        matrix = self.matrix
+        if matrix.nrow != self.size or matrix.ncol != self.size or matrix.row_counts is not None:
+            raise ValueError("Invalid fixed internal BSR matrix layout")
+        arrays = list(self.buffers())
+        specs = [
+            *self._spec.values(),
+            (self.size + 1, wp.int32),
+            (self.output_capacity, wp.int32),
+            (self.output_capacity, wp.mat33),
+        ]
+        for name, scalar, length in (
+            ("rows", wp.int32, self.capacity),
+            ("columns", wp.int32, self.capacity),
+            ("values", wp.mat33, self.capacity),
+            ("count", wp.int32, 1),
+            ("status", wp.int32, 1),
+        ):
+            arrays.append(getattr(triplets, name))
+            specs.append((length, scalar))
+        for array, (length, scalar) in zip(arrays, specs, strict=True):
+            if (
+                array.shape != (length,)
+                or array.dtype != scalar
+                or array.device != self.device
+                or not array.is_contiguous
+            ):
+                raise ValueError("Invalid fixed internal BSR storage")
+        intervals = sorted((a.ptr, a.ptr + a.size * wp.types.type_size_in_bytes(a.dtype)) for a in arrays if a.size)
+        if any(right[0] < left[1] for left, right in pairwise(intervals)):
+            raise ValueError("Fixed internal BSR storage aliases")
+        matrix.nnz = self.output_capacity
+        self.graphs.run(
+            "fixed_internal_bsr", (self.size, self.capacity, layout_identity), arrays, lambda: self._build(triplets)
+        )
+
+    def _build(self, triplets):
+        matrix = self.matrix
+        for array in (matrix.offsets, matrix.columns, matrix.values):
+            array.zero_()
+        wp.launch(
+            _fixed_internal_begin, 1, [triplets.count, triplets.status, self.status, self.capacity], device=self.device
+        )
+        if self.capacity:
+            wp.launch(
+                _fixed_internal_validate,
+                self.capacity,
+                [
+                    triplets.rows,
+                    triplets.columns,
+                    triplets.values,
+                    triplets.count,
+                    self.expected_rows,
+                    self.expected_columns,
+                    self.active,
+                    self.status,
+                ],
+                device=self.device,
+            )
+        if self.device.is_cpu:
+            if self.status.numpy()[0] == 0:
+                # Preserve native CPU std::sort and numerical-zero pruning.
+                sparse.bsr_set_from_triplets(
+                    matrix, triplets.rows, triplets.columns, triplets.values, count=triplets.count
+                )
+                if self.size:
+                    wp.launch(
+                        _fixed_internal_finite,
+                        self.size,
+                        [matrix.offsets, matrix.values, self.status],
+                        device=self.device,
+                    )
+        else:
+            if self.group_count:
+                wp.launch(
+                    _fixed_internal_values,
+                    (self.group_count, 3, 3),
+                    [
+                        triplets.values,
+                        self.indices,
+                        self.group_offsets,
+                        self.active,
+                        self.live,
+                        wp.array(
+                            ptr=self.work.ptr,
+                            capacity=self.work.capacity,
+                            dtype=wp.float32,
+                            shape=(self.group_count, 3, 3),
+                            device=self.device,
+                        ),
+                        self.status,
+                    ],
+                    device=self.device,
+                )
+            wp.launch(_fixed_internal_seed, self.prefix.size, [self.live, self.prefix], device=self.device)
+            distance = 1
+            while distance < self.prefix.size:
+                wp.launch(
+                    _fixed_bsr_scan_up, self.prefix.size // (2 * distance), [self.prefix, distance], device=self.device
+                )
+                distance *= 2
+            wp.launch(_fixed_bsr_scan_root, 1, [self.prefix], device=self.device)
+            distance //= 2
+            while distance:
+                wp.launch(
+                    _fixed_bsr_scan_down,
+                    self.prefix.size // (2 * distance),
+                    [self.prefix, distance],
+                    device=self.device,
+                )
+                distance //= 2
+            wp.launch(
+                _fixed_internal_offsets,
+                self.size + 1,
+                [self.row_groups, self.prefix, matrix.offsets],
+                device=self.device,
+            )
+            if self.group_count:
+                wp.launch(
+                    _fixed_internal_entries,
+                    self.group_count,
+                    [self.live, self.prefix, self.group_columns, self.work, matrix.columns, matrix.values],
+                    device=self.device,
+                )
+        for array in (matrix.offsets, matrix.columns, matrix.values):
+            if array.size:
+                wp.launch(_fixed_bsr_clear_failed, array.size, [array, self.status], device=self.device)
+        wp.launch(_fixed_bsr_publish_status, 1, [self.status, triplets.status], device=self.device)
+        matrix.notify_nnz_changed(nnz=self.output_capacity, nnz_capacity=self.output_capacity)

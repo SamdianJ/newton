@@ -25,7 +25,12 @@ from .bsr import (
     _validate_bsr_finite,
     _validate_triplets,
 )
-from .bsr_reduction import _ScalarBsrReduction
+from .bsr_reduction import (
+    _fixed_bsr_publish_status,
+    _FixedInternalBsrReduction,
+    _FixedScalarBsrReduction,
+    _ScalarBsrReduction,
+)
 from .linear_types import (
     MonolithicDenseLinearOracle,
     MonolithicLinearBuildResult,
@@ -111,6 +116,7 @@ class MonolithicLinearWorkspace:
         self._sealed = True
         self._valid = False
         self._fixed_patterns = None
+        self._fixed_bsr = None
         self._global = _create_triplets(
             _MonolithicScalarTriplets,
             capacities.global_scalar_triplet_count,
@@ -265,6 +271,27 @@ class MonolithicLinearWorkspace:
         self._fixed_patterns = tuple(
             tuple(wp.array(indices, dtype=int, device=self.device) for indices in pattern) for pattern in patterns
         )
+
+    def _enable_fixed_bsr_storage(self):
+        """Bind fixed CUDA builders once for a complete immutable owner pattern."""
+        if self._generation is not None or self._fixed_bsr is not None or self._fixed_patterns is None:
+            raise ValueError("Fixed BSR storage requires an unused workspace with owner patterns")
+        rows, columns = self._fixed_patterns[1]
+        if rows.size != self._internal.capacity:
+            raise ValueError("Fixed BSR storage requires the complete internal owner capacity")
+        scalar = _FixedScalarBsrReduction(
+            self.layout.scalar_dof_count, self._global.capacity, self.device, use_cuda_graph=self.use_cuda_graph
+        )
+        internal = _FixedInternalBsrReduction(
+            self.layout.dynamic_particle_count,
+            rows.numpy(),
+            columns.numpy(),
+            self.device,
+            use_cuda_graph=self.use_cuda_graph,
+        )
+        self._fixed_bsr = scalar, internal
+        self.k_global_scalar_bsr, self.ax_internal_bsr3 = scalar.matrix, internal.matrix
+        self._scalar_reduction = None  # No legacy sort scratch survives this construction-only switch.
 
     def begin_assembly(self, generation: MonolithicLinearGeneration) -> MonolithicLinearAssembly:
         if self.layout != self._layout_identity:
@@ -433,6 +460,14 @@ class MonolithicLinearWorkspace:
                     counts[:2],
                     strict=True,
                 ):
+                    if self._fixed_bsr is not None:
+                        reduction = self._fixed_bsr[0] if matrix is self.k_global_scalar_bsr else self._fixed_bsr[1]
+                        reduction.build(triplets, layout_identity=self.layout.identity)
+                        if matrix is self.ax_internal_bsr3:
+                            wp.launch(
+                                _fixed_bsr_publish_status, 1, [triplets.status, self._global.status], device=self.device
+                            )
+                        continue
                     if matrix is self.k_global_scalar_bsr:
                         self._scalar_reduction.build(
                             matrix,
