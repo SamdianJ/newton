@@ -285,10 +285,30 @@ def _actor_forces(
             wp.atomic_add(qforce, dof, -wp.dot(jacobians[index], local))
 
 
+def _validate_actor_targets(contact, samples):
+    """Apply the actor target SDF contract before either storage path is allocated."""
+    for shape in samples.targets_used:
+        if contact.values["shape_type"][shape] == GeoType.MESH:
+            index = int(contact.values["_shape_sdf_index"][shape])
+            if (
+                contact.model.device.is_cpu
+                or contact._descriptors is None
+                or index < 0
+                or index >= len(contact._descriptors)
+            ):
+                raise ValueError("Actor mesh target requires CUDA texture SDF")
+            if contact.smooth_sdf is None or contact.smooth_sdf.fields[index].representation != "c2-bspline":
+                raise ValueError("Actor mesh target requires bound C2 SDF")
+            scale = contact.values["shape_scale"][shape]
+            if not contact._descriptors["scale_baked"][index] and (scale[0] <= 0 or not np.all(scale == scale[0])):
+                raise ValueError("Unbaked actor mesh scale must be positive and uniform")
+
+
 class ActorContact:
     """Own fixed new-query arrays and native scratch appended to the old contact batch."""
 
     def __init__(self, contact, samples):
+        _validate_actor_targets(contact, samples)
         self.contact, self.samples = contact, samples
         self.count = samples.count
         self._bound = {}
@@ -355,21 +375,6 @@ class ActorContact:
         self.bound_lower = wp.empty(len(selected), dtype=contact.vector, device=contact.model.device)
         self.bound_upper = wp.empty_like(self.bound_lower)
         self.tet_bound = wp.empty(2, dtype=contact.vector, device=contact.model.device)
-        for shape in samples.targets_used:
-            if contact.values["shape_type"][shape] == GeoType.MESH:
-                index = int(contact.values["_shape_sdf_index"][shape])
-                if (
-                    contact.model.device.is_cpu
-                    or contact._descriptors is None
-                    or index < 0
-                    or index >= len(contact._descriptors)
-                ):
-                    raise ValueError("Actor mesh target requires CUDA texture SDF")
-                if contact.smooth_sdf is None or contact.smooth_sdf.fields[index].representation != "c2-bspline":
-                    raise ValueError("Actor mesh target requires bound C2 SDF")
-                scale = contact.values["shape_scale"][shape]
-                if not contact._descriptors["scale_baked"][index] and (scale[0] <= 0 or not np.all(scale == scale[0])):
-                    raise ValueError("Unbaked actor mesh scale must be positive and uniform")
 
     def geometry(self):
         c = self.contact

@@ -447,7 +447,12 @@ def _check_residual(residual: wp.array[Any], flags: wp.array[int]):
 
 
 class ContactObjective:
-    """Preallocate all face/slot/shape queries and separate frozen step geometry from trials."""
+    """Validate complete contact inputs, optionally retaining only bounded-generator metadata.
+
+    The default owns the original full evaluation storage. The private
+    metadata-only construction skips expanded support and geometry tables;
+    native evaluation then belongs to the bounded contact batch.
+    """
 
     def __init__(
         self,
@@ -468,7 +473,11 @@ class ContactObjective:
         articulation_actor=None,
         base_triplet_count=0,
         actors=None,
+        _metadata_only=False,
     ):
+        if type(_metadata_only) is not bool:
+            raise ValueError("Contact metadata mode must be boolean")
+        self._metadata_only = _metadata_only
         if dtype not in (wp.float64, wp.float32):
             raise ValueError("Contact requires float64 or float32")
         self.dtype = dtype
@@ -528,7 +537,13 @@ class ContactObjective:
         self.actor_samples = (
             None
             if actors is None
-            else ContactSamples(model, actors, radius=particle_radius, base_triplet_count=base_triplet_count)
+            else ContactSamples(
+                model,
+                actors,
+                radius=particle_radius,
+                base_triplet_count=base_triplet_count,
+                _expand_support=not _metadata_only,
+            )
         )
         shapes = np.flatnonzero(v["shape_flags"] & int(ShapeFlags.COLLIDE_PARTICLES)).astype(np.int32)
         if self.actor_samples is not None:
@@ -578,7 +593,6 @@ class ContactObjective:
         self.layout = layout or MonolithicLinearLayout(q_dof_count, len(dynamic))
         if (self.layout.q_dof_count, self.layout.dynamic_particle_count) != (q_dof_count, len(dynamic)):
             raise ValueError("Contact layout does not match endpoint DoFs")
-        support_columns, support_local, support_offsets = [], [], [0]
         ancestors = {}
         if articulation_actor is not None:
             parents, children = model.joint_parent.numpy(), model.joint_child.numpy()
@@ -592,6 +606,7 @@ class ContactObjective:
                     selected.extend(local_dofs[i] for i in range(int(starts[joint]), int(starts[joint + 1])))
                     cursor = int(parents[joint])
                 ancestors[body] = sorted(selected)
+        self._legacy_ancestors = {body: tuple(selected) for body, selected in ancestors.items()}
         if type(base_triplet_count) is not int or not 0 <= base_triplet_count < 2**31:
             raise ValueError("Invalid base triplet capacity")
         support_count, triplet_count = 0, 0
@@ -621,43 +636,45 @@ class ContactObjective:
             )
             count += samples.count
             triplet_count += samples.triplet_capacity
-        for face in triangles:
-            for _slot in range(3):
-                for shape in shapes:
-                    body = int(v["shape_body"][shape])
-                    q = ancestors.get(body, list(range(q_dof_count))) if body >= 0 else []
-                    columns = [self.layout.q_scalar_offset + i for i in q]
-                    local = list(q)
-                    for a, particle in enumerate(face):
-                        node = int(mapping[particle])
-                        if node >= 0:
-                            columns.extend(self.layout.x_scalar_offset + 3 * node + j for j in range(3))
-                            local.extend(-(3 * a + j + 1) for j in range(3))
+        if not _metadata_only:
+            support_columns, support_local, support_offsets = [], [], [0]
+            for face in triangles:
+                for _slot in range(3):
+                    for shape in shapes:
+                        body = int(v["shape_body"][shape])
+                        q = ancestors.get(body, list(range(q_dof_count))) if body >= 0 else []
+                        columns = [self.layout.q_scalar_offset + i for i in q]
+                        local = list(q)
+                        for a, particle in enumerate(face):
+                            node = int(mapping[particle])
+                            if node >= 0:
+                                columns.extend(self.layout.x_scalar_offset + 3 * node + j for j in range(3))
+                                local.extend(-(3 * a + j + 1) for j in range(3))
+                        for _component in range(3):
+                            support_columns.extend(columns)
+                            support_local.extend(local)
+                            support_offsets.append(len(support_columns))
+            if samples is not None:
+                for columns in samples.supports:
                     for _component in range(3):
                         support_columns.extend(columns)
-                        support_local.extend(local)
+                        support_local.extend([0] * len(columns))
                         support_offsets.append(len(support_columns))
-        if samples is not None:
-            for columns in samples.supports:
-                for _component in range(3):
-                    support_columns.extend(columns)
-                    support_local.extend([0] * len(columns))
-                    support_offsets.append(len(support_columns))
-        self.factor_support = tuple(
-            np.asarray(a, dtype=np.int32) for a in (support_offsets, support_columns, support_local)
-        )
-        offsets, columns, local = self.factor_support
-        residual_columns = (
-            np.concatenate([columns[offsets[3 * key] : offsets[3 * key + 1]] for key in range(count)])
-            if count
-            else np.empty(0, dtype=np.int32)
-        )
-        self._residual_offsets, self._residual_slots = _row_gather_map(
-            residual_columns, self.layout.scalar_dof_count, model.device
-        )
-        self._residual_terms = wp.zeros(len(residual_columns), dtype=self.dtype, device=model.device)
-        self._support_offsets = wp.array(offsets, dtype=int, device=model.device)
-        self._support_local = wp.array(local, dtype=int, device=model.device)
+            self.factor_support = tuple(
+                np.asarray(a, dtype=np.int32) for a in (support_offsets, support_columns, support_local)
+            )
+            offsets, columns, local = self.factor_support
+            residual_columns = (
+                np.concatenate([columns[offsets[3 * key] : offsets[3 * key + 1]] for key in range(count)])
+                if count
+                else np.empty(0, dtype=np.int32)
+            )
+            self._residual_offsets, self._residual_slots = _row_gather_map(
+                residual_columns, self.layout.scalar_dof_count, model.device
+            )
+            self._residual_terms = wp.zeros(len(residual_columns), dtype=self.dtype, device=model.device)
+            self._support_offsets = wp.array(offsets, dtype=int, device=model.device)
+            self._support_local = wp.array(local, dtype=int, device=model.device)
         self.triplet_capacity = triplet_count
         self.model, self.contact_model = model, contact_model
         self.body_count = model.body_count if articulation_actor is None else len(articulation_actor.body_indices)
@@ -699,6 +716,14 @@ class ContactObjective:
         self.scales = wp.array(v["shape_scale"].astype(self.numpy_dtype), dtype=self.vector, device=model.device)
         self.margins = wp.array(v["shape_margin"].astype(self.numpy_dtype), dtype=self.dtype, device=model.device)
         self.area = wp.array(areas, dtype=self.dtype, device=model.device)
+        self._started, self._evaluated = False, False
+        self.actor_contact = None
+        if _metadata_only:
+            if samples is not None and samples.count:
+                from .contact_actor import _validate_actor_targets  # noqa: PLC0415
+
+                _validate_actor_targets(self, samples)
+            return
         self.current, self.start = self._geometry_storage(), self._geometry_storage()
         self.flags = wp.zeros(2, dtype=int, device=model.device)
         self.start_flags = wp.zeros_like(self.flags)
@@ -710,8 +735,6 @@ class ContactObjective:
         self.weights = wp.zeros((count, 3), dtype=self.dtype, device=model.device)
         self.omitted = wp.zeros((count, 4), dtype=self.dtype, device=model.device)
         self.mask_seen = wp.zeros(count, dtype=int, device=model.device)
-        self._started, self._evaluated = False, False
-        self.actor_contact = None
         if samples is not None and samples.count:
             from .contact_actor import ActorContact  # noqa: PLC0415
 
@@ -775,6 +798,8 @@ class ContactObjective:
 
     def begin_step(self, x, poses, com, jt, jw, *, rigid_com=None, rigid_rotation=None):
         """Freeze geometry for the complete deterministic key set, including inactive pairs."""
+        if self._metadata_only:
+            raise ValueError("Contact metadata requires the bounded batch evaluator")
         self.mask_seen.zero_()
         wp.launch(_reset_flags, 1, [self.start_flags], device=self.model.device)
         self._query(x, poses, com, jt, jw, self.start, self.start_flags)
@@ -801,6 +826,8 @@ class ContactObjective:
 
     def evaluate(self, x, poses, com, jt, jw, *, dt, rigid_com=None, rigid_rotation=None):
         """Overwrite trial E/r without changing step-start geometry or tangent storage."""
+        if self._metadata_only:
+            raise ValueError("Contact metadata requires the bounded batch evaluator")
         if not self._started or not math.isfinite(dt) or dt <= 0:
             raise ValueError("A frozen step and positive finite dt are required")
         stiffness, mu, velocity, smoothing, radius = map(self.numpy_dtype, self.parameters)
@@ -870,6 +897,8 @@ class ContactObjective:
 
     def assemble_tangent(self, assembly):
         """Append normal/radial/transverse PSD factors with frozen load/normal; B is FP32."""
+        if self._metadata_only:
+            raise ValueError("Contact metadata requires the bounded batch evaluator")
         if not self._evaluated or assembly.contact_factors.scalar_dof_count != self.residual.size:
             raise ValueError("Evaluate contact first and use the matching linear layout")
         if self.legacy_count:

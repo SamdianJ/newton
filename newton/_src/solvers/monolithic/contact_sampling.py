@@ -72,7 +72,9 @@ def _checked_contact_capacity(count, support, triplets, base=0):
 class ContactSamples:
     """Freeze Model-selected directed keys without rebuilding collision filters."""
 
-    def __init__(self, model, actors, *, radius, base_triplet_count):
+    def __init__(self, model, actors, *, radius, base_triplet_count, _expand_support=True):
+        if type(_expand_support) is not bool:
+            raise ValueError("Contact support expansion mode must be boolean")
         self.model = model
         self.actors = actors
         self.meshes = {}
@@ -131,8 +133,9 @@ class ContactSamples:
             self.triplet_capacity += 3 * k * k
             _checked_contact_capacity(self.count, self.support_size, self.triplet_capacity, base_triplet_count)
             self.keys.append((source, target, face, slot))
-            self.supports.append(tuple(columns))
-            self.selectors.append(tuple(selectors))
+            if _expand_support:
+                self.supports.append(tuple(columns))
+                self.selectors.append(tuple(selectors))
             points.append(point)
             normals.append(normal)
             weights.append(area)

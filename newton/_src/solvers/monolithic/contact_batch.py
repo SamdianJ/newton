@@ -355,7 +355,10 @@ class _ContactBatch:
             particles = np.asarray(actors.maps["particle_to_global"], np.int32)
         else:
             body_support = {
-                body: [(contact.layout.q_scalar_offset + j, j) for j in range(contact.nq)]
+                body: [
+                    (contact.layout.q_scalar_offset + j, j)
+                    for j in contact._legacy_ancestors.get(body, range(contact.nq))
+                ]
                 for body in range(model.body_count)
                 if indices[body] >= 0
             }
