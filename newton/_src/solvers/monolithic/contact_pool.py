@@ -483,7 +483,13 @@ def _reserve_contacts(
         actual = wp.atomic_cas(records.used, 0, before, before + units)
         if actual == before:
             selected[index] = 1
-            demands[index] = wp.vec4i(1, k, 3 * k * k, candidates.force_counts[i])
+            components = int(0)
+            for axis in range(3):
+                if candidates.weights[i, axis] > 0.0:
+                    components += 1
+            # Retain zero products within positive factors, but preserve the
+            # original omission of entire zero-weight factors from B's tree.
+            demands[index] = wp.vec4i(1, k, components * k * k, candidates.force_counts[i])
             return
         before = actual
     # Failure does not increment any resource counter or publish a partial row.
@@ -598,7 +604,13 @@ def _write_contact_triplets(records: Any):
             hi = mid
     k = records.support_offsets[lo + 1] - records.support_offsets[lo]
     local = i - records.triplet_offsets[lo]
-    component = local // (k * k)
+    remaining = local // (k * k)
+    component = int(0)
+    for axis in range(3):
+        if records.factor_weights[3 * lo + axis] > 0.0:
+            if remaining == 0:
+                component = axis
+            remaining -= 1
     begin = records.factor_offsets[3 * lo + component]
     row = begin + (local % (k * k)) // k
     column = begin + local % k

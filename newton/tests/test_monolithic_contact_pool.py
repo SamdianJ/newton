@@ -12,6 +12,12 @@ import numpy as np
 import warp as wp
 from warp import sparse
 
+from newton._src.solvers.monolithic.bsr import (
+    _append_monolithic_contact_factor_triplets,
+    _create_triplets,
+    _MonolithicContactFactors,
+    _MonolithicScalarTriplets,
+)
 from newton._src.solvers.monolithic.bsr_reduction import _FixedScalarBsrReduction, _ScalarBsrReduction
 from newton._src.solvers.monolithic.contact_pool import _ContactPool, _ContactRows
 from newton.tests.test_monolithic_linear_assembly import _dense_bsr
@@ -369,7 +375,7 @@ def check_admitted(test, pool, data):
                 np.add.at(expected_b[columns[a]], columns, values[a])
         supports += k
         forces += f
-        triplets += 3 * k * k
+        triplets += int(np.count_nonzero(data["weights"][i] > 0)) * k * k
     test.assertEqual(int(record.support_count.numpy()[0]), supports)
     test.assertEqual(int(record.factor_count.numpy()[0]), 3 * n)
     test.assertEqual(int(record.triplet_count.numpy()[0]), triplets)
@@ -742,6 +748,66 @@ def test_pool_invalid_scratch(test, device):
                 pool.evaluate()
 
 
+@wp.kernel
+def _legacy_pool_triplets(factors: _MonolithicContactFactors, triplets: _MonolithicScalarTriplets):
+    _append_monolithic_contact_factor_triplets(factors, wp.tid(), triplets)
+
+
+def test_pool_zero_weight_b_policy(test, device):
+    """Skip zero-weight factors while preserving zero products in positive factors' B tree."""
+    pool = _ContactPool(1, 0, 3, 3, 1, 3, wp.float64, device, use_cuda_graph=device.is_cuda)
+    a = pool.candidates
+    a.count.assign([3])
+    a.identities.assign([0, 1, 2])
+    a.support_counts.fill_(1)
+    factors = np.zeros((3, 3, 1), np.float32)
+    factors[:, 0, 0] = 1
+    a.factors.assign(factors)
+    a.weights.assign([[2**24, 1, 0], [1, 1, 0], [1, 1, 0]])
+    pool.evaluate()
+    test.assertEqual(pool.records.flags.numpy()[0], 0)
+    np.testing.assert_array_equal(pool.records.accepted.numpy(), [1, 1, 1])
+    record = pool.records
+    token = wp.ones(1, dtype=int, device=device)
+    legacy = _create_triplets(_MonolithicScalarTriplets, 9, 1, float, device, token, 1)
+    factor = _MonolithicContactFactors()
+    for name, values in (
+        ("offsets", record.factor_offsets),
+        ("columns", record.factor_columns),
+        ("values", record.factor_values),
+        ("local_indices", record.factor_local),
+        ("weights", record.factor_weights),
+        ("kind", record.factor_kind),
+        ("candidate_tid", record.factor_contact),
+        ("count", record.factor_count),
+        ("status", legacy.status),
+        ("active_token", token),
+    ):
+        setattr(factor, name, values)
+    factor.capacity, factor.scalar_dof_count, factor.token = 9, 1, 1
+    wp.launch(_legacy_pool_triplets, 9, [factor, legacy], device=device)
+    old_matrix = sparse.bsr_zeros(1, 1, wp.float32, device=device)
+    old = _ScalarBsrReduction(9, device, use_cuda_graph=device.is_cuda)
+    old.build(old_matrix, legacy, int(legacy.count.numpy()[0]), layout_identity="zero-weight", graphs=None)
+    new = _FixedScalarBsrReduction(1, pool.triplet_capacity, device, use_cuda_graph=device.is_cuda)
+    new.build(
+        SimpleNamespace(
+            rows=record.triplet_rows,
+            columns=record.triplet_columns,
+            values=record.triplet_values,
+            count=record.triplet_count,
+            status=wp.zeros(1, dtype=int, device=device),
+        )
+    )
+    test.assertEqual(old_matrix.values.numpy()[0], np.float32(2**24))
+    np.testing.assert_array_equal(
+        new.matrix.values.numpy()[:1].view(np.uint32), old_matrix.values.numpy()[:1].view(np.uint32)
+    )
+    test.assertEqual(int(record.triplet_count.numpy()[0]), int(legacy.count.numpy()[0]))
+    test.assertEqual(int(record.triplet_count.numpy()[0]), 6)
+    test.assertEqual(int(record.factor_count.numpy()[0]), 9)
+
+
 class TestContactPool(unittest.TestCase):
     pass
 
@@ -764,6 +830,7 @@ for _device in get_test_devices():
         test_many_contact_reservations,
         test_pool_native_energy_bits,
         test_pool_invalid_scratch,
+        test_pool_zero_weight_b_policy,
     ):
         add_function_test(TestContactPool, _test.__name__, _test, devices=[_device])
     if _device.is_cuda:
