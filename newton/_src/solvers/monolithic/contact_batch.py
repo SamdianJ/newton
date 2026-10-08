@@ -308,7 +308,7 @@ class _ContactBatch:
         "margins",
     )
 
-    def __init__(self, contact, *, batch_capacity, capacity, use_cuda_graph=False):
+    def __init__(self, contact, *, batch_capacity, capacity, contact_factor_capacity=None, use_cuda_graph=False):
         self.contact, self.device = contact, contact.model.device
         self.dtype, self.vector, self.matrix = contact.dtype, contact.vector, contact.matrix
         self.batch_capacity = batch_capacity
@@ -319,7 +319,7 @@ class _ContactBatch:
             or not (0 if m == 0 else 1) <= batch_capacity <= m
         ):
             raise ValueError("Invalid native contact batch capacity")
-        if (
+        if capacity is not None and (
             isinstance(capacity, (bool, np.bool_))
             or not isinstance(capacity, (int, np.integer))
             or not 0 <= capacity < 2**31
@@ -422,6 +422,8 @@ class _ContactBatch:
             else:
                 k += len(body_support.get(int(bodies[source]), ()))
             demands.append(k)
+        if capacity is None:
+            capacity = sum(max(1, k) for k in demands)
         self.pool = _ContactPool(
             contact.layout.scalar_dof_count,
             3 * model.particle_count + 6 * model.body_count,
@@ -432,6 +434,7 @@ class _ContactBatch:
             self.dtype,
             self.device,
             batch_capacity=batch_capacity,
+            contact_factor_capacity=contact_factor_capacity,
             use_cuda_graph=use_cuda_graph,
         )
         for name in fields:

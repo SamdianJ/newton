@@ -98,6 +98,8 @@ def energy_terms(
     joint: wp.array[Any],
     tet: wp.array[Any],
     contact: wp.array[Any],
+    contact_absolute: wp.array[Any],
+    pooled: bool,
     terms: wp.array2d[Any],
 ):
     i = wp.tid()
@@ -117,6 +119,8 @@ def energy_terms(
                 value = contact[j - tet.shape[0]]
     terms[0, i] = value
     terms[1, i] = wp.abs(value)
+    if pooled and i >= link.shape[0] + joint.shape[0] + tet.shape[0]:
+        terms[1, i] = contact_absolute[j - tet.shape[0]]
 
 
 @wp.kernel
@@ -167,6 +171,8 @@ def evaluate(solver):
             self._objective.joint_energy,
             self._tet.parts,
             self._contact.energy.flatten(),
+            self._contact.absolute_energy if self._contact_pool else self._contact.energy.flatten(),
+            self._contact_pool,
             self._energy_terms,
         ],
         device=self.model.device,

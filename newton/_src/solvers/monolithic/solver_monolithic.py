@@ -24,6 +24,7 @@ from .articulation_state import _predict, _recover_history
 from .collision import _validate_and_collect_boundary_faces
 from .contact import ContactObjective, ContactStatus
 from .contact_forces import MonolithicContactForces
+from .contact_pipeline import _PooledContactObjective
 from .coupled_state import CoupledState
 from .iteration import iterate, measure
 from .joint_parameters import JointParameters
@@ -193,6 +194,9 @@ class SolverMonolithic(SolverBase):
         capacity = 3 * self._contact.count if contact_factor_capacity is None else contact_factor_capacity
         if type(capacity) is not int or capacity < 0:
             raise ValueError("Contact factor capacity must be a nonnegative integer")
+        self._contact_pool = isinstance(self._contact, _PooledContactObjective)
+        if self._contact_pool:
+            self._contact.initialize_pool(capacity, use_cuda_graph=use_cuda_graph)
         self._guard = min_det_f_guard
         physics_sources = dict(self._tet.physics.sources)
         for name in (
@@ -218,6 +222,9 @@ class SolverMonolithic(SolverBase):
             "alignment_policy": np.frombuffer(alignment_policy.encode(), dtype=np.uint8),
             "heuristic_energy": np.array([allow_nonconservative_energy], dtype=np.uint8),
         }
+        if self._contact_pool:
+            self._coupled_config["contact_dataflow"] = self._contact.dataflow_identity
+            self._coupled_config["contact_resources"] = self._contact.resource_identity
         if self._rigid.count:
             self._coupled_config.update(
                 rigid_contact_pairs=self._rigid.values["shape_contact_pairs"],
@@ -332,7 +339,7 @@ class SolverMonolithic(SolverBase):
             MonolithicLinearCapacities(
                 nq * nq + len(pattern.global_rows) + 36 * self._rigid.count + self._contact.triplet_capacity,
                 len(pattern.ax_rows),
-                capacity,
+                0 if self._contact_pool else capacity,
                 self.linear_max_iterations,
                 self.linear_max_iterations + 2,
             ),
@@ -340,7 +347,7 @@ class SolverMonolithic(SolverBase):
             device=device,
             pcg_mode=self.pcg_mode.value,
             use_cuda_graph=self._use_cuda_graph,
-            contact_support=self._contact.factor_support,
+            contact_support=None if self._contact_pool else self._contact.factor_support,
         )
         rigid_rows = np.repeat(self._rigid.rows_numpy, 6, axis=1).ravel()
         rigid_columns = np.tile(self._rigid.rows_numpy, (1, 6)).ravel()
@@ -351,6 +358,8 @@ class SolverMonolithic(SolverBase):
             internal_rows=pattern.ax_rows,
             internal_columns=pattern.ax_columns,
         )
+        if self._contact_pool:
+            self._linear._enable_fixed_bsr_storage()
         for name in ("_rhs", "_y", "_delta", "_diagonal"):
             setattr(self, name, wp.zeros(layout.scalar_dof_count, dtype=float, device=device))
         self._complete_r = wp.zeros(layout.scalar_dof_count, dtype=self._dtype, device=device)
@@ -673,6 +682,13 @@ class SolverMonolithic(SolverBase):
             if isinstance(self._variational.get("residual"), wp.array):
                 self._variational["residual"] = self._variational["residual"].numpy().tolist()
             self._variational["graphs"] = self._graphs.summary()
+            if self._contact_pool:
+                self._variational["contact_graphs"] = {
+                    "batch": self._contact._batch.graphs.summary(),
+                    "pool": self._contact.pool.graphs.summary(),
+                    "bsr": self._linear._fixed_bsr[0].graphs.summary(),
+                    "internal": self._linear._fixed_bsr[1].graphs.summary(),
+                }
             self._last_stats = self.Stats(
                 status=status,
                 failure_reason=failure,
@@ -795,12 +811,17 @@ class SolverMonolithic(SolverBase):
             buffers.extend((self._energy_terms, self._energy_sums, self._evaluation_status, self._evaluation_packet))
         rigid_history = state._monolithic_coupled
         buffers.extend([rigid_history.rigid_com, rigid_history.rigid_rotation])
-        for owner in (self._objective, k, tet, contact, contact.start, contact.current, self._rigid):
+        owners = (self._objective, k, tet, contact, self._rigid)
+        if not self._contact_pool:
+            owners += (contact.start, contact.current)
+        for owner in owners:
             buffers.extend(value for value in vars(owner).values() if isinstance(value, wp.array))
         if contact.actor_contact is not None:
             buffers.extend(contact.actor_contact.buffers())
+        if self._contact_pool:
+            buffers.extend(contact.buffers())
 
-        def evaluate():
+        def evaluate_owners():
             self._objective.evaluate(local_q, dt, build_tangent=build_tangent)
             self._rigid.evaluate(state, dt, build_tangent)
             tet.evaluate(
@@ -812,6 +833,8 @@ class SolverMonolithic(SolverBase):
                 dt=dt,
                 min_det_f_guard=self._guard,
             )
+
+        def evaluate_contact():
             contact.evaluate(
                 state.particle_q,
                 k.poses,
@@ -822,6 +845,8 @@ class SolverMonolithic(SolverBase):
                 rigid_com=rigid_history.rigid_com,
                 rigid_rotation=rigid_history.rigid_rotation,
             )
+
+        def evaluate_result():
             wp.launch(
                 kernels.combine,
                 self._complete_r.size,
@@ -841,16 +866,25 @@ class SolverMonolithic(SolverBase):
                 [self._rigid.rows, self._rigid.residual, self._complete_r],
                 device=self.model.device,
             )
-
             if device_result:
                 iteration_device.evaluate(self)
 
-        self._graphs.run(
-            "coupled_objective",
-            (self._layout.identity, self.precision.value, dt, build_tangent, device_result),
-            buffers,
-            evaluate,
-        )
+        key = (self._layout.identity, self.precision.value, dt, build_tangent, device_result)
+        if self._contact_pool:
+            self._graphs.run("coupled_objective_owners", key, buffers, evaluate_owners)
+            # Pool begin/append have side effects; they must run once, never
+            # inside the owner's warmup/capture/replay overwrite chain.
+            evaluate_contact()
+            self._graphs.run("coupled_objective_result", key, buffers, evaluate_result)
+            self._variational["contact_pool"] = contact.evaluation_diagnostics()
+        else:
+
+            def evaluate():
+                evaluate_owners()
+                evaluate_contact()
+                evaluate_result()
+
+            self._graphs.run("coupled_objective", key, buffers, evaluate)
         self._current_state = state
         if device_result:
             packet = self._evaluation_packet.numpy()
@@ -882,7 +916,10 @@ class SolverMonolithic(SolverBase):
         if not np.isfinite(residual).all() or not np.isfinite(parts).all() or not np.isfinite(parts.sum()):
             raise _StepFailure(self.Status.NONFINITE, "Nonfinite coupled E/r")
         self._metrics["min_det_f"] = float(tet.min_det_f.numpy()[0])
-        return parts.sum(), residual, abs(parts).sum()
+        absolute = abs(parts).sum()
+        if self._contact_pool:
+            absolute = abs(parts[: -contact.energy.size]).sum() + contact.absolute_energy.numpy().sum()
+        return parts.sum(), residual, absolute
 
     def _initial_reference(self, dt, *, device_result=False):
         residual = self._evaluate(self._original, dt, build_tangent=False, device_result=device_result)[1]
@@ -984,7 +1021,7 @@ class SolverMonolithic(SolverBase):
         self._generation = MonolithicLinearGeneration(
             self._step_generation,
             iteration,
-            self._step_generation,
+            self._contact.evaluation_generation if self._contact_pool else self._step_generation,
             self._assembly_sequence,
             history_epoch=self._step_generation,
         )
@@ -1146,7 +1183,9 @@ class SolverMonolithic(SolverBase):
         arrays = [history.contact_joint_force, history.contact_particle_force, history.contact_body_force]
         for array in arrays:
             array.zero_()
-        if contact.legacy_count:
+        if self._contact_pool:
+            self._variational["actor_contact_pairs"] = contact.publish(state)
+        elif contact.legacy_count:
             wp.launch(
                 kernels.contact_forces,
                 contact.legacy_count,
@@ -1166,8 +1205,8 @@ class SolverMonolithic(SolverBase):
             )
         if contact.actor_contact is not None:
             self._variational["actor_contact_pairs"] = contact.actor_contact.publish(state, k)
-            for pair in self._variational["actor_contact_pairs"]:
-                pair["force_generation"] = self._step_generation
+        for pair in self._variational.get("actor_contact_pairs", ()):
+            pair["force_generation"] = self._step_generation
         self._force_status.zero_()
         for index, array in enumerate(arrays):
             values = state_checks.scalar_view(array)
