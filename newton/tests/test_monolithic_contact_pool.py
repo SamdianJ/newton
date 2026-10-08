@@ -321,7 +321,7 @@ def assign_contacts(pool, data, order=None):
         getattr(pool.candidates, name).assign(array)
 
 
-def check_admitted(test, pool, data):
+def check_admitted(test, pool, data, *, stable_order=True):
     record = pool.records
     stored = {
         name: getattr(record, name).numpy()
@@ -343,6 +343,11 @@ def check_admitted(test, pool, data):
     accepted = sorted(np.flatnonzero(mask), key=lambda i: int(ids[i]))
     n = len(accepted)
     test.assertEqual(int(record.count.numpy()[0]), n)
+    if not stable_order:
+        slots = record.source_slots.numpy()[:n]
+        test.assertEqual(set(map(int, slots)), set(accepted))
+        accepted = slots
+
     np.testing.assert_array_equal(stored["identities"][:n], ids[accepted])
     test.assertEqual(int(record.used.numpy()[0]), sum(max(1, int(data["support_counts"][i])) for i in accepted))
     expected_r = np.zeros(pool.row_count)

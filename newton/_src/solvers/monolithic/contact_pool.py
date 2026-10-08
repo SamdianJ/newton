@@ -512,9 +512,12 @@ def _scan_up(prefix: wp.array[wp.vec4i], distance: int):
 
 
 @wp.kernel
-def _scan_root(prefix: wp.array[wp.vec4i], records: Any):
+def _scan_root(prefix: wp.array[wp.vec4i], records: Any, append: bool):
     last = prefix.shape[0] - 1
-    total = prefix[last]
+    base = wp.vec4i(0)
+    if append:
+        base = wp.vec4i(records.count[0], records.support_count[0], records.triplet_count[0], records.force_count[0])
+    total = prefix[last] + base
     records.count[0] = total[0]
     records.support_count[0] = total[1]
     records.triplet_count[0] = total[2]
@@ -524,7 +527,7 @@ def _scan_root(prefix: wp.array[wp.vec4i], records: Any):
     records.support_offsets[total[0]] = total[1]
     records.triplet_offsets[total[0]] = total[2]
     records.factor_offsets[3 * total[0]] = 3 * total[1]
-    prefix[last] = wp.vec4i(0)
+    prefix[last] = base
 
 
 @wp.kernel
@@ -639,6 +642,56 @@ def _clear_failed_pool(values: wp.array[Any], flags: wp.array[int]):
         values[wp.tid()] = values.dtype(0)
 
 
+@wp.kernel
+def _begin_contact_batch(candidates: Any, records: Any, count: wp.array[int], base: wp.array[int], capacity: int):
+    n = candidates.count[0]
+    base[0] = -1
+    if n < 0 or n > candidates.identities.shape[0] or count[0] > capacity - n:
+        wp.atomic_or(records.flags, 0, 1)
+    elif candidates.overflow[0] < 0 or candidates.overflow[0] > 2147483647 - n:
+        wp.atomic_or(records.flags, 0, 1)
+    else:
+        base[0] = count[0]
+        count[0] += n
+
+
+@wp.kernel
+def _contact_batch_identities(
+    candidates: Any,
+    records: Any,
+    identities: wp.array[wp.uint64],
+    base: wp.array[int],
+    identity_count: wp.uint64,
+    indices: wp.array[int],
+):
+    i = wp.tid()
+    indices[i] = i
+    if base[0] >= 0 and i < candidates.count[0]:
+        identity = candidates.identities[i]
+        identities[base[0] + i] = identity
+        if identity >= identity_count:
+            wp.atomic_or(records.flags, 0, 2)
+
+
+@wp.kernel
+def _contact_batch_sources(records: Any, selected: wp.array[int], prefix: wp.array[wp.vec4i], base: wp.array[int]):
+    i = wp.tid()
+    if selected[i] != 0:
+        records.source_slots[prefix[i][0]] = base[0] + i
+
+
+@wp.kernel
+def _contact_stream_flags(records: Any, flags: wp.array[int]):
+    records.flags[0] = records.flags[0] | flags[0]
+
+
+@wp.kernel
+def _publish_contact_stream(records: Any):
+    i = wp.tid()
+    if records.flags[0] == 0 and i < records.count[0]:
+        records.accepted[records.source_slots[i]] = 1
+
+
 class _ContactPool:
     """Stage and commit complete local contact records within one bounded budget.
 
@@ -647,6 +700,11 @@ class _ContactPool:
     after all reservations. Publish accepted only after every local E/r/B/force
     write and native row reduction. No physical state/history is changed here.
     Staging overflow is supplied by the producer separately from written count.
+    With batch_capacity set, reuse only batch x support candidate storage and
+    call begin/append/finish. Batches share one budget and concatenate exclusive
+    scans. The O(M) identity ledger checks even dropped/inert inputs at finish;
+    row keys use identities, never these storage slots. Outputs are unpublished
+    until all batches finish. Determinism is required only without overflow.
     Three FP32 factors and all their COO records retain the existing arithmetic;
     fixed BSR topology/duplicate reduction remain with linear assembly.
     """
@@ -667,6 +725,7 @@ class _ContactPool:
         contact_factor_capacity=None,
         contact_triplet_capacity=None,
         use_cuda_graph=False,
+        batch_capacity=None,
     ):
         for name, value, minimum, maximum in (
             ("row_count", row_count, 0, 2**31 - 2),
@@ -685,6 +744,16 @@ class _ContactPool:
         if dtype not in (wp.float32, wp.float64):
             raise ValueError("Contact pool requires native scalar precision")
         m, c, k = int(candidate_capacity), int(capacity), int(max_support)
+        b = m if batch_capacity is None else batch_capacity
+        if (
+            isinstance(b, (bool, np.bool_))
+            or not isinstance(b, (int, np.integer))
+            or not (0 if m == 0 else 1) <= b <= m
+        ):
+            raise ValueError("Invalid contact batch capacity")
+        b = int(b)
+        if m * k >= 2**31:
+            raise ValueError("Contact requested budget exceeds int32")
         requested_capacity = c
         for name, limit in (("factor", contact_factor_capacity), ("triplet", contact_triplet_capacity)):
             if limit is None:
@@ -701,7 +770,7 @@ class _ContactPool:
                 c = min(c, int(limit) // (3 * k))
         n, r, f = min(m, c), min(m * k, c), self.FORCE_TERMS
         t = 3 * k * r
-        p = 1 << m.bit_length()  # Power of two >= M+1, including M=0.
+        p = 1 << b.bit_length()  # Power of two >= batch size+1, including zero.
         if 3 * k * k >= 2**31:
             raise ValueError("Contact triplet demand exceeds int32")
         for rows, local in ((1, 1), (4, 1), (row_count, k), (force_row_count, f)):
@@ -711,17 +780,17 @@ class _ContactPool:
         candidate_spec = {
             "count": ((1,), wp.int32),
             "overflow": ((1,), wp.int32),
-            "identities": ((m,), wp.uint64),
-            "support_counts": ((m,), wp.int32),
-            "columns": ((m, k), wp.int32),
-            "residual": ((m, k), dtype),
-            "weights": ((m, 3), wp.float32),
-            "factors": ((m, 3, k), wp.float32),
-            "energy": ((m, 2), dtype),
-            "force_counts": ((m,), wp.int32),
-            "force_rows": ((m, f), wp.int32),
-            "forces": ((m, f), dtype),
-            "pairs": ((m, 2, 6), dtype),
+            "identities": ((b,), wp.uint64),
+            "support_counts": ((b,), wp.int32),
+            "columns": ((b, k), wp.int32),
+            "residual": ((b, k), dtype),
+            "weights": ((b, 3), wp.float32),
+            "factors": ((b, 3, k), wp.float32),
+            "energy": ((b, 2), dtype),
+            "force_counts": ((b,), wp.int32),
+            "force_rows": ((b, f), wp.int32),
+            "forces": ((b, f), dtype),
+            "pairs": ((b, 2, 6), dtype),
         }
         record_spec = dict.fromkeys(
             (
@@ -770,14 +839,16 @@ class _ContactPool:
             size * wp.types.type_size_in_bytes(scalar)
             for size, (_, scalar) in zip(sizes, (*candidate_spec.values(), *record_spec.values()), strict=True)
         )
-        byte_count += 16 * (m + p) + (12 + native_bytes) * m
+        byte_count += 24 * b + 16 * p + (4 + native_bytes) * m
+        if batch_capacity is not None:
+            byte_count += 8 * m + 4 * b + 8
         for rows, size in ((1, m), (4, 4 * n), (row_count, r), (force_row_count, f * n)):
             byte_count += size * (24 + native_bytes) + 4 * (int(rows) + 1) + int(rows) * native_bytes + 4
         if byte_count >= 2**63:
             raise ValueError("Contact pool byte capacity exceeds int64")
         self.row_count, self.force_row_count = int(row_count), int(force_row_count)
         self.capacity, self.requested_capacity = c, requested_capacity
-        self.candidate_capacity, self.max_support = m, k
+        self.candidate_capacity, self.max_support, self.batch_capacity = m, k, b
         self.contact_capacity, self.support_capacity, self.triplet_capacity = n, r, t
         self.identity_count, self.dtype, self.device = int(identity_count), dtype, wp.get_device(device)
         self._specs = (candidate_spec, record_spec)
@@ -785,18 +856,27 @@ class _ContactPool:
         for struct, spec in zip((self.candidates, self.records), self._specs, strict=True):
             for name, (shape, scalar) in spec.items():
                 setattr(struct, name, wp.zeros(shape, dtype=scalar, device=self.device))
-        self._active, self._selected = (wp.zeros(m, dtype=int, device=self.device) for _ in range(2))
-        self._demands = wp.zeros(m, dtype=wp.vec4i, device=self.device)
+        self._active, self._selected = (wp.zeros(b, dtype=int, device=self.device) for _ in range(2))
+        self._demands = wp.zeros(b, dtype=wp.vec4i, device=self.device)
         self._prefix = wp.zeros(p, dtype=wp.vec4i, device=self.device)
         self._zero_rows = wp.zeros(m, dtype=int, device=self.device)
         self._zero_values = wp.zeros(m, dtype=dtype, device=self.device)
-        self._scratch_spec = ((m, wp.int32), (m, wp.int32), (m, wp.vec4i), (p, wp.vec4i), (m, wp.int32), (m, dtype))
+        self._scratch_spec = ((b, wp.int32), (b, wp.int32), (b, wp.vec4i), (p, wp.vec4i), (m, wp.int32), (m, dtype))
         self._identity = _ContactRows(1, m, identity_count, 1, dtype, self.device)
         self.energy = _ContactRows(4, 4 * n, identity_count, 1, dtype, self.device)
         self.residual = _ContactRows(row_count, r, identity_count, k, dtype, self.device)
         self.force = _ContactRows(force_row_count, f * n, identity_count, f, dtype, self.device)
         self.graphs = _SegmentGraphCache(self.device, enabled=use_cuda_graph and self.device.is_cuda)
         self.payload_bytes = byte_count
+        self._stream = None
+        self._stream_started = False
+        if batch_capacity is not None:
+            self._stream = (
+                wp.zeros(m, dtype=wp.uint64, device=self.device),
+                wp.zeros(1, dtype=int, device=self.device),
+                wp.zeros(1, dtype=int, device=self.device),
+                wp.zeros(b, dtype=int, device=self.device),
+            )
 
     def buffers(self):
         buffers = [
@@ -807,9 +887,11 @@ class _ContactPool:
         buffers.extend((self._active, self._selected, self._demands, self._prefix, self._zero_rows, self._zero_values))
         for owner in (self._identity, self.energy, self.residual, self.force):
             buffers.extend(owner.buffers())
+        if self._stream is not None:
+            buffers.extend(self._stream)
         return tuple(buffers)
 
-    def evaluate(self):
+    def _validate_storage(self):
         for struct, spec in zip((self.candidates, self.records), self._specs, strict=True):
             for name, (shape, dtype) in spec.items():
                 array = getattr(struct, name)
@@ -826,10 +908,29 @@ class _ContactPool:
                 raise ValueError("Invalid contact pool scratch storage")
         for owner in (self._identity, self.energy, self.residual, self.force):
             owner._validate_storage()
+        if self._stream is not None:
+            for array, (size, dtype) in zip(
+                self._stream,
+                ((self.candidate_capacity, wp.uint64), (1, wp.int32), (1, wp.int32), (self.batch_capacity, wp.int32)),
+                strict=True,
+            ):
+                if (
+                    array.shape != (size,)
+                    or array.dtype != dtype
+                    or array.device != self.device
+                    or not array.is_contiguous
+                ):
+                    raise ValueError("Invalid contact stream storage")
         buffers = self.buffers()
         intervals = sorted((a.ptr, a.ptr + a.size * wp.types.type_size_in_bytes(a.dtype)) for a in buffers if a.size)
         if any(right[0] < left[1] for left, right in pairwise(intervals)):
             raise ValueError("Contact pool arrays alias")
+        return buffers
+
+    def evaluate(self):
+        if self._stream is not None:
+            raise ValueError("Batched contact pools require begin/append/finish")
+        buffers = self._validate_storage()
         self.graphs.run(
             "contact_pool",
             (
@@ -868,13 +969,17 @@ class _ContactPool:
         while distance < self._prefix.size:
             wp.launch(_scan_up, self._prefix.size // (2 * distance), [self._prefix, distance], device=self.device)
             distance *= 2
-        wp.launch(_scan_root, 1, [self._prefix, out], device=self.device)
+        wp.launch(_scan_root, 1, [self._prefix, out, False], device=self.device)
         distance //= 2
         while distance:
             wp.launch(_scan_down, self._prefix.size // (2 * distance), [self._prefix, distance], device=self.device)
             distance //= 2
         if m:
             wp.launch(_write_contacts, m, [a, out, indices, self._selected, self._prefix], device=self.device)
+        self._finish_records(indices)
+
+    def _finish_records(self, indices=None):
+        out = self.records
         if self.triplet_capacity:
             wp.launch(_write_contact_triplets, self.triplet_capacity, [out], device=self.device)
         for owner, prefix, count in (
@@ -886,8 +991,11 @@ class _ContactPool:
         wp.launch(
             _pool_row_flags, 1, [out, self.energy.flags, self.residual.flags, self.force.flags], device=self.device
         )
-        if m:
-            wp.launch(_publish_contacts, m, [out, indices, self._selected], device=self.device)
+        if indices is None:
+            if self.contact_capacity:
+                wp.launch(_publish_contact_stream, self.contact_capacity, [out], device=self.device)
+        elif self.candidate_capacity:
+            wp.launch(_publish_contacts, self.candidate_capacity, [out, indices, self._selected], device=self.device)
         # A row-sum overflow is a hard error for the complete evaluation, not a
         # capacity warning or a partially usable force/B record.
         outputs = [getattr(out, name) for name in self._specs[1] if name not in ("flags", "requested")]
@@ -896,3 +1004,80 @@ class _ContactPool:
         for values in outputs:
             if values.size:
                 wp.launch(_clear_failed_pool, values.size, [values.flatten(), out.flags], device=self.device)
+
+    def begin(self):
+        """Reset one evaluation; retain only bounded batch x support staging."""
+        if self._stream is None:
+            raise ValueError("Contact pool has no bounded batch storage")
+        self._validate_storage()
+        for name in self._specs[1]:
+            getattr(self.records, name).zero_()
+        for array in self._stream[:3]:
+            array.zero_()
+        for owner in (self.energy, self.residual, self.force):
+            owner.result.zero_()
+            owner.offsets.zero_()
+        self._stream_started = True
+
+    def append(self):
+        """Validate a whole batch and append once against the shared CAS budget.
+
+        This additive chain must not use the overwrite-only graph cache: its
+        warmup and capture would reserve/append the same contacts multiple times.
+        The producer may use a cached graph to overwrite candidates before here.
+        """
+        if not self._stream_started:
+            raise ValueError("Begin a contact evaluation before appending")
+        self._validate_storage()
+        identities, count, base, indices = self._stream
+        a, out = self.candidates, self.records
+        wp.launch(_begin_contact_batch, 1, [a, out, count, base, self.candidate_capacity], device=self.device)
+        b = self.batch_capacity
+        if b:
+            wp.launch(
+                _contact_batch_identities,
+                b,
+                [a, out, identities, base, wp.uint64(self.identity_count), indices],
+                device=self.device,
+            )
+            wp.launch(
+                _validate_contacts, b, [a, out, self.row_count, self.force_row_count, self._active], device=self.device
+            )
+            wp.launch(
+                _reserve_contacts,
+                b,
+                [a, out, indices, self._active, self.capacity, self._selected, self._demands],
+                device=self.device,
+            )
+        wp.launch(_scan_seed, self._prefix.size, [self._demands, self._prefix], device=self.device)
+        distance = 1
+        while distance < self._prefix.size:
+            wp.launch(_scan_up, self._prefix.size // (2 * distance), [self._prefix, distance], device=self.device)
+            distance *= 2
+        wp.launch(_scan_root, 1, [self._prefix, out, True], device=self.device)
+        distance //= 2
+        while distance:
+            wp.launch(_scan_down, self._prefix.size // (2 * distance), [self._prefix, distance], device=self.device)
+            distance //= 2
+        if b:
+            wp.launch(_write_contacts, b, [a, out, indices, self._selected, self._prefix], device=self.device)
+            wp.launch(_contact_batch_sources, b, [out, self._selected, self._prefix, base], device=self.device)
+
+    def finish(self):
+        """Check identities across all batches, then derive and publish one evaluation."""
+        if not self._stream_started:
+            raise ValueError("Begin a contact evaluation before finishing")
+        buffers = self._validate_storage()
+        self.graphs.run(
+            "contact_stream_finish",
+            (self.candidate_capacity, self.capacity, self.max_support, self.identity_count, self.dtype),
+            buffers,
+            self._finish_stream,
+        )
+        self._stream_started = False
+
+    def _finish_stream(self):
+        identities, count, _, _ = self._stream
+        self._identity._reduce(self._zero_rows, identities, self._zero_rows, self._zero_values, count)
+        wp.launch(_contact_stream_flags, 1, [self.records, self._identity.flags], device=self.device)
+        self._finish_records()
