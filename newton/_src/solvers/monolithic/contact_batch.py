@@ -1,0 +1,716 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 The Newton Developers
+# SPDX-License-Identifier: Apache-2.0
+
+"""Bounded native contact generation; solver publication stays with its owner."""
+
+import math
+from functools import cache, partial
+from typing import Any
+
+import numpy as np
+import warp as wp
+
+from .contact import _geometry_type, _law, _reset_flags, _validate_start
+from .contact_actor import _actor_geometry, _center, _point_column
+from .contact_pool import _ContactPool
+from .segment_graph import _SegmentGraphCache
+
+
+@cache
+def _batch_types(dtype):
+    vector = wp.vec3d if dtype == wp.float64 else wp.vec3
+
+    @wp.struct
+    class Samples:
+        sources: wp.array[int]
+        targets: wp.array[int]
+        faces: wp.array[int]
+        slots: wp.array[int]
+        points: wp.array[vector]
+        normals: wp.array[vector]
+        area: wp.array[dtype]
+        gaps: wp.array[dtype]
+
+    @wp.struct
+    class Support:
+        kinds: wp.array[int]
+        indices: wp.array[int]
+        offsets: wp.array[int]
+        columns: wp.array[int]
+        local: wp.array[int]
+        particles: wp.array[int]
+        com: wp.array[vector]
+
+    return Samples, Support
+
+
+@wp.kernel
+def _select_contact_chunk(first: int, end: int, capacity: int, begin: wp.array[int], count: wp.array[int]):
+    begin[0] = first
+    count[0] = wp.min(capacity, end - first)
+
+
+@wp.kernel
+def _load_contact_chunk(all_samples: Any, batch: Any, first: wp.array[int], candidates: Any):
+    i = wp.tid()
+    if i < candidates.count[0]:
+        key = first[0] + i
+        candidates.identities[i] = wp.uint64(key)
+        candidates.support_counts[i] = 0
+        candidates.force_counts[i] = 0
+        for axis in range(2):
+            candidates.energy[i, axis] = candidates.energy.dtype(0)
+            for j in range(6):
+                candidates.pairs[i, axis, j] = candidates.pairs.dtype(0)
+        for axis in range(3):
+            candidates.weights[i, axis] = 0.0
+        batch.sources[i] = all_samples.sources[key]
+        batch.targets[i] = all_samples.targets[key]
+        batch.faces[i] = all_samples.faces[key]
+        batch.slots[i] = all_samples.slots[key]
+        batch.points[i] = all_samples.points[key]
+        batch.normals[i] = all_samples.normals[key]
+        batch.area[i] = all_samples.area[key]
+        batch.gaps[i] = all_samples.gaps[key]
+
+
+@wp.kernel
+def _copy_contact_geometry(source: Any, target: Any, first: wp.array[int], count: wp.array[int], store: bool):
+    i = wp.tid()
+    if i < count[0]:
+        a, b = i, first[0] + i
+        if not store:
+            a, b = b, a
+        target.y[b] = source.y[a]
+        target.gradient[b] = source.gradient[a]
+        target.soft_normal[b] = source.soft_normal[a]
+        target.distance[b] = source.distance[a]
+        target.uncertified[b] = source.uncertified[a]
+
+
+@wp.kernel
+def _merge_contact_chunk_flags(flags: wp.array[int], chunk: wp.array[int], first: wp.array[int], records: Any):
+    if chunk[0] != 0:
+        wp.atomic_max(flags, 0, chunk[0])
+        wp.atomic_min(flags, 1, first[0] + chunk[1])
+        wp.atomic_or(records.flags, 0, wp.where(chunk[0] == 1, 4, 2))
+
+
+@wp.kernel
+def _contact_pool_start_flags(records: Any, flags: wp.array[int]):
+    if flags[0] != 0:
+        wp.atomic_or(records.flags, 0, wp.where(flags[0] == 1, 4, 2))
+
+
+@wp.kernel
+def _contact_pool_failure(flags: wp.array[int], records: Any):
+    if records.flags[0] != 0:
+        status = wp.where((records.flags[0] & 4) != 0, 1, 2)
+        wp.atomic_max(flags, 0, status)
+        wp.atomic_min(flags, 1, -1)
+
+
+@wp.func
+def _project_contact_column(
+    candidates: Any,
+    contact: int,
+    local: int,
+    row: int,
+    jacobian: Any,
+    residual: Any,
+    gradient: Any,
+    radial: Any,
+    transverse: Any,
+    legacy_tet: bool,
+    bary: Any,
+    axis: int,
+    rotation: Any,
+):
+    candidates.columns[contact, local] = row
+    candidates.residual[contact, local] = wp.dot(jacobian, residual)
+    candidates.factors[contact, 0, local] = float(wp.dot(jacobian, gradient))
+    candidates.factors[contact, 1, local] = float(wp.dot(jacobian, radial))
+    candidates.factors[contact, 2, local] = float(wp.dot(jacobian, transverse))
+    if legacy_tet:
+        # Preserve legacy bary * world-coordinate arithmetic, including FP32
+        # conversion after projection, rather than using an equivalent dot.
+        candidates.residual[contact, local] = bary * (rotation * residual)[axis]
+        candidates.factors[contact, 0, local] = float(bary * (rotation * gradient)[axis])
+        candidates.factors[contact, 1, local] = float(bary * (rotation * radial)[axis])
+        candidates.factors[contact, 2, local] = float(bary * (rotation * transverse)[axis])
+
+
+@wp.kernel
+def _project_contact_chunk(
+    samples: Any,
+    support: Any,
+    geometry: Any,
+    points: wp.array[Any],
+    bodies: wp.array[int],
+    triangles: wp.array2d[int],
+    com: wp.array[Any],
+    jt: wp.array2d[Any],
+    jw: wp.array2d[Any],
+    rigid_com: wp.array[Any],
+    normal: wp.array[Any],
+    tangent: wp.array[Any],
+    weights: wp.array2d[Any],
+    local_r: wp.array[Any],
+    candidates: Any,
+    flags: wp.array[int],
+    legacy: bool,
+    particle_count: int,
+):
+    i = wp.tid()
+    if i >= candidates.count[0] or flags[0] != 0:
+        return
+    source, target = samples.sources[i] + 0, samples.targets[i] + 0
+    point, rotation, n = points[i], geometry.rotation[i], normal[i]
+    axis = type(point)(1.0, 0.0, 0.0)
+    if wp.abs(n[1]) < wp.abs(n[0]) and wp.abs(n[1]) <= wp.abs(n[2]):
+        axis = type(point)(0.0, 1.0, 0.0)
+    elif wp.abs(n[2]) < wp.abs(n[0]):
+        axis = type(point)(0.0, 0.0, 1.0)
+    t = tangent[i]
+    if weights[i, 1] > type(weights[0, 0])(0.0) and wp.length(t) == type(weights[0, 0])(0.0):
+        t = wp.normalize(wp.cross(n, axis))
+    transverse = wp.cross(n, t)
+    candidates.weights[i, 0] = float(weights[i, 0])
+    candidates.weights[i, 1] = float(weights[i, 2])
+    candidates.weights[i, 2] = float(weights[i, 1])
+    r = local_r[i]
+    k = int(0)
+    for end in range(2):
+        tet = source < 0 and end == 0
+        if legacy:
+            tet = end == 1
+        if tet:
+            for node in range(3):
+                particle = triangles[samples.faces[i], node]
+                row = support.particles[particle]
+                if row >= 0:
+                    bary = type(point[0])(1.0) / type(point[0])(6.0)
+                    if node == samples.slots[i]:
+                        bary = type(point[0])(2.0) / type(point[0])(3.0)
+                    for coordinate in range(3):
+                        vector = type(point)(0.0)
+                        vector[coordinate] = bary
+                        jacobian = wp.transpose(rotation) * vector
+                        _project_contact_column(
+                            candidates,
+                            i,
+                            k,
+                            row + coordinate,
+                            jacobian,
+                            r,
+                            geometry.gradient[i],
+                            t,
+                            transverse,
+                            legacy,
+                            bary,
+                            coordinate,
+                            rotation,
+                        )
+                        k += 1
+        else:
+            shape = target
+            sign = type(point[0])(-1.0)
+            if not legacy and end == 0:
+                shape, sign = source, type(point[0])(1.0)
+            body = bodies[shape]
+            if body >= 0:
+                for index in range(support.offsets[body], support.offsets[body + 1]):
+                    column = _point_column(
+                        body, support.local[index], point, support.kinds, support.indices, com, jt, jw, rigid_com
+                    )
+                    jacobian = wp.transpose(rotation) * (sign * column)
+                    if legacy:
+                        local = support.indices[body]
+                        j = support.local[index]
+                        jacobian = wp.transpose(rotation) * (-jt[local, j] - wp.cross(jw[local, j], point - com[local]))
+                    _project_contact_column(
+                        candidates,
+                        i,
+                        k,
+                        support.columns[index],
+                        jacobian,
+                        r,
+                        geometry.gradient[i],
+                        t,
+                        transverse,
+                        False,
+                        type(point[0])(0.0),
+                        0,
+                        rotation,
+                    )
+                    k += 1
+    candidates.support_counts[i] = k
+    world = rotation * r
+    f = int(0)
+    for end in range(2):
+        shape = source
+        force = -world
+        if end == 1:
+            shape, force = target, world
+        torque = wp.cross(point, force)
+        for coordinate in range(3):
+            candidates.pairs[i, end, coordinate] = force[coordinate]
+            candidates.pairs[i, end, coordinate + 3] = torque[coordinate]
+        if shape < 0:
+            for node in range(3):
+                bary = type(point[0])(1.0) / type(point[0])(6.0)
+                if node == samples.slots[i]:
+                    bary = type(point[0])(2.0) / type(point[0])(3.0)
+                for coordinate in range(3):
+                    candidates.force_rows[i, f] = 3 * triangles[samples.faces[i], node] + coordinate
+                    candidates.forces[i, f] = bary * force[coordinate]
+                    f += 1
+        else:
+            body = bodies[shape]
+            if body >= 0:
+                torque = wp.cross(point - _center(body, support.kinds, support.indices, com, rigid_com), force)
+                for coordinate in range(6):
+                    candidates.force_rows[i, f] = 3 * particle_count + 6 * body + coordinate
+                    value = force[coordinate % 3]
+                    if coordinate >= 3:
+                        value = torque[coordinate % 3]
+                    candidates.forces[i, f] = value
+                    f += 1
+    candidates.force_counts[i] = f
+
+
+def _storage_interval(array):
+    offsets = [(size - 1) * stride for size, stride in zip(array.shape, array.strides, strict=True)]
+    begin = array.ptr + sum(min(0, offset) for offset in offsets)
+    end = array.ptr + sum(max(0, offset) for offset in offsets) + wp.types.type_size_in_bytes(array.dtype)
+    return begin, end
+
+
+class _ContactBatch:
+    """Generate complete supported candidates from validated contact metadata.
+
+    The metadata owner supplies Model identity and the unchanged native law
+    parameters. No owner factor_support, per-contact selector/J table, residual
+    gather map or evaluated local output is consumed. Owned projection storage
+    is batch x max_support; the complete physical-step reference is O(M).
+    This generator does not publish physical state or select spatial candidates.
+    """
+
+    METADATA_ARRAYS = (
+        "bodies",
+        "transforms",
+        "triangles",
+        "types",
+        "scales",
+        "sdf_indices",
+        "table",
+        "smooth_table",
+        "margins",
+    )
+
+    def __init__(self, contact, *, batch_capacity, capacity, use_cuda_graph=False):
+        self.contact, self.device = contact, contact.model.device
+        self.dtype, self.vector, self.matrix = contact.dtype, contact.vector, contact.matrix
+        self.batch_capacity = batch_capacity
+        model, m = contact.model, contact.count
+        if (
+            isinstance(batch_capacity, (bool, np.bool_))
+            or not isinstance(batch_capacity, (int, np.integer))
+            or not (0 if m == 0 else 1) <= batch_capacity <= m
+        ):
+            raise ValueError("Invalid native contact batch capacity")
+        if (
+            isinstance(capacity, (bool, np.bool_))
+            or not isinstance(capacity, (int, np.integer))
+            or not 0 <= capacity < 2**31
+        ):
+            raise ValueError("Invalid native contact pool capacity")
+        samples_type, support_type = _batch_types(self.dtype)
+        self.support = support_type()
+        actors = None if contact.actor_samples is None else contact.actor_samples.actors
+        kinds = np.zeros(model.body_count, np.int32)
+        indices = contact.body_local.numpy()
+        body_support = {}
+        if actors is not None:
+            kinds.fill(-1)
+            indices = np.full(model.body_count, -1, np.int32)
+            arm = next(a for a in actors.actors if a.kind == "articulation")
+            parent, child, starts = (
+                getattr(model, n).numpy() for n in ("joint_parent", "joint_child", "joint_qd_start")
+            )
+            incoming = {int(child[j]): j for j in arm.joint_indices}
+            local_dofs = {j: i for i, j in enumerate(arm.dof_indices)}
+            for local, body in enumerate(arm.body_indices):
+                kinds[body], indices[body] = 0, local
+                selected, cursor = [], body
+                while cursor >= 0:
+                    joint = incoming[cursor]
+                    selected.extend(local_dofs[j] for j in range(int(starts[joint]), int(starts[joint + 1])))
+                    cursor = int(parent[joint])
+                body_support[body] = [(arm.dof_start + j, j) for j in sorted(selected)]
+            for local, actor in enumerate(a for a in actors.actors if a.kind == "rigid"):
+                body = actor.body_indices[0]
+                kinds[body], indices[body] = 1, local
+                body_support[body] = [(actor.dof_start + j, j) for j in range(6)]
+            particles = np.asarray(actors.maps["particle_to_global"], np.int32)
+        else:
+            body_support = {
+                body: [(contact.layout.q_scalar_offset + j, j) for j in range(contact.nq)]
+                for body in range(model.body_count)
+                if indices[body] >= 0
+            }
+            mapping = contact.mapping.numpy()
+            particles = np.where(mapping >= 0, contact.layout.x_scalar_offset + 3 * mapping, -1).astype(np.int32)
+        self.rigid_count = int(np.count_nonzero(kinds == 1))
+        offsets, columns, local = [0], [], []
+        for body in range(model.body_count):
+            for row, j in body_support.get(body, ()):
+                columns.append(row)
+                local.append(j)
+            offsets.append(len(columns))
+        for name, values, scalar in (
+            ("kinds", kinds, int),
+            ("indices", indices, int),
+            ("offsets", offsets, int),
+            ("columns", columns, int),
+            ("local", local, int),
+            ("particles", particles, int),
+            ("com", model.body_com.numpy().astype(contact.numpy_dtype), self.vector),
+        ):
+            setattr(self.support, name, wp.array(values, dtype=scalar, device=self.device))
+        shapes, triangles = contact.shapes.numpy(), contact.triangles.numpy()
+        n = contact.legacy_count
+        legacy = {
+            "sources": np.full(n, -1, np.int32),
+            "targets": np.tile(shapes, len(triangles) * 3),
+            "faces": np.repeat(np.arange(len(triangles)), 3 * len(shapes)),
+            "slots": np.tile(np.repeat(np.arange(3), len(shapes)), len(triangles)),
+            "points": np.zeros((n, 3)),
+            "normals": np.zeros((n, 3)),
+            "area": np.repeat(contact.area.numpy(), 3 * len(shapes)),
+            "gaps": np.tile(contact.parameters[4] + contact.margins.numpy()[shapes], len(triangles) * 3),
+        }
+        a = contact.actor_samples
+        self.all_samples, self.samples = samples_type(), samples_type()
+        fields = {
+            "sources": "source_shapes",
+            "targets": "targets",
+            "faces": "faces",
+            "slots": "slots",
+            "points": "points",
+            "normals": "normals",
+            "area": "weights",
+            "gaps": "offsets",
+        }
+        arrays = {}
+        for name, base_values in legacy.items():
+            values = base_values
+            if a is not None and a.count:
+                values = np.concatenate((values, getattr(a, fields[name])), axis=0)
+            scalar = self.vector if name in ("points", "normals") else self.dtype if name in ("area", "gaps") else int
+            arrays[name] = values
+            setattr(self.all_samples, name, wp.array(values, dtype=scalar, device=self.device))
+        bodies = contact.bodies.numpy()
+        demands = []
+        for source, target, face in zip(arrays["sources"], arrays["targets"], arrays["faces"], strict=True):
+            k = len(body_support.get(int(bodies[target]), ()))
+            if source < 0:
+                k += 3 * int(np.count_nonzero(particles[triangles[face]] >= 0))
+            else:
+                k += len(body_support.get(int(bodies[source]), ()))
+            demands.append(k)
+        self.pool = _ContactPool(
+            contact.layout.scalar_dof_count,
+            3 * model.particle_count + 6 * model.body_count,
+            m,
+            capacity,
+            max(1, max(demands, default=0)),
+            max(1, m),
+            self.dtype,
+            self.device,
+            batch_capacity=batch_capacity,
+            use_cuda_graph=use_cuda_graph,
+        )
+        for name in fields:
+            array = getattr(self.all_samples, name)
+            setattr(
+                self.samples, name, wp.zeros((batch_capacity, *array.shape[1:]), dtype=array.dtype, device=self.device)
+            )
+        self.current, self._start_chunk = (
+            self._geometry(batch_capacity, rotation=True),
+            self._geometry(batch_capacity, rotation=False),
+        )
+        self.start = self._geometry(m, rotation=False)
+        self.first = wp.zeros(1, dtype=int, device=self.device)
+        self.points = wp.zeros(batch_capacity, dtype=self.vector, device=self.device)
+        self.normal, self.tangent, self.local_r = (wp.zeros_like(self.points) for _ in range(3))
+        self.weights = wp.zeros((batch_capacity, 3), dtype=self.dtype, device=self.device)
+        self.omitted = wp.zeros((batch_capacity, 4), dtype=self.dtype, device=self.device)
+        self.mask = wp.zeros(batch_capacity, dtype=int, device=self.device)
+        self.flags, self.start_flags, self._flags = (wp.zeros(2, dtype=int, device=self.device) for _ in range(3))
+        self._empty_scalar = wp.empty(0, dtype=self.dtype, device=self.device)
+        self._empty_int = wp.empty(0, dtype=int, device=self.device)
+        self._empty_selector = wp.empty(0, dtype=wp.vec2i, device=self.device)
+        self._empty_vector = wp.empty(0, dtype=self.vector, device=self.device)
+        self._empty_rotation = wp.empty(0, dtype=wp.quatd if self.dtype == wp.float64 else wp.quat, device=self.device)
+        self._key_ids = wp.array(np.arange(batch_capacity, dtype=np.int32), dtype=int, device=self.device)
+        self.graphs = _SegmentGraphCache(self.device, enabled=use_cuda_graph and self.device.is_cuda)
+        self._started = False
+
+    def _geometry(self, count, *, rotation):
+        geometry = _geometry_type(self.dtype)()
+        for name in ("y", "gradient", "soft_normal"):
+            setattr(geometry, name, wp.zeros(count, dtype=self.vector, device=self.device))
+        geometry.distance = wp.zeros(count, dtype=self.dtype, device=self.device)
+        geometry.uncertified = wp.zeros(count, dtype=int, device=self.device)
+        geometry.rotation = wp.zeros(count if rotation else 0, dtype=self.matrix, device=self.device)
+        geometry.jacobian_q = wp.empty((count, 0), dtype=self.vector, device=self.device)
+        return geometry
+
+    def buffers(self):
+        arrays = [a for a in vars(self).values() if isinstance(a, wp.array)]
+        for owner in (self.all_samples, self.samples, self.support, self.current, self.start, self._start_chunk):
+            arrays.extend(a for a in vars(owner).values() if isinstance(a, wp.array))
+        # Shared metadata is a graph binding too: rebinding a shape/SDF array
+        # must not replay a graph containing its retired pointer.
+        metadata = tuple(getattr(self.contact, name) for name in self.METADATA_ARRAYS)
+        return tuple(arrays) + self.pool.buffers() + metadata
+
+    def _state(self, x, poses, com, jt, jw, rigid_com, rigid_rotation):
+        c = self.contact
+        nr = self.rigid_count
+        if nr == 0:
+            rigid_com, rigid_rotation = self._empty_vector, self._empty_rotation
+        for a, dtype, shape in (
+            (x, self.vector, (c.model.particle_count,)),
+            (poses, c.transform, (c.body_count,)),
+            (com, self.vector, (c.body_count,)),
+            (jt, self.vector, (c.body_count, c.nq)),
+            (jw, self.vector, (c.body_count, c.nq)),
+            (rigid_com, self.vector, (nr,)),
+            (rigid_rotation, self._empty_rotation.dtype, (nr,)),
+        ):
+            if not isinstance(a, wp.array) or (a.dtype, a.shape, a.device) != (dtype, shape, self.device):
+                raise ValueError("Invalid native contact batch state")
+        state = x, poses, com, jt, jw, rigid_com, rigid_rotation
+        owned = self.buffers()[: -len(self.METADATA_ARRAYS)]
+        intervals = [_storage_interval(a) for a in owned if a.size]
+        for a in state:
+            if a.size:
+                begin, end = _storage_interval(a)
+                if any(begin < hi and lo < end for lo, hi in intervals):
+                    raise ValueError("Native contact state aliases producer storage")
+        return state
+
+    def _chunks(self):
+        for begin, end, mode in ((0, self.contact.legacy_count, 2), (self.contact.legacy_count, self.contact.count, 3)):
+            for first in range(begin, end, max(1, self.batch_capacity)):
+                wp.launch(
+                    _select_contact_chunk,
+                    1,
+                    [first, end, self.batch_capacity, self.first, self.pool.candidates.count],
+                    device=self.device,
+                )
+                yield mode
+
+    def _query(self, state):
+        c, s, t = self.contact, self.samples, self.support
+        x, poses, com, jt, jw, rigid_com, rigid_rotation = state
+        wp.launch(
+            _actor_geometry,
+            self.batch_capacity,
+            [
+                x,
+                poses,
+                com,
+                jt,
+                jw,
+                rigid_com,
+                rigid_rotation,
+                t.com,
+                t.kinds,
+                t.indices,
+                c.bodies,
+                c.transforms,
+                s.sources,
+                s.targets,
+                s.faces,
+                s.slots,
+                s.points,
+                s.normals,
+                c.triangles,
+                c.types,
+                c.scales,
+                c.sdf_indices,
+                c.table,
+                c.smooth_table,
+                self._empty_int,
+                self._empty_selector,
+                self._empty_vector,
+                0,
+                self.dtype(c.quaternion_norm_tolerance),
+                self.current,
+                self.points,
+                self._flags,
+                False,
+                self.pool.candidates.count,
+            ],
+            device=self.device,
+        )
+
+    def _stage(self, state, mode, dt, *, begin):
+        c, out = self.contact, self.pool.candidates
+        wp.launch(_reset_flags, 1, [self._flags], device=self.device)
+        wp.launch(
+            _load_contact_chunk,
+            self.batch_capacity,
+            [self.all_samples, self.samples, self.first, out],
+            device=self.device,
+        )
+        self._query(state)
+        if begin:
+            wp.launch(
+                _validate_start,
+                self.batch_capacity,
+                [
+                    self.current,
+                    self.samples.targets if mode == 2 else self._key_ids,
+                    c.margins if mode == 2 else self.samples.gaps,
+                    self.dtype(c.parameters[4] if mode == 2 else 0),
+                    self.dtype(c.parameters[3]),
+                    int(c._alignment_policy == "mask"),
+                    self._flags,
+                    True,
+                    out.count,
+                ],
+                device=self.device,
+            )
+            wp.launch(
+                _copy_contact_geometry,
+                self.batch_capacity,
+                [self.current, self.start, self.first, out.count, True],
+                device=self.device,
+            )
+            return
+        wp.launch(
+            _copy_contact_geometry,
+            self.batch_capacity,
+            [self.start, self._start_chunk, self.first, out.count, False],
+            device=self.device,
+        )
+        self.weights.zero_()
+        self.local_r.zero_()
+        self.omitted.zero_()
+        self.mask.zero_()
+        wp.launch(
+            _law,
+            self.batch_capacity,
+            [
+                self.current,
+                self._start_chunk,
+                self.samples.targets,
+                c.margins,
+                self.samples.area,
+                self.dtype(c.parameters[4] if mode == 2 else 0),
+                self.dtype(c.parameters[0]),
+                self.dtype(c.parameters[3]),
+                self.dtype(c.parameters[1]),
+                self.dtype(c.numpy_dtype(c.parameters[2]) * c.numpy_dtype(dt)),
+                ("C-EE", "C-IE", "C-II").index(c.contact_model),
+                int(c._alignment_policy == "mask"),
+                self._flags,
+                out.energy,
+                self._empty_scalar,
+                self.normal,
+                self.tangent,
+                self.weights,
+                self.local_r,
+                self.omitted,
+                self.mask,
+                mode,
+                0,
+                self.samples.gaps,
+                self._empty_int,
+                self._empty_int,
+                self._empty_vector,
+                out.count,
+            ],
+            device=self.device,
+        )
+        wp.launch(
+            _project_contact_chunk,
+            self.batch_capacity,
+            [
+                self.samples,
+                self.support,
+                self.current,
+                self.points,
+                c.bodies,
+                c.triangles,
+                state[2],
+                state[3],
+                state[4],
+                state[5],
+                self.normal,
+                self.tangent,
+                self.weights,
+                self.local_r,
+                out,
+                self._flags,
+                mode == 2,
+                c.model.particle_count,
+            ],
+            device=self.device,
+        )
+
+    def begin_step(self, x, poses, com, jt, jw, *, rigid_com=None, rigid_rotation=None):
+        state = self._state(x, poses, com, jt, jw, rigid_com, rigid_rotation)
+        wp.launch(_reset_flags, 1, [self.start_flags], device=self.device)
+        for mode in self._chunks():
+            # This overwrite stage freezes every complete step-start sample,
+            # independently of pool capacity or currently nonzero forces.
+            self.graphs.run(
+                "contact_batch_start",
+                (mode,),
+                (*self.buffers(), *state),
+                partial(self._stage, state, mode, 0, begin=True),
+            )
+            wp.launch(
+                _merge_contact_chunk_flags,
+                1,
+                [self.start_flags, self._flags, self.first, self.pool.records],
+                device=self.device,
+            )
+        self._started = True
+
+    def evaluate(self, x, poses, com, jt, jw, *, dt, rigid_com=None, rigid_rotation=None):
+        if not self._started or not math.isfinite(dt) or dt <= 0:
+            raise ValueError("Freeze a physical step and use positive finite dt")
+        dt = self.contact.numpy_dtype(dt)
+        falloff = self.contact.numpy_dtype(self.contact.parameters[2]) * dt
+        if (
+            not np.isfinite(dt)
+            or dt <= 0
+            or (self.contact.parameters[1] > 0 and (not np.isfinite(falloff) or falloff <= 0))
+        ):
+            raise ValueError("Invalid native contact displacement scale")
+        state = self._state(x, poses, com, jt, jw, rigid_com, rigid_rotation)
+        self.pool.begin()
+        wp.copy(self.flags, self.start_flags)
+        wp.launch(_contact_pool_start_flags, 1, [self.pool.records, self.start_flags], device=self.device)
+        for mode in self._chunks():
+            self.graphs.run(
+                "contact_batch_eval",
+                (mode, float(dt)),
+                (*self.buffers(), *state),
+                partial(self._stage, state, mode, dt, begin=False),
+            )
+            wp.launch(
+                _merge_contact_chunk_flags,
+                1,
+                [self.flags, self._flags, self.first, self.pool.records],
+                device=self.device,
+            )
+            self.pool.append()
+        self.pool.finish()
+        wp.launch(_contact_pool_failure, 1, [self.flags, self.pool.records], device=self.device)

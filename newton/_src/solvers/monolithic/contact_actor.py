@@ -147,8 +147,12 @@ def _actor_geometry(
     out: Any,
     world_points: wp.array[Any],
     flags: wp.array[int],
+    project: bool,
+    batch_count: wp.array[int],
 ):
     key = wp.tid()
+    if not project and key >= batch_count[0]:
+        return
     source, target = source_shapes[key], target_shapes[key]
     point, normal = type(x[0])(0.0), type(x[0])(0.0)
     if source < 0:
@@ -180,7 +184,7 @@ def _actor_geometry(
     y = wp.transpose(rotation) * (point - wp.transform_get_translation(target_pose))
     d, g = _shape64(types[target], scales[target], y, sdf_indices[target], table)
     out.uncertified[key] = 0
-    if types[target] == GeoType.MESH:
+    if types[target] == GeoType.MESH and smooth_table.shape[0] > 0:
         index = sdf_indices[target]
         field = smooth_table[index]
         query = y
@@ -201,6 +205,8 @@ def _actor_geometry(
     out.distance[key] = d
     out.rotation[key] = rotation
     out.soft_normal[key] = wp.transpose(rotation) * normal / length
+    if not project:
+        return
     for component in range(3):
         factor = 3 * (key + key_offset) + component
         for index in range(support_offsets[factor], support_offsets[factor + 1]):
@@ -465,6 +471,8 @@ class ActorContact:
                 output,
                 self.world_points,
                 flags,
+                True,
+                flags,
             ],
             device=c.model.device,
         )
@@ -482,6 +490,8 @@ class ActorContact:
                 c.dtype(0),
                 c.dtype(c.parameters[3]),
                 int(c._alignment_policy == "mask"),
+                c.start_flags,
+                False,
                 c.start_flags,
             ],
             device=c.model.device,
@@ -521,6 +531,7 @@ class ActorContact:
                 self.support_offsets,
                 c._support_local,
                 self.jacobians,
+                c.flags,
             ],
             device=c.model.device,
         )

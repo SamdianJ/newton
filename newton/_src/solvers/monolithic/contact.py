@@ -173,8 +173,12 @@ def _validate_start(
     smoothing: Any,
     alignment_mask: int,
     flags: wp.array[int],
+    bounded: bool,
+    batch_count: wp.array[int],
 ):
     key = wp.tid()
+    if bounded and key >= batch_count[0]:
+        return
     gap = geometry.distance[key] - radius - margins[shapes[key % shapes.shape[0]]]
     g = geometry.gradient[key]
     if gap < smoothing:
@@ -215,8 +219,11 @@ def _law(
     support_offsets: wp.array[int],
     support_local: wp.array[int],
     jacobians: wp.array[Any],
+    batch_count: wp.array[int],
 ):
     key = wp.tid()
+    if direct >= 2 and key >= batch_count[0]:
+        return
     if flags[0] != 0:
         return
     face = key / (3 * shapes.shape[0])
@@ -229,6 +236,12 @@ def _law(
         k = stiffness * area[key]
         gap = current.distance[key] - gap_offsets[key]
         old_gap = start.distance[key] - gap_offsets[key]
+        if direct == 2:
+            # Bounded legacy geometry keeps the original multiply/divide and
+            # two subtractions; changing these would also change the law.
+            k /= type(radius)(3.0)
+            gap = current.distance[key] - radius - margins[shape]
+            old_gap = start.distance[key] - radius - margins[shape]
     output_key = key + key_offset
     g = current.gradient[key]
     u = current.y[key] - start.y[key]
@@ -312,6 +325,9 @@ def _law(
     weights[output_key, 0] = curvature
     weights[output_key, 1] = beta
     weights[output_key, 2] = radial
+    if direct >= 2:
+        # Bounded producers project actual endpoint support after local law.
+        return
     first = support_offsets[3 * output_key]
     world_r = current.rotation[key] * r
     for index in range(first, support_offsets[3 * output_key + 1]):
@@ -774,6 +790,8 @@ class ContactObjective:
                     self.dtype(self.parameters[3]),
                     int(self._alignment_policy == "mask"),
                     self.start_flags,
+                    False,
+                    self.start_flags,
                 ],
                 device=self.model.device,
             )
@@ -832,6 +850,7 @@ class ContactObjective:
                     self._support_offsets,
                     self._support_local,
                     self.normal,
+                    self.flags,
                 ],
                 device=self.model.device,
             )
