@@ -35,6 +35,15 @@ def sparse_product(data, vector, values="values"):
     return result
 
 
+def posterior_error(data, residual):
+    """Reconstruct the delivered equation; legacy snapshots retain e0 semantics."""
+    direction, scale = data["direction"].astype(float), data["scale"].astype(float)
+    original = scale * (sparse_product(data, direction) + residual.astype(float))
+    actual = float(data["actual_regularization"][0]) if "actual_regularization" in data else 0.0
+    term = actual * (direction / scale)
+    return original + term, original, term
+
+
 def goals(residual, reference, scale, nq, config):
     """Recompute the original thresholds and expose native scalar-rounding effects."""
     result = {}
@@ -194,8 +203,7 @@ def audit(directory):
     for row in json.loads((directory / "linear.json").read_text()):
         assert sha(directory / row["file"]) == row["sha256"]
         data = load(row["file"])
-        direction = data["direction"].astype(float)
-        ref = data["scale"].astype(float) * (sparse_product(data, direction) + data["residual"].astype(float))
+        ref, original, term = posterior_error(data, data["residual"])
         candidates = [
             (i, load(r["file"]))
             for i, r in enumerate(records)
@@ -203,15 +211,23 @@ def audit(directory):
         ]
         matches = [i for i, d in candidates if np.array_equal(d["native.residual"], data["residual"])]
         assert matches, "Physical posterior has no matching frozen candidate"
-        independent = data["scale"].astype(float) * (sparse_product(data, direction) + saved[matches[0]]["residual"])
+        independent, _, _ = posterior_error(data, saved[matches[0]]["residual"])
         position = linear_positions.get(row["step"], 0)
         postcheck = stats[row["step"]]["stats"]["variational"]["linear_postchecks"][position]
+        if "actual_regularization" in data:
+            assert float(data["actual_regularization"][0]) == postcheck["actual_regularization"]
         linear_positions[row["step"]] = position + 1
         blocks = {}
         for name, part in [("global", slice(None)), ("q", slice(0, oracle.k.n)), ("x", slice(oracle.k.n, None))]:
             limit = postcheck["blocks"][name]["limit"]
             norm = float(np.linalg.norm(independent[part]))
-            blocks[name] = {"independent_residual": norm, "frozen_native_limit": limit, "passed": norm <= limit}
+            blocks[name] = {
+                "independent_residual": norm,
+                "original_residual": float(np.linalg.norm(original[part])),
+                "regularization_term": float(np.linalg.norm(term[part])),
+                "frozen_native_limit": limit,
+                "passed": norm <= limit,
+            }
         row["independent_residual_posterior"] = blocks
         linear.append(
             dict(

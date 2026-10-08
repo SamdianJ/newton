@@ -240,6 +240,7 @@ class SolverMonolithic(SolverBase):
                 linear_absolute_tolerance,
             ]
         )
+        self._coupled_config["direction_policy"] = np.array([1], dtype=np.int32)
         if globalization not in ("Armijo", "ResNorm", "ArmijoOrResNorm"):
             raise ValueError("Unknown articulation globalization/publication policy")
         for value in (newton_max_iterations, line_search_max_iterations, linear_max_iterations):
@@ -354,6 +355,14 @@ class SolverMonolithic(SolverBase):
             setattr(self, name, wp.zeros(layout.scalar_dof_count, dtype=float, device=device))
         self._complete_r = wp.zeros(layout.scalar_dof_count, dtype=self._dtype, device=device)
         self._post_r, self._post_error = wp.zeros_like(self._complete_r), wp.zeros_like(self._complete_r)
+        self._post_original, self._post_regularization = (
+            wp.zeros_like(self._complete_r),
+            wp.zeros_like(self._complete_r),
+        )
+        self._post_lambda = wp.zeros(1, dtype=float, device=model.device)
+        self._correction_rhs, self._correction_delta = wp.zeros_like(self._rhs), wp.zeros_like(self._delta)
+        self._direction_base = wp.zeros_like(self._delta)
+        self._direction_status = wp.zeros(1, dtype=int, device=model.device)
         self._tet_r32 = wp.zeros(n, dtype=wp.vec3, device=device)
         self._frozen_force = wp.zeros(model.particle_count, dtype=wp.vec3, device=device)
         self._frozen_gravity = wp.zeros_like(model.gravity)
@@ -1061,7 +1070,19 @@ class SolverMonolithic(SolverBase):
         else:
             self._post_r.assign(residual)
         b = self._linear.k_global_scalar_bsr
-        buffers = [b.offsets, b.columns, b.values, self._delta, self._post_r, self._linear.scale, self._post_error]
+        self._post_lambda.fill_(self._linear._lambda)
+        buffers = [
+            b.offsets,
+            b.columns,
+            b.values,
+            self._delta,
+            self._post_r,
+            self._linear.scale,
+            self._post_lambda,
+            self._post_original,
+            self._post_regularization,
+            self._post_error,
+        ]
         self._graphs.run(
             "coupled_posterior",
             (
@@ -1072,6 +1093,30 @@ class SolverMonolithic(SolverBase):
             lambda: wp.launch(kernels.sparse_posterior, self._post_error.size, buffers, device=self.model.device),
         )
         return self._post_error if device_result else self._post_error.numpy().copy()
+
+    def _prepare_direction_correction(self):
+        wp.launch(
+            kernels.direction_correction_rhs,
+            self._post_error.size,
+            [self._post_error, self._correction_rhs],
+            device=self.model.device,
+        )
+
+    def _combine_direction_correction(self):
+        # A saved base makes warmup/capture/replay overwrite-only, rather than
+        # adding the same correction twice on the first graph invocation.
+        wp.copy(self._direction_base, self._delta)
+        buffers = [self._direction_base, self._correction_delta, self._delta, self._direction_status]
+
+        def execute():
+            self._direction_status.zero_()
+            wp.launch(kernels.combine_direction, self._delta.size, buffers, device=self.model.device)
+
+        self._graphs.run("coupled_direction_correction", (), buffers, execute)
+        status = self._direction_status.numpy()[0]
+        if status == 2:
+            raise _StepFailure(self.Status.NONFINITE, "Nonfinite corrected direction")
+        return status == 1
 
     def _validate_final(self, dt, status):
         device = self._device_iteration

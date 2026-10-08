@@ -146,13 +146,42 @@ def sparse_posterior(
     direction: wp.array[float],
     residual: wp.array[Any],
     scale: wp.array[float],
+    regularization: wp.array[float],
+    original: wp.array[Any],
+    regularization_term: wp.array[Any],
     error: wp.array[Any],
 ):
     row = wp.tid()
     value = residual[row]
     for j in range(offsets[row], offsets[row + 1]):
         value += type(residual[0])(values[j]) * type(residual[0])(direction[columns[j]])
-    error[row] = type(residual[0])(scale[row]) * value
+    original[row] = type(residual[0])(scale[row]) * value
+    term = type(residual[0])(0.0)
+    if regularization[0] != 0.0:
+        term = type(residual[0])(regularization[0]) * (
+            type(residual[0])(direction[row]) / type(residual[0])(scale[row])
+        )
+    regularization_term[row] = term
+    error[row] = original[row] + term
+
+
+@wp.kernel
+def direction_correction_rhs(error: wp.array[Any], rhs: wp.array[float]):
+    i = wp.tid()
+    rhs[i] = float(-error[i])
+
+
+@wp.kernel
+def combine_direction(
+    base: wp.array[float], correction: wp.array[float], direction: wp.array[float], status: wp.array[int]
+):
+    i = wp.tid()
+    value = base[i] + correction[i]
+    direction[i] = value
+    if not wp.isfinite(value):
+        wp.atomic_max(status, 0, 2)
+    elif value != base[i]:
+        wp.atomic_max(status, 0, 1)
 
 
 @wp.kernel

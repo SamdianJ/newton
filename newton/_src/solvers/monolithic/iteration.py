@@ -4,6 +4,7 @@
 """Shared PR2/PR3 bounded iteration; component/state policy stays with each entry."""
 
 import math
+from dataclasses import replace
 
 import numpy as np
 import warp as wp
@@ -102,6 +103,141 @@ def measure(solver, residual, reference, scale):
     return values
 
 
+def direction_norms(solver, vector):
+    """Measure every active layout group in the nonlinear native precision."""
+    if isinstance(vector, wp.array):
+        values = iteration_device.norms(solver, vector)
+        return dict(zip(("global", "q", "x"), values, strict=True))
+    return {name: np.linalg.norm(vector[part]) for name, part in blocks(solver)}
+
+
+def solve_direction(solver, residual, scale, limits, pcg, *, iteration, retry, regularization):
+    """Qualify the delivered direction, correcting native error within one budget."""
+    self = solver
+    remaining = pcg.maximum_iterations
+    correction = 0
+    solve_config = pcg
+    rhs, output = self._rhs, self._delta
+    attempt = {
+        "iteration": iteration,
+        "retry": retry,
+        "regularization": regularization,
+        "passes": [],
+        "failure_reason": None,
+    }
+    self._variational.setdefault("linear_direction_attempts", []).append(attempt)
+    while remaining > 0:
+        try:
+            result = self._linear.solve_pcg(
+                rhs,
+                self._y,
+                generation=self._generation,
+                warm_start=MonolithicPcgWarmStart.ZERO,
+                config=solve_config,
+                delta=output,
+            )
+            remaining -= result.iterations
+            self._metrics["linear_iterations"] += result.iterations
+            self._metrics["linear_scheduled_slots"] += result.scheduled_slots
+            attempt["passes"].append(
+                {
+                    "correction": correction,
+                    "iterations": result.iterations,
+                    "remaining_iterations": remaining,
+                    "status": result.status.name,
+                    "graph_rebuilt": result.graph_rebuilt,
+                    "capture_seconds": result.capture_seconds,
+                }
+            )
+            self._require_linear(result.status)
+            if self.pcg_mode == self.PCGMode.DIAGNOSTIC:
+                self._require_linear(self._linear.recover_delta(self._y, output, generation=self._generation))
+            elif not result.output_valid:
+                raise _StepFailure(self.Status.NONFINITE, "Invalid PCG output")
+            changed = self._combine_direction_correction() if correction else True
+        except _StepFailure as error:
+            attempt["failure_reason"] = (
+                "direction_accuracy_budget_exhausted"
+                if correction and remaining == 0 and error.status == self.Status.LINEAR_MAX_ITERATIONS
+                else error.status.value
+            )
+            return False
+        direction = self._delta if self._device_iteration else self._delta.numpy().astype(self._numpy_dtype)
+        error = self._physical_linear_error(None, direction, residual, scale, device_result=self._device_iteration)
+        errors = direction_norms(self, error)
+        if np.float32(regularization) == 0:
+            originals, terms = errors, dict.fromkeys(errors, 0.0)
+        else:
+            originals = direction_norms(
+                self, self._post_original if self._device_iteration else self._post_original.numpy()
+            )
+            terms = direction_norms(
+                self, self._post_regularization if self._device_iteration else self._post_regularization.numpy()
+            )
+        internal = (
+            self._linear._true_residual_norms
+            if self.pcg_mode == self.PCGMode.DIAGNOSTIC
+            else self._linear._masked_pcg_plan.norms
+        ).numpy()
+        postchecks = {
+            name: {
+                "residual": errors[name],
+                "limit": limits[name],
+                "original_residual": originals[name],
+                "regularization_term": terms[name],
+                "internal_residual": internal[index],
+                "external_minus_internal_norm": errors[name] - internal[index],
+            }
+            for index, (name, _) in enumerate(blocks(self))
+        }
+        self._variational["linear_postchecks"].append(
+            {
+                "residual": errors["global"],
+                "limit": min(limits.values()),
+                "regularization": regularization,
+                "actual_regularization": float(np.float32(regularization)),
+                "equation": "regularized" if np.float32(regularization) else "original",
+                "iteration": iteration,
+                "retry": retry,
+                "correction": correction,
+                "total_iterations": pcg.maximum_iterations - remaining,
+                "blocks": postchecks,
+            }
+        )
+        if any(not np.isfinite(value) for value in errors.values()):
+            attempt["failure_reason"] = "nonfinite_posterior"
+            return False
+        if all(errors[name] <= limits[name] for name in limits):
+            return True
+        if not changed:
+            attempt["failure_reason"] = "direction_precision_unreachable"
+            return False
+        if remaining == 0:
+            break
+        # Solve A_lambda z = -e_lambda in FP32, then recheck the recovered,
+        # rounded total delta. The original RHS and external gates stay frozen.
+        self._prepare_direction_correction()
+        rhs, output = self._correction_rhs, self._correction_delta
+        # An original RHS floor can otherwise accept the correction's zero
+        # guess. Apply the same rtol to its native error norm, without that floor.
+        targets = {
+            name: max(float(np.finfo(np.float32).smallest_subnormal), min(limits[name], pcg.linear_tolerance * value))
+            if value
+            else limits[name]
+            for name, value in errors.items()
+        }
+        solve_config = replace(
+            pcg,
+            maximum_iterations=remaining,
+            linear_absolute_tolerance=0.0,
+            residual_norm_limits=tuple(targets.get(name, 1.0) for name in ("global", "q", "x")),
+            group_norm_limits=tuple(targets[name] for name, _ in blocks(self)),
+        )
+        correction += 1
+    attempt["failure_reason"] = "direction_accuracy_budget_exhausted"
+    return False
+
+
 def iterate(solver, dt):
     """Keep one direction, one line search, and all active block gates per iterate."""
     self = solver
@@ -117,7 +253,7 @@ def iterate(solver, dt):
         if device:
             wp.copy(self._accepted_r, evaluated)
         residual = self._accepted_r if device else evaluated
-        b, scale = self._assemble(iteration, device_result=True) if device else self._assemble(iteration)
+        _, scale = self._assemble(iteration, device_result=True) if device else self._assemble(iteration)
         self._reference_residual = reference
         values = measure(self, residual, reference, scale)
         merit = values["global"][0]
@@ -162,6 +298,17 @@ def iterate(solver, dt):
             stagnation_window=10,
             stagnation_minimum_reduction=1e-3,
         )
+        limits = {}
+        for name, part in blocks(self):
+            rhs_norm = self._rhs_norms_host[("global", "q", "x").index(name)] if device else np.linalg.norm(rhs[part])
+            limits[name] = min(
+                caps[name],
+                max(
+                    native(self.linear_absolute_tolerance),
+                    native(self.linear_tolerance)
+                    * max(rhs_norm, native(_block_policy(config, "residual_floor", name))),
+                ),
+            )
         accepted = False
         for retry, regularization in enumerate(config.regularization_values):
             self._metrics["regularization_retries"] += int(retry > 0)
@@ -171,56 +318,13 @@ def iterate(solver, dt):
                 self._require_linear(
                     self._linear.factor_actor_preconditioner(generation=self._generation, pivot_tolerance=0.0)
                 )
-                result = self._linear.solve_pcg(
-                    self._rhs,
-                    self._y,
-                    generation=self._generation,
-                    warm_start=MonolithicPcgWarmStart.ZERO,
-                    config=pcg,
-                    delta=self._delta,
-                )
-                self._metrics["linear_iterations"] += result.iterations
-                self._metrics["linear_scheduled_slots"] += result.scheduled_slots
-                self._require_linear(result.status)
-                if self.pcg_mode == self.PCGMode.DIAGNOSTIC:
-                    self._require_linear(self._linear.recover_delta(self._y, self._delta, generation=self._generation))
-                elif not result.output_valid:
-                    raise _StepFailure(self.Status.NONFINITE, "Invalid PCG output")
             except _StepFailure:
                 continue
-            direction = self._delta if device else self._delta.numpy().astype(native)
-            error = (
-                self._physical_linear_error(b, direction, residual, scale, device_result=True)
-                if device
-                else self._physical_linear_error(b, direction, residual, scale)
-            )
-            norms = iteration_device.norms(self, error) if isinstance(error, wp.array) else None
-            postchecks = {}
-            for name, part in blocks(self):
-                index = ("global", "q", "x").index(name) if device else None
-                post = norms[index] if norms is not None else np.linalg.norm(error[part])
-                limit = min(
-                    caps[name],
-                    max(
-                        native(self.linear_absolute_tolerance),
-                        native(self.linear_tolerance)
-                        * max(
-                            self._rhs_norms_host[index] if device else np.linalg.norm(rhs[part]),
-                            native(_block_policy(config, "residual_floor", name)),
-                        ),
-                    ),
-                )
-                postchecks[name] = {"residual": post, "limit": limit}
-            self._variational["linear_postchecks"].append(
-                {
-                    "residual": postchecks["global"]["residual"],
-                    "limit": min(p["limit"] for p in postchecks.values()),
-                    "regularization": regularization,
-                    "blocks": postchecks,
-                }
-            )
-            if any(not np.isfinite(p["residual"]) or p["residual"] > p["limit"] for p in postchecks.values()):
+            if not solve_direction(
+                self, residual, scale, limits, pcg, iteration=iteration, retry=retry, regularization=regularization
+            ):
                 continue
+            direction = self._delta if device else self._delta.numpy().astype(native)
             for search in range(self.line_search_max_iterations):
                 alpha = native(0.5**search)
                 self._metrics["line_search_iterations"] += 1
