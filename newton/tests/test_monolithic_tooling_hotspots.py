@@ -13,14 +13,12 @@ from unittest.mock import patch
 import numpy as np
 
 from newton._src.solvers.monolithic import iteration
-from newton.tests.test_monolithic_rigid_dynamics import rigid_scene, rigid_solver
 from newton.tests.unittest_utils import add_function_test, get_test_devices
 from scripts.monolithic_reference.record_workload import CallRecorder, main, record
 from scripts.monolithic_reference.replay_workload import acceptance_trace, replay
 from scripts.monolithic_reference.summarize_workload import summarize
 from scripts.monolithic_reference.workload_io import complete_bundle, digest, load_arrays, save_arrays, write_json
-from scripts.monolithic_reference.workload_objective import arrays_for, compare_assembly, replay_objective
-from scripts.monolithic_reference.workload_pcg import pcg_input
+from scripts.monolithic_reference.workload_objective import compare_assembly, replay_objective
 
 
 def test_hotspot_dependencies(test, device):
@@ -104,14 +102,6 @@ def test_hotspot_dependencies(test, device):
 
 
 class TestHotspots(unittest.TestCase):
-    def test_mixed_adapter_rejection(self):
-        """Reject mixed actor snapshots before the canonical replay adapter omits rigid owners."""
-        run = rigid_solver(rigid_scene("cpu", contact=False), mode="production")
-        with self.assertRaisesRegex(ValueError, r"canonical A\+T"):
-            arrays_for(run)
-        with self.assertRaisesRegex(ValueError, r"canonical A\+T"):
-            pcg_input(run._linear, run._rhs, run._y, config=None, warm_start=None, delta=run._delta)
-
     def test_reduction_roundoff(self):
         """Allow summation-order cancellation but reject errors beyond its bound."""
 

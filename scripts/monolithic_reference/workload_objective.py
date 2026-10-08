@@ -9,7 +9,8 @@ import time
 import numpy as np
 import warp as wp
 
-from scripts.monolithic_reference.profiling import SolverProfiler
+from newton.examples.softbody.monolithic_recording import serial
+from scripts.monolithic_reference.profiling import SolverProfiler, provenance
 from scripts.monolithic_reference.workload_scene import build_scene, compare_arrays
 
 # These are numerical owners, not a recursively serialized object graph.
@@ -31,11 +32,20 @@ TOPOLOGY = {
 
 def arrays_for(run):
     """Enumerate a bounded set of numerical buffers; exclude texture descriptors."""
-    if not run._device_iteration:
-        raise ValueError("Objective/assembly replay requires canonical A+T; mixed/permuted layouts need a new adapter")
     arrays = {"solver." + name: getattr(run, name) for name in SOLVER_ARRAYS}
     owners = {name: getattr(run, name) for name in OWNERS}
     owners.update({"contact.start": run._contact.start, "contact.current": run._contact.current})
+    if not run._device_iteration:
+        owners["_rigid"] = run._rigid
+        actor_contact = run._contact.actor_contact
+        if actor_contact is not None:
+            owners.update(
+                {
+                    "actor_contact": actor_contact,
+                    "actor_contact.start": actor_contact.start,
+                    "actor_contact.current": actor_contact.current,
+                }
+            )
     for state_name in ("_original", "_accepted", "_trial"):
         state = getattr(run, state_name)
         owners[state_name] = state
@@ -71,6 +81,14 @@ def capture_input(run, boundary, args, kwargs):
         "contact_evaluated": run._contact._evaluated,
         "physical_digest": run._kinematics.digest.hex(),
     }
+    if not run._device_iteration:
+        metadata.update(
+            adapter="actor-objective/1",
+            layout=serial(dataclasses.asdict(run._layout)),
+            actor_maps=serial(run._actors.maps),
+            rigid_has_torque=run._rigid.has_torque,
+            source_hashes=provenance()["source_hashes"],
+        )
     return {name: array.numpy().copy() for name, array in arrays_for(run).items()}, metadata
 
 
@@ -108,6 +126,12 @@ def capture_output(run, boundary, result):
             diagonal=run._diagonal.numpy().copy(),
             tet_failure=run._tet_assembly.failure_flags.numpy().copy(),
             actor_dense=run._linear.aq_actor_dense.numpy().copy(),
+        )
+    if not run._device_iteration:
+        arrays.update(
+            rigid_energy=run._rigid.energy.numpy().copy(),
+            rigid_residual=run._rigid.residual.numpy().copy(),
+            rigid_tangent=run._rigid.tangent.numpy().copy(),
         )
     return arrays
 
@@ -179,6 +203,15 @@ def replay_objective(arrays, metadata, expected, *, scene, device, graph, repeat
     model, run, state, _ = build_scene(scene, device=device, graph=graph)
     if run._kinematics.digest.hex() != metadata["physical_digest"]:
         raise ValueError("Hotspot physical identity differs")
+    if not run._device_iteration:
+        if (
+            metadata.get("adapter") != "actor-objective/1"
+            or metadata.get("layout") != serial(dataclasses.asdict(run._layout))
+            or metadata.get("actor_maps") != serial(run._actors.maps)
+            or metadata.get("source_hashes") != provenance()["source_hashes"]
+            or type(metadata.get("rigid_has_torque")) is not bool
+        ):
+            raise ValueError("Mixed hotspot adapter, source or layout identity differs")
     for name in ("_original", "_accepted", "_trial"):
         setattr(run, name, run._states.copy(state))
     targets = arrays_for(run)
@@ -190,7 +223,17 @@ def replay_objective(arrays, metadata, expected, *, scene, device, graph, repeat
             raise ValueError(f"Hotspot live-in shape/dtype differs: {name}")
         if not np.isfinite(arrays[name]).all():
             raise ValueError(f"Nonfinite hotspot live-in: {name}")
-        if name in TOPOLOGY or (name.startswith("_kinematics.") and actual.dtype.kind in "iu"):
+        actor_contact = run._contact.actor_contact
+        static_actor = actor_contact is not None and name in {"actor_contact." + key for key in actor_contact._bound}
+        static_rigid = name in {
+            "_rigid." + key for key in ("rows", "qs", "vs", "bodies", "mass", "second", "xp", "xc", "local_com")
+        }
+        if (
+            name in TOPOLOGY
+            or static_actor
+            or static_rigid
+            or (name.startswith("_kinematics.") and actual.dtype.kind in "iu")
+        ):
             if not np.array_equal(arrays[name], actual):
                 raise ValueError(f"Hotspot topology differs from reconstructed scene: {name}")
     run._dt = run._kinematics.timestep(metadata["dt"])
@@ -204,6 +247,8 @@ def replay_objective(arrays, metadata, expected, *, scene, device, graph, repeat
             target.assign(arrays[name])
         run._contact._started = metadata["contact_started"]
         run._contact._evaluated = metadata["contact_evaluated"]
+        if not run._device_iteration:
+            run._rigid.has_torque = metadata["rigid_has_torque"]
         run._current_state = getattr(run, metadata["state"])
         wp.synchronize_device(model.device)
         restore = time.perf_counter() - start

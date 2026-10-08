@@ -30,6 +30,11 @@ def replay(root, *, mode="window", device="cuda:0", repeat=5, profile=False):
     """Validate the entire bundle before constructing any GPU objects."""
     root = Path(root)
     manifest = open_bundle(root)
+    if (
+        manifest["scene"].startswith("actor-coupling")
+        and manifest["source"]["source_hashes"] != provenance()["source_hashes"]
+    ):
+        raise ValueError("Mixed workload source identity differs")
     results = []
     if mode == "hotspot":
         if not manifest["snapshots"]:

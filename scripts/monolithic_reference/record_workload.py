@@ -217,7 +217,18 @@ def record(
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--case", choices=("tiny-contact", "franka-default", "sharpa-default"), default="tiny-contact")
+    parser.add_argument(
+        "--case",
+        choices=(
+            "tiny-contact",
+            "franka-default",
+            "sharpa-default",
+            "actor-coupling",
+            "actor-coupling-before",
+            "actor-coupling-permuted",
+        ),
+        default="tiny-contact",
+    )
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--no-graph", action="store_true")
     parser.add_argument("--steps", type=int, default=10)
