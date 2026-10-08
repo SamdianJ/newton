@@ -12,7 +12,7 @@ import numpy as np
 import warp as wp
 from warp import sparse
 
-from newton._src.solvers.monolithic.bsr_reduction import _ScalarBsrReduction
+from newton._src.solvers.monolithic.bsr_reduction import _FixedScalarBsrReduction, _ScalarBsrReduction
 from newton._src.solvers.monolithic.contact_pool import _ContactPool, _ContactRows
 from newton.tests.test_monolithic_linear_assembly import _dense_bsr
 from newton.tests.test_monolithic_linear_reduction import _reference
@@ -547,6 +547,10 @@ def test_force_and_dense_operator(test, device):
             15,
         )
         np.testing.assert_array_equal(_dense_bsr(matrix), reference)
+        fixed = _FixedScalarBsrReduction(15, pool.triplet_capacity, device, use_cuda_graph=device.is_cuda)
+        fixed.build(triplets, layout_identity=("contact-pool", 15))
+        test.assertEqual(int(triplets.status.numpy()[0]), 0)
+        np.testing.assert_array_equal(_dense_bsr(fixed.matrix), reference)
         expected = sum(
             weight * np.outer(j.T @ direction, j.T @ direction)
             for weight, direction in zip([7, 3, 5], directions, strict=True)
