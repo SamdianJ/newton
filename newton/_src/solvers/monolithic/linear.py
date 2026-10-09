@@ -279,6 +279,8 @@ class MonolithicLinearWorkspace:
         rows, columns = self._fixed_patterns[1]
         if rows.size != self._internal.capacity:
             raise ValueError("Fixed BSR storage requires the complete internal owner capacity")
+        # Release unused legacy scratch before allocating its fixed replacements.
+        self._scalar_reduction = None
         scalar = _FixedScalarBsrReduction(
             self.layout.scalar_dof_count, self._global.capacity, self.device, use_cuda_graph=self.use_cuda_graph
         )
@@ -291,7 +293,6 @@ class MonolithicLinearWorkspace:
         )
         self._fixed_bsr = scalar, internal
         self.k_global_scalar_bsr, self.ax_internal_bsr3 = scalar.matrix, internal.matrix
-        self._scalar_reduction = None  # No legacy sort scratch survives this construction-only switch.
 
     def begin_assembly(self, generation: MonolithicLinearGeneration) -> MonolithicLinearAssembly:
         if self.layout != self._layout_identity:
