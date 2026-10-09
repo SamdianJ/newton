@@ -18,10 +18,11 @@ import numpy as np
 import warp as wp
 
 from newton._src.solvers.monolithic.articulation import _configuration_digest
+from newton._src.solvers.monolithic.coupled_kernels import contact_forces
 from newton._src.solvers.monolithic.linear_types import MonolithicLinearGeneration, MonolithicLinearStatus
 from newton.examples.softbody.monolithic_recording import serial, state_arrays
 from scripts.monolithic_reference.actor_recording import _semantic, compare_semantic_fields
-from scripts.monolithic_reference.contact_full_oracle import evaluate_full
+from scripts.monolithic_reference.contact_full_oracle import evaluate_stream
 from scripts.monolithic_reference.profiling import capture_count, provenance
 from scripts.monolithic_reference.record_workload import apply_inputs, inputs
 from scripts.monolithic_reference.replay_workload import acceptance_trace
@@ -121,7 +122,33 @@ def _physical(state):
     }
 
 
-def _contact_at(run, frame, start, dt):
+def _sparse_bsr(matrix):
+    """Copy only the used scalar raw BSR prefix, retaining every stored coordinate."""
+    if matrix.block_shape != (1, 1) or matrix.nrow != matrix.ncol:
+        raise ValueError("Contact audit requires square scalar raw BSR")
+    offsets = matrix.offsets.numpy()
+    if (
+        offsets.shape != (matrix.nrow + 1,)
+        or offsets[0] != 0
+        or np.any(np.diff(offsets.astype(np.int64)) < 0)
+        or offsets[-1] > min(matrix.columns.size, matrix.values.size)
+    ):
+        raise ValueError("Invalid contact BSR offsets")
+    count = int(offsets[-1])
+    columns = matrix.columns[:count].numpy().astype(np.int64) if count else np.empty(0, dtype=np.int64)
+    values = matrix.values[:count].numpy().reshape(-1).astype(np.float64) if count else np.empty(0)
+    rows = np.repeat(np.arange(matrix.nrow, dtype=np.int64), np.diff(offsets))
+    if (
+        np.any(columns < 0)
+        or np.any(columns >= matrix.ncol)
+        or not np.isfinite(values).all()
+        or np.any((rows[1:] == rows[:-1]) & (columns[1:] <= columns[:-1]))
+    ):
+        raise ValueError("Invalid contact BSR coordinates or values")
+    return {"shape": (matrix.nrow, matrix.ncol), "row": rows, "column": columns, "value": values}
+
+
+def _contact_at(run, frame, start, dt, *, sparse=False):
     """Evaluate native contact inputs on an audit instance, without transplanting history."""
     c, k = run._contact, run._kinematics
     state = run.create_state(dt=dt)
@@ -161,11 +188,43 @@ def _contact_at(run, frame, start, dt):
     result = run._linear.finalize_assembly(generation=generation)
     if result.status != MonolithicLinearStatus.SUCCESS:
         raise ValueError("Contact audit assembly failed")
-    tangent = run._linear.densify_for_test(generation=generation).raw_matrix
+    tangent = (
+        _sparse_bsr(run._linear.k_global_scalar_bsr)
+        if sparse
+        else run._linear.densify_for_test(generation=generation).raw_matrix
+    )
+    pairs = []
     if run._contact_pool:
-        c.publish(state)
+        pairs = c.publish(state)
     else:
-        c.actor_contact.publish(state, k)
+        if c.legacy_count:
+            wp.launch(
+                contact_forces,
+                c.legacy_count,
+                [
+                    c.current,
+                    c.local_residual,
+                    c.shapes,
+                    c.bodies,
+                    c.body_local,
+                    c.triangles,
+                    state.particle_q,
+                    k.com,
+                    k.dof_map,
+                    h.contact_joint_force,
+                    h.contact_particle_force,
+                    h.contact_body_force,
+                ],
+                device=run.model.device,
+            )
+        if c.actor_contact is not None:
+            pairs = c.actor_contact.publish(state, k)
+    static = np.zeros((run.model.shape_count, 6))
+    bodies = run.model.shape_body.numpy()
+    for pair in pairs:
+        for shape, wrench in zip((pair["source"], pair["target"]), pair["world_wrench"], strict=True):
+            if shape >= 0 and bodies[shape] < 0:
+                static[shape] += wrench
     return {
         "energy": c.energy.numpy().reshape(-1, 2).sum(axis=0),
         "residual": c.residual.numpy().copy(),
@@ -173,6 +232,7 @@ def _contact_at(run, frame, start, dt):
         "particle_force": h.contact_particle_force.numpy().copy(),
         "body_wrench": h.contact_body_force.numpy().copy(),
         "joint_force": h.contact_joint_force.numpy().copy(),
+        "static_wrench": static,
     }
 
 
@@ -189,11 +249,85 @@ def _check_contact(actual, full):
     return errors
 
 
+def _check_contact_sparse(actual, full):
+    """Use the original numerical gates on every raw sparse B coordinate and endpoint."""
+    errors = {}
+    for name in ("energy", "residual", "particle_force", "body_wrench", "joint_force", "static_wrench"):
+        got, wanted = actual[name], full[name]
+        np.testing.assert_allclose(got, wanted, rtol=1e-8, atol=1e-12 if name == "energy" else 1e-10, err_msg=name)
+        errors[name] = float(np.max(np.abs(got - wanted), initial=0))
+    left, right = actual["tangent"], full["tangent"]
+    if left["shape"] != right["shape"] or left["shape"][0] >= 2**31:
+        raise ValueError("Contact tangent shape differs or exceeds the scalar layout")
+    size = left["shape"][1]
+    keys = [b["row"] * size + b["column"] for b in (left, right)]
+    combined = np.union1d(*keys)
+    values = []
+    for b, ids in zip((left, right), keys, strict=True):
+        if (
+            ids.size != b["value"].size
+            or not np.isfinite(b["value"]).all()
+            or np.any(b["row"] < 0)
+            or np.any(b["row"] >= left["shape"][0])
+            or np.any(b["column"] < 0)
+            or np.any(b["column"] >= size)
+            or np.any(ids[1:] <= ids[:-1])
+        ):
+            raise ValueError("Invalid sparse contact tangent")
+        row = np.zeros(combined.size)
+        row[np.searchsorted(combined, ids)] = b["value"]
+        values.append(row)
+    error = np.linalg.norm(values[0] - values[1]) / max(1, np.linalg.norm(values[1]))
+    if not np.isfinite(error) or error >= 1e-5:
+        raise ValueError("Contact tangent violates the original full-oracle gate")
+    errors["tangent_relative"] = float(error)
+    return errors
+
+
+def audit_contact_state(run, frame, start, dt, *, mesh_fields=None):
+    """Audit one complete native contact state, not nonlinear convergence or a trajectory.
+
+    The caller supplies a separate audit solver and true physical-step start.
+    No checkpoint/history is transferred; scratch is never passed to step.
+    """
+    c = run._contact
+    stiffness, mu, velocity, width, radius = c.parameters
+    full = evaluate_stream(
+        run.model,
+        run._actors,
+        frame,
+        start,
+        c.contact_model,
+        radius=radius,
+        stiffness=stiffness,
+        mu=mu,
+        width=width,
+        falloff=velocity * dt,
+        mesh_fields=mesh_fields,
+        alignment_policy=c.alignment_policy,
+    )
+    if full["full_count"] != c.count:
+        raise ValueError("Independent full enumeration disagrees with the declared complete set")
+    actual = _contact_at(run, frame, start, dt, sparse=True)
+    return {
+        "status": "PASS_LOCAL_COMPLETE_CONTACT_STATE",
+        "full_count": full["full_count"],
+        "full_contributing_count": full["full_contributing_count"],
+        "full_key_sha256": full["full_key_sha256"],
+        "state_sha256": _configuration_digest(frame).hex(),
+        "step_start_sha256": _configuration_digest(start).hex(),
+        "max_penetration_m": max(0, -full["min_gap"]),
+        "native_B_coordinates": actual["tangent"]["value"].size,
+        "full_B_coordinates": full["full"]["tangent"]["value"].size,
+        "errors": _check_contact_sparse(actual, full["full"]),
+    }
+
+
 def _audit_pair(audits, frame, start, dt, label):
     left = audits[0]
     c = left._contact
     stiffness, mu, velocity, width, radius = c.parameters
-    full = evaluate_full(
+    full = evaluate_stream(
         left.model,
         left._actors,
         frame,
@@ -204,21 +338,22 @@ def _audit_pair(audits, frame, start, dt, label):
         mu=mu,
         width=width,
         falloff=velocity * dt,
+        alignment_policy=c.alignment_policy,
     )
-    if len(full["records"]) != c.count:
+    if full["full_count"] != c.count:
         raise ValueError("Independent full enumeration disagrees with the declared complete set")
     result = []
     for algorithm, audit in zip(("legacy", "pooled"), audits, strict=True):
-        actual = _contact_at(audit, frame, start, dt)
+        actual = _contact_at(audit, frame, start, dt, sparse=True)
         result.append(
             {
                 **label,
                 "algorithm": algorithm,
-                "full_count": len(full["records"]),
+                "full_count": full["full_count"],
                 "state_sha256": _configuration_digest(frame).hex(),
                 "step_start_sha256": _configuration_digest(start).hex(),
                 "max_penetration_m": max(0, -full["min_gap"]),
-                "errors": _check_contact(actual, full),
+                "errors": _check_contact_sparse(actual, full["full"]),
             }
         )
     return result

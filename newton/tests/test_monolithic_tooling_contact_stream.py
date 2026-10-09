@@ -52,9 +52,9 @@ def grid_scene(dimension, device="cpu"):
     """Construct an active connected-volume audit input, without solver stepping."""
     builder = newton.ModelBuilder(gravity=(0, 0, 0))
     body = builder.add_link(mass=1, inertia=wp.diag(wp.vec3(0.001)))
-    joint = builder.add_joint_prismatic(-1, body, axis=newton.Axis.Z)
+    joint = builder.add_joint_prismatic(-1, body, axis=newton.Axis.Z, limit_ke=0, limit_kd=0)
     builder.add_articulation([joint])
-    builder.add_shape_plane(body=body, cfg=builder.ShapeConfig(density=0, margin=0.0001))
+    builder.add_shape_plane(body=body, width=0, length=0, cfg=builder.ShapeConfig(density=0, margin=0.0001))
     builder.add_soft_grid(
         pos=wp.vec3(0, 0, 0.0005),
         rot=wp.quat_identity(),

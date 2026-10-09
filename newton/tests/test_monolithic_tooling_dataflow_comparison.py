@@ -126,14 +126,14 @@ def test_hotspot_and_failure(test, device):
         result = compare(root, device=device)
         test.assertGreater(result["same_state_checks"], 4)
         test.assertTrue(any(row.get("state_owner") == "_trial" for row in result["same_state"]))
-        from scripts.monolithic_reference.contact_full_oracle import evaluate_full  # noqa: PLC0415
+        from scripts.monolithic_reference.contact_full_oracle import evaluate_stream  # noqa: PLC0415
 
         def wrong_oracle(*args, **kwargs):
-            full = evaluate_full(*args, **kwargs)
-            full["energy"] += 1
+            full = evaluate_stream(*args, **kwargs)
+            full["full"]["energy"] += 1
             return full
 
-        with patch("scripts.monolithic_reference.compare_contact_dataflows.evaluate_full", wrong_oracle):
+        with patch("scripts.monolithic_reference.compare_contact_dataflows.evaluate_stream", wrong_oracle):
             with test.assertRaises(AssertionError):
                 compare(root, device=device)
     run = pooled_solver(contact_scene(device, "chain"), contact_factor_capacity=0)

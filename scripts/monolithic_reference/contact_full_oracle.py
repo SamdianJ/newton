@@ -109,28 +109,56 @@ def _frames(model, actors, state):
 
 def _samples(model, source, kinds, scales):
     if kinds[source] == 7:
-        return box_face_samples(scales[source])
+        points, weights = box_face_samples(scales[source])
+        axis = np.argmax(np.abs(points) / scales[source], axis=1)
+        normals = np.zeros_like(points)
+        normals[np.arange(len(points)), axis] = np.sign(points[np.arange(len(points)), axis])
+        return points, weights, normals
     if kinds[source] == 3:
-        return sphere_samples(float(scales[source, 0]))
+        points, weights = sphere_samples(float(scales[source, 0]))
+        return points, weights, points / np.linalg.norm(points, axis=1)[:, None]
     if kinds[source] != 8:
         raise ValueError("Unsupported full-oracle source shape")
     mesh = model.shape_source[source]
     tri = (np.asarray(mesh.vertices, dtype=float) * scales[source])[np.asarray(mesh.indices).reshape(-1, 3)]
-    area = np.linalg.norm(np.cross(tri[:, 1] - tri[:, 0], tri[:, 2] - tri[:, 0]), axis=1) / 2
+    cross = np.cross(tri[:, 1] - tri[:, 0], tri[:, 2] - tri[:, 0])
+    area = np.linalg.norm(cross, axis=1) / 2
+    if not np.isfinite(area).all() or np.any(area <= 0):
+        raise ValueError("Invalid full-oracle source normals")
     bary = np.eye(3) / 2 + np.ones((3, 3)) / 6
-    return np.einsum("qn,fni->fqi", bary, tri).reshape(-1, 3), np.repeat(area / 3, 3)
+    return (
+        np.einsum("qn,fni->fqi", bary, tri).reshape(-1, 3),
+        np.repeat(area / 3, 3),
+        np.repeat(cross / (2 * area[:, None]), 3, axis=0),
+    )
 
 
 def iter_full(
-    model, actors, state, start, law, *, radius, stiffness=1e7, width=1e-4, mu=0.5, falloff=1e-5, mesh_fields=None
+    model,
+    actors,
+    state,
+    start,
+    law,
+    *,
+    radius,
+    stiffness=1e7,
+    width=1e-4,
+    mu=0.5,
+    falloff=1e-5,
+    mesh_fields=None,
+    alignment_policy=None,
 ):
     """Yield every supported Model sample, with only its local DoF and endpoint contributions.
 
     Enumeration ignores spatial candidates and production capacity. Contact keys
     are unique by face/slot/target and directed, deduplicated Model shape pair.
     No full contact-key set or global dense Jacobian/matrix is retained.
+    None retains the raw mathematical wrapper; native audits must explicitly
+    pass their guard/mask physical policy. Masking retains all enumerated keys.
     """
     _check_native(state, start)
+    if alignment_policy not in (None, "guard", "mask"):
+        raise ValueError("Unsupported full-oracle alignment policy")
     poses, centers, jacobian, ancestors = _frames(model, actors, state)
     old_poses, _, _, _ = _frames(model, actors, start)
     bodies, kinds, scales, margins, flags = (
@@ -150,7 +178,7 @@ def iter_full(
     rigid_bodies = {a.body_indices[0] for a in actors.actors if a.kind == "rigid"}
     dynamic = [body in rigid_bodies or bool(ancestors.get(int(body), ())) for body in bodies]
 
-    def contribution(key, point, old_point, source_j, weight, offset, tri=None, bary=None):
+    def contribution(key, point, old_point, source_j, weight, offset, normal, old_normal, tri=None, bary=None):
         source, target, _, _ = key
         rt = current[target][:3, :3]
         y = rt.T @ (point - current[target][:3, 3])
@@ -166,6 +194,21 @@ def iter_full(
         )
         if any(not np.isfinite(value).all() for value in (e, r, b)):
             raise ValueError("Nonfinite full-oracle local contribution")
+        masked = False
+        if alignment_policy is not None:
+            old_rt = initial[target][:3, :3]
+            old_geometry = geometry(yn, kind, scales[target])
+            gradient = geometry(y, kind, scales[target])[1]
+            direction = old_geometry[1] if law == "C-EE" else gradient
+            masked = np.dot(rt.T @ normal, direction) > 0
+            if alignment_policy == "guard":
+                if (old_geometry[0] - offset < 0 and np.dot(old_rt.T @ old_normal, old_geometry[1]) > 0) or (
+                    gap < 0 and np.dot(rt.T @ normal, gradient) > 0
+                ):
+                    raise ValueError("Invalid full-oracle contact alignment")
+                masked = False
+            if masked:
+                e, r, b = np.zeros(2), np.zeros(3), np.zeros((3, 3))
         combined = dict(source_j)
         for column, value in jacobian(int(bodies[target]), point).items():
             combined[column] = combined.get(column, np.zeros(3)) - value
@@ -190,6 +233,7 @@ def iter_full(
                 static_wrench.append(np.r_[force, np.cross(point, force)])
         record = {
             "key": key,
+            "alignment_masked": bool(masked),
             "energy": e,
             "columns": columns,
             "residual": rr,
@@ -214,6 +258,14 @@ def iter_full(
     rest = model.particle_q.numpy().astype(float)
     for face, tri in enumerate(model.tri_indices.numpy()):
         area = np.linalg.norm(np.cross(rest[tri[1]] - rest[tri[0]], rest[tri[2]] - rest[tri[0]])) / 2
+        normals = []
+        for frame in (state, start):
+            points = frame["x"][tri]
+            normal = np.cross(points[1] - points[0], points[2] - points[0])
+            length = np.linalg.norm(normal)
+            if not np.isfinite(length) or length <= 0:
+                raise ValueError("Invalid full-oracle source normals")
+            normals.append(normal / length)
         for slot in range(3):
             bary = np.full(3, 1 / 6)
             bary[slot] = 2 / 3
@@ -231,6 +283,7 @@ def iter_full(
                     j,
                     area / 3,
                     radius + margins[target],
+                    *normals,
                     tri,
                     bary,
                 )
@@ -248,8 +301,8 @@ def iter_full(
         for source, target in ((a, b), (b, a)):
             if not dynamic[source]:
                 continue
-            points, weights = _samples(model, source, kinds, scales)
-            for sample, (point, weight) in enumerate(zip(points, weights, strict=True)):
+            points, weights, normals = _samples(model, source, kinds, scales)
+            for sample, (point, weight, normal) in enumerate(zip(points, weights, normals, strict=True)):
                 world = current[source][:3, :3] @ point + current[source][:3, 3]
                 old = initial[source][:3, :3] @ point + initial[source][:3, 3]
                 yield contribution(
@@ -259,6 +312,8 @@ def iter_full(
                     jacobian(int(bodies[source]), world),
                     weight * (0.5 if dynamic[target] else 1),
                     margins[source] + margins[target],
+                    current[source][:3, :3] @ normal,
+                    initial[source][:3, :3] @ normal,
                 )
 
 
@@ -295,7 +350,19 @@ def _accumulate(totals, record, dofs):
 
 
 def evaluate_full(
-    model, actors, state, start, law, *, radius, stiffness=1e7, width=1e-4, mu=0.5, falloff=1e-5, mesh_fields=None
+    model,
+    actors,
+    state,
+    start,
+    law,
+    *,
+    radius,
+    stiffness=1e7,
+    width=1e-4,
+    mu=0.5,
+    falloff=1e-5,
+    mesh_fields=None,
+    alignment_policy=None,
 ):
     """Return the existing dense small-scene E/r/B, forces and complete per-key records."""
     _check_native(state, start)
@@ -314,6 +381,7 @@ def evaluate_full(
         mu=mu,
         falloff=falloff,
         mesh_fields=mesh_fields,
+        alignment_policy=alignment_policy,
     ):
         key = record["key"]
         if key in records:
