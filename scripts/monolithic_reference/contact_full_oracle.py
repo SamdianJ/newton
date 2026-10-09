@@ -8,12 +8,19 @@ Native states and actor row descriptions are explicit inputs. Mesh targets
 require an independently exported SDF field; CPU texture handles are not used.
 """
 
+import hashlib
+
 import numpy as np
 
 from .actor_contact_oracle import box_face_samples
 from .actor_contract_oracle import rotation, sphere_samples
 from .articulation_oracle import skew, transform
 from .contact_oracle import geometry, local
+
+
+def _check_native(state, start):
+    if any(not np.isfinite(value).all() for physical in (state, start) for value in physical.values()):
+        raise ValueError("Full oracle requires finite native states")
 
 
 def export_mesh_fields(model, sdf):
@@ -86,14 +93,15 @@ def _frames(model, actors, state):
     centers = np.einsum("bij,bj->bi", poses[:, :3, :3], body_com) + poses[:, :3, 3]
 
     def jacobian(body, point):
-        j = np.zeros((3, actors.scalar_dof_count))
+        j = {}
         if body in rigid_rows:
             start = rigid_rows[body]
-            j[:, start : start + 6] = np.column_stack((np.eye(3), -skew(point - centers[body])))
+            values = np.column_stack((np.eye(3), -skew(point - centers[body])))
+            j = {start + i: values[:, i] for i in range(6)}
         elif body in ancestors:
             for column in ancestors[body]:
                 kind, axis, origin = screws[column]
-                j[:, column] = axis if kind == 0 else np.cross(axis, point - origin)
+                j[column] = axis if kind == 0 else np.cross(axis, point - origin)
         return j
 
     return poses, centers, jacobian, ancestors
@@ -113,13 +121,16 @@ def _samples(model, source, kinds, scales):
     return np.einsum("qn,fni->fqi", bary, tri).reshape(-1, 3), np.repeat(area / 3, 3)
 
 
-def evaluate_full(
+def iter_full(
     model, actors, state, start, law, *, radius, stiffness=1e7, width=1e-4, mu=0.5, falloff=1e-5, mesh_fields=None
 ):
-    """Return full dense E/r/B, endpoint forces and sparse per-key contribution records."""
-    if any(not np.isfinite(value).all() for physical in (state, start) for value in physical.values()):
-        raise ValueError("Full oracle requires finite native states")
-    n = actors.scalar_dof_count
+    """Yield every supported Model sample, with only its local DoF and endpoint contributions.
+
+    Enumeration ignores spatial candidates and production capacity. Contact keys
+    are unique by face/slot/target and directed, deduplicated Model shape pair.
+    No full contact-key set or global dense Jacobian/matrix is retained.
+    """
+    _check_native(state, start)
     poses, centers, jacobian, ancestors = _frames(model, actors, state)
     old_poses, _, _, _ = _frames(model, actors, start)
     bodies, kinds, scales, margins, flags = (
@@ -138,15 +149,8 @@ def evaluate_full(
     owner = {body: i for i, actor in enumerate(actors.actors) for body in actor.body_indices}
     rigid_bodies = {a.body_indices[0] for a in actors.actors if a.kind == "rigid"}
     dynamic = [body in rigid_bodies or bool(ancestors.get(int(body), ())) for body in bodies]
-    energy, residual, tangent = np.zeros(2), np.zeros(n), np.zeros((n, n))
-    particle_force, body_wrench = np.zeros((model.particle_count, 3)), np.zeros((model.body_count, 6))
-    joint_force = np.zeros(model.joint_dof_count)
-    dofs = {a.dof_start + i: d for a in actors.actors if a.kind != "tet" for i, d in enumerate(a.dof_indices)}
-    records = {}
-    min_gap = np.inf
 
-    def append(key, point, old_point, source_j, weight, offset, tri=None, bary=None):
-        nonlocal energy, min_gap
+    def contribution(key, point, old_point, source_j, weight, offset, tri=None, bary=None):
         source, target, _, _ = key
         rt = current[target][:3, :3]
         y = rt.T @ (point - current[target][:3, 3])
@@ -156,40 +160,56 @@ def evaluate_full(
             if kinds[target] != 8 or mesh_fields is None or target not in mesh_fields:
                 raise ValueError("Full oracle mesh target requires independently exported SDF input")
             kind = mesh_fields[target]
-        min_gap = min(min_gap, float(geometry(y, kind, scales[target])[0] - offset))
+        gap = float(geometry(y, kind, scales[target])[0] - offset)
         e, r, _, b = local(
             y, yn, kind, scales[target], law, offset=offset, stiffness=stiffness * weight, width=width, mu=mu, a=falloff
         )
         if any(not np.isfinite(value).all() for value in (e, r, b)):
             raise ValueError("Nonfinite full-oracle local contribution")
-        j = rt.T @ (source_j - jacobian(int(bodies[target]), point))
-        columns = np.flatnonzero(np.any(j != 0, axis=0))
-        reduced = j[:, columns]
+        combined = dict(source_j)
+        for column, value in jacobian(int(bodies[target]), point).items():
+            combined[column] = combined.get(column, np.zeros(3)) - value
+        columns = np.asarray(sorted(combined), dtype=np.int64)
+        reduced = rt.T @ np.column_stack([combined[c] for c in columns]) if columns.size else np.empty((3, 0))
+        active = np.any(reduced != 0, axis=0)
+        columns, reduced = columns[active], reduced[:, active]
         rr, bb = reduced.T @ r, reduced.T @ b @ reduced
         world = rt @ r
-        if key in records:
-            raise ValueError("Duplicate independently enumerated contact identity")
-        records[key] = {
+        particle_ids, particle_force, body_ids, body_wrench, static_ids, static_wrench = [], [], [], [], [], []
+        for shape, force in ((source, -world), (target, world)):
+            if shape < 0:
+                for particle, coefficient in zip(tri, bary, strict=True):
+                    particle_ids.append(int(particle))
+                    particle_force.append(coefficient * force)
+            elif bodies[shape] >= 0:
+                body = int(bodies[shape])
+                body_ids.append(body)
+                body_wrench.append(np.r_[force, np.cross(point - centers[body], force)])
+            else:
+                static_ids.append(shape)
+                static_wrench.append(np.r_[force, np.cross(point, force)])
+        record = {
+            "key": key,
             "energy": e,
             "columns": columns,
             "residual": rr,
             "tangent": bb,
             "point": point,
             "world_residual": world,
+            "gap": gap,
+            "particle_ids": np.asarray(particle_ids, dtype=np.int64),
+            "particle_force": np.asarray(particle_force).reshape(-1, 3),
+            "body_ids": np.asarray(body_ids, dtype=np.int64),
+            "body_wrench": np.asarray(body_wrench).reshape(-1, 6),
+            "static_ids": np.asarray(static_ids, dtype=np.int64),
+            "static_wrench": np.asarray(static_wrench).reshape(-1, 6),
         }
-        energy += e
-        residual[columns] += rr
-        tangent[np.ix_(columns, columns)] += bb
-        for column, value in zip(columns, rr, strict=True):
-            if column in dofs:
-                joint_force[dofs[column]] -= value
-        for shape, force in ((source, -world), (target, world)):
-            if shape < 0:
-                for particle, coefficient in zip(tri, bary, strict=True):
-                    particle_force[particle] += coefficient * force
-            elif bodies[shape] >= 0:
-                body = bodies[shape]
-                body_wrench[body] += np.r_[force, np.cross(point - centers[body], force)]
+        if any(
+            not np.isfinite(record[name]).all()
+            for name in ("residual", "tangent", "particle_force", "body_wrench", "static_wrench", "gap")
+        ):
+            raise ValueError("Nonfinite full-oracle transformed contribution")
+        return record
 
     rest = model.particle_q.numpy().astype(float)
     for face, tri in enumerate(model.tri_indices.numpy()):
@@ -197,13 +217,14 @@ def evaluate_full(
         for slot in range(3):
             bary = np.full(3, 1 / 6)
             bary[slot] = 2 / 3
-            j = np.zeros((3, n))
+            j = {}
             for particle, coefficient in zip(tri, bary, strict=True):
                 if particle in particle_rows:
                     row = particle_rows[particle]
-                    j[:, row : row + 3] = coefficient * np.eye(3)
+                    for axis in range(3):
+                        j[row + axis] = coefficient * np.eye(3)[:, axis]
             for target in np.flatnonzero(flags & 4):
-                append(
+                yield contribution(
                     (-1, int(target), face, slot),
                     bary @ state["x"][tri],
                     bary @ start["x"][tri],
@@ -231,7 +252,7 @@ def evaluate_full(
             for sample, (point, weight) in enumerate(zip(points, weights, strict=True)):
                 world = current[source][:3, :3] @ point + current[source][:3, 3]
                 old = initial[source][:3, :3] @ point + initial[source][:3, 3]
-                append(
+                yield contribution(
                     (source, target, sample // 3, sample % 3),
                     world,
                     old,
@@ -239,15 +260,195 @@ def evaluate_full(
                     weight * (0.5 if dynamic[target] else 1),
                     margins[source] + margins[target],
                 )
+
+
+def _totals(model, actors, *, dense=False):
+    n = actors.scalar_dof_count
     return {
-        "energy": energy,
-        "residual": residual,
-        "tangent": tangent,
-        "particle_force": particle_force,
-        "body_wrench": body_wrench,
-        "joint_force": joint_force,
-        "records": records,
-        "min_gap": min_gap if records else 0.0,
+        "energy": np.zeros(2),
+        "residual": np.zeros(n),
+        "tangent": np.zeros((n, n)) if dense else {},
+        "particle_force": np.zeros((model.particle_count, 3)),
+        "body_wrench": np.zeros((model.body_count, 6)),
+        "static_wrench": np.zeros((model.shape_count, 6)),
+        "joint_force": np.zeros(model.joint_dof_count),
+    }
+
+
+def _accumulate(totals, record, dofs):
+    columns, bb = record["columns"], record["tangent"]
+    totals["energy"] += record["energy"]
+    totals["residual"][columns] += record["residual"]
+    tangent = totals["tangent"]
+    if isinstance(tangent, np.ndarray):
+        tangent[np.ix_(columns, columns)] += bb
+    else:
+        for i, j in zip(*np.nonzero(bb), strict=True):
+            key = (int(columns[i]), int(columns[j]))
+            tangent[key] = tangent.get(key, 0.0) + bb[i, j]
+    for column, value in zip(columns, record["residual"], strict=True):
+        if column in dofs:
+            totals["joint_force"][dofs[column]] -= value
+    np.add.at(totals["particle_force"], record["particle_ids"], record["particle_force"])
+    np.add.at(totals["body_wrench"], record["body_ids"], record["body_wrench"])
+    np.add.at(totals["static_wrench"], record["static_ids"], record["static_wrench"])
+
+
+def evaluate_full(
+    model, actors, state, start, law, *, radius, stiffness=1e7, width=1e-4, mu=0.5, falloff=1e-5, mesh_fields=None
+):
+    """Return the existing dense small-scene E/r/B, forces and complete per-key records."""
+    _check_native(state, start)
+    totals = _totals(model, actors, dense=True)
+    dofs = {a.dof_start + i: d for a in actors.actors if a.kind != "tet" for i, d in enumerate(a.dof_indices)}
+    records, min_gap = {}, np.inf
+    for record in iter_full(
+        model,
+        actors,
+        state,
+        start,
+        law,
+        radius=radius,
+        stiffness=stiffness,
+        width=width,
+        mu=mu,
+        falloff=falloff,
+        mesh_fields=mesh_fields,
+    ):
+        key = record["key"]
+        if key in records:
+            raise ValueError("Duplicate independently enumerated contact identity")
+        records[key] = record
+        min_gap = min(min_gap, record["gap"])
+        _accumulate(totals, record, dofs)
+    return {**totals, "records": records, "min_gap": min_gap if records else 0.0}
+
+
+def _key_set(keys):
+    if keys is None:
+        return None
+    result = set()
+    for key in keys:
+        if (
+            not isinstance(key, (tuple, list, np.ndarray))
+            or (isinstance(key, np.ndarray) and key.ndim != 1)
+            or len(key) != 4
+            or any(isinstance(value, (bool, np.bool_)) or not isinstance(value, (int, np.integer)) for value in key)
+        ):
+            raise ValueError("Candidate identity requires four integers")
+        identity = tuple(map(int, key))
+        if identity in result:
+            raise ValueError("Duplicate candidate identity")
+        result.add(identity)
+    return result
+
+
+def _errors(reference, selected):
+    errors = {}
+    for name in reference:
+        if name == "tangent":
+            keys = sorted(reference[name].keys() | selected[name].keys())
+            expected = np.asarray([reference[name].get(k, 0.0) for k in keys])
+            got = np.asarray([selected[name].get(k, 0.0) for k in keys])
+        else:
+            expected, got = reference[name], selected[name]
+        if not np.isfinite(expected).all() or not np.isfinite(got).all():
+            raise ValueError("Nonfinite full-oracle aggregate")
+        delta = got - expected
+        errors[name] = {
+            "max_abs": float(np.max(np.abs(delta), initial=0)),
+            "l2": float(np.linalg.norm(delta)),
+            "reference_l2": float(np.linalg.norm(expected)),
+        }
+        if not np.isfinite(list(errors[name].values())).all():
+            raise ValueError("Nonfinite full-oracle error metric")
+    return errors
+
+
+def evaluate_stream(model, actors, state, start, law, *, candidate_keys=None, admitted_keys=None, **options):
+    """Audit the full system and optional spatial/capacity subsets without dense B.
+
+    Missing selections mean the complete set and the candidate set, respectively.
+    Sparse B includes every numerical coordinate; errors use its full Frobenius
+    norm, not sampled matvecs. Results measure omissions and grant no acceptance.
+    Memory is O(Model inputs + native state + touched B coordinates + supplied
+    selection keys + largest source surface/local support). Cancellation zeros
+    may retain a touched coordinate; a dense interaction pattern can still take
+    O(n_dof squared) memory. No contact records are retained.
+    """
+    candidates, admitted = _key_set(candidate_keys), _key_set(admitted_keys)
+    if candidates is not None and admitted is not None and not admitted <= candidates:
+        raise ValueError("Admitted identities must belong to the candidate set")
+    _check_native(state, start)
+    totals = {name: _totals(model, actors) for name in ("full", "candidate", "admitted")}
+    counts = dict.fromkeys(totals, 0)
+    active_counts = dict.fromkeys(totals, 0)
+    dofs = {a.dof_start + i: d for a in actors.actors if a.kind != "tet" for i, d in enumerate(a.dof_indices)}
+    omissions = {name: {"count": 0, "contributing_count": 0} for name in ("spatial_omission", "capacity_omission")}
+    hashes = {name: hashlib.sha256() for name in ("full", *omissions)}
+    pairs, min_gap = {}, np.inf
+    for record in iter_full(model, actors, state, start, law, **options):
+        key = record["key"]
+        selected = candidates is None or key in candidates
+        accepted = selected and (admitted is None or key in admitted)
+        contributing = any(np.any(record[name] != 0) for name in ("energy", "residual", "tangent", "world_residual"))
+        identity = np.asarray(key, dtype="<i8").tobytes()
+        hashes["full"].update(identity)
+        min_gap = min(min_gap, record["gap"])
+        pair = pairs.setdefault(
+            key[:2],
+            {
+                "full": 0,
+                "candidate": 0,
+                "admitted": 0,
+                "full_contributing": 0,
+                "candidate_contributing": 0,
+                "admitted_contributing": 0,
+                "spatial_contributing": 0,
+                "capacity_contributing": 0,
+            },
+        )
+        for name, include in (("full", True), ("candidate", selected), ("admitted", accepted)):
+            if include:
+                counts[name] += 1
+                pair[name] += 1
+                active_counts[name] += int(contributing)
+                pair[name + "_contributing"] += int(contributing)
+                _accumulate(totals[name], record, dofs)
+        category = "spatial_omission" if not selected else "capacity_omission" if not accepted else None
+        if category:
+            omissions[category]["count"] += 1
+            omissions[category]["contributing_count"] += int(contributing)
+            hashes[category].update(identity)
+            pair["spatial_contributing" if not selected else "capacity_contributing"] += int(contributing)
+    if (candidates is not None and counts["candidate"] != len(candidates)) or (
+        admitted is not None and counts["admitted"] != len(admitted)
+    ):
+        raise ValueError("Unknown candidate or admitted identity")
+    for name, reference, selected in (
+        ("spatial_omission", "full", "candidate"),
+        ("capacity_omission", "candidate", "admitted"),
+    ):
+        omissions[name].update(key_sha256=hashes[name].hexdigest(), errors=_errors(totals[reference], totals[selected]))
+    full_to_admitted = _errors(totals["full"], totals["admitted"])
+    for group in totals.values():
+        keys = sorted(group["tangent"])
+        group["tangent"] = {
+            "shape": (actors.scalar_dof_count, actors.scalar_dof_count),
+            "row": np.asarray([k[0] for k in keys], dtype=np.int64),
+            "column": np.asarray([k[1] for k in keys], dtype=np.int64),
+            "value": np.asarray([group["tangent"][k] for k in keys]),
+        }
+    return {
+        **totals,
+        **omissions,
+        **{name + "_count": value for name, value in counts.items()},
+        **{name + "_contributing_count": value for name, value in active_counts.items()},
+        "full_key_sha256": hashes["full"].hexdigest(),
+        "law": law,
+        "full_to_admitted_errors": full_to_admitted,
+        "min_gap": min_gap if counts["full"] else 0.0,
+        "pairs": [{"source": key[0], "target": key[1], **pair} for key, pair in sorted(pairs.items())],
     }
 
 
