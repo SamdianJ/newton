@@ -23,6 +23,7 @@ from newton._src.solvers.monolithic.linear_types import MonolithicLinearGenerati
 from newton.examples.softbody.monolithic_recording import serial, state_arrays
 from scripts.monolithic_reference.actor_recording import _semantic, compare_semantic_fields
 from scripts.monolithic_reference.contact_full_oracle import evaluate_stream
+from scripts.monolithic_reference.coupled_fixtures import DIRECTORY, NORMAL, PROTOCOL
 from scripts.monolithic_reference.profiling import capture_count, provenance
 from scripts.monolithic_reference.record_workload import apply_inputs, inputs
 from scripts.monolithic_reference.replay_workload import acceptance_trace
@@ -31,7 +32,7 @@ from scripts.monolithic_reference.workload_io import digest, load_arrays, open_b
 from scripts.monolithic_reference.workload_objective import replay_objective
 from scripts.monolithic_reference.workload_scene import build_scene, compare_arrays, set_control
 
-SCENES = ("actor-coupling", "actor-coupling-before", "actor-coupling-permuted")
+SCENES = ("actor-coupling", "actor-coupling-before", "actor-coupling-permuted", "tiny-contact")
 ALGORITHM_FIELDS = {"contact_dataflow", "contact_resources"}
 
 
@@ -44,10 +45,35 @@ def _exact(a, b):
         raise ValueError("Physical input, policy or sampling differs") from error
 
 
+def _legacy_sampling(contact):
+    """Bind the actual legacy tet quadrature and endpoint metadata, including empty sets."""
+    names = (
+        "shapes",
+        "triangles",
+        "mapping",
+        "types",
+        "bodies",
+        "body_local",
+        "target_bodies",
+        "sdf_indices",
+        "transforms",
+        "scales",
+        "margins",
+        "area",
+    )
+    values = {name: getattr(contact, name).numpy() for name in names}
+    legacy_count = 3 * len(values["triangles"]) * len(values["shapes"])
+    actor_count = contact.actor_samples.count if contact.actor_samples is not None else 0
+    if contact.legacy_count != legacy_count or contact.count != legacy_count + actor_count:
+        raise ValueError("Complete contact enumeration count differs from its sampling metadata")
+    values["ancestors"] = np.frombuffer(json.dumps(contact._legacy_ancestors, sort_keys=True).encode(), dtype=np.uint8)
+    return values
+
+
 def verify_contract(left, right):
     """Permit only the two declared complete-pool fields after exact physical checks."""
-    if left._contact_pool or not right._contact_pool or left._contact.legacy_count or right._contact.legacy_count:
-        raise ValueError("Comparison requires complete mixed-actor legacy/pool algorithms")
+    if left._contact_pool or not right._contact_pool:
+        raise ValueError("Comparison requires complete legacy/pool algorithms")
     expected = np.frombuffer(b"complete-pool/fixed-tree/v1", dtype=np.uint8)
     if not np.array_equal(right._contact.dataflow_identity, expected):
         raise ValueError("Unreviewed contact algorithm")
@@ -59,6 +85,8 @@ def verify_contract(left, right):
     _exact(left._kinematics._source_values, right._kinematics._source_values)
     _exact(left._contact.values, right._contact.values)
     _exact(left._contact.actor_samples.fields, right._contact.actor_samples.fields)
+    legacy_sampling = _legacy_sampling(left._contact)
+    _exact(legacy_sampling, _legacy_sampling(right._contact))
     _exact(left._actors.maps, right._actors.maps)
     if (
         left._actors.layout_payload() != right._actors.layout_payload()
@@ -100,6 +128,7 @@ def verify_contract(left, right):
     common = {"model." + name: value for name, value in model_arrays(left.model).items()}
     for prefix, values in (("config", a), ("sampling", left._contact.actor_samples.fields)):
         common.update({prefix + "." + name: value for name, value in values.items()})
+    common.update({"legacy_sampling." + name: value for name, value in legacy_sampling.items()})
     common["joint_parameters"] = left._joint_parameters_host
     common["layout"] = np.frombuffer(left._actors.layout_payload(), dtype=np.uint8)
     common.update({"effective_policy." + name: value for name, value in dataclasses.asdict(left._config).items()})
@@ -109,6 +138,11 @@ def verify_contract(left, right):
             name: {"legacy": None, "pooled": serial(b[name])} for name in sorted(ALGORITHM_FIELDS)
         },
         "config_digests": [run._kinematics.digest.hex() for run in (left, right)],
+        "enumeration": {
+            "legacy": left._contact.legacy_count,
+            "actor": left._contact.actor_samples.count,
+            "complete": left._contact.count,
+        },
     }
 
 
@@ -386,7 +420,23 @@ def _audit_pair(audits, frame, start, dt, label):
 def compare(root, *, device="cuda:0"):
     """Authenticate a complete input window and advance independently under frozen gates."""
     root = Path(root)
-    manifest, source, case = open_bundle(root), provenance(), load_case()
+    manifest, source = open_bundle(root), provenance()
+    canonical = manifest.get("scene") == "tiny-contact"
+    if canonical:
+        # Keep the existing computational replay envelope and physical gates.
+        # This short recipe does not qualify the frozen loading/settling run.
+        case = {
+            "steps": NORMAL["substeps"],
+            "dt": PROTOCOL["dt"],
+            "equivalence": {"rtol": 2e-5, "atol": 2e-6},
+            "gates": {
+                "min_det_f": NORMAL["acceptance"]["min_det_f"],
+                "max_penetration_m": NORMAL["acceptance"]["penetration_acceptance_limit_m"],
+            },
+        }
+        fixtures = [DIRECTORY / "p3_coupled_t4_v1.json", DIRECTORY / PROTOCOL["normal_source"]]
+    else:
+        case, fixtures = load_case(), [CASE]
     if (
         manifest.get("scene") not in SCENES
         or manifest.get("contact_dataflow", "legacy") != "legacy"
@@ -435,7 +485,7 @@ def compare(root, *, device="cuda:0"):
     verify_contract(*audits)
     controls = [route[0].control() for route in routes]
     errors, work, same_state = {}, [], []
-    metadata = {"roles": roles(left.model, left._actors)}
+    metadata = None if canonical else {"roles": roles(left.model, left._actors)}
     for step in range(1, manifest["steps"] + 1):
         key = f"inputs-{step}.npz"
         values = load_arrays(root / key, manifest["array_schemas"][key])
@@ -482,7 +532,15 @@ def compare(root, *, device="cuda:0"):
                 raise ValueError("Legacy baseline execution differs from its authenticated trace")
         if acceptance_trace(left._variational["trials"]) != acceptance_trace(expected["trials"]):
             raise ValueError("Legacy baseline acceptance differs from its authenticated trace")
-        if not compare_semantic_fields(
+        if canonical:
+            # Each state was validated against its own configuration above.
+            # All other authority/history/publication fields keep their gates.
+            states = [
+                {k: v for k, v in state_arrays(route[2]).items() if k != "history.config_digest"} for route in routes
+            ]
+            for name, value in compare_arrays(*states, **case["equivalence"]).items():
+                errors[name] = max(errors.get(name, 0), value)
+        elif not compare_semantic_fields(
             _semantic(state_arrays(routes[0][2]), metadata),
             _semantic(state_arrays(routes[1][2]), metadata),
             case["equivalence"],
@@ -548,10 +606,11 @@ def compare(root, *, device="cuda:0"):
         "qualification": "Local complete-contact comparison; stage E2E/nightly/performance qualification NOT_RUN",
         "source": source,
         "bundle_manifest_sha256": digest(root / "manifest.json"),
-        "fixture_sha256": digest(CASE),
+        "fixture_sha256": digest(fixtures[0]),
+        "fixture_sha256s": {path.name: digest(path) for path in fixtures},
         "scene": manifest["scene"],
         "steps": manifest["steps"],
-        "asset_sha256": case["tet_asset_sha256"],
+        "asset_sha256": None if canonical else case["tet_asset_sha256"],
         "device": str(left.model.device),
         "graph": manifest["graph"],
         **contract,

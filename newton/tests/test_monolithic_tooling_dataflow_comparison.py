@@ -142,11 +142,93 @@ def test_hotspot_and_failure(test, device):
         _contact_at(run, state, state, 0.001)
 
 
+def test_canonical_contract(test, device):
+    """Authenticate legacy tet sampling without permitting metadata or checkpoint drift."""
+    from scripts.monolithic_reference.compare_contact_dataflows import verify_contract  # noqa: PLC0415
+
+    _, left, _, _ = build_scene("tiny-contact", device=device, graph=False)
+    _, right, _, _ = build_scene("tiny-contact", device=device, graph=False, contact_dataflow="pooled")
+    result = verify_contract(left, right)
+    test.assertEqual(result["enumeration"], {"legacy": 12, "actor": 0, "complete": 12})
+    for name in ("legacy_count", "count"):
+        with patch.object(right._contact, name, getattr(right._contact, name) + 1):
+            with test.assertRaises(ValueError):
+                verify_contract(left, right)
+    for name in ("area", "mapping", "shapes", "target_bodies"):
+        array = getattr(right._contact, name)
+        original = array.numpy().copy()
+        damaged = original.copy()
+        damaged.flat[0] += 1
+        array.assign(damaged)
+        with test.assertRaises(ValueError):
+            verify_contract(left, right)
+        array.assign(original)
+    with patch.object(right._contact, "_legacy_ancestors", {}):
+        with test.assertRaises(ValueError):
+            verify_contract(left, right)
+    with tempfile.TemporaryDirectory() as directory:
+        path = Path(directory) / "checkpoint.npz"
+        left.save_checkpoint(left.create_state(dt=0.001), path)
+        with test.assertRaises(ValueError):
+            right.load_checkpoint(right.create_state(dt=0.001), path)
+
+
+def test_canonical_comparison(test, device):
+    """Compare authentic canonical steps and recorded trial operands under original gates."""
+    from scripts.monolithic_reference.compare_contact_dataflows import compare  # noqa: PLC0415
+
+    for graph in (False, True) if device.is_cuda else (False,):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "bundle"
+            record(
+                root,
+                scene="tiny-contact",
+                device=device,
+                graph=graph,
+                steps=2,
+                windows=[(1, 2)],
+                boundaries=("objective",),
+                call_ordinals={"objective": list(range(10))},
+            )
+            result = compare(root, device=device)
+            test.assertEqual(result["status"], "PASS_LOCAL_COMPLETE_CONTACT")
+            test.assertEqual(result["enumeration"], {"legacy": 12, "actor": 0, "complete": 12})
+            test.assertEqual(result["trajectory_limits"], {"rtol": 2e-5, "atol": 2e-6})
+            test.assertGreater(result["same_state_checks"], 8)
+            test.assertTrue(any(row.get("state_owner") == "_trial" for row in result["same_state"]))
+            test.assertTrue(all(row["full_count"] == 12 for row in result["same_state"]))
+            test.assertTrue(all(s["converged"] for row in result["work"] for s in row["algorithms"]))
+            manifest = json.loads((root / "manifest.json").read_text())
+            for key, value in (("dt", 0.002), ("source", {}), ("comparison", {"rtol": 1, "atol": 1})):
+                damaged = copy.deepcopy(manifest)
+                damaged[key] = value
+                write_json(root / "manifest.json", damaged)
+                with test.assertRaises(ValueError):
+                    compare(root, device=device)
+            write_json(root / "manifest.json", manifest)
+            # Rehashed inputs still have to match the allowlisted scene controls.
+            path = root / "inputs-1.npz"
+            with np.load(path, allow_pickle=False) as archive:
+                arrays = dict(archive)
+            arrays["control.joint_f"] += 1
+            np.savez_compressed(path, **arrays)
+            manifest["files"][path.name] = digest(path)
+            write_json(root / "manifest.json", manifest)
+            with test.assertRaises(ValueError):
+                compare(root, device=device)
+
+
 class TestContactDataflowComparison(unittest.TestCase):
     pass
 
 
-for _test in (test_dataflow_comparison, test_contract_rejection, test_hotspot_and_failure):
+for _test in (
+    test_dataflow_comparison,
+    test_contract_rejection,
+    test_hotspot_and_failure,
+    test_canonical_contract,
+    test_canonical_comparison,
+):
     add_function_test(TestContactDataflowComparison, _test.__name__, _test, devices=get_test_devices())
 
 
