@@ -13,7 +13,7 @@ import numpy as np
 from .actor_contact_oracle import box_face_samples
 from .actor_contract_oracle import rotation, sphere_samples
 from .articulation_oracle import skew, transform
-from .contact_oracle import local
+from .contact_oracle import geometry, local
 
 
 def export_mesh_fields(model, sdf):
@@ -143,9 +143,10 @@ def evaluate_full(
     joint_force = np.zeros(model.joint_dof_count)
     dofs = {a.dof_start + i: d for a in actors.actors if a.kind != "tet" for i, d in enumerate(a.dof_indices)}
     records = {}
+    min_gap = np.inf
 
     def append(key, point, old_point, source_j, weight, offset, tri=None, bary=None):
-        nonlocal energy
+        nonlocal energy, min_gap
         source, target, _, _ = key
         rt = current[target][:3, :3]
         y = rt.T @ (point - current[target][:3, 3])
@@ -155,6 +156,7 @@ def evaluate_full(
             if kinds[target] != 8 or mesh_fields is None or target not in mesh_fields:
                 raise ValueError("Full oracle mesh target requires independently exported SDF input")
             kind = mesh_fields[target]
+        min_gap = min(min_gap, float(geometry(y, kind, scales[target])[0] - offset))
         e, r, _, b = local(
             y, yn, kind, scales[target], law, offset=offset, stiffness=stiffness * weight, width=width, mu=mu, a=falloff
         )
@@ -245,6 +247,7 @@ def evaluate_full(
         "body_wrench": body_wrench,
         "joint_force": joint_force,
         "records": records,
+        "min_gap": min_gap if records else 0.0,
     }
 
 

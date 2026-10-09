@@ -505,6 +505,51 @@ def _semantic(frame, metadata):
     return result
 
 
+def compare_semantic_fields(aa, bb, limits, errors):
+    """Apply the frozen actor envelope to one authenticated pair of semantic frames."""
+    passed = True
+    if aa.keys() != bb.keys():
+        raise ValueError("Semantic actor fields differ")
+    for name, value in aa.items():
+        other = bb[name]
+        if value.shape != other.shape or value.dtype != other.dtype:
+            raise ValueError("Semantic actor shape/dtype differs")
+        rotation = (
+            name.endswith(".rotation") or name.endswith("rigid_rotation") or name.endswith("rigid_bound_rotation")
+        )
+        if rotation:
+            q, r = np.atleast_2d(value), np.atleast_2d(other)
+            q, r = q / np.linalg.norm(q, axis=-1)[:, None], r / np.linalg.norm(r, axis=-1)[:, None]
+            sign = np.where(np.sum(q * r, axis=-1) < 0, -1, 1)
+            delta = 4 * np.arcsin(np.minimum(1, np.linalg.norm(q - sign[:, None] * r, axis=-1) / 2))
+            limit = limits["rotation_absolute_rad"]
+        else:
+            delta = (
+                np.abs(value.astype(np.float64) - other.astype(np.float64))
+                if value.dtype.kind in "fci"
+                else np.array([not np.array_equal(value, other)], float)
+            )
+            if value.dtype.kind != "f":
+                limit = 0
+            elif "force" in name or name in {"body_f", "particle_f"}:
+                limit = limits["force_absolute"] + limits["force_relative"] * np.abs(value)
+            elif name.startswith("frame_") or name in {"history.last_dt"}:
+                limit = 0
+            elif any(
+                token in name
+                for token in ("qd", "_omega", "_vsym", "_v_com", "joint_v", "link_v", "particle_qd", "bound_v")
+            ):
+                limit = limits["velocity_absolute"]
+            else:
+                limit = limits["position_absolute_m"]
+        ok = bool(np.all(delta <= limit))
+        row = errors.setdefault(name, {"max_error": 0.0, "within_tolerance": True})
+        row["max_error"] = max(row["max_error"], float(np.max(delta, initial=0)))
+        row["within_tolerance"] &= ok
+        passed &= ok
+    return passed
+
+
 def compare_actor(
     reference, actual, *, creation_order=False, reference_run=None, actual_run=None, require_complete=True
 ):
@@ -539,44 +584,6 @@ def compare_actor(
     errors, passed, count = {}, True, 0
     for a, b in zip(left, right, strict=True):
         aa, bb = _semantic(a, left_meta), _semantic(b, right_meta)
-        if aa.keys() != bb.keys():
-            raise ValueError("Semantic actor fields differ")
-        for name, value in aa.items():
-            other = bb[name]
-            if value.shape != other.shape or value.dtype != other.dtype:
-                raise ValueError("Semantic actor shape/dtype differs")
-            rotation = (
-                name.endswith(".rotation") or name.endswith("rigid_rotation") or name.endswith("rigid_bound_rotation")
-            )
-            if rotation:
-                q, r = np.atleast_2d(value), np.atleast_2d(other)
-                q, r = q / np.linalg.norm(q, axis=-1)[:, None], r / np.linalg.norm(r, axis=-1)[:, None]
-                sign = np.where(np.sum(q * r, axis=-1) < 0, -1, 1)
-                delta = 4 * np.arcsin(np.minimum(1, np.linalg.norm(q - sign[:, None] * r, axis=-1) / 2))
-                limit = limits["rotation_absolute_rad"]
-            else:
-                delta = (
-                    np.abs(value.astype(np.float64) - other.astype(np.float64))
-                    if value.dtype.kind in "fci"
-                    else np.array([not np.array_equal(value, other)], float)
-                )
-                if value.dtype.kind != "f":
-                    limit = 0
-                elif "force" in name or name in {"body_f", "particle_f"}:
-                    limit = limits["force_absolute"] + limits["force_relative"] * np.abs(value)
-                elif name.startswith("frame_") or name in {"history.last_dt"}:
-                    limit = 0
-                elif any(
-                    token in name
-                    for token in ("qd", "_omega", "_vsym", "_v_com", "joint_v", "link_v", "particle_qd", "bound_v")
-                ):
-                    limit = limits["velocity_absolute"]
-                else:
-                    limit = limits["position_absolute_m"]
-            ok = bool(np.all(delta <= limit))
-            row = errors.setdefault(name, {"max_error": 0.0, "within_tolerance": True})
-            row["max_error"] = max(row["max_error"], float(np.max(delta, initial=0)))
-            row["within_tolerance"] &= ok
-            passed &= ok
+        passed &= compare_semantic_fields(aa, bb, limits, errors)
         count += 1
     return {"status": "PASS_FROZEN_ENVELOPE" if passed else "FAIL", "frames": count, "fields": errors, "audits": audits}
