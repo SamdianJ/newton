@@ -16,6 +16,7 @@ from .actor_contact_oracle import box_face_samples
 from .actor_contract_oracle import rotation, sphere_samples
 from .articulation_oracle import skew, transform
 from .contact_oracle import geometry, local
+from .smooth_sdf_oracle import NaturalSpline
 
 
 def _check_native(state, start):
@@ -26,12 +27,18 @@ def _check_native(state, start):
 def export_mesh_fields(model, sdf):
     """Export immutable C2 coefficients as independent natural-spline node input."""
     table = model._texture_sdf_data.numpy()
-    indices, kinds, scales = (
-        getattr(model, name).numpy() for name in ("_shape_sdf_index", "shape_type", "shape_scale")
+    indices, kinds, scales, flags = (
+        getattr(model, name).numpy() for name in ("_shape_sdf_index", "shape_type", "shape_scale", "shape_flags")
     )
-    result = {}
+    result, prepared = {}, {}
     for shape in np.flatnonzero(kinds == 8):
         index = int(indices[shape])
+        if index < -1 or index >= len(sdf.fields) or index >= len(table):
+            raise ValueError("Invalid full-oracle mesh SDF index")
+        if index == -1:
+            if flags[shape] & 4:
+                raise ValueError("Full-oracle particle collider requires a mesh SDF")
+            continue
         field = sdf.fields[index]
         if field.representation != "c2-bspline":
             raise ValueError("Full mesh oracle requires the supported C2 field")
@@ -44,12 +51,20 @@ def export_mesh_fields(model, sdf):
         unit = 1.0 if table["scale_baked"][index] else float(scales[shape, 0])
         if unit <= 0 or (not table["scale_baked"][index] and np.any(scales[shape] != unit)):
             raise ValueError("Unbaked full-oracle mesh scale must be positive and uniform")
+        values = nodes * unit
+        lower, upper = np.asarray(field.identity["lower"]) * unit, np.asarray(field.identity["upper"]) * unit
+        # Share only identical physical node input, not a production query/cache identity.
+        key = (values.shape, hashlib.sha256(values.tobytes()).digest(), tuple(lower), tuple(upper))
+        if key not in prepared:
+            prepared[key] = NaturalSpline(values, lower, upper)
+        natural = prepared[key]
         result[int(shape)] = {
-            "smooth_grid": nodes * unit,
-            "lower": np.asarray(field.identity["lower"]) * unit,
-            "upper": np.asarray(field.identity["upper"]) * unit,
+            "smooth_grid": natural.values,
+            "lower": natural.lower,
+            "upper": natural.upper,
             "representation": "c2-bspline",
             "identity": dict(field.identity),
+            "natural_spline": natural,
         }
     return result
 

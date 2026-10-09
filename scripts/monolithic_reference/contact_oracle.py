@@ -23,7 +23,12 @@ def rotation(angle):
 def geometry(y, kind, scale):
     if isinstance(kind, dict):
         if "smooth_grid" in kind:
-            row = smooth_reference(kind["smooth_grid"], kind["lower"], kind["upper"], [y], kind["representation"])[0]
+            if "natural_spline" in kind:
+                row = kind["natural_spline"].evaluate([y])[0]
+            else:
+                row = smooth_reference(kind["smooth_grid"], kind["lower"], kind["upper"], [y], kind["representation"])[
+                    0
+                ]
             return row[0], row[1:4], row[4:].reshape(3, 3)
         value = mesh_reference(kind, [y])[0]
         # Independent cell-local derivative of the raw mesh gradient. The

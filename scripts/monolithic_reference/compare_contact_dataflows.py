@@ -221,10 +221,34 @@ def _contact_at(run, frame, start, dt, *, sparse=False):
             pairs = c.actor_contact.publish(state, k)
     static = np.zeros((run.model.shape_count, 6))
     bodies = run.model.shape_body.numpy()
-    for pair in pairs:
-        for shape, wrench in zip((pair["source"], pair["target"]), pair["world_wrench"], strict=True):
-            if shape >= 0 and bodies[shape] < 0:
-                static[shape] += wrench
+    if run._contact_pool:
+        # Actor pair diagnostics omit legacy T contacts; the committed ledger does not.
+        records, samples = c.pool.records, c._batch.all_samples
+        count = int(records.count.numpy()[0])
+        identities, wrenches = records.identities.numpy()[:count], records.pairs.numpy()[:count]
+        sources, targets = samples.sources.numpy(), samples.targets.numpy()
+        for i in np.argsort(identities, kind="stable"):
+            key = int(identities[i])
+            for shape, wrench in zip((sources[key], targets[key]), wrenches[i], strict=True):
+                if shape >= 0 and bodies[shape] < 0:
+                    static[shape] += wrench
+    else:
+        for pair in pairs:
+            for shape, wrench in zip((pair["source"], pair["target"]), pair["world_wrench"], strict=True):
+                if shape >= 0 and bodies[shape] < 0:
+                    static[shape] += wrench
+        if c.legacy_count:
+            shapes = c.shapes.numpy()
+            keys = np.arange(c.legacy_count)
+            targets = shapes[keys % len(shapes)]
+            keys = keys[bodies[targets] < 0]
+            # Use native local/rotation operands and the original quadrature point.
+            world = np.einsum("nij,nj->ni", c.current.rotation.numpy()[keys], c.local_residual.numpy()[keys])
+            bary = np.full((len(keys), 3), 1 / 6, dtype=c.numpy_dtype)
+            bary[np.arange(len(keys)), keys // len(shapes) % 3] = 2 / 3
+            triangles = c.triangles.numpy()[keys // (3 * len(shapes))]
+            points = np.einsum("ni,nij->nj", bary, state.particle_q.numpy()[triangles])
+            np.add.at(static, targets[keys], np.column_stack((world, np.cross(points, world))))
     return {
         "energy": c.energy.numpy().reshape(-1, 2).sum(axis=0),
         "residual": c.residual.numpy().copy(),

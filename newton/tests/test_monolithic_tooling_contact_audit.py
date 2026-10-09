@@ -5,6 +5,7 @@
 
 import unittest
 import warnings
+from contextlib import nullcontext
 from unittest.mock import patch
 
 import numpy as np
@@ -88,6 +89,43 @@ def test_legacy_force_publication(test, device):
     test.assertGreater(np.linalg.norm(wanted["particle_force"]), 0)
     for name in ("particle_force", "body_wrench", "joint_force"):
         np.testing.assert_allclose(actual[name], wanted[name], rtol=1e-8, atol=1e-10)
+
+
+def test_tet_static_reactions(test, device):
+    """Audit legacy T-static reactions and balance both endpoints about the world origin."""
+    for algorithm in ("legacy", "pooled"):
+        for law in ("C-EE", "C-IE", "C-II"):
+            model, _, start = grid_scene(2, device=device)
+            model.shape_body.assign(np.full(model.shape_count, -1))
+            context = (
+                patch("newton._src.solvers.monolithic.solver_monolithic.ContactObjective", _PooledContactObjective)
+                if algorithm == "pooled"
+                else nullcontext()
+            )
+            with context:
+                run = SolverMonolithic(
+                    model,
+                    mass_mode="lumped",
+                    contact_model=law,
+                    globalization="ArmijoOrResNorm",
+                    friction_velocity_scale=0.01,
+                    alignment_policy="mask",
+                    allow_nonconservative_energy=True,
+                    pcg_mode="production",
+                    use_cuda_graph=device.is_cuda,
+                )
+            frame = {name: value.copy() for name, value in start.items()}
+            frame["x"] += [0.0002, 0, -0.0001]
+            wanted = reference(run, frame, start)["full"]
+            actual = comparison._contact_at(run, frame, start, 0.001, sparse=True)
+            test.assertGreater(np.linalg.norm(wanted["static_wrench"]), 0)
+            comparison._check_contact_sparse(actual, wanted)
+            force = actual["particle_force"].sum(axis=0) + actual["static_wrench"][:, :3].sum(axis=0)
+            torque = np.cross(frame["x"], actual["particle_force"]).sum(axis=0) + actual["static_wrench"][:, 3:].sum(
+                axis=0
+            )
+            np.testing.assert_allclose(force, 0, rtol=0, atol=1e-10)
+            np.testing.assert_allclose(torque, 0, rtol=0, atol=1e-10)
 
 
 def test_sparse_bsr_validation(test, device):
@@ -194,6 +232,7 @@ class TestNativeContactAudit(unittest.TestCase):
 for function in (
     test_complete_native_audit,
     test_legacy_force_publication,
+    test_tet_static_reactions,
     test_sparse_bsr_validation,
     test_connected_native_sparse,
     test_independent_alignment_policy,
