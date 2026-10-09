@@ -22,17 +22,19 @@ from newton._src.solvers.monolithic.coupled_kernels import contact_forces
 from newton._src.solvers.monolithic.linear_types import MonolithicLinearGeneration, MonolithicLinearStatus
 from newton.examples.softbody.monolithic_recording import serial, state_arrays
 from scripts.monolithic_reference.actor_recording import _semantic, compare_semantic_fields
-from scripts.monolithic_reference.contact_full_oracle import evaluate_stream
+from scripts.monolithic_reference.contact_full_oracle import evaluate_stream, export_mesh_fields
 from scripts.monolithic_reference.coupled_fixtures import DIRECTORY, NORMAL, PROTOCOL
 from scripts.monolithic_reference.profiling import capture_count, provenance
 from scripts.monolithic_reference.record_workload import apply_inputs, inputs
 from scripts.monolithic_reference.replay_workload import acceptance_trace
+from scripts.monolithic_reference.retained_assets import FROZEN, INPUTS, retained_hashes, verify_retained
 from scripts.monolithic_reference.run_actor_coupling import CASE, load_case, model_arrays, roles
+from scripts.monolithic_reference.run_baseline import cases as baseline_cases
 from scripts.monolithic_reference.workload_io import digest, load_arrays, open_bundle, write_json
 from scripts.monolithic_reference.workload_objective import replay_objective
 from scripts.monolithic_reference.workload_scene import build_scene, compare_arrays, set_control
 
-SCENES = ("actor-coupling", "actor-coupling-before", "actor-coupling-permuted", "tiny-contact")
+SCENES = ("actor-coupling", "actor-coupling-before", "actor-coupling-permuted", "tiny-contact", "franka-default")
 ALGORITHM_FIELDS = {"contact_dataflow", "contact_resources"}
 MODEL_IDENTITY_ADAPTER = "monolithic-owned-geometry/v1"
 
@@ -44,6 +46,20 @@ def _exact(a, b):
         )
     except (AssertionError, TypeError) as error:
         raise ValueError("Physical input, policy or sampling differs") from error
+
+
+def _compare_absolute(actual, expected, limits, errors):
+    """Keep original per-field absolute limits; missing and discrete fields remain exact."""
+    if actual.keys() != expected.keys():
+        raise ValueError("State comparison fields differ")
+    for name, value in expected.items():
+        checked = compare_arrays(
+            {name: actual[name]},
+            {name: value},
+            rtol=0,
+            atol=limits.get(name, 0.0) if value.dtype.kind == "f" else 0.0,
+        )
+        errors[name] = max(errors.get(name, 0.0), checked.get(name, 0.0))
 
 
 def _legacy_sampling(contact):
@@ -442,7 +458,7 @@ def audit_contact_state(run, frame, start, dt, *, mesh_fields=None):
     }
 
 
-def _audit_pair(audits, frame, start, dt, label):
+def _audit_pair(audits, frame, start, dt, label, *, mesh_fields=None, published=None):
     left = audits[0]
     c = left._contact
     stiffness, mu, velocity, width, radius = c.parameters
@@ -457,6 +473,7 @@ def _audit_pair(audits, frame, start, dt, label):
         mu=mu,
         width=width,
         falloff=velocity * dt,
+        mesh_fields=mesh_fields,
         alignment_policy=c.alignment_policy,
     )
     if full["full_count"] != c.count:
@@ -464,6 +481,11 @@ def _audit_pair(audits, frame, start, dt, label):
     result = []
     for algorithm, audit in zip(("legacy", "pooled"), audits, strict=True):
         actual = _contact_at(audit, frame, start, dt, sparse=True)
+        publication_errors = {}
+        if published is not None and algorithm == label["state_origin"]:
+            for name, value in published.items():
+                np.testing.assert_allclose(value, actual[name], rtol=1e-8, atol=1e-10, err_msg=name)
+                publication_errors[name] = float(np.max(np.abs(value - actual[name]), initial=0))
         result.append(
             {
                 **label,
@@ -473,6 +495,7 @@ def _audit_pair(audits, frame, start, dt, label):
                 "step_start_sha256": _configuration_digest(start).hex(),
                 "max_penetration_m": max(0, -full["min_gap"]),
                 "errors": _check_contact_sparse(actual, full["full"]),
+                "published_force_errors": publication_errors,
             }
         )
     return result
@@ -483,6 +506,7 @@ def compare(root, *, device="cuda:0"):
     root = Path(root)
     manifest, source = open_bundle(root), provenance()
     canonical = manifest.get("scene") == "tiny-contact"
+    robot = manifest.get("scene") == "franka-default"
     if canonical:
         # Keep the existing computational replay envelope and physical gates.
         # This short recipe does not qualify the frozen loading/settling run.
@@ -496,6 +520,21 @@ def compare(root, *, device="cuda:0"):
             },
         }
         fixtures = [DIRECTORY / "p3_coupled_t4_v1.json", DIRECTORY / PROTOCOL["normal_source"]]
+    elif robot:
+        definition = next(
+            row for row in baseline_cases() if row["id"] == "franka-cube--ArmijoOrResNorm--C-IE--production--graph1"
+        )
+        protocol = INPUTS / "comparison-tolerances.json"
+        verify_retained(protocol, retained_hashes())
+        case = {
+            "steps": definition["steps"],
+            "dt": 0.001,
+            "equivalence": {"absolute": json.loads(protocol.read_text())["cases"][definition["id"]]["absolute"]},
+            # This is the original accepted-tet guard from check_recording;
+            # the full grasp/hold/reference gate is not a short-window claim.
+            "gates": {"min_det_f": 0.2},
+        }
+        fixtures = [FROZEN, protocol]
     else:
         case, fixtures = load_case(), [CASE]
     if (
@@ -511,6 +550,7 @@ def compare(root, *, device="cuda:0"):
         or manifest.get("windows") != [[1, manifest["steps"]]]
         or manifest.get("dt") != case["dt"]
         or manifest.get("device") != str(wp.get_device(device))
+        or (robot and (not manifest["graph"] or not wp.get_device(device).is_cuda))
     ):
         raise ValueError("Unreviewed algorithm, source, input range or execution identity")
     needed = {"checkpoint-1.npz", "trace.jsonl"} | {
@@ -544,9 +584,10 @@ def compare(root, *, device="cuda:0"):
         for name in ("legacy", "pooled")
     ]
     verify_contract(*audits)
+    mesh_fields = export_mesh_fields(audits[0].model, audits[0]._contact.smooth_sdf) if robot else None
     controls = [route[0].control() for route in routes]
     errors, work, same_state = {}, [], []
-    metadata = None if canonical else {"roles": roles(left.model, left._actors)}
+    metadata = None if canonical or robot else {"roles": roles(left.model, left._actors)}
     for step in range(1, manifest["steps"] + 1):
         key = f"inputs-{step}.npz"
         values = load_arrays(root / key, manifest["array_schemas"][key])
@@ -582,25 +623,28 @@ def compare(root, *, device="cuda:0"):
                 }
             )
         recorded = f"state-{step}.npz"
-        compare_arrays(
-            state_arrays(routes[0][2]),
-            load_arrays(root / recorded, manifest["array_schemas"][recorded]),
-            **manifest["comparison"],
-        )
+        recorded_state = load_arrays(root / recorded, manifest["array_schemas"][recorded])
+        if robot:
+            _compare_absolute(state_arrays(routes[0][2]), recorded_state, case["equivalence"]["absolute"], {})
+        else:
+            compare_arrays(state_arrays(routes[0][2]), recorded_state, **manifest["comparison"])
         expected = traces[step - 1]
         for name in ("converged", "rolled_back", "nonlinear_iterations", "linear_iterations", "line_search_iterations"):
             if getattr(left.last_stats, name) != expected["stats"][name]:
                 raise ValueError("Legacy baseline execution differs from its authenticated trace")
         if acceptance_trace(left._variational["trials"]) != acceptance_trace(expected["trials"]):
             raise ValueError("Legacy baseline acceptance differs from its authenticated trace")
-        if canonical:
+        if canonical or robot:
             # Each state was validated against its own configuration above.
             # All other authority/history/publication fields keep their gates.
             states = [
                 {k: v for k, v in state_arrays(route[2]).items() if k != "history.config_digest"} for route in routes
             ]
-            for name, value in compare_arrays(*states, **case["equivalence"]).items():
-                errors[name] = max(errors.get(name, 0), value)
+            if robot:
+                _compare_absolute(*states, case["equivalence"]["absolute"], errors)
+            else:
+                for name, value in compare_arrays(*states, **case["equivalence"]).items():
+                    errors[name] = max(errors.get(name, 0), value)
         elif not compare_semantic_fields(
             _semantic(state_arrays(routes[0][2]), metadata),
             _semantic(state_arrays(routes[1][2]), metadata),
@@ -610,11 +654,31 @@ def compare(root, *, device="cuda:0"):
             raise ValueError("Independent trajectories violate the frozen actor envelope")
         for origin, (frame, start) in enumerate(zip(frames, starts, strict=True)):
             checked = _audit_pair(
-                audits, frame, start, manifest["dt"], {"step": step, "state_origin": ("legacy", "pooled")[origin]}
+                audits,
+                frame,
+                start,
+                manifest["dt"],
+                {"step": step, "state_origin": ("legacy", "pooled")[origin]},
+                mesh_fields=mesh_fields,
+                published={
+                    key: getattr(routes[origin][2]._monolithic_coupled, name).numpy()
+                    for key, name in (
+                        ("particle_force", "contact_particle_force"),
+                        ("body_wrench", "contact_body_force"),
+                        ("joint_force", "contact_joint_force"),
+                    )
+                },
             )
-            if checked[0]["max_penetration_m"] > case["gates"]["max_penetration_m"]:
+            if (
+                "max_penetration_m" in case["gates"]
+                and checked[0]["max_penetration_m"] > case["gates"]["max_penetration_m"]
+            ):
                 raise ValueError("Independent trajectory violates the frozen penetration gate")
-            if routes[origin][1].last_stats.min_det_f <= case["gates"]["min_det_f"]:
+            if (
+                routes[origin][1].last_stats.min_det_f < case["gates"]["min_det_f"]
+                if robot
+                else routes[origin][1].last_stats.min_det_f <= case["gates"]["min_det_f"]
+            ):
                 raise ValueError("Independent trajectory violates the frozen determinant gate")
             same_state.extend(checked)
         work.append(row)
@@ -659,6 +723,7 @@ def compare(root, *, device="cuda:0"):
                     "state_owner": call["state"],
                     "state_origin": "recorded_objective",
                 },
+                mesh_fields=mesh_fields,
             )
         )
     return {
@@ -671,7 +736,7 @@ def compare(root, *, device="cuda:0"):
         "fixture_sha256s": {path.name: digest(path) for path in fixtures},
         "scene": manifest["scene"],
         "steps": manifest["steps"],
-        "asset_sha256": None if canonical else case["tet_asset_sha256"],
+        "asset_sha256": case.get("tet_asset_sha256"),
         "device": str(left.model.device),
         "graph": manifest["graph"],
         **contract,

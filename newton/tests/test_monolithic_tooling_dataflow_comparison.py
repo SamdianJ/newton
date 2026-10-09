@@ -311,8 +311,58 @@ def test_owned_sdf_contract(test, device):
     verify_contract(left, right)
 
 
+def test_prepared_mesh_audit_pair(test, device):
+    """Audit both native paths using one independently prepared immutable mesh field."""
+    if device.is_cpu:
+        test.skipTest("Mesh SDF requires CUDA")
+    from newton.solvers.experimental.monolithic import build_smooth_sdf  # noqa: PLC0415
+    from newton.tests.test_monolithic_solver_actor_contacts import (  # noqa: PLC0415
+        contact_scene,
+        contact_solver,
+        contact_state,
+    )
+    from newton.tests.test_monolithic_solver_contact_pool import pooled_solver  # noqa: PLC0415
+    from scripts.monolithic_reference.compare_contact_dataflows import _audit_pair, _physical  # noqa: PLC0415
+    from scripts.monolithic_reference.contact_full_oracle import export_mesh_fields  # noqa: PLC0415
+
+    for law in ("C-IE", "C-EE", "C-II"):
+        runs = []
+        for factory in (contact_solver, pooled_solver):
+            model = contact_scene(device, "A-R", mesh=True)
+            sdf = build_smooth_sdf(model, representation="c2-bspline")
+            runs.append(factory(model, law=law, mode="production", graph=device.is_cuda, smooth_sdf=sdf))
+        frame = _physical(contact_state(runs[0], "A-R"))
+        fields = export_mesh_fields(runs[0].model, runs[0]._contact.smooth_sdf)
+        result = _audit_pair(runs, frame, frame, 0.001, {"state_origin": "legacy"}, mesh_fields=fields)
+        test.assertEqual([row["algorithm"] for row in result], ["legacy", "pooled"])
+        test.assertTrue(all(row["full_count"] == runs[0]._contact.count for row in result))
+        for row in result:
+            test.assertLess(row["errors"]["tangent_relative"], 1e-5)
+
+
 class TestContactDataflowComparison(unittest.TestCase):
-    pass
+    def test_absolute_state_envelope(self):
+        """Keep frozen absolute, zero and discrete field limits without falling back to a relative tolerance."""
+        from scripts.monolithic_reference.compare_contact_dataflows import _compare_absolute  # noqa: PLC0415
+
+        expected = {"bounded": np.array([1.0]), "zero": np.zeros(1), "discrete": np.array([7], dtype=np.int32)}
+        limit = 2.0**-30
+        limits = {"bounded": limit, "zero": 0.0, "discrete": 1.0}
+        actual = {name: value.copy() for name, value in expected.items()}
+        actual["bounded"] += limit / 2
+        errors = {}
+        _compare_absolute(actual, expected, limits, errors)
+        self.assertEqual(errors["bounded"], limit / 2)
+        for name, delta in (("bounded", 2 * limit), ("zero", 1e-12), ("discrete", 1)):
+            damaged = {key: value.copy() for key, value in expected.items()}
+            damaged[name] += delta
+            with self.assertRaises(AssertionError):
+                _compare_absolute(damaged, expected, limits, {})
+        with self.assertRaises(AssertionError):
+            _compare_absolute(actual, expected, {}, {})
+        for value in (np.zeros(2), np.zeros(1, dtype=np.float32), np.array([np.nan])):
+            with self.assertRaises(ValueError):
+                _compare_absolute({**expected, "zero": value}, expected, limits, {})
 
 
 for _test in (
@@ -323,6 +373,7 @@ for _test in (
     test_canonical_comparison,
     test_owned_geometry_contract,
     test_owned_sdf_contract,
+    test_prepared_mesh_audit_pair,
 ):
     add_function_test(TestContactDataflowComparison, _test.__name__, _test, devices=get_test_devices())
 
