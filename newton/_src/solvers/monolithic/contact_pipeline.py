@@ -13,7 +13,6 @@ from . import state_checks
 from .bsr import _MonolithicScalarTriplets
 from .contact import ContactObjective
 from .contact_batch import _ContactBatch
-from .contact_pool import _ContactRows
 
 
 @wp.kernel
@@ -82,9 +81,11 @@ class _PooledContactObjective(ContactObjective):
 
     def initialize_pool(self, factor_capacity, *, use_cuda_graph):
         actors = self.actor_samples.actors
+        # CUDA geometry needs larger batches than a single row-reduction block.
+        batch_capacity = 8192 if self.model.device.is_cuda else 256
         self._batch = _ContactBatch(
             self,
-            batch_capacity=min(self.count, _ContactRows.BLOCK_SIZE),
+            batch_capacity=min(self.count, batch_capacity),
             capacity=None,
             contact_factor_capacity=factor_capacity,
             use_cuda_graph=use_cuda_graph,
