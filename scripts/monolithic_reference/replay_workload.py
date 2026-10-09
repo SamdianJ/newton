@@ -30,10 +30,10 @@ def replay(root, *, mode="window", device="cuda:0", repeat=5, profile=False):
     """Validate the entire bundle before constructing any GPU objects."""
     root = Path(root)
     manifest = open_bundle(root)
-    if (
-        manifest["scene"].startswith("actor-coupling")
-        and manifest["source"]["source_hashes"] != provenance()["source_hashes"]
-    ):
+    contact_dataflow = manifest.get("contact_dataflow", "legacy")
+    if (manifest["scene"].startswith("actor-coupling") or contact_dataflow == "pooled") and manifest["source"][
+        "source_hashes"
+    ] != provenance()["source_hashes"]:
         raise ValueError("Mixed workload source identity differs")
     results = []
     if mode == "hotspot":
@@ -44,6 +44,11 @@ def replay(root, *, mode="window", device="cuda:0", repeat=5, profile=False):
                 raise ValueError("Unauthenticated hotspot metadata")
             path = root / name
             metadata = json.loads((path / "call.json").read_text())
+            if (
+                metadata["boundary"] in ("objective", "assembly")
+                and metadata.get("contact_dataflow", "legacy") != contact_dataflow
+            ):
+                raise ValueError("Hotspot contact dataflow differs from its bundle")
             arrays = load_arrays(path / "input.npz", metadata["input_schema"])
             expected = load_arrays(path / "output.npz", metadata["output_schema"])
             if metadata["boundary"] == "production_pcg_core":
@@ -66,7 +71,9 @@ def replay(root, *, mode="window", device="cuda:0", repeat=5, profile=False):
         if [r["step"] for r in trace] != list(range(1, manifest["steps"] + 1)):
             raise ValueError("Incomplete execution trace")
         for first, last in manifest["windows"]:
-            model, run, state, _ = build_scene(manifest["scene"], device=device, graph=manifest["graph"])
+            model, run, state, _ = build_scene(
+                manifest["scene"], device=device, graph=manifest["graph"], contact_dataflow=contact_dataflow
+            )
             if run._kinematics.digest.hex() != manifest["physical_digest"]:
                 raise ValueError("Scene physical identity changed")
             run.load_checkpoint(state, root / f"checkpoint-{first}.npz")

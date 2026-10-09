@@ -145,6 +145,7 @@ def record(
     scene="tiny-contact",
     device="cuda:0",
     graph=True,
+    contact_dataflow="legacy",
     steps=10,
     windows=None,
     boundaries=("pcg",),
@@ -158,13 +159,14 @@ def record(
         raise ValueError("Windows must be ordered and disjoint")
     root = Path(root)
     root.mkdir(parents=True, exist_ok=False)
-    model, run, state, samples = build_scene(scene, device=device, graph=graph)
+    model, run, state, samples = build_scene(scene, device=device, graph=graph, contact_dataflow=contact_dataflow)
     if samples is not None and steps >= len(samples):
         raise ValueError("Step range exceeds scene controls")
     control = model.control()
     manifest = {
         "scene": scene,
         "graph": graph,
+        "contact_dataflow": contact_dataflow,
         "device": str(model.device),
         "dt": 0.001,
         "steps": steps,
@@ -231,6 +233,7 @@ def main():
     )
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--no-graph", action="store_true")
+    parser.add_argument("--contact-dataflow", choices=("legacy", "pooled"), default="legacy")
     parser.add_argument("--steps", type=int, default=10)
     parser.add_argument("--start", type=int, default=6)
     parser.add_argument(
@@ -243,6 +246,7 @@ def main():
     for key, expected in (
         ("schema", "monolithic-workload-selection/1"),
         ("scene", args.case),
+        ("contact_dataflow", args.contact_dataflow),
         ("steps", args.steps),
         ("comparison", {"rtol": 2e-5, "atol": 2e-6}),
     ):
@@ -254,6 +258,7 @@ def main():
         scene=args.case,
         device=args.device,
         graph=not args.no_graph,
+        contact_dataflow=args.contact_dataflow,
         steps=args.steps,
         windows=windows,
         boundaries=args.boundaries,

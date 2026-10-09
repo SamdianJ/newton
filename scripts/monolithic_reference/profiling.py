@@ -19,6 +19,15 @@ import warp as wp
 ROOT = Path(__file__).resolve().parents[2]
 
 
+def capture_count(run):
+    """Include pooled generation, reduction and BSR captures in tool accounting."""
+    caches = [run._graphs]
+    if run._contact_pool:
+        caches.extend((run._contact._batch.graphs, run._contact.pool.graphs))
+        caches.extend(owner.graphs for owner in run._linear._fixed_bsr)
+    return sum(sum(cache.captures.values()) for cache in caches)
+
+
 def provenance():
     """Bind reports to imported source, including uncommitted tool changes."""
     import newton  # noqa: PLC0415
@@ -101,12 +110,12 @@ class SolverProfiler:
             if method == "step":
                 self.step += 1
                 first = len(self.rows)
-                before = sum(self.solver._graphs.captures.values())
+                before = capture_count(self.solver)
                 plan = getattr(self.solver._linear, "_masked_pcg_plan", None)
             with self.scope(name):
                 result = original(*args, **kwargs)
             if method == "step":
-                captured = before != sum(self.solver._graphs.captures.values()) or plan is not getattr(
+                captured = before != capture_count(self.solver) or plan is not getattr(
                     self.solver._linear, "_masked_pcg_plan", None
                 )
                 for row in self.rows[first:]:

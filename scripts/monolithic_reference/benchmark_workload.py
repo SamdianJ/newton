@@ -15,7 +15,7 @@ from unittest.mock import patch
 import warp as wp
 
 from newton.examples.softbody.monolithic_recording import state_arrays
-from scripts.monolithic_reference.profiling import provenance
+from scripts.monolithic_reference.profiling import capture_count, provenance
 from scripts.monolithic_reference.record_workload import apply_inputs
 from scripts.monolithic_reference.replay_workload import acceptance_trace
 from scripts.monolithic_reference.workload_io import digest, load_arrays, open_bundle, write_json
@@ -36,6 +36,9 @@ def benchmark(root, *, device="cuda:0", warmup=2, repeat=5):
         raise ValueError("Positive warmup and repeat counts are required")
     root = Path(root)
     manifest = open_bundle(root)
+    contact_dataflow = manifest.get("contact_dataflow", "legacy")
+    if contact_dataflow == "pooled" and manifest["source"]["source_hashes"] != provenance()["source_hashes"]:
+        raise ValueError("Pooled workload source identity differs")
     selected = {step for first, last in manifest["windows"] for step in range(first, last + 1)}
     trace = {}
     number = 0
@@ -50,7 +53,9 @@ def benchmark(root, *, device="cuda:0", warmup=2, repeat=5):
         raise ValueError("Incomplete execution trace")
     results = []
     for first, last in manifest["windows"]:
-        model, run, state, _ = build_scene(manifest["scene"], device=device, graph=manifest["graph"])
+        model, run, state, _ = build_scene(
+            manifest["scene"], device=device, graph=manifest["graph"], contact_dataflow=contact_dataflow
+        )
         if run._kinematics.digest.hex() != manifest["physical_digest"]:
             raise ValueError("Scene physical identity changed")
         control = model.control()
@@ -78,8 +83,15 @@ def benchmark(root, *, device="cuda:0", warmup=2, repeat=5):
                 initial_generation = int(state._monolithic_coupled.force_generation.numpy()[0])
                 offset = max(run._step_generation - initial_generation, 0)
                 restore_seconds = time.perf_counter() - start
-                captures = sum(run._graphs.captures.values())
-                objective_captures = run._graphs.captures["coupled_objective"]
+                captures = capture_count(run)
+                objective_names = (
+                    ("coupled_objective_owners", "coupled_objective_result")
+                    if run._contact_pool
+                    else ("coupled_objective",)
+                )
+                objective_captures = sum(run._graphs.captures[name] for name in objective_names)
+                contact_caches = (run._contact._batch.graphs, run._contact.pool.graphs) if run._contact_pool else ()
+                objective_captures += sum(sum(cache.captures.values()) for cache in contact_caches)
                 seconds, work = [], []
                 objective_seconds.clear()
                 with patch.object(run, "_evaluate", timed_objective) if scope == "objective" else nullcontext():
@@ -120,8 +132,10 @@ def benchmark(root, *, device="cuda:0", warmup=2, repeat=5):
                         "seconds": sum(seconds) if scope == "step" else sum(objective_seconds),
                         "step_seconds": seconds,
                         "restore_seconds": restore_seconds,
-                        "captures": sum(run._graphs.captures.values()) - captures,
-                        "objective_captures": run._graphs.captures["coupled_objective"] - objective_captures,
+                        "captures": capture_count(run) - captures,
+                        "objective_captures": sum(run._graphs.captures[name] for name in objective_names)
+                        + sum(sum(cache.captures.values()) for cache in contact_caches)
+                        - objective_captures,
                         "generation_offset": offset,
                         "work": work,
                     }

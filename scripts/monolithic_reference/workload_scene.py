@@ -3,6 +3,7 @@
 
 """Allowlisted scene recipes shared by profiling and computational replay."""
 
+from contextlib import nullcontext
 from unittest.mock import patch
 
 import numpy as np
@@ -13,7 +14,20 @@ from scripts.monolithic_reference.retained_assets import validate_inputs
 from scripts.monolithic_reference.run_precision import build, cases
 
 
-def build_scene(name, *, device="cuda:0", graph=True):
+def build_scene(name, *, device="cuda:0", graph=True, contact_dataflow="legacy"):
+    """Select the contact algorithm at the existing offline constructor seam."""
+    if contact_dataflow not in ("legacy", "pooled"):
+        raise ValueError("Unsupported contact dataflow")
+    context = nullcontext()
+    if contact_dataflow == "pooled":
+        from newton._src.solvers.monolithic.contact_pipeline import _PooledContactObjective  # noqa: PLC0415
+
+        context = patch("newton._src.solvers.monolithic.solver_monolithic.ContactObjective", _PooledContactObjective)
+    with context:
+        return _build_scene(name, device=device, graph=graph)
+
+
+def _build_scene(name, *, device, graph):
     """Reconstruct a supported scene without advancing its physical clock."""
     if name in ("actor-coupling", "actor-coupling-before", "actor-coupling-permuted"):
         from scripts.monolithic_reference.run_actor_coupling import (  # noqa: PLC0415

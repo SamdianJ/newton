@@ -10,7 +10,7 @@ import numpy as np
 import warp as wp
 
 from newton.examples.softbody.monolithic_recording import serial
-from scripts.monolithic_reference.profiling import SolverProfiler, provenance
+from scripts.monolithic_reference.profiling import SolverProfiler, capture_count, provenance
 from scripts.monolithic_reference.workload_scene import build_scene, compare_arrays
 
 # These are numerical owners, not a recursively serialized object graph.
@@ -34,8 +34,18 @@ def arrays_for(run):
     """Enumerate a bounded set of numerical buffers; exclude texture descriptors."""
     arrays = {"solver." + name: getattr(run, name) for name in SOLVER_ARRAYS}
     owners = {name: getattr(run, name) for name in OWNERS}
-    owners.update({"contact.start": run._contact.start, "contact.current": run._contact.current})
-    if not run._device_iteration:
+    if run._contact_pool:
+        batch, pool = run._contact._batch, run._contact.pool
+        owners.update({"contact.batch": batch, "contact.pool": pool})
+        for name in ("all_samples", "samples", "support", "current", "start", "_start_chunk"):
+            owners["contact.batch." + name] = getattr(batch, name)
+        for name in ("candidates", "records", "_identity", "energy", "residual", "force"):
+            owners["contact.pool." + name] = getattr(pool, name)
+        for name, array in zip(("identities", "count", "base", "indices"), pool._stream, strict=True):
+            arrays["contact.pool.stream." + name] = array
+    else:
+        owners.update({"contact.start": run._contact.start, "contact.current": run._contact.current})
+    if not run._device_iteration or run._contact_pool:
         owners["_rigid"] = run._rigid
         actor_contact = run._contact.actor_contact
         if actor_contact is not None:
@@ -77,17 +87,31 @@ def capture_input(run, boundary, args, kwargs):
         "device_result": kwargs.get("device_result", False),
         "step_generation": run._step_generation,
         "assembly_sequence": run._assembly_sequence,
-        "contact_started": run._contact._started,
+        "contact_started": run._contact._batch._started if run._contact_pool else run._contact._started,
         "contact_evaluated": run._contact._evaluated,
         "physical_digest": run._kinematics.digest.hex(),
     }
-    if not run._device_iteration:
+    if not run._device_iteration or run._contact_pool:
         metadata.update(
-            adapter="actor-objective/1",
+            adapter="pool-objective/1" if run._contact_pool else "actor-objective/1",
             layout=serial(dataclasses.asdict(run._layout)),
             actor_maps=serial(run._actors.maps),
             rigid_has_torque=run._rigid.has_torque,
             source_hashes=provenance()["source_hashes"],
+        )
+    if run._contact_pool:
+        c = run._contact
+        metadata.update(
+            contact_dataflow="pooled",
+            pool={
+                "started": c._batch._started,
+                "candidate_generation": c.candidate_generation,
+                "evaluation_generation": c.evaluation_generation,
+                "admission_generation": c.evaluation_generation,
+                "assembled_generation": c._assembled_generation,
+                "tainted": c._tainted,
+                "warned": c._warned,
+            },
         )
     return {name: array.numpy().copy() for name, array in arrays_for(run).items()}, metadata
 
@@ -99,9 +123,32 @@ def capture_output(run, boundary, result):
         "tet_flags": run._tet.flags.numpy().copy(),
         "contact_flags": run._contact.flags.numpy().copy(),
         "contact_r": run._contact.residual.numpy().copy(),
-        "contact_weights": run._contact.weights.numpy().copy(),
-        "contact_local_r": run._contact.local_residual.numpy().copy(),
     }
+    if run._contact_pool:
+        c, records = run._contact, run._contact.pool.records
+        count = int(records.count.numpy()[0])
+        if not 0 <= count <= c.pool.contact_capacity:
+            raise ValueError("Invalid pooled output count")
+        for name in (
+            "accepted",
+            "flags",
+            "count",
+            "used",
+            "requested",
+            "dropped",
+            "support_count",
+            "factor_count",
+            "triplet_count",
+        ):
+            arrays["contact." + name] = getattr(records, name).numpy().copy()
+        for name in ("identities", "source_slots", "pairs"):
+            arrays["contact." + name] = getattr(records, name).numpy()[:count].copy()
+        arrays["contact_force"] = c.pool.force.result.numpy().copy()
+    else:
+        arrays.update(
+            contact_weights=run._contact.weights.numpy().copy(),
+            contact_local_r=run._contact.local_residual.numpy().copy(),
+        )
     if boundary == "objective":
         arrays.update(
             energy=np.asarray([result[0], result[2]]),
@@ -127,7 +174,7 @@ def capture_output(run, boundary, result):
             tet_failure=run._tet_assembly.failure_flags.numpy().copy(),
             actor_dense=run._linear.aq_actor_dense.numpy().copy(),
         )
-    if not run._device_iteration:
+    if not run._device_iteration or run._contact_pool:
         arrays.update(
             rigid_energy=run._rigid.energy.numpy().copy(),
             rigid_residual=run._rigid.residual.numpy().copy(),
@@ -200,18 +247,47 @@ def replay_objective(arrays, metadata, expected, *, scene, device, graph, repeat
         raise ValueError("Unsupported boundary or repeat count")
     if metadata["state"] not in ("_original", "_accepted", "_trial"):
         raise ValueError("Unsupported candidate state owner")
-    model, run, state, _ = build_scene(scene, device=device, graph=graph)
+    model, run, state, _ = build_scene(
+        scene, device=device, graph=graph, contact_dataflow=metadata.get("contact_dataflow", "legacy")
+    )
     if run._kinematics.digest.hex() != metadata["physical_digest"]:
         raise ValueError("Hotspot physical identity differs")
-    if not run._device_iteration:
+    if not run._device_iteration or run._contact_pool:
         if (
-            metadata.get("adapter") != "actor-objective/1"
+            metadata.get("adapter") != ("pool-objective/1" if run._contact_pool else "actor-objective/1")
             or metadata.get("layout") != serial(dataclasses.asdict(run._layout))
             or metadata.get("actor_maps") != serial(run._actors.maps)
             or metadata.get("source_hashes") != provenance()["source_hashes"]
             or type(metadata.get("rigid_has_torque")) is not bool
         ):
             raise ValueError("Mixed hotspot adapter, source or layout identity differs")
+    if run._contact_pool:
+        pool = metadata.get("pool", {})
+        if (
+            type(pool) is not dict
+            or set(pool)
+            != {
+                "started",
+                "candidate_generation",
+                "evaluation_generation",
+                "admission_generation",
+                "assembled_generation",
+                "tainted",
+                "warned",
+            }
+            or any(type(pool[name]) is not bool for name in ("started", "tainted", "warned"))
+            or any(
+                type(pool[name]) is not int or pool[name] < 0
+                for name in ("candidate_generation", "evaluation_generation", "admission_generation")
+            )
+            or type(pool["assembled_generation"]) is not int
+            or not -1 <= pool["assembled_generation"] <= pool["evaluation_generation"]
+            or pool["admission_generation"] != pool["evaluation_generation"]
+            or pool["started"] != metadata.get("contact_started")
+            or type(metadata.get("contact_evaluated")) is not bool
+            or (metadata["boundary"] == "assembly" and not metadata["contact_evaluated"])
+        ):
+            raise ValueError("Invalid pooled hotspot generations")
     for name in ("_original", "_accepted", "_trial"):
         setattr(run, name, run._states.copy(state))
     targets = arrays_for(run)
@@ -228,10 +304,15 @@ def replay_objective(arrays, metadata, expected, *, scene, device, graph, repeat
         static_rigid = name in {
             "_rigid." + key for key in ("rows", "qs", "vs", "bodies", "mass", "second", "xp", "xc", "local_com")
         }
+        static_pool = run._contact_pool and (
+            name.startswith(("contact.batch.all_samples.", "contact.batch.support."))
+            or name in {"_contact." + key for key in (*run._contact._batch.METADATA_ARRAYS, "_model_rows")}
+        )
         if (
             name in TOPOLOGY
             or static_actor
             or static_rigid
+            or static_pool
             or (name.startswith("_kinematics.") and actual.dtype.kind in "iu")
         ):
             if not np.array_equal(arrays[name], actual):
@@ -240,19 +321,32 @@ def replay_objective(arrays, metadata, expected, *, scene, device, graph, repeat
     run._step_generation = metadata["step_generation"]
     run._assembly_sequence = metadata["assembly_sequence"]
     run._metrics = {"matrix_assembly_count": 0}
+    run._variational = {}
     times, restore_times, captures, checks = [], [], [], []
     for index in range(repeat + 1):
         start = time.perf_counter()
         for name, target in targets.items():
             target.assign(arrays[name])
-        run._contact._started = metadata["contact_started"]
+        if not run._contact_pool:
+            run._contact._started = metadata["contact_started"]
         run._contact._evaluated = metadata["contact_evaluated"]
-        if not run._device_iteration:
+        if run._contact_pool:
+            c = run._contact
+            c._batch._started = pool["started"]
+            c.pool._stream_started = False
+            c.candidate_generation = pool["candidate_generation"]
+            c.evaluation_generation = pool["evaluation_generation"]
+            c._assembled_generation = pool["assembled_generation"]
+            c._tainted, c._warned = pool["tainted"], pool["warned"]
+            # The fresh workspace has no previous append. New assembly tokens
+            # still increase; recorded tokens/pointers are never restored.
+            c._last_assembly = None
+        if not run._device_iteration or run._contact_pool:
             run._rigid.has_torque = metadata["rigid_has_torque"]
         run._current_state = getattr(run, metadata["state"])
         wp.synchronize_device(model.device)
         restore = time.perf_counter() - start
-        before = sum(run._graphs.captures.values())
+        before = capture_count(run)
         start = time.perf_counter()
         if metadata["boundary"] == "objective":
             result = run._evaluate(
@@ -274,7 +368,7 @@ def replay_objective(arrays, metadata, expected, *, scene, device, graph, repeat
         if index:
             times.append(elapsed)
             restore_times.append(restore)
-            captures.append(before != sum(run._graphs.captures.values()))
+            captures.append(before != capture_count(run))
     # Separate instrumented replay from the timing samples above.
     for name, target in targets.items():
         target.assign(arrays[name])
