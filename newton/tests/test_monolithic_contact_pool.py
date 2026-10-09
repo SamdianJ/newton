@@ -76,7 +76,8 @@ def test_sorted_native_rows(test, device):
         for _ in range(8):
             order = rng.permutation(len(rows))
             inputs = row_inputs(rows[order], identities[order], local[order], values[order], device, dtype)
-            reducer.reduce(*inputs)
+            with patch("newton._src.solvers.monolithic.contact_pool._CONTACT_WORKERS", 3):
+                reducer.reduce(*inputs)
             test.assertEqual(int(reducer.flags.numpy()[0]), 0)
             np.testing.assert_array_equal(reducer.offsets.numpy(), [0, 2, 2, 6, 6, 7, 7])
             np.testing.assert_array_equal(reducer.result.numpy(), expected)
@@ -86,7 +87,7 @@ def test_long_rows(test, device):
     """Handle odd tails and multiple fixed blocks with an independent error bound."""
     rng = np.random.default_rng(831)
     for dtype, native in ((wp.float32, np.float32), (wp.float64, np.float64)):
-        for count in (1, 3, 255, 256, 257, 20736, 20739):
+        for count in (1, 3, 255, 256, 257, 20736, 20739, 131075):
             # Powers of two make exact cancellation and a broad exponent range.
             values = np.ldexp(rng.choice([-1.0, 1.0], count), rng.integers(-20, 20, count)).astype(native)
             order = rng.permutation(count)

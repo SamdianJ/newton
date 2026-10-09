@@ -12,6 +12,8 @@ import warp as wp
 
 from .segment_graph import _SegmentGraphCache
 
+_CONTACT_WORKERS = 262144
+
 
 @wp.kernel
 def _reset_rows(count: wp.array[int], capacity: int, flags: wp.array[int]):
@@ -66,38 +68,42 @@ def _merge_contact_keys(
     out_indices: wp.array[int],
     count: wp.array[int],
     run: int,
+    workers: int,
 ):
     i = wp.tid()
     n = count[0]
     if n < 0 or n > keys.shape[0] or i >= n:
         return
-    # int64 avoids 2*run overflowing at the last int32-capacity merge.
-    base = int((wp.int64(i) // (wp.int64(2) * wp.int64(run))) * (wp.int64(2) * wp.int64(run)))
-    middle = int(wp.min(wp.int64(base) + wp.int64(run), wp.int64(n)))
-    end = int(wp.min(wp.int64(base) + wp.int64(2) * wp.int64(run), wp.int64(n)))
-    left = i < middle
-    lo = middle
-    hi = end
-    own_begin = base
-    if not left:
-        lo = base
-        hi = middle
-        own_begin = middle
-    first = lo
-    key = keys[i]
-    while lo < hi:
-        mid = lo + (hi - lo) // 2
-        advance = keys[mid] < key
+    while i < n:
+        # int64 avoids 2*run overflowing at the last int32-capacity merge.
+        base = int((wp.int64(i) // (wp.int64(2) * wp.int64(run))) * (wp.int64(2) * wp.int64(run)))
+        middle = int(wp.min(wp.int64(base) + wp.int64(run), wp.int64(n)))
+        end = int(wp.min(wp.int64(base) + wp.int64(2) * wp.int64(run), wp.int64(n)))
+        left = i < middle
+        lo = middle
+        hi = end
+        own_begin = base
         if not left:
-            # Keep the left run first for equal stable keys.
-            advance = keys[mid] <= key
-        if advance:
-            lo = mid + 1
-        else:
-            hi = mid
-    destination = base + (i - own_begin) + (lo - first)
-    out_keys[destination] = key
-    out_indices[destination] = indices[i]
+            lo = base
+            hi = middle
+            own_begin = middle
+        first = lo
+        key = keys[i]
+        while lo < hi:
+            mid = lo + (hi - lo) // 2
+            advance = keys[mid] < key
+            if not left:
+                # Keep the left run first for equal stable keys.
+                advance = keys[mid] <= key
+            if advance:
+                lo = mid + 1
+            else:
+                hi = mid
+        destination = base + (i - own_begin) + (lo - first)
+        out_keys[destination] = key
+        out_indices[destination] = indices[i]
+        # Avoid wrapping after the last int32-capacity entry.
+        i += wp.min(workers, n - i)
 
 
 @wp.kernel
@@ -303,11 +309,12 @@ class _ContactRows:
                 device=self.device,
             )
             run = 1
+            workers = min(self.capacity, _CONTACT_WORKERS)
             while run < self.capacity:
                 wp.launch(
                     _merge_contact_keys,
-                    self.capacity,
-                    [keys, indices, temp_keys, temp_indices, count, run],
+                    workers,
+                    [keys, indices, temp_keys, temp_indices, count, run, workers],
                     device=self.device,
                 )
                 keys, temp_keys = temp_keys, keys

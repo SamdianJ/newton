@@ -11,7 +11,7 @@ import warp as wp
 from warp import sparse
 from warp.utils import radix_sort_pairs
 
-from .contact_pool import _merge_contact_keys
+from .contact_pool import _CONTACT_WORKERS, _merge_contact_keys
 from .linear_types import MonolithicLinearStatus
 from .segment_graph import _SegmentGraphCache
 
@@ -177,10 +177,18 @@ class _ScalarBsrReduction:
 
 
 @wp.kernel
-def _fixed_bsr_begin(count: wp.array[int], incoming: wp.array[int], status: wp.array[int], capacity: int):
+def _fixed_bsr_begin(
+    count: wp.array[int], incoming: wp.array[int], status: wp.array[int], scan_size: wp.array[int], capacity: int
+):
     status[0] = incoming[0]
+    span = int(1)
     if count[0] < 0 or count[0] > capacity:
         wp.atomic_max(status, 0, int(MonolithicLinearStatus.GLOBAL_TRIPLET_OVERFLOW))
+    else:
+        # Include the terminal prefix[count] without reading count on the host.
+        while span <= count[0]:
+            span *= 2
+    scan_size[0] = span
 
 
 @wp.kernel
@@ -253,18 +261,29 @@ def _fixed_bsr_work(
 
 @wp.kernel
 def _fixed_bsr_pair(
-    keys: wp.array[wp.uint64], starts: wp.array[int], work: wp.array[float], stride: int, status: wp.array[int]
+    keys: wp.array[wp.uint64],
+    starts: wp.array[int],
+    work: wp.array[float],
+    count: wp.array[int],
+    stride: int,
+    workers: int,
+    status: wp.array[int],
 ):
     i = wp.tid()
-    if keys[i] != wp.uint64(0) - wp.uint64(1) and (i - starts[i]) % (2 * stride) == 0:
-        right = i + stride
-        if right < keys.shape[0]:
-            if keys[right] == keys[i]:
-                # Preserve the existing odd-tail carry, including zero inputs.
-                value = work[i] + work[right]
-                work[i] = value
-                if not wp.isfinite(value):
-                    wp.atomic_max(status, 0, int(MonolithicLinearStatus.NONFINITE_CONTRIBUTION))
+    n = count[0]
+    if n < 0 or n > keys.shape[0] or stride >= n:
+        return
+    while i < n:
+        if keys[i] != wp.uint64(0) - wp.uint64(1) and (i - starts[i]) % (2 * stride) == 0:
+            right = i + stride
+            if right < n:
+                if keys[right] == keys[i]:
+                    # Same disjoint pairs and odd carries at every tree level.
+                    value = work[i] + work[right]
+                    work[i] = value
+                    if not wp.isfinite(value):
+                        wp.atomic_max(status, 0, int(MonolithicLinearStatus.NONFINITE_CONTRIBUTION))
+        i += workers
 
 
 @wp.kernel
@@ -278,23 +297,36 @@ def _fixed_bsr_scan_seed(starts: wp.array[int], live: wp.array[int], prefix: wp.
 
 
 @wp.kernel
-def _fixed_bsr_scan_up(prefix: wp.array[int], distance: int):
+def _fixed_bsr_scan_up(prefix: wp.array[int], scan_size: wp.array[int], fixed_size: int, distance: int, workers: int):
+    span = fixed_size
+    if span == 0:
+        span = scan_size[0]
     right = (wp.tid() + 1) * 2 * distance - 1
-    prefix[right] = prefix[right] + prefix[right - distance]
+    while right < span:
+        prefix[right] = prefix[right] + prefix[right - distance]
+        right += workers * 2 * distance
 
 
 @wp.kernel
-def _fixed_bsr_scan_root(prefix: wp.array[int]):
-    prefix[prefix.shape[0] - 1] = 0
+def _fixed_bsr_scan_root(prefix: wp.array[int], scan_size: wp.array[int], fixed_size: int):
+    span = fixed_size
+    if span == 0:
+        span = scan_size[0]
+    prefix[span - 1] = 0
 
 
 @wp.kernel
-def _fixed_bsr_scan_down(prefix: wp.array[int], distance: int):
+def _fixed_bsr_scan_down(prefix: wp.array[int], scan_size: wp.array[int], fixed_size: int, distance: int, workers: int):
+    span = fixed_size
+    if span == 0:
+        span = scan_size[0]
     right = (wp.tid() + 1) * 2 * distance - 1
-    left = right - distance
-    value = prefix[left]
-    prefix[left] = prefix[right]
-    prefix[right] = prefix[right] + value
+    while right < span:
+        left = right - distance
+        value = prefix[left]
+        prefix[left] = prefix[right]
+        prefix[right] = prefix[right] + value
+        right += workers * 2 * distance
 
 
 @wp.kernel
@@ -343,6 +375,8 @@ class _FixedScalarBsrReduction:
     component owns its compact matrix; nnz is a capacity bound until nnz_sync.
     """
 
+    MAX_WORKERS = _CONTACT_WORKERS
+
     def __init__(self, size, capacity, device, *, use_cuda_graph):
         for name, value, maximum in (("size", size, 2**31 - 2), ("capacity", capacity, 2**30 - 1)):
             if (
@@ -354,14 +388,16 @@ class _FixedScalarBsrReduction:
         size, capacity = int(size), int(capacity)
         output_capacity = min(capacity, size * size)
         p = 1 << capacity.bit_length()  # Always has a terminal prefix[capacity].
-        byte_count = 36 * capacity + 4 * p + 4 + 4 * (size + 1) + 8 * output_capacity
+        byte_count = 36 * capacity + 4 * p + 8 + 4 * (size + 1) + 8 * output_capacity
         if byte_count >= 2**63:
             raise ValueError("Fixed scalar BSR byte capacity exceeds int64")
         self.size, self.capacity, self.output_capacity = size, capacity, output_capacity
         self.device = wp.get_device(device)
         self._spec = dict.fromkeys(("keys", "key_scratch"), (capacity, wp.uint64))
         self._spec.update(dict.fromkeys(("indices", "index_scratch", "starts", "live"), (capacity, wp.int32)))
-        self._spec.update(work=(capacity, wp.float32), prefix=(p, wp.int32), status=(1, wp.int32))
+        self._spec.update(
+            work=(capacity, wp.float32), prefix=(p, wp.int32), scan_size=(1, wp.int32), status=(1, wp.int32)
+        )
         for name, (length, scalar) in self._spec.items():
             setattr(self, name, wp.zeros(length, dtype=scalar, device=self.device))
         self.matrix = sparse.bsr_zeros(size, size, wp.float32, device=self.device, nnz_capacity=output_capacity)
@@ -423,11 +459,12 @@ class _FixedScalarBsrReduction:
         if keys.ptr == out_keys.ptr:
             out_keys, out_indices = self.keys, self.indices
         run = 1
+        workers = min(self.capacity, self.MAX_WORKERS)
         while run < self.capacity:
             wp.launch(
                 _merge_contact_keys,
-                self.capacity,
-                [keys, indices, out_keys, out_indices, count, run],
+                workers,
+                [keys, indices, out_keys, out_indices, count, run, workers],
                 device=self.device,
             )
             keys, out_keys = out_keys, keys
@@ -439,7 +476,9 @@ class _FixedScalarBsrReduction:
         matrix, n = self.matrix, self.capacity
         for array in (self.live, matrix.offsets, matrix.columns, matrix.values):
             array.zero_()
-        wp.launch(_fixed_bsr_begin, 1, [triplets.count, triplets.status, self.status, n], device=self.device)
+        wp.launch(
+            _fixed_bsr_begin, 1, [triplets.count, triplets.status, self.status, self.scan_size, n], device=self.device
+        )
         keys, indices = self.keys, self.indices
         if n:
             wp.launch(
@@ -475,21 +514,35 @@ class _FixedScalarBsrReduction:
                 device=self.device,
             )
             stride = 1
+            workers = min(n, self.MAX_WORKERS)
             while stride < n:
-                wp.launch(_fixed_bsr_pair, n, [keys, self.starts, self.work, stride, self.status], device=self.device)
+                wp.launch(
+                    _fixed_bsr_pair,
+                    workers,
+                    [keys, self.starts, self.work, triplets.count, stride, workers, self.status],
+                    device=self.device,
+                )
                 stride *= 2
         wp.launch(_fixed_bsr_scan_seed, self.prefix.size, [self.starts, self.live, self.prefix], device=self.device)
         distance = 1
         while distance < self.prefix.size:
+            workers = min(self.prefix.size // (2 * distance), self.MAX_WORKERS)
             wp.launch(
-                _fixed_bsr_scan_up, self.prefix.size // (2 * distance), [self.prefix, distance], device=self.device
+                _fixed_bsr_scan_up,
+                workers,
+                [self.prefix, self.scan_size, 0, distance, workers],
+                device=self.device,
             )
             distance *= 2
-        wp.launch(_fixed_bsr_scan_root, 1, [self.prefix], device=self.device)
+        wp.launch(_fixed_bsr_scan_root, 1, [self.prefix, self.scan_size, 0], device=self.device)
         distance //= 2
         while distance:
+            workers = min(self.prefix.size // (2 * distance), self.MAX_WORKERS)
             wp.launch(
-                _fixed_bsr_scan_down, self.prefix.size // (2 * distance), [self.prefix, distance], device=self.device
+                _fixed_bsr_scan_down,
+                workers,
+                [self.prefix, self.scan_size, 0, distance, workers],
+                device=self.device,
             )
             distance //= 2
         wp.launch(_fixed_bsr_offsets, self.size + 1, [keys, self.prefix, self.size, matrix.offsets], device=self.device)
@@ -790,17 +843,22 @@ class _FixedInternalBsrReduction:
             wp.launch(_fixed_internal_seed, self.prefix.size, [self.live, self.prefix], device=self.device)
             distance = 1
             while distance < self.prefix.size:
+                workers = self.prefix.size // (2 * distance)
                 wp.launch(
-                    _fixed_bsr_scan_up, self.prefix.size // (2 * distance), [self.prefix, distance], device=self.device
+                    _fixed_bsr_scan_up,
+                    workers,
+                    [self.prefix, triplets.count, self.prefix.size, distance, workers],
+                    device=self.device,
                 )
                 distance *= 2
-            wp.launch(_fixed_bsr_scan_root, 1, [self.prefix], device=self.device)
+            wp.launch(_fixed_bsr_scan_root, 1, [self.prefix, triplets.count, self.prefix.size], device=self.device)
             distance //= 2
             while distance:
+                workers = self.prefix.size // (2 * distance)
                 wp.launch(
                     _fixed_bsr_scan_down,
-                    self.prefix.size // (2 * distance),
-                    [self.prefix, distance],
+                    workers,
+                    [self.prefix, triplets.count, self.prefix.size, distance, workers],
                     device=self.device,
                 )
                 distance //= 2

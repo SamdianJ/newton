@@ -78,11 +78,16 @@ def test_fixed_topology_reuse(test, device):
     values = np.array([0, -0.0, 1, -1, 0, 2**24, 1, 1, -0.0, -3, 1e8, -1e8], np.float32)
     for n in (0, 12, 5, 0, 12):
         _fill(inputs, rows[:n], columns[:n], values[:n])
-        for _ in range(3):
-            for array in (owner.keys, owner.key_scratch, owner.indices, owner.index_scratch):
-                array.zero_()
+        snapshot = None
+        for seed in range(3):
+            for array in owner.buffers():
+                array.fill_(seed)
             owner.build(inputs, layout_identity="fixed")
             _assert_matrix(test, owner, rows[:n], columns[:n], values[:n])
+            current = tuple(array.numpy().tobytes() for array in owner.buffers())
+            if snapshot is not None:
+                test.assertEqual(current, snapshot)
+            snapshot = current
     if device.is_cuda:
         test.assertEqual(owner.graphs.captures["fixed_scalar_bsr"], 1)
     _fill(inputs, rows, columns, values)
@@ -96,20 +101,21 @@ def test_fixed_topology_reuse(test, device):
 
 def test_fixed_topology_long_tree(test, device):
     """Preserve value-bit order and odd carries for long duplicate groups and permutations."""
-    values = np.r_[np.full(20736, 1, np.float32), np.float32(2**24), np.float32(-(2**24)), np.float32(-0.0)]
-    rows = np.zeros(len(values), np.int32)
-    columns = rows.copy()
-    owner = _FixedScalarBsrReduction(3, len(values), device, use_cuda_graph=device.is_cuda)
-    inputs = _inputs(len(values), device)
     rng = np.random.default_rng(893)
-    for _ in range(4):
-        order = rng.permutation(len(values))
-        _fill(inputs, rows[order], columns[order], values[order])
+    for count in (20736, 131072):
+        values = np.r_[np.full(count, 1, np.float32), np.float32(2**24), np.float32(-(2**24)), np.float32(-0.0)]
+        rows = np.zeros(len(values), np.int32)
+        columns = rows.copy()
+        owner = _FixedScalarBsrReduction(3, len(values), device, use_cuda_graph=device.is_cuda)
+        inputs = _inputs(len(values), device)
+        for _ in range(4):
+            order = rng.permutation(len(values))
+            _fill(inputs, rows[order], columns[order], values[order])
+            owner.build(inputs)
+            _assert_matrix(test, owner, rows, columns, values)
+        _fill(inputs, [], [], [])
         owner.build(inputs)
-        _assert_matrix(test, owner, rows, columns, values)
-    _fill(inputs, [], [], [])
-    owner.build(inputs)
-    _assert_matrix(test, owner, [], [], [])
+        _assert_matrix(test, owner, [], [], [])
 
 
 def test_fixed_topology_errors(test, device):
@@ -159,7 +165,7 @@ def test_fixed_topology_bindings(test, device):
         _assert_matrix(test, owner, [0, 0, 2], [1, 1, 2], [2, 3, 4])
         captures += int(device.is_cuda)
         test.assertEqual(owner.graphs.captures["fixed_scalar_bsr"], captures)
-    for name in ("keys", "key_scratch", "indices", "index_scratch", "starts", "work", "live", "prefix", "status"):
+    for name in owner._spec:
         setattr(owner, name, wp.clone(getattr(owner, name)))
         owner.build(inputs)
         _assert_matrix(test, owner, [0, 0, 2], [1, 1, 2], [2, 3, 4])
@@ -221,16 +227,18 @@ def test_fixed_topology_random_groups(test, device):
     owner = _FixedScalarBsrReduction(11, capacity, device, use_cuda_graph=device.is_cuda)
     inputs = _inputs(capacity, device)
     rng = np.random.default_rng(779)
-    for count in (3, capacity, 1, 257, 0, capacity):
-        rows, columns = rng.integers(0, 11, size=(2, count), dtype=np.int32)
-        values = rng.choice(np.array([0, -0.0, 1, -1, 2**24, -(2**24), 1e8, -1e8, 0.25], np.float32), count)
-        if count == 3:
-            rows[:] = 0
-            columns[:] = 0
-            values[:] = -0.0
-        _fill(inputs, rows, columns, values)
-        owner.build(inputs)
-        _assert_matrix(test, owner, rows, columns, values)
+    # Force worker reuse across both sort passes, the scan and the float tree.
+    with patch.object(_FixedScalarBsrReduction, "MAX_WORKERS", 7):
+        for count in (3, capacity, 1, 2, 7, 8, 9, 255, 256, 257, 511, 512, 0, capacity):
+            rows, columns = rng.integers(0, 11, size=(2, count), dtype=np.int32)
+            values = rng.choice(np.array([0, -0.0, 1, -1, 2**24, -(2**24), 1e8, -1e8, 0.25], np.float32), count)
+            if count == 3:
+                rows[:] = 0
+                columns[:] = 0
+                values[:] = -0.0
+            _fill(inputs, rows, columns, values)
+            owner.build(inputs)
+            _assert_matrix(test, owner, rows, columns, values)
 
 
 def test_fixed_topology_key_width(test, device):
