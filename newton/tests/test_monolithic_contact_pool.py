@@ -111,21 +111,33 @@ def test_long_rows(test, device):
 
 
 def test_counts_and_tails(test, device):
-    """Overwrite all derived storage while active counts shrink, empty and grow."""
-    reducer = _ContactRows(3, 9, 9, 1, wp.float64, device)
-    inputs = row_inputs(np.arange(9) % 3, np.arange(9), np.zeros(9), np.arange(9) + 1.0, device, wp.float64)
-    for count in (9, 3, 0, 7, 9):
-        values = np.arange(9, dtype=np.float64) + 1
+    """Overwrite row outputs despite poisoned scratch as counts shrink, empty and grow."""
+    capacity = 17
+    reducer = _ContactRows(3, capacity, capacity, 1, wp.float64, device, use_cuda_graph=device.is_cuda)
+    inputs = row_inputs(
+        np.arange(capacity) % 3, np.arange(capacity), np.zeros(capacity), np.arange(capacity) + 1.0, device, wp.float64
+    )
+    for count in (capacity, 3, 0, 7, capacity):
+        values = np.arange(capacity, dtype=np.float64) + 1
         values[count:] = np.nan
         inputs[3].assign(values)
         inputs[4].assign([count])
-        for _ in range(3):
+        snapshot = None
+        for seed in range(3):
+            for array in (reducer.keys, reducer.key_scratch, reducer.indices, reducer.index_scratch):
+                array.fill_(seed)
             reducer.reduce(*inputs)
             test.assertEqual(int(reducer.flags.numpy()[0]), 0)
             expected = np.zeros(3)
             np.add.at(expected, np.arange(count) % 3, values[:count])
             np.testing.assert_array_equal(reducer.result.numpy(), expected)
             test.assertEqual(int(reducer.offsets.numpy()[-1]), count)
+            current = tuple(array.numpy().tobytes() for array in reducer.buffers())
+            if snapshot is not None:
+                test.assertEqual(current, snapshot)
+            snapshot = current
+    if device.is_cuda:
+        test.assertEqual(reducer.graphs.captures["contact_rows"], 1)
     for row_count in (0, 3):
         empty = _ContactRows(row_count, 0, 1, 1, wp.float64, device, use_cuda_graph=device.is_cuda)
         empty.reduce(*row_inputs([], [], [], [], device, wp.float64))

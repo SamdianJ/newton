@@ -69,8 +69,8 @@ def _assert_matrix(test, owner, rows, columns, values):
 
 
 def test_fixed_topology_reuse(test, device):
-    """Keep zeros in the value tree while changing compact topology without allocation."""
-    capacity = 64
+    """Keep zeros in the value tree despite stale scratch and changing active topology."""
+    capacity = 65
     inputs = _inputs(capacity, device)
     owner = _FixedScalarBsrReduction(5, capacity, device, use_cuda_graph=device.is_cuda)
     rows = np.array([0, 0, 1, 1, 2, 2, 2, 2, 2, 3, 4, 4], np.int32)
@@ -79,6 +79,8 @@ def test_fixed_topology_reuse(test, device):
     for n in (0, 12, 5, 0, 12):
         _fill(inputs, rows[:n], columns[:n], values[:n])
         for _ in range(3):
+            for array in (owner.keys, owner.key_scratch, owner.indices, owner.index_scratch):
+                array.zero_()
             owner.build(inputs, layout_identity="fixed")
             _assert_matrix(test, owner, rows[:n], columns[:n], values[:n])
     if device.is_cuda:

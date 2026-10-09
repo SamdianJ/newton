@@ -30,6 +30,8 @@ def _contact_keys(
     local_count: int,
     keys: wp.array[wp.uint64],
     indices: wp.array[int],
+    scratch_keys: wp.array[wp.uint64],
+    scratch_indices: wp.array[int],
     flags: wp.array[int],
 ):
     i = wp.tid()
@@ -51,6 +53,9 @@ def _contact_keys(
             key += wp.uint64(local_ids[i])
     keys[i] = key
     indices[i] = i
+    # Prefix merge leaves the tails untouched, including recorded scratch.
+    scratch_keys[i] = wp.uint64(0) - wp.uint64(1)
+    scratch_indices[i] = i
 
 
 @wp.kernel
@@ -59,10 +64,13 @@ def _merge_contact_keys(
     indices: wp.array[int],
     out_keys: wp.array[wp.uint64],
     out_indices: wp.array[int],
+    count: wp.array[int],
     run: int,
 ):
     i = wp.tid()
-    n = keys.shape[0]
+    n = count[0]
+    if n < 0 or n > keys.shape[0] or i >= n:
+        return
     # int64 avoids 2*run overflowing at the last int32-capacity merge.
     base = int((wp.int64(i) // (wp.int64(2) * wp.int64(run))) * (wp.int64(2) * wp.int64(run)))
     middle = int(wp.min(wp.int64(base) + wp.int64(run), wp.int64(n)))
@@ -81,7 +89,7 @@ def _merge_contact_keys(
         mid = lo + (hi - lo) // 2
         advance = keys[mid] < key
         if not left:
-            # Keep the left run first for equal keys, including inactive tails.
+            # Keep the left run first for equal stable keys.
             advance = keys[mid] <= key
         if advance:
             lo = mid + 1
@@ -288,6 +296,8 @@ class _ContactRows:
                     self.local_count,
                     keys,
                     indices,
+                    temp_keys,
+                    temp_indices,
                     self.flags,
                 ],
                 device=self.device,
@@ -297,7 +307,7 @@ class _ContactRows:
                 wp.launch(
                     _merge_contact_keys,
                     self.capacity,
-                    [keys, indices, temp_keys, temp_indices, run],
+                    [keys, indices, temp_keys, temp_indices, count, run],
                     device=self.device,
                 )
                 keys, temp_keys = temp_keys, keys

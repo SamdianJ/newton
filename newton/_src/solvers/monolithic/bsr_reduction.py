@@ -193,6 +193,8 @@ def _fixed_bsr_value_keys(
     size: int,
     keys: wp.array[wp.uint64],
     indices: wp.array[int],
+    scratch_keys: wp.array[wp.uint64],
+    scratch_indices: wp.array[int],
     status: wp.array[int],
 ):
     i = wp.tid()
@@ -205,6 +207,8 @@ def _fixed_bsr_value_keys(
         key = wp.uint64(bits[i])
     keys[i] = key
     indices[i] = i
+    scratch_keys[i] = wp.uint64(0) - wp.uint64(1)
+    scratch_indices[i] = i
 
 
 @wp.kernel
@@ -217,11 +221,12 @@ def _fixed_bsr_position_keys(
     keys: wp.array[wp.uint64],
 ):
     i = wp.tid()
-    source = indices[i]
     key = wp.uint64(0) - wp.uint64(1)
-    if count[0] >= 0 and count[0] <= keys.shape[0] and source < count[0]:
-        if rows[source] >= 0 and rows[source] < size and columns[source] >= 0 and columns[source] < size:
-            key = wp.uint64(rows[source]) * wp.uint64(size) + wp.uint64(columns[source])
+    if count[0] >= 0 and count[0] <= keys.shape[0] and i < count[0]:
+        source = indices[i]
+        if source < count[0]:
+            if rows[source] >= 0 and rows[source] < size and columns[source] >= 0 and columns[source] < size:
+                key = wp.uint64(rows[source]) * wp.uint64(size) + wp.uint64(columns[source])
     keys[i] = key
 
 
@@ -413,7 +418,7 @@ class _FixedScalarBsrReduction:
             lambda: self._build(triplets),
         )
 
-    def _sort(self, keys, indices):
+    def _sort(self, keys, indices, count):
         out_keys, out_indices = self.key_scratch, self.index_scratch
         if keys.ptr == out_keys.ptr:
             out_keys, out_indices = self.keys, self.indices
@@ -422,7 +427,7 @@ class _FixedScalarBsrReduction:
             wp.launch(
                 _merge_contact_keys,
                 self.capacity,
-                [keys, indices, out_keys, out_indices, run],
+                [keys, indices, out_keys, out_indices, count, run],
                 device=self.device,
             )
             keys, out_keys = out_keys, keys
@@ -449,18 +454,20 @@ class _FixedScalarBsrReduction:
                     self.size,
                     keys,
                     indices,
+                    self.key_scratch,
+                    self.index_scratch,
                     self.status,
                 ],
                 device=self.device,
             )
-            keys, indices = self._sort(keys, indices)
+            keys, indices = self._sort(keys, indices, triplets.count)
             wp.launch(
                 _fixed_bsr_position_keys,
                 n,
                 [triplets.rows, triplets.columns, triplets.count, self.size, indices, keys],
                 device=self.device,
             )
-            keys, indices = self._sort(keys, indices)
+            keys, indices = self._sort(keys, indices, triplets.count)
             wp.launch(
                 _fixed_bsr_work,
                 n,
