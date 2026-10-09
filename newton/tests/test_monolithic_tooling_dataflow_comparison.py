@@ -11,7 +11,9 @@ from pathlib import Path
 from unittest.mock import patch
 
 import numpy as np
+import warp as wp
 
+import newton
 from newton.tests.unittest_utils import add_function_test, get_test_devices
 from scripts.monolithic_reference.record_workload import record
 from scripts.monolithic_reference.workload_io import digest, write_json
@@ -218,6 +220,97 @@ def test_canonical_comparison(test, device):
                 compare(root, device=device)
 
 
+def test_owned_geometry_contract(test, device):
+    """Compare owned mesh contents while rejecting unknown pointers and changed geometry."""
+    from scripts.monolithic_reference.compare_contact_dataflows import verify_contract  # noqa: PLC0415
+
+    finalize = newton.ModelBuilder.finalize
+
+    def with_mesh(builder, *args, **kwargs):
+        cfg = builder.ShapeConfig(density=0, has_shape_collision=False, has_particle_collision=False)
+        builder.add_shape_mesh(-1, mesh=newton.Mesh.create_box(0.01, 0.02, 0.03), cfg=cfg)
+        return finalize(builder, *args, **kwargs)
+
+    with patch.object(newton.ModelBuilder, "finalize", with_mesh):
+        _, left, _, _ = build_scene("tiny-contact", device=device, graph=False)
+        _, right, _, _ = build_scene("tiny-contact", device=device, graph=False, contact_dataflow="pooled")
+    test.assertNotEqual(left.model.shape_source_ptr.numpy()[-1], right.model.shape_source_ptr.numpy()[-1])
+    right.model.particle_colors.fill_(987)
+    right.model.bvh_shape_enabled.fill_(987)
+    result = verify_contract(left, right)
+    test.assertEqual(result["model_identity_adapter"], "monolithic-owned-geometry/v1")
+    for name in ("particle_colors", "bvh_shape_enabled"):
+        array = getattr(right.model, name)
+        for size, dtype in ((array.size + 1, array.dtype), (array.size, wp.float32)):
+            with patch.object(right.model, name, wp.empty(size, dtype=dtype, device=device)):
+                with test.assertRaises(ValueError):
+                    verify_contract(left, right)
+    mesh = right.model._mesh_keep_alive[-1]
+    for array in (mesh.points, mesh.indices):
+        original = array.numpy().copy()
+        damaged = original.copy()
+        damaged.flat[0] += 1
+        array.assign(damaged)
+        with test.assertRaises(ValueError):
+            verify_contract(left, right)
+        array.assign(original)
+    original = right.model.shape_source_ptr.numpy().copy()
+    damaged = original.copy()
+    damaged[-1] = 1
+    right.model.shape_source_ptr.assign(damaged)
+    with test.assertRaises(ValueError):
+        verify_contract(left, right)
+    right.model.shape_source_ptr.assign(original)
+    verify_contract(left, right)
+
+
+def test_owned_sdf_contract(test, device):
+    """Reject changed live descriptors, texels and C2 coefficients while allowing owned resource identities."""
+    if device.is_cpu:
+        test.skipTest("Mesh texture ownership requires CUDA")
+    from newton.solvers.experimental.monolithic import build_smooth_sdf  # noqa: PLC0415
+    from newton.tests.test_monolithic_solver_actor_contacts import contact_scene, contact_solver  # noqa: PLC0415
+    from newton.tests.test_monolithic_solver_contact_pool import pooled_solver  # noqa: PLC0415
+    from scripts.monolithic_reference.compare_contact_dataflows import verify_contract  # noqa: PLC0415
+
+    runs = []
+    for factory in (contact_solver, pooled_solver):
+        model = contact_scene(device, "A-R", mesh=True)
+        sdf = build_smooth_sdf(model, representation="c2-bspline")
+        runs.append(factory(model, mode="production", graph=False, smooth_sdf=sdf))
+    left, right = runs
+    verify_contract(left, right)
+    for name in ("_texture_sdf_coarse_textures", "_texture_sdf_subgrid_textures", "_texture_sdf_subgrid_start_slots"):
+        with patch.object(right.model, name, getattr(left.model, name)):
+            with test.assertRaises(ValueError):
+                verify_contract(left, right)
+    table = right.model._texture_sdf_data
+    original = table.numpy().copy()
+    damaged = original.copy()
+    damaged["voxel_radius"][0] += 0.01
+    table.assign(damaged)
+    with test.assertRaises(ValueError):
+        verify_contract(left, right)
+    table.assign(original)
+    texture = right.model._texture_sdf_coarse_textures[0]
+    shape = (texture.depth, texture.height, texture.width)
+    if texture.num_channels != 1:
+        shape += (texture.num_channels,)
+    pixels = np.empty(shape, dtype=np.float32)
+    texture.copy_to(pixels)
+    texture.copy_from(pixels + 0.01)
+    with test.assertRaises(ValueError):
+        verify_contract(left, right)
+    texture.copy_from(pixels)
+    coefficients = right._contact.smooth_sdf.fields[0].data.coefficients
+    original = coefficients.numpy().copy()
+    coefficients.assign(original + 0.01)
+    with test.assertRaises(ValueError):
+        verify_contract(left, right)
+    coefficients.assign(original)
+    verify_contract(left, right)
+
+
 class TestContactDataflowComparison(unittest.TestCase):
     pass
 
@@ -228,6 +321,8 @@ for _test in (
     test_hotspot_and_failure,
     test_canonical_contract,
     test_canonical_comparison,
+    test_owned_geometry_contract,
+    test_owned_sdf_contract,
 ):
     add_function_test(TestContactDataflowComparison, _test.__name__, _test, devices=get_test_devices())
 

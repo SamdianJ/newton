@@ -34,6 +34,7 @@ from scripts.monolithic_reference.workload_scene import build_scene, compare_arr
 
 SCENES = ("actor-coupling", "actor-coupling-before", "actor-coupling-permuted", "tiny-contact")
 ALGORITHM_FIELDS = {"contact_dataflow", "contact_resources"}
+MODEL_IDENTITY_ADAPTER = "monolithic-owned-geometry/v1"
 
 
 def _exact(a, b):
@@ -70,6 +71,64 @@ def _legacy_sampling(contact):
     return values
 
 
+def _physical_model_arrays(run):
+    """Compare owned geometry contents, validating live SDF binding before removing handles."""
+    model, contact = run.model, run._contact
+    values = model_arrays(model)
+    pointers = values.pop("shape_source_ptr")
+    meshes = {mesh.id: mesh for mesh in model._mesh_keep_alive}
+    values["shape_source_present"] = pointers != 0
+    for shape, pointer in enumerate(pointers):
+        if not pointer:
+            continue
+        if int(pointer) not in meshes:
+            raise ValueError("Shape source is not a Model-owned mesh")
+        mesh = meshes[int(pointer)]
+        for name in ("points", "indices", "velocities", "groups"):
+            array = getattr(mesh, name)
+            values[f"shape_source.{shape}.{name}.present"] = np.array(array is not None)
+            if array is not None:
+                values[f"shape_source.{shape}.{name}"] = array.numpy()
+    # Keep the existing recording adapter's schema checks for unused coloring
+    # and ray-BVH caches; their contents/tails can depend on GPU scheduling.
+    for name in ("particle_colors", "bvh_shape_enabled"):
+        if name in values:
+            values[name] = np.zeros_like(values[name])
+    values.pop("_texture_sdf_data", None)
+    table = model._texture_sdf_data
+    if table is not None:
+        if table is not contact.table or contact._descriptors is None:
+            raise ValueError("Model SDF descriptor binding changed")
+        descriptors = table.numpy()
+        _exact({"descriptors": descriptors}, {"descriptors": contact._descriptors})
+        for name, owners in (
+            ("coarse_texture", model._texture_sdf_coarse_textures),
+            ("subgrid_texture", model._texture_sdf_subgrid_textures),
+            ("subgrid_start_slots", model._texture_sdf_subgrid_start_slots),
+        ):
+            if len(owners) != table.size:
+                raise ValueError("Model SDF requires every owned resource")
+            for descriptor, owner in zip(descriptors[name], owners, strict=True):
+                if owner is None or owner.device != model.device:
+                    raise ValueError("Model SDF resource ownership differs")
+                matches = (
+                    descriptor["data"] == owner.ptr
+                    if name == "subgrid_start_slots"
+                    else descriptor.tobytes() == bytes(owner.__ctype__())
+                )
+                if not matches:
+                    raise ValueError("Model SDF descriptor does not reference its owned resource")
+    elif contact._descriptors is not None:
+        raise ValueError("Model SDF descriptor binding changed")
+    fields = run._freeze_sdf(model)
+    _exact(fields, run._sdf_fields)
+    values.update({"owned_sdf." + name: array for name, array in fields.items()})
+    if contact.smooth_sdf is not None:
+        contact.smooth_sdf.validate_identity()
+    values["identity_adapter"] = np.frombuffer(MODEL_IDENTITY_ADAPTER.encode(), dtype=np.uint8)
+    return values
+
+
 def verify_contract(left, right):
     """Permit only the two declared complete-pool fields after exact physical checks."""
     if left._contact_pool or not right._contact_pool:
@@ -79,7 +138,8 @@ def verify_contract(left, right):
         raise ValueError("Unreviewed contact algorithm")
     if left.precision.value != "fp64" or right.precision.value != "fp64":
         raise ValueError("Comparison requires native FP64")
-    _exact(model_arrays(left.model), model_arrays(right.model))
+    model_inputs = _physical_model_arrays(left)
+    _exact(model_inputs, _physical_model_arrays(right))
     _exact(left._physics_values, right._physics_values)
     _exact(left._sdf_fields, right._sdf_fields)
     _exact(left._kinematics._source_values, right._kinematics._source_values)
@@ -125,7 +185,7 @@ def verify_contract(left, right):
     _exact({"resources": b["contact_resources"]}, {"resources": resources})
     # Bind the exact compared values, rather than asserting two different
     # aggregate configuration hashes happen to represent the same physics.
-    common = {"model." + name: value for name, value in model_arrays(left.model).items()}
+    common = {"model." + name: value for name, value in model_inputs.items()}
     for prefix, values in (("config", a), ("sampling", left._contact.actor_samples.fields)):
         common.update({prefix + "." + name: value for name, value in values.items()})
     common.update({"legacy_sampling." + name: value for name, value in legacy_sampling.items()})
@@ -134,6 +194,7 @@ def verify_contract(left, right):
     common.update({"effective_policy." + name: value for name, value in dataclasses.asdict(left._config).items()})
     return {
         "physical_contract_sha256": _configuration_digest(common).hex(),
+        "model_identity_adapter": MODEL_IDENTITY_ADAPTER,
         "algorithm_differences": {
             name: {"legacy": None, "pooled": serial(b[name])} for name in sorted(ALGORITHM_FIELDS)
         },
