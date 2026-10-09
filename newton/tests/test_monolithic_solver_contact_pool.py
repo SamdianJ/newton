@@ -16,16 +16,129 @@ from newton._src.solvers.monolithic.contact_pipeline import _PooledContactObject
 from newton._src.solvers.monolithic.linear_types import MonolithicLinearGeneration, MonolithicLinearStatus
 from newton.tests.test_monolithic_contact_actor_pairs import physical
 from newton.tests.test_monolithic_contact_batch import batch_matrix
-from newton.tests.test_monolithic_solver_actor_contacts import contact_scene, contact_solver, contact_state
+from newton.tests.test_monolithic_solver_actor_contacts import contact_scene, contact_solver, contact_state, frame
 from newton.tests.test_monolithic_solver_coupled import assert_snapshot, independent_objective, scene, snapshot, solver
+from newton.tests.test_monolithic_solver_rigid import assert_physical
 from newton.tests.unittest_utils import add_function_test, get_test_devices
 from scripts.monolithic_reference.actor_contact_oracle import fixture_terms
+from scripts.monolithic_reference.compare_contact_dataflows import _check_contact, audit_contact_state, verify_contract
+from scripts.monolithic_reference.contact_full_oracle import evaluate_stream
 
 
 def pooled_solver(model, **options):
     """Select B2 at the existing private constructor seam, before any full contact allocation."""
     with patch.object(solver_monolithic, "ContactObjective", _PooledContactObjective):
         return contact_solver(model, **options)
+
+
+def sphere_static_scene(device):
+    """Keep the existing static recipe and loads while selecting its supported sphere source."""
+    model = contact_scene(device, "R-static")
+    shape = int(np.flatnonzero(model.shape_body.numpy() == model.body_label.index("rigid_0"))[0])
+    kinds, scales = model.shape_type.numpy(), model.shape_scale.numpy()
+    kinds[shape], scales[shape] = 3, [0.01, 0, 0]
+    model.shape_type.assign(kinds)
+    model.shape_scale.assign(scales)
+    return model
+
+
+def check_sphere_publication(test, run, state, start):
+    """Check the live accepted ledger and published endpoints against independent full mathematics."""
+    c = run._contact
+    stiffness, mu, velocity, width, radius = c.parameters
+    full = evaluate_stream(
+        run.model,
+        run._actors,
+        physical(state),
+        start,
+        c.contact_model,
+        radius=radius,
+        stiffness=stiffness,
+        mu=mu,
+        width=width,
+        falloff=velocity * 0.001,
+        alignment_policy=c.alignment_policy,
+    )
+    test.assertEqual(full["full_count"], 5952)
+    test.assertEqual(c.count, full["full_count"])
+    expected = full["full"]
+    sparse = expected["tangent"]
+    tangent = np.zeros(sparse["shape"])
+    tangent[sparse["row"], sparse["column"]] = sparse["value"]
+    force = run.get_contact_forces(state)
+    errors = _check_contact(
+        {
+            "energy": c.energy.numpy().reshape(-1, 2).sum(axis=0),
+            "residual": c.residual.numpy(),
+            "tangent": batch_matrix(c._batch),
+            "particle_force": force.particle_force,
+            "body_wrench": force.body_wrench,
+            "joint_force": force.joint_force,
+        },
+        {**expected, "tangent": tangent},
+    )
+    static = np.zeros_like(expected["static_wrench"])
+    bodies = run.model.shape_body.numpy()
+    for pair in run.last_stats.variational["actor_contact_pairs"]:
+        for shape, wrench in zip((pair["source"], pair["target"]), pair["world_wrench"], strict=True):
+            if bodies[shape] < 0:
+                static[shape] += wrench
+    np.testing.assert_allclose(static, expected["static_wrench"], rtol=1e-8, atol=1e-10)
+    test.assertGreater(np.linalg.norm(force.body_wrench), 1e-4)
+    test.assertEqual(force.force_generation, run.last_stats.step_generation)
+    test.assertTrue(force.force_valid)
+    test.assertEqual(c.pool.records.dropped.numpy()[0], 0)
+    test.assertFalse(c.evaluation_diagnostics()["tainted"])
+    return {"full_count": full["full_count"], "min_gap": full["min_gap"], "errors": errors}
+
+
+def test_sphere_steps(test, device):
+    """Advance sphere-source legacy/pool trajectories independently under original gates and all laws."""
+    for graph in (False, True) if device.is_cuda else (False,):
+        for law in ("C-EE", "C-IE", "C-II"):
+            with test.subTest(graph=graph, law=law):
+                options = {"law": law, "mode": "production", "graph": graph}
+                legacy = contact_solver(sphere_static_scene(device), **options)
+                run = pooled_solver(sphere_static_scene(device), **options)
+                verify_contract(legacy, run)
+                states = [contact_state(owner, "R-static") for owner in (legacy, run)]
+                audit = contact_solver(sphere_static_scene(device), **options)
+                for _ in range(2):
+                    starts = [physical(state) for state in states]
+                    for owner, state in zip((legacy, run), states, strict=True):
+                        owner.step(state, state, owner.model.control(), dt=0.001)
+                        test.assertTrue(owner.last_stats.converged, owner.last_stats)
+                        test.assertFalse(owner.last_stats.rolled_back)
+                        owner._states.validate(state)
+                    assert_physical(test, frame(legacy, states[0]), frame(run, states[1]))
+                    check_sphere_publication(test, run, states[1], starts[1])
+                    result = audit_contact_state(audit, physical(states[0]), starts[0], 0.001)
+                    test.assertEqual(result["full_count"], 5952)
+
+
+def test_sphere_checkpoint(test, device):
+    """Resume active sphere contacts into a distinct output and retain exact physical authority and forces."""
+    for law in ("C-EE", "C-IE", "C-II"):
+        options = {"law": law, "mode": "production", "graph": device.is_cuda}
+        run = pooled_solver(sphere_static_scene(device), **options)
+        state = contact_state(run, "R-static")
+        run.step(state, state, run.model.control(), dt=0.001)
+        test.assertTrue(run.last_stats.converged, run.last_stats)
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "sphere.npz"
+            run.save_checkpoint(state, path)
+            resumed = pooled_solver(sphere_static_scene(device), **options)
+            restored = resumed.create_state(dt=0.001)
+            resumed.load_checkpoint(restored, path)
+            assert_snapshot(test, restored, snapshot(state))
+            start = physical(state)
+            run.step(state, state, run.model.control(), dt=0.001)
+            output = resumed.create_state(dt=0.001)
+            resumed.step(restored, output, resumed.model.control(), dt=0.001)
+            test.assertTrue(run.last_stats.converged, run.last_stats)
+            test.assertTrue(resumed.last_stats.converged, resumed.last_stats)
+            assert_snapshot(test, output, snapshot(state))
+            check_sphere_publication(test, resumed, output, start)
 
 
 def test_pooled_steps(test, device):
@@ -303,6 +416,8 @@ class TestSolverContactPool(unittest.TestCase):
 
 for _device in get_test_devices():
     for _test in (
+        test_sphere_steps,
+        test_sphere_checkpoint,
         test_pooled_steps,
         test_pooled_same_state,
         test_pooled_assembly_generation,
