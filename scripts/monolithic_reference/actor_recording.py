@@ -55,6 +55,8 @@ def _context(directory, expected_run=None):
     from scripts.monolithic_reference import run_actor_coupling as scene  # noqa: PLC0415
 
     metadata = json.loads((directory / "configuration.json").read_text())
+    schema = metadata.get("schema")
+    pooled = schema == "actor-coupling-recording/v2"
     if metadata.keys() != {
         "schema",
         "case",
@@ -68,10 +70,10 @@ def _context(directory, expected_run=None):
         "roles",
         "sampling",
         "execution",
-    }:
+    } | ({"algorithm"} if pooled else set()):
         raise ValueError("Unknown or missing actor recording metadata")
     if (
-        metadata["schema"] != "actor-coupling-recording/v1"
+        schema not in ("actor-coupling-recording/v1", "actor-coupling-recording/v2")
         or metadata["case"] != scene.load_case()
         or metadata["fixture_sha256"] != sha(scene.CASE)
         or type(metadata["before"]) is not bool
@@ -94,8 +96,41 @@ def _context(directory, expected_run=None):
     ):
         raise ValueError("Unsupported actor recording execution route")
     run = expected_run
+    algorithm = metadata.get("algorithm", {})
+    if pooled and (
+        type(algorithm) is not dict
+        or set(algorithm) != {"contact_dataflow", "contact_factor_capacity", "spatial"}
+        or algorithm["contact_dataflow"] not in ("pooled", "spatial")
+        or type(algorithm["contact_factor_capacity"]) is not int
+        or algorithm["contact_factor_capacity"] < 0
+    ):
+        raise ValueError("Invalid recorded contact algorithm")
+    if pooled and algorithm["contact_dataflow"] == "spatial":
+        spatial = algorithm["spatial"]
+        if (
+            type(spatial) is not dict
+            or set(spatial) != {"candidate_capacity", "law_margin"}
+            or type(spatial["candidate_capacity"]) is not int
+            or not 0 <= spatial["candidate_capacity"] < 2**31
+            or type(spatial["law_margin"]) not in (int, float)
+            or not np.isfinite(spatial["law_margin"])
+            or spatial["law_margin"] < 0
+        ):
+            raise ValueError("Invalid recorded spatial parameters")
+    elif pooled and algorithm["spatial"] is not None:
+        raise ValueError("Complete-candidate recordings cannot declare spatial parameters")
     if run is None:
-        run = scene.make_solver(scene.build_model(device="cpu", before=metadata["before"]), graph=False)
+        # Batch/resource identity is device-specific for pooled routes. Rebuild
+        # the recorded route explicitly rather than weakening its digest guard.
+        device = execution["device"] if pooled else "cpu"
+        run = scene.make_solver(
+            scene.build_model(device=device, before=metadata["before"]),
+            graph=execution["graph"] if pooled else False,
+            mode=execution["mode"] if pooled else None,
+            **algorithm,
+        )
+    if pooled != run._contact_pool or (pooled and algorithm != scene.contact_algorithm(run)):
+        raise ValueError("Recorded contact algorithm or resources differ")
     model = run.model
     if run._states.precision_bits != 64:
         raise ValueError("Actor coupling recording requires native FP64")
@@ -121,7 +156,8 @@ def _context(directory, expected_run=None):
         permutation[actor.dof_start : actor.dof_start + actor.dof_count] = np.arange(
             target.dof_start, target.dof_start + target.dof_count
         )
-    expected_sampling["columns"] = permutation[expected_sampling["columns"]].tolist()
+    if not pooled:
+        expected_sampling["columns"] = permutation[expected_sampling["columns"]].tolist()
     if metadata["sampling"] != expected_sampling:
         raise ValueError("Recorded sampling identity or capacity differs")
     template = state_arrays(run.create_state(dt=metadata["case"]["dt"]))
@@ -412,6 +448,10 @@ def check_actor(directory, *, expected_run=None, require_complete=True):
                     "logged actual Control",
                 )
                 _equal(row["phase"], phase, "logged phase")
+                if (run._contact_pool and "contact_pool" not in row["stats"]["variational"]) or (
+                    run._contact_spatial and "contact_spatial" not in row["stats"]["variational"]
+                ):
+                    raise ValueError("Missing recorded contact capacity diagnostics")
                 scene.validate_row(row, metadata["case"])
                 _close(row["stats"]["min_det_f"], determinant, "logged determinant", atol=1e-8)
                 displacement = np.linalg.norm(frame["particle_q"] - run.model.particle_q.numpy(), axis=1).max()
@@ -578,6 +618,8 @@ def compare_actor(
     left_meta, right_meta = [
         json.loads((Path(path) / "configuration.json").read_text()) for path in (reference, actual)
     ]
+    if left_meta.get("algorithm") != right_meta.get("algorithm"):
+        raise ValueError("Different contact algorithms require an explicit dataflow comparison")
     left = (f for f in actor_frames(Path(reference), left_meta) if int(f["frame_steps"]) >= start)
     right = actor_frames(Path(actual), right_meta)
     limits = load_case()["equivalence"]

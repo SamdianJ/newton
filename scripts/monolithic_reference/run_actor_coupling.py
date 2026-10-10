@@ -11,7 +11,10 @@ import platform
 import subprocess
 import sys
 import time
+from contextlib import nullcontext
+from functools import partial
 from pathlib import Path
+from unittest.mock import patch
 
 import numpy as np
 import warp as wp
@@ -155,24 +158,56 @@ def build_model(*, device="cuda:0", before=False):
     return model
 
 
-def make_solver(model, *, mode=None, graph=None):
+def make_solver(model, *, mode=None, graph=None, contact_dataflow="legacy", spatial=None, contact_factor_capacity=None):
     """Select an execution route without modifying physical solver options."""
+    if contact_dataflow not in ("legacy", "pooled", "spatial"):
+        raise ValueError("Unsupported actor contact dataflow")
+    if (contact_dataflow == "spatial") != (spatial is not None):
+        raise ValueError("Spatial actor experiments require explicit capacity and law margin")
+    context = nullcontext()
+    if contact_dataflow != "legacy":
+        from newton._src.solvers.monolithic.contact_pipeline import (  # noqa: PLC0415
+            _PooledContactObjective,
+            _SpatialContactObjective,
+        )
+
+        objective = _PooledContactObjective
+        if contact_dataflow == "spatial":
+            if type(spatial) is not dict or set(spatial) != {"candidate_capacity", "law_margin"}:
+                raise ValueError("Invalid spatial actor experiment parameters")
+            objective = partial(_SpatialContactObjective, **spatial)
+        context = patch("newton._src.solvers.monolithic.solver_monolithic.ContactObjective", objective)
     case = load_case()
     options = dict(case["solver"])
     if mode is not None:
         options["pcg_mode"] = mode
     if graph is not None:
         options["use_cuda_graph"] = graph
-    return SolverMonolithic(
-        model,
-        **options,
-        contact_stiffness=case["contact_stiffness"],
-        normal_smoothing=case["normal_smoothing_m"],
-        friction_coefficient=case["friction_coefficient"],
-        friction_velocity_scale=case["friction_velocity_scale"],
-        joint_terms=SolverMonolithic.JointTerms(implicit_pd=True),
-        tet_rest_density=wp.full(model.tet_count, case["density_kg_m3"], dtype=float, device=model.device),
-    )
+    with context:
+        return SolverMonolithic(
+            model,
+            **options,
+            contact_factor_capacity=contact_factor_capacity,
+            contact_stiffness=case["contact_stiffness"],
+            normal_smoothing=case["normal_smoothing_m"],
+            friction_coefficient=case["friction_coefficient"],
+            friction_velocity_scale=case["friction_velocity_scale"],
+            joint_terms=SolverMonolithic.JointTerms(implicit_pd=True),
+            tet_rest_density=wp.full(model.tet_count, case["density_kg_m3"], dtype=float, device=model.device),
+        )
+
+
+def contact_algorithm(run):
+    """Record the exact private pooled constructor recipe, including its resource budget."""
+    return {
+        "contact_dataflow": "spatial" if run._contact_spatial else "pooled",
+        "contact_factor_capacity": int(run._coupled_config["guard_capacity"][1]),
+        "spatial": (
+            {"candidate_capacity": run._contact.candidate_capacity, "law_margin": run._contact.law_margin}
+            if run._contact_spatial
+            else None
+        ),
+    }
 
 
 def roles(model, table):
@@ -209,6 +244,17 @@ def roles(model, table):
 def sampling(run):
     """Record fixed keys, weights, support and allocation bounds once."""
     c = run._contact
+    if run._contact_pool:
+        # Compact metadata is authenticated directly; pooled execution has no
+        # permanent per-contact expanded support table to archive.
+        return {
+            "fields": {name: value.tolist() for name, value in c.actor_samples.fields.items()},
+            "keys": c.count,
+            "triplets": c.triplet_capacity,
+            # Pool payload only; lazy query/reference scratch is not part of
+            # fixed sampling identity or a total-device-memory measurement.
+            "pool_bytes": sum(a.size * wp.types.type_size_in_bytes(a.dtype) for a in c.pool.buffers()),
+        }
     sample = c.actor_contact.samples
     return {
         "fields": {name: value.tolist() for name, value in sample.fields.items()},
@@ -226,17 +272,25 @@ def model_arrays(model):
     return {n: a.numpy() for n, a in vars(model).items() if isinstance(a, wp.array) and n not in caches}
 
 
-def measure(run, state, step):
+def measure(run, state, step, *, metadata=None):
     """Measure accepted native geometry and both endpoint world-origin wrenches."""
     c = run._contact
     gaps = []
-    if c.legacy_count:
+    if not run._contact_pool and c.legacy_count:
         shapes = c.shapes.numpy()
         gaps.extend(c.current.distance.numpy() - c.parameters[4] - c.margins.numpy()[np.resize(shapes, c.legacy_count)])
     if c.actor_contact is not None:
         gaps.extend(c.actor_contact.current.distance.numpy() - c.actor_contact.offsets.numpy())
     pairs = []
     role_map = roles(run.model, run._actors)
+    if run._contact_pool:
+        from scripts.monolithic_reference.actor_recording import _penetration  # noqa: PLC0415
+
+        # This is an offline full-sampling geometry guard, independent of the
+        # frozen query/admission set. It does not repair missing contributions.
+        penetration = _penetration(state_arrays(state), metadata or {"roles": role_map, "sampling": sampling(run)}, run)
+    else:
+        penetration = max(0.0, -min(gaps, default=0.0))
     matrix = run._linear.densify_for_test(generation=run._generation).raw_matrix
     for row in run.last_stats.variational["actor_contact_pairs"]:
         pair = dict(row)
@@ -274,7 +328,7 @@ def measure(run, state, step):
         "stats": stats,
         "unmeasured_stats": unmeasured,
         "pairs": pairs,
-        "penetration": max(0.0, -min(gaps, default=0.0)),
+        "penetration": penetration,
         "tet_displacement": float(
             np.linalg.norm(state.particle_q.numpy() - run.model.particle_q.numpy(), axis=1).max()
         ),
@@ -303,6 +357,12 @@ def validate_row(row, case):
     if s.keys() != {f.name for f in fields} or set(row["unmeasured_stats"]) != missing:
         raise ValueError("Incomplete Stats or undeclared unmeasured diagnostics")
     _finite_diagnostics(s)
+    pool = s["variational"].get("contact_pool")
+    spatial = s["variational"].get("contact_spatial")
+    if pool is not None and (pool["tainted"] is not False or pool["dropped"] != 0):
+        raise ValueError("Contact capacity truncation cannot qualify an actor recording")
+    if spatial is not None and (spatial["tainted"] is not False or spatial["capacity_dropped"] != 0):
+        raise ValueError("Spatial capacity truncation cannot qualify an actor recording")
     if (
         s["converged"] is not True
         or s["rolled_back"]
@@ -447,6 +507,8 @@ def record_run(run, state, output, *, before=False, start_step=0, end_step=2000,
         "sampling": sampling(run),
         "execution": {"device": str(run.model.device), "mode": run.pcg_mode.value, "graph": run._use_cuda_graph},
     }
+    if run._contact_pool:
+        metadata.update(schema="actor-coupling-recording/v2", algorithm=contact_algorithm(run))
     save(output / "configuration.json", metadata)
     np.savez_compressed(output / "model.npz", **model_arrays(run.model))
     save(
@@ -532,7 +594,7 @@ def record_run(run, state, output, *, before=False, start_step=0, end_step=2000,
                     if run.last_stats.rolled_back
                     else "STOPPED_ACCEPTED"
                 )
-                row = measure(run, state, step)
+                row = measure(run, state, step, metadata=metadata)
                 row.update(target_q=q, target_qd=v, control_target_q=cq, control_target_qd=cv, phase=phase)
                 log.write(json.dumps(serial(row), allow_nan=False) + "\n")
                 log.flush()
@@ -594,7 +656,20 @@ def main():
         "--output", type=Path, required=True, help="New directory for the manually started 5000-step comparison"
     )
     parser.add_argument("--retain-recordings", choices=("all", "failures"), default="failures")
+    parser.add_argument("--contact-dataflow", choices=("legacy", "pooled", "spatial"), default="legacy")
+    parser.add_argument("--candidate-capacity", type=int)
+    parser.add_argument("--law-margin", type=float)
+    parser.add_argument("--contact-factor-capacity", type=int)
     args = parser.parse_args()
+    spatial = None
+    if args.contact_dataflow == "spatial":
+        if any(v is None for v in (args.candidate_capacity, args.law_margin, args.contact_factor_capacity)):
+            parser.error("Spatial acceptance requires explicit candidate capacity, law margin and factor budget")
+        spatial = {"candidate_capacity": args.candidate_capacity, "law_margin": args.law_margin}
+    elif args.candidate_capacity is not None or args.law_margin is not None:
+        parser.error("Spatial parameters require --contact-dataflow spatial")
+    elif args.contact_dataflow == "legacy" and args.contact_factor_capacity is not None:
+        parser.error("The frozen legacy command retains its original factor budget")
     args.output.mkdir(parents=True, exist_ok=False)
     from scripts.monolithic_reference.check_recording import check_actor, compare_actor  # noqa: PLC0415
 
@@ -602,7 +677,12 @@ def main():
     try:
         for name, before, start in (("primary", False, 0), ("restored", False, 1000), ("reordered", True, 0)):
             reports[name] = {"status": "IN_PROGRESS"}
-            run = make_solver(build_model(before=before))
+            run = make_solver(
+                build_model(before=before),
+                contact_dataflow=args.contact_dataflow,
+                spatial=spatial,
+                contact_factor_capacity=args.contact_factor_capacity,
+            )
             state = run.create_state(dt=load_case()["dt"])
             if start:
                 restore_midpoint(run, state, args.output / "primary/recording/midpoint.npz", start)
