@@ -194,6 +194,7 @@ class FrankaGrasp:
         globalization="ArmijoOrResNorm",
         precision="fp64",
         fp32_absolute_tolerance=None,
+        solver_factory=SolverMonolithic,
     ):
         cache = Path(cache)
         cache.mkdir(parents=True, exist_ok=True)
@@ -210,7 +211,7 @@ class FrankaGrasp:
             duration=float(TIMES[-1]),
         )
         widths = (0.01,) * 7 + (0.001,) * 2
-        self.solver = SolverMonolithic(
+        self.solver = solver_factory(
             self.model,
             contact_model=law,
             globalization=globalization,

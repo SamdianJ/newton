@@ -76,7 +76,7 @@ def run(args):
     payload = json.loads(args.trajectory.read_text())
     model, scene, mapping, curve, terms, trajectory, palm = build_recorded(payload)
     smooth = build_smooth_sdf(model, qualified_directory=ASSETS / "sharpa/geometry-rebuilt")
-    solver = SolverMonolithic(
+    solver = getattr(args, "solver_factory", SolverMonolithic)(
         model,
         contact_model="C-IE",
         globalization="ArmijoOrResNorm",
@@ -105,6 +105,9 @@ def run(args):
     newton.eval_fk(model, source.joint_q, source.joint_qd, source)
     state = solver.create_state(dt=trajectory.dt, source=source)
     expected_digest = getattr(args, "expected_config_digest", None)
+    certify = getattr(args, "certify_configuration", None)
+    if certify is not None:
+        certify(solver)
     if expected_digest is not None and solver._kinematics.digest.hex() != expected_digest:
         raise ValueError("Physical configuration digest changed")
     expected_controls = getattr(args, "expected_controls", None)
@@ -201,7 +204,7 @@ def run(args):
 
     solver._linear.solve_pcg = measured
     with gzip.open(output / "steps.jsonl.gz", "wt") as log:
-        for step in range(1, trajectory.steps + 1):
+        for step in range(1, min(getattr(args, "max_steps", None) or trajectory.steps, trajectory.steps) + 1):
             q, v, desired, phase = targets(trajectory, curve, mapping, step * trajectory.dt)
             control.joint_target_q.assign(q)
             control.joint_target_qd.assign(v)
@@ -228,7 +231,8 @@ def run(args):
                 "pcg_calls": list(calls),
             }
             if not stats.rolled_back:
-                fields = measure(solver, state)
+                contact_recorder = getattr(args, "contact_recorder", None)
+                fields = contact_recorder(solver, state) if contact_recorder else measure(solver, state)
                 com = np.average(fields["x"], axis=0, weights=weights)
                 body_force = state._monolithic_coupled.contact_body_force.numpy()
                 palm_pose = solver._kinematics.poses.numpy()[palm]
@@ -244,7 +248,12 @@ def run(args):
                     slip=fields["slip"],
                     friction_work=fields["friction_work"],
                     force_balance=fields["force_balance"],
-                    mask=mask_statistics(solver._contact),
+                    mask=fields["mask"] if contact_recorder else mask_statistics(solver._contact),
+                    **(
+                        {name: fields[name] for name in ("full_system", "contact_pool", "contact_spatial")}
+                        if contact_recorder
+                        else {}
+                    ),
                     force_generation=int(state._monolithic_coupled.force_generation.numpy()[0]),
                     force_valid=int(state._monolithic_coupled.force_valid.numpy()[0]),
                 )

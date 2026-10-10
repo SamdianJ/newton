@@ -43,17 +43,20 @@ def select_cases(profile, filters=()):
 
 def aggregate(results, filtered):
     """Never grant profile qualification to a filtered run."""
-    if any(row["status"] != "PASS" for row in results):
+    if any(row["status"] not in ("PASS", "PARTIAL") for row in results):
         return "FAIL"
-    identities = {(row.get("commit"), row.get("source_sha256"), row.get("input_manifest_sha256")) for row in results}
+    identities = {
+        (row.get("commit"), row.get("source_sha256"), row.get("input_manifest_sha256"), row.get("contact_dataflow"))
+        for row in results
+    }
     if len(identities) > 1:
         return "FAIL"
-    return "PARTIAL" if filtered else "PASS"
+    return "PARTIAL" if filtered or any(row["status"] == "PARTIAL" for row in results) else "PASS"
 
 
 def finalize_case(destination, receipt, exit_code, retention):
     """Retain failure recordings and remove only successful newly generated recordings."""
-    status = "PASS" if exit_code == 0 and receipt["status"] == "PASS" else "FAIL"
+    status = receipt["status"] if exit_code == 0 and receipt["status"] in ("PASS", "PARTIAL") else "FAIL"
     recording = destination / "recording"
     receipt["retention"] = retention
     receipt["recording_retained"] = recording.is_dir()
@@ -155,7 +158,7 @@ def reference_binding(case):
     return reference, controls, native_controls, envelopes, {**entry, "comparison_policy": policy}
 
 
-def worker(case, output):
+def worker(case, output, *, contact_dataflow="legacy", max_steps=None):
     """Run a complete scene and validate recordings against the frozen envelopes."""
     output.mkdir(parents=True, exist_ok=False)
     receipt = {"case": case, "status": "FAIL", "source_root": str(ROOT)}
@@ -175,6 +178,14 @@ def worker(case, output):
         import warp as wp  # noqa: PLC0415
 
         from scripts.monolithic_reference.check_recording import check, compare  # noqa: PLC0415
+        from scripts.monolithic_reference.robot_contact_acceptance import (  # noqa: PLC0415
+            FrozenRobotFactory,
+            check_robot_reports,
+        )
+
+        factory = FrozenRobotFactory(case["id"].split("--")[0], dataflow=contact_dataflow)
+        certificate = None
+        limit = min(max_steps, case["steps"]) if max_steps is not None else case["steps"]
 
         if not wp.get_device("cuda:0").is_cuda:
             raise ValueError("P4 profiles require CUDA")
@@ -196,10 +207,14 @@ def worker(case, output):
                 asset_cache=INPUTS / "franka/sdf-cache",
                 law=case["law"],
                 globalization=case["globalization"],
+                solver_factory=factory,
+                contact_recorder=factory.measure if contact_dataflow == "spatial" else None,
+                max_steps=max_steps,
             )
             example = Example(ViewerNull(), args)
-            if example.case.solver._kinematics.digest.hex() != binding["config_digest"]:
-                raise ValueError("Physical configuration digest changed")
+            certificate = factory.certify(binding["config_digest"])
+            receipt["configuration_certificate"] = certificate.receipt()
+            receipt["recipe"] = factory.recipe()
             samples = np.asarray(
                 [targets(example.case.high, example.case.low, i * 0.001)[:2] for i in range(case["steps"] + 1)],
                 dtype=np.float32,
@@ -208,7 +223,8 @@ def worker(case, output):
                 raise ValueError("Constructed controls differ from frozen controls")
             while not example.closed:
                 example.step()
-            example.test_final()
+            if max_steps is None:
+                example.test_final()
         else:
             from newton.examples.softbody.monolithic_sharpa_recorded import run  # noqa: PLC0415
 
@@ -216,27 +232,48 @@ def worker(case, output):
             args = SimpleNamespace(
                 output=recording,
                 trajectory=INPUTS / "sharpa/recorded-control.json",
-                expected_config_digest=binding["config_digest"],
                 expected_controls=controls,
+                solver_factory=factory,
+                contact_recorder=factory.measure if contact_dataflow == "spatial" else None,
+                max_steps=max_steps,
             )
-            if not run(args):
+
+            def certify(solver):
+                nonlocal certificate
+                if solver is not factory.run:
+                    raise ValueError("Unexpected recorded robot solver")
+                certificate = factory.certify(binding["config_digest"])
+                receipt["configuration_certificate"] = certificate.receipt()
+                receipt["recipe"] = factory.recipe()
+
+            args.certify_configuration = certify
+            complete = run(args)
+            if not complete and max_steps is None:
                 raise ValueError("Sharpa did not publish its complete trajectory")
-        receipt["recording"] = check(recording, case["steps"])
-        receipt["comparison"] = compare(
-            reference,
-            recording,
-            envelopes,
-            legacy_fp64=True,
-            native_controls=native_controls,
-            actor_layout_migration=True,
-        )
-        if receipt["comparison"]["status"] not in ("PASS_EXACT", "PASS_FROZEN_ENVELOPE"):
-            raise ValueError("Recording differs outside the frozen envelope")
+        receipt["recording"] = check(recording, limit, require_complete=max_steps is None)
+        if contact_dataflow == "spatial":
+            receipt["full_system"] = check_robot_reports(recording, factory.run, limit)
+        if max_steps is None:
+            receipt["comparison"] = compare(
+                reference,
+                recording,
+                envelopes,
+                legacy_fp64=True,
+                native_controls=native_controls,
+                actor_layout_migration=True,
+                configuration_certificate=certificate,
+            )
+            if receipt["comparison"]["status"] not in ("PASS_EXACT", "PASS_FROZEN_ENVELOPE"):
+                raise ValueError("Recording differs outside the frozen envelope")
+        else:
+            receipt["comparison"] = {"status": "NOT_RUN_PREFIX_ONLY"}
         actual = json.loads((recording / "configuration.json").read_text())
-        if actual["config_digest"] != binding["config_digest"]:
+        if actual["config_digest"] != certificate.validate()[1]:
             raise ValueError("Physical configuration digest changed")
         receipt["modules"] = module_origins(ROOT, source_hashes)
-        receipt["status"] = "PASS"
+        if any(not (ROOT / name).is_file() or sha(ROOT / name) != value for name, value in source_hashes.items()):
+            raise ValueError("Source changed during robot acceptance")
+        receipt["status"] = "PASS" if max_steps is None else "PARTIAL"
     except Exception:
         receipt["exception"] = traceback.format_exc()
     finally:
@@ -244,7 +281,7 @@ def worker(case, output):
         if scene_summary.is_file():
             receipt["scene_summary"] = json.loads(scene_summary.read_text())
         (output / "receipt.json").write_text(json.dumps(receipt, indent=2) + "\n")
-    return int(receipt["status"] != "PASS")
+    return int(receipt["status"] not in ("PASS", "PARTIAL"))
 
 
 def main():
@@ -260,7 +297,16 @@ def main():
         help="Keep compact success receipts and full failure recordings by default",
     )
     parser.add_argument("--worker", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument(
+        "--contact-dataflow",
+        choices=("legacy", "spatial"),
+        default="legacy",
+        help="Explicit frozen B3 experimental recipe; default legacy Q1",
+    )
+    parser.add_argument("--max-steps", type=int, help="Bounded smoke only; always PARTIAL, no trajectory qualification")
     args = parser.parse_args()
+    if args.max_steps is not None and args.max_steps <= 0:
+        parser.error("--max-steps must be positive")
     try:
         selected = select_cases(args.profile, args.case)
     except ValueError as error:
@@ -273,7 +319,9 @@ def main():
     if args.worker:
         if len(selected) != 1:
             parser.error("Worker requires exactly one case")
-        return worker(selected[0], args.output.resolve())
+        return worker(
+            selected[0], args.output.resolve(), contact_dataflow=args.contact_dataflow, max_steps=args.max_steps
+        )
     args.output.mkdir(parents=True, exist_ok=False)
     results = []
     for case in selected:
@@ -290,7 +338,11 @@ def main():
             "--worker",
             "--output",
             str(destination),
+            "--contact-dataflow",
+            args.contact_dataflow,
         ]
+        if args.max_steps is not None:
+            command += ["--max-steps", str(args.max_steps)]
         with (args.output / f"{case['id']}.log").open("w") as log:
             process = subprocess.run(command, cwd=ROOT, stdout=log, stderr=subprocess.STDOUT, check=False)
         path = destination / "receipt.json"
@@ -309,6 +361,7 @@ def main():
                     json.dumps(receipt.get("source_hashes", {}), sort_keys=True).encode()
                 ).hexdigest(),
                 "input_manifest_sha256": receipt.get("input_manifest_sha256"),
+                "contact_dataflow": args.contact_dataflow,
             }
         )
         summary = {
@@ -316,6 +369,8 @@ def main():
             "status": aggregate(results, bool(args.case)),
             "complete": len(results) == len(selected),
             "filtered": bool(args.case),
+            "contact_dataflow": args.contact_dataflow,
+            "max_steps": args.max_steps,
             "cases": results,
         }
         if not summary["complete"] and summary["status"] == "PASS":

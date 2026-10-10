@@ -28,7 +28,15 @@ class Example:
         self.output = Path(args.output) if args.output else None
         if self.output:
             self.output.mkdir(parents=True, exist_ok=False)
-        self.case = FrankaGrasp(args.asset_cache, device=args.device, law=args.law, globalization=args.globalization)
+        self.case = FrankaGrasp(
+            args.asset_cache,
+            device=args.device,
+            law=args.law,
+            globalization=args.globalization,
+            **({"solver_factory": args.solver_factory} if hasattr(args, "solver_factory") else {}),
+        )
+        self.contact_recorder = getattr(args, "contact_recorder", None)
+        self.step_limit = min(getattr(args, "max_steps", None) or round(TIMES[-1] / DT), round(TIMES[-1] / DT))
         self.viewer = viewer
         self.viewer.set_model(self.case.model)
         self.viewer.set_camera(pos=wp.vec3(1.35, -1.2, 0.8), pitch=-22.0, yaw=135.0)
@@ -41,9 +49,12 @@ class Example:
         self.weights = self.case.model.particle_mass.numpy().astype(float)
         self.initial_com = np.average(self.case.state.particle_q.numpy(), axis=0, weights=self.weights)
         c = self.case.solver._contact
-        self.plane_keys = self.case.model.shape_type.numpy()[
-            c.shapes.numpy()[np.arange(c.count) % c.shapes.size]
-        ] == int(newton.GeoType.PLANE)
+        self.plane_keys = (
+            None
+            if self.contact_recorder
+            else self.case.model.shape_type.numpy()[c.shapes.numpy()[np.arange(c.count) % c.shapes.size]]
+            == int(newton.GeoType.PLANE)
+        )
         if self.output:
             self.log = gzip.open(self.output / "steps.jsonl.gz", "wt")
             save(self.output / "configuration.json", self.case.metadata)
@@ -109,7 +120,7 @@ class Example:
         if self.closed:
             return
         for _ in range(10):
-            if self.case.steps >= round(TIMES[-1] / DT):
+            if self.case.steps >= self.step_limit:
                 break
             before = state_arrays(self.case.state) if self.output else None
             start = time.perf_counter()
@@ -131,16 +142,22 @@ class Example:
             if not stats.rolled_back:
                 state = self.case.state
                 c = self.case.solver._contact
-                forces = -np.einsum("kij,kj->ki", c.current.rotation.numpy(), c.local_residual.numpy())
-                gap = c.current.distance.numpy() - c.parameters[4]
-                gap -= c.margins.numpy()[c.shapes.numpy()[np.arange(c.count) % c.shapes.size]]
+                if self.contact_recorder:
+                    contact_fields = self.contact_recorder(self.case.solver, state)
+                else:
+                    forces = -np.einsum("kij,kj->ki", c.current.rotation.numpy(), c.local_residual.numpy())
+                    gap = c.current.distance.numpy() - c.parameters[4]
+                    gap -= c.margins.numpy()[c.shapes.numpy()[np.arange(c.count) % c.shapes.size]]
+                    contact_fields = {
+                        "ground_force": forces[self.plane_keys].sum(axis=0),
+                        "robot_force": forces[~self.plane_keys].sum(axis=0),
+                        "penetration": max(0.0, float(-gap.min())),
+                    }
                 q = state.joint_q.numpy()
                 row.update(
                     cube_com=np.average(state.particle_q.numpy(), axis=0, weights=self.weights),
                     min_cube_z=float(state.particle_q.numpy()[:, 2].min()),
-                    ground_force=forces[self.plane_keys].sum(axis=0),
-                    robot_force=forces[~self.plane_keys].sum(axis=0),
-                    penetration=max(0.0, float(-gap.min())),
+                    **contact_fields,
                     finger_positions=q[7:].copy(),
                     finger_asymmetry=abs(float(q[7] - q[8])),
                     force_valid=int(state._monolithic_coupled.force_valid.numpy()[0]),
@@ -174,7 +191,7 @@ class Example:
                 raise RuntimeError(f"Franka step {row['step']} rolled back: {stats.failure_reason}")
             if self.case.steps % 250 == 0:
                 print(self.case.steps, self.case.phase, flush=True)
-        if self.case.steps >= round(TIMES[-1] / DT):
+        if self.case.steps >= self.step_limit:
             self.close()
 
     def close(self):

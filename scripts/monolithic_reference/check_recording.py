@@ -66,7 +66,7 @@ def frames(directory):
         raise ValueError("Trajectory index totals disagree")
 
 
-def check(directory, expected_steps):
+def check(directory, expected_steps, *, require_complete=True):
     """Check every frame, history field and step label, plus the physical summary."""
     labels = []
     schema = None
@@ -93,12 +93,12 @@ def check(directory, expected_steps):
     if count != expected_steps:
         raise ValueError("Step log is not complete")
     summary = json.loads((directory / "summary.json").read_text())
-    if not summary["complete"] or summary["published_steps"] != expected_steps:
+    if (require_complete and not summary["complete"]) or summary["published_steps"] != expected_steps:
         raise ValueError("Summary does not establish complete publication")
-    if expected_steps == 5250 and not summary["held_cube"]:
+    if require_complete and expected_steps == 5250 and not summary["held_cube"]:
         raise ValueError("Franka did not satisfy original grasp criteria")
     return {
-        "status": "PASS",
+        "status": "PASS" if require_complete else "PASS_PREFIX",
         "frames": len(labels),
         "steps": count,
         "fields": schema,
@@ -289,7 +289,14 @@ def _migrate_actor_frame(left, right, table, physical_digest):
 
 
 def compare(
-    reference, actual, envelopes=None, *, legacy_fp64=False, native_controls=None, actor_layout_migration=False
+    reference,
+    actual,
+    envelopes=None,
+    *,
+    legacy_fp64=False,
+    native_controls=None,
+    actor_layout_migration=False,
+    configuration_certificate=None,
 ):
     """Compare every same-configuration frame; never infer a trajectory tolerance."""
     if type(actor_layout_migration) is not bool:
@@ -301,6 +308,13 @@ def compare(
     migrated = False
     actor_migration = None
     table = None
+    certified = None
+    if configuration_certificate is not None:
+        from scripts.monolithic_reference.robot_contact_acceptance import _ConfigurationCertificate  # noqa: PLC0415
+
+        if not isinstance(configuration_certificate, _ConfigurationCertificate):
+            raise ValueError("Expected an authenticated constructor certificate")
+        certified = configuration_certificate.validate()
     if native_controls is None:
         reference_frames = frames(reference)
     else:
@@ -309,6 +323,16 @@ def compare(
         reference_frames = native_frames(reference, native_controls)
     for left, right_block in zip(reference_frames, frames(actual), strict=True):
         right = right_block
+        if certified is not None:
+            for block, expected in zip((left, right), certified, strict=True):
+                value = block["history.config_digest"]
+                if (
+                    value.dtype != np.uint8
+                    or value.shape != (len(block["frame_steps"]), 32)
+                    or not np.all(value == np.frombuffer(bytes.fromhex(expected), np.uint8))
+                ):
+                    raise ValueError("Certified frame configuration digest differs")
+            right = {**right, "history.config_digest": left["history.config_digest"].copy()}
         if (
             actor_layout_migration
             and np.all(right["history.schema_version"] == 4)
@@ -363,6 +387,7 @@ def compare(
         "frames": count,
         "fields": errors,
         "schema_migration": actor_migration or ("2 -> 3 (FP64)" if migrated else None),
+        **({"configuration_certificate": configuration_certificate.receipt()} if certified is not None else {}),
     }
 
 

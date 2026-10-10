@@ -41,7 +41,7 @@ def cases():
     ]
 
 
-def build(case, *, input_manifest=FROZEN):
+def build(case, *, input_manifest=FROZEN, solver_factory=None):
     """Reuse frozen scene construction and sample the original FP32 controls."""
     import warp as wp  # noqa: PLC0415
     from newton.solvers.experimental.monolithic import SolverMonolithic, build_smooth_sdf  # noqa: PLC0415
@@ -59,6 +59,7 @@ def build(case, *, input_manifest=FROZEN):
             globalization=case["globalization"],
             precision=case["precision"],
             fp32_absolute_tolerance=case.get("fp32_absolute_tolerance"),
+            **({"solver_factory": solver_factory} if solver_factory is not None else {}),
         )
         samples = [franka_targets(scene.high, scene.low, i * case["dt"])[:2] for i in range(case["steps"] + 1)]
         return scene.model, scene.solver, scene.state, np.asarray(samples, dtype=np.float32)
@@ -74,7 +75,7 @@ def build(case, *, input_manifest=FROZEN):
         "smooth_sdf_directory", str(INPUTS / "sharpa/geometry-original")
     )
     smooth = build_smooth_sdf(model, qualified_directory=resolve_input(directory))
-    run = SolverMonolithic(
+    run = (solver_factory or SolverMonolithic)(
         model,
         contact_model=case["law"],
         globalization=case["globalization"],
