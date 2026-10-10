@@ -8,7 +8,7 @@ import numpy as np
 from ...geometry import GeoType, Mesh, ShapeFlags
 
 
-def _surface_samples(geo, scale, mesh=None):
+def _surface_samples(geo, scale, mesh=None, *, _return_triangles=False):
     """Return local P1Q3 points, outward normals and scaled surface weights."""
     bary = np.eye(3) * 0.5 + np.full((3, 3), 1 / 6)
     if geo == GeoType.SPHERE:
@@ -41,6 +41,7 @@ def _surface_samples(geo, scale, mesh=None):
         points = np.einsum("qn,fni->fqi", bary, tri)
         normals = points / np.linalg.norm(points, axis=2)[..., None]
         points = normals * scale[0]
+        tri = tri * scale[0]
     else:
         if not np.isfinite(scale).all() or np.any(scale <= 0):
             raise ValueError("Invalid source shape scale")
@@ -61,7 +62,8 @@ def _surface_samples(geo, scale, mesh=None):
             raise ValueError("Source faces must have positive finite area")
         points = np.einsum("qn,fni->fqi", bary, tri)
         normals = np.repeat((cross / (2 * area[:, None]))[:, None], 3, axis=1)
-    return points.reshape(-1, 3), normals.reshape(-1, 3), np.repeat(area / 3, 3)
+    result = points.reshape(-1, 3), normals.reshape(-1, 3), np.repeat(area / 3, 3)
+    return (*result, tri) if _return_triangles else result
 
 
 def _checked_contact_capacity(count, support, triplets, base=0):

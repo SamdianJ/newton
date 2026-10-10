@@ -50,11 +50,57 @@ def _select_contact_chunk(first: int, end: int, capacity: int, begin: wp.array[i
     count[0] = wp.min(capacity, end - first)
 
 
+@wp.kernel(enable_backward=False)
+def _validate_selection(
+    ids: wp.array[wp.uint64], count: wp.array[int], status: wp.array[int], limit: int, records: Any
+):
+    i = wp.tid()
+    n = count[0]
+    if status[0] != 0 or n < 0 or n > ids.shape[0]:
+        wp.atomic_or(records.flags, 0, 2)
+    elif i < n:
+        if ids[i] >= wp.uint64(limit) or (i > 0 and ids[i] <= ids[i - 1]):
+            wp.atomic_or(records.flags, 0, 2)
+
+
+@wp.kernel(enable_backward=False)
+def _select_sparse_chunk(
+    ids: wp.array[wp.uint64],
+    size: wp.array[int],
+    records: Any,
+    legacy: int,
+    mode: int,
+    offset: int,
+    capacity: int,
+    begin: wp.array[int],
+    count: wp.array[int],
+):
+    n = wp.clamp(size[0], 0, ids.shape[0])
+    lo, hi = int(0), n + 0
+    while lo < hi:
+        mid = lo + (hi - lo) // 2
+        if ids[mid] < wp.uint64(legacy):
+            lo = mid + 1
+        else:
+            hi = mid
+    start, end = lo + 0, n + 0
+    if mode == 2:
+        start, end = 0, lo + 0
+    begin[0] = start + offset
+    count[0] = wp.max(0, wp.min(capacity, end - start - offset))
+    if records.flags[0] != 0:
+        count[0] = 0
+
+
 @wp.kernel
-def _load_contact_chunk(all_samples: Any, batch: Any, first: wp.array[int], candidates: Any):
+def _load_contact_chunk(
+    all_samples: Any, batch: Any, first: wp.array[int], candidates: Any, selected: wp.array[wp.uint64], sparse: bool
+):
     i = wp.tid()
     if i < candidates.count[0]:
         key = first[0] + i
+        if sparse:
+            key = int(selected[key])
         candidates.identities[i] = wp.uint64(key)
         candidates.support_counts[i] = 0
         candidates.force_counts[i] = 0
@@ -75,10 +121,10 @@ def _load_contact_chunk(all_samples: Any, batch: Any, first: wp.array[int], cand
 
 
 @wp.kernel
-def _copy_contact_geometry(source: Any, target: Any, first: wp.array[int], count: wp.array[int], store: bool):
+def _copy_contact_geometry(source: Any, target: Any, ids: wp.array[wp.uint64], count: wp.array[int], store: bool):
     i = wp.tid()
     if i < count[0]:
-        a, b = i, first[0] + i
+        a, b = i, int(ids[i])
         if not store:
             a, b = b, a
         target.y[b] = source.y[a]
@@ -89,10 +135,13 @@ def _copy_contact_geometry(source: Any, target: Any, first: wp.array[int], count
 
 
 @wp.kernel
-def _merge_contact_chunk_flags(flags: wp.array[int], chunk: wp.array[int], first: wp.array[int], records: Any):
+def _merge_contact_chunk_flags(flags: wp.array[int], chunk: wp.array[int], ids: wp.array[wp.uint64], records: Any):
     if chunk[0] != 0:
         wp.atomic_max(flags, 0, chunk[0])
-        wp.atomic_min(flags, 1, first[0] + chunk[1])
+        identity = int(-1)
+        if chunk[1] >= 0 and chunk[1] < ids.shape[0]:
+            identity = int(ids[chunk[1]])
+        wp.atomic_min(flags, 1, identity)
         wp.atomic_or(records.flags, 0, wp.where(chunk[0] == 1, 4, 2))
 
 
@@ -293,7 +342,8 @@ class _ContactBatch:
     parameters. No owner factor_support, per-contact selector/J table, residual
     gather map or evaluated local output is consumed. Owned projection storage
     is batch x max_support; the complete physical-step reference is O(M).
-    This generator does not publish physical state or select spatial candidates.
+    This generator does not publish physical state. A private spatial selection
+    can restrict evaluation while preserving original physical-step references.
     """
 
     METADATA_ARRAYS = (
@@ -460,6 +510,7 @@ class _ContactBatch:
         self._empty_vector = wp.empty(0, dtype=self.vector, device=self.device)
         self._empty_rotation = wp.empty(0, dtype=wp.quatd if self.dtype == wp.float64 else wp.quat, device=self.device)
         self._key_ids = wp.array(np.arange(batch_capacity, dtype=np.int32), dtype=int, device=self.device)
+        self._empty_ids = wp.empty(0, dtype=wp.uint64, device=self.device)
         self.graphs = _SegmentGraphCache(self.device, enabled=use_cuda_graph and self.device.is_cuda)
         self._started = False
 
@@ -508,7 +559,32 @@ class _ContactBatch:
                     raise ValueError("Native contact state aliases producer storage")
         return state
 
-    def _chunks(self):
+    def _chunks(self, selection=None):
+        if selection is not None:
+            for mode in (2, 3):
+                if (mode == 2 and self.contact.legacy_count == 0) or (
+                    mode == 3 and self.contact.count == self.contact.legacy_count
+                ):
+                    continue
+                for offset in range(0, selection.capacity, max(1, self.batch_capacity)):
+                    wp.launch(
+                        _select_sparse_chunk,
+                        1,
+                        [
+                            selection.identities,
+                            selection.count,
+                            self.pool.records,
+                            self.contact.legacy_count,
+                            mode,
+                            offset,
+                            self.batch_capacity,
+                            self.first,
+                            self.pool.candidates.count,
+                        ],
+                        device=self.device,
+                    )
+                    yield mode
+            return
         for begin, end, mode in ((0, self.contact.legacy_count, 2), (self.contact.legacy_count, self.contact.count, 3)):
             for first in range(begin, end, max(1, self.batch_capacity)):
                 wp.launch(
@@ -564,13 +640,20 @@ class _ContactBatch:
             device=self.device,
         )
 
-    def _stage(self, state, mode, dt, *, begin):
+    def _stage(self, state, mode, dt, *, begin, selection=None):
         c, out = self.contact, self.pool.candidates
         wp.launch(_reset_flags, 1, [self._flags], device=self.device)
         wp.launch(
             _load_contact_chunk,
             self.batch_capacity,
-            [self.all_samples, self.samples, self.first, out],
+            [
+                self.all_samples,
+                self.samples,
+                self.first,
+                out,
+                self._empty_ids if selection is None else selection.identities,
+                selection is not None,
+            ],
             device=self.device,
         )
         self._query(state)
@@ -594,14 +677,14 @@ class _ContactBatch:
             wp.launch(
                 _copy_contact_geometry,
                 self.batch_capacity,
-                [self.current, self.start, self.first, out.count, True],
+                [self.current, self.start, out.identities, out.count, True],
                 device=self.device,
             )
             return
         wp.launch(
             _copy_contact_geometry,
             self.batch_capacity,
-            [self.start, self._start_chunk, self.first, out.count, False],
+            [self.start, self._start_chunk, out.identities, out.count, False],
             device=self.device,
         )
         self.weights.zero_()
@@ -684,12 +767,12 @@ class _ContactBatch:
             wp.launch(
                 _merge_contact_chunk_flags,
                 1,
-                [self.start_flags, self._flags, self.first, self.pool.records],
+                [self.start_flags, self._flags, self.pool.candidates.identities, self.pool.records],
                 device=self.device,
             )
         self._started = True
 
-    def evaluate(self, x, poses, com, jt, jw, *, dt, rigid_com=None, rigid_rotation=None):
+    def evaluate(self, x, poses, com, jt, jw, *, dt, rigid_com=None, rigid_rotation=None, selection=None):
         if not self._started or not math.isfinite(dt) or dt <= 0:
             raise ValueError("Freeze a physical step and use positive finite dt")
         dt = self.contact.numpy_dtype(dt)
@@ -701,20 +784,33 @@ class _ContactBatch:
         ):
             raise ValueError("Invalid native contact displacement scale")
         state = self._state(x, poses, com, jt, jw, rigid_com, rigid_rotation)
+        bindings = ()
+        if selection is not None:
+            if selection.batch is not self:
+                raise ValueError("Spatial selection belongs to another contact batch")
+            selection.validate_storage()
+            bindings = selection.buffers()
         self.pool.begin()
         wp.copy(self.flags, self.start_flags)
         wp.launch(_contact_pool_start_flags, 1, [self.pool.records, self.start_flags], device=self.device)
-        for mode in self._chunks():
+        if selection is not None:
+            wp.launch(
+                _validate_selection,
+                max(1, selection.capacity),
+                [selection.identities, selection.count, selection.status, self.contact.count, self.pool.records],
+                device=self.device,
+            )
+        for mode in self._chunks(selection):
             self.graphs.run(
                 "contact_batch_eval",
-                (mode, float(dt)),
-                (*self.buffers(), *state),
-                partial(self._stage, state, mode, dt, begin=False),
+                (mode, float(dt), selection is not None),
+                (*self.buffers(), *state, *bindings),
+                partial(self._stage, state, mode, dt, begin=False, selection=selection),
             )
             wp.launch(
                 _merge_contact_chunk_flags,
                 1,
-                [self.flags, self._flags, self.first, self.pool.records],
+                [self.flags, self._flags, self.pool.candidates.identities, self.pool.records],
                 device=self.device,
             )
             self.pool.append()

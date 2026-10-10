@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 The Newton Developers
 # SPDX-License-Identifier: Apache-2.0
 
-"""Ancestor displacement bounds for real rigid joint paths, without a numerical FK coverage claim."""
+"""Ancestor motion bounds and a separate native FK roundoff allowance."""
 
 from typing import Any
 
@@ -9,6 +9,7 @@ import numpy as np
 import warp as wp
 
 from ...sim import JointType
+from .articulation import _forward
 
 
 @wp.func_native("""
@@ -53,12 +54,16 @@ def _ancestor_displacement(
     q0: wp.array[Any],
     q1: wp.array[Any],
     displacement: wp.array[wp.float64],
+    numerical: wp.array[wp.float64],
+    unit_roundoff: wp.float64,
+    tiny: wp.float64,
     status: wp.array[int],
 ):
     body = wp.tid()
     cursor = body
     tail = radii[body]
     distance = wp.float64(0.0)
+    operations, angle = wp.float64(0.0), wp.float64(0.0)
     valid = wp.isfinite(tail) and tail >= wp.float64(0.0)
     # The bounded loop also rejects a corrupted parent cycle instead of hanging.
     for _depth in range(types.shape[0]):
@@ -76,6 +81,9 @@ def _ancestor_displacement(
             valid = False
             break
         radius = _sum_upper(tail, b)
+        # <=512 primitive rounding/trig allowances per FK joint, with a
+        # factor-two propagation allowance through quaternion normalization.
+        operations = _sum_upper(_product_upper(wp.float64(2.0), operations), wp.float64(512.0))
         kind = types[joint]
         tail = _sum_upper(a, radius)
         if kind == JointType.REVOLUTE or kind == JointType.PRISMATIC:
@@ -91,6 +99,7 @@ def _ancestor_displacement(
             if start != end:
                 delta = _next_upper(wp.abs(end - start))
             if kind == JointType.REVOLUTE:
+                angle = _sum_upper(angle, wp.max(wp.abs(start), wp.abs(end)))
                 # ||R(alpha*dq)-I|| <= min(|dq|,2); never wrap whole revolutions.
                 distance = _sum_upper(distance, _product_upper(wp.min(delta, wp.float64(2.0)), radius))
             else:
@@ -100,16 +109,39 @@ def _ancestor_displacement(
             valid = False
             break
         cursor = parents[joint]
-    if cursor != -1 or not valid or not wp.isfinite(distance) or not wp.isfinite(tail):
+    nu = _product_upper(operations, unit_roundoff)
+    error = wp.float64(0.0)
+    if nu < wp.float64(0.125):
+        gamma = _next_upper(nu / (wp.float64(1.0) - nu))
+        # Both the stored start FK and an intermediate FK can differ from
+        # the real path; angular coordinate rounding carries a length scale.
+        error = _product_upper(
+            wp.float64(2.0), _product_upper(gamma, _product_upper(tail, _sum_upper(wp.float64(1.0), angle)))
+        )
+        error = _sum_upper(error, _product_upper(operations, tiny))
+    if (
+        cursor != -1
+        or not valid
+        or not wp.isfinite(distance)
+        or not wp.isfinite(tail)
+        or not wp.isfinite(error)
+        or not wp.isfinite(angle)
+        or nu >= wp.float64(0.125)
+    ):
         wp.atomic_or(status, 0, 1)
         distance = wp.float64(0.0)
+        error = wp.float64(0.0)
     displacement[body] = distance
+    numerical[body] = error
 
 
 @wp.kernel(enable_backward=False)
-def _invalidate_displacement(displacement: wp.array[wp.float64], status: wp.array[int]):
+def _invalidate_displacement(
+    displacement: wp.array[wp.float64], numerical: wp.array[wp.float64], status: wp.array[int]
+):
     if status[0] != 0:
         displacement[wp.tid()] = wp.float64(0.0)
+        numerical[wp.tid()] = wp.float64(0.0)
 
 
 def _length_upper(vectors):
@@ -127,7 +159,7 @@ def _length_upper(vectors):
 
 
 class _ArticulationSweep:
-    """Bound a body's local radius along q0→q1; numerical FK/BVH error is separate.
+    """Bound a body's local radius along q0→q1, with separate native FK allowance.
 
     Radii are about body-frame origins, including all local offsets. This scalar
     component does not select contacts, assert law support, perform CCD, or cover
@@ -136,6 +168,8 @@ class _ArticulationSweep:
 
     def __init__(self, kinematics, radii):
         kinematics.validate_identity()
+        if wp.get_module_options(_forward.module).get("fast_math", False):
+            raise ValueError("Native articulation sweep requires fast_math disabled")
         value = np.asarray(radii)
         if (
             value.dtype.kind not in "fiu"
@@ -158,13 +192,23 @@ class _ArticulationSweep:
         self.axis_length = wp.array(lengths, dtype=wp.float64, device=self.device)
         self.radii = wp.array(value.astype(np.float64), dtype=wp.float64, device=self.device)
         self.displacement = wp.zeros(kinematics.bodies, dtype=wp.float64, device=self.device)
+        self.numerical = wp.zeros_like(self.displacement)
         self.status = wp.zeros(1, dtype=int, device=self.device)
         self._owned = {
             name: getattr(self, name)
-            for name in ("incoming", "parent_length", "child_length", "axis_length", "radii", "displacement", "status")
+            for name in (
+                "incoming",
+                "parent_length",
+                "child_length",
+                "axis_length",
+                "radii",
+                "displacement",
+                "numerical",
+                "status",
+            )
         }
         self._borrowed = {name: getattr(kinematics, name) for name in ("parents", "types", "starts")}
-        self.payload_bytes = 20 * kinematics.bodies + 24 * kinematics.joints + 4
+        self.payload_bytes = 28 * kinematics.bodies + 24 * kinematics.joints + 4
 
     def buffers(self):
         return tuple(self._owned.values())
@@ -172,6 +216,8 @@ class _ArticulationSweep:
     def update(self, q0, q1):
         """Overwrite fixed scalar scratch; callers must reject nonzero status."""
         k = self.kinematics
+        if wp.get_module_options(_forward.module).get("fast_math", False):
+            raise ValueError("Native articulation sweep requires fast_math disabled")
         for source, fields in ((self, self._owned), (k, self._borrowed)):
             if any(getattr(source, name) is not original for name, original in fields.items()):
                 raise ValueError("Articulation sweep storage changed")
@@ -201,8 +247,13 @@ class _ArticulationSweep:
                 q0,
                 q1,
                 self.displacement,
+                self.numerical,
+                wp.float64(np.finfo(k.numpy_dtype).eps / 2),
+                wp.float64(np.finfo(k.numpy_dtype).tiny),
                 self.status,
             ],
             device=self.device,
         )
-        wp.launch(_invalidate_displacement, k.bodies, [self.displacement, self.status], device=self.device)
+        wp.launch(
+            _invalidate_displacement, k.bodies, [self.displacement, self.numerical, self.status], device=self.device
+        )

@@ -86,6 +86,7 @@ def test_sweep_coverage(test, device):
             sweep.update(q0, q1)
             test.assertEqual(int(sweep.status.numpy()[0]), 0)
             bound = sweep.displacement.numpy().copy()
+            numerical = sweep.numerical.numpy().copy()
             starts.append(bound)
             for alpha in np.linspace(0, 1, 41):
                 coordinates = ((1 - alpha) * q0_host.astype(float) + alpha * final.astype(float)).astype(k.numpy_dtype)
@@ -104,6 +105,11 @@ def test_sweep_coverage(test, device):
                 np.testing.assert_allclose(native, independent, atol=tolerance, rtol=tolerance)
                 test.assertLessEqual(
                     float(np.max(np.linalg.norm(native - initial, axis=2) - bound[:, None])), tolerance
+                )
+                # The query allowance is derived from native arithmetic and
+                # chain depth, independently of the observation tolerance.
+                test.assertLessEqual(
+                    float(np.max(np.linalg.norm(native - initial, axis=2) - bound[:, None] - numerical[:, None])), 0
                 )
             q1.assign(final)
         test.assertLess(float(starts[0].max()), 1e-280)

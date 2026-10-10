@@ -147,7 +147,7 @@ class _ContactQuery:
     a frozen list can omit contacts. This component supplies no automatic repair.
     """
 
-    def __init__(self, faces, targets, allowed, *, planes=(), capacity, device):
+    def __init__(self, faces, targets, allowed, *, planes=(), capacity, device, initial_bounds=None):
         def integers(values, columns):
             a = np.asarray(values)
             if a.size == 0:
@@ -204,6 +204,17 @@ class _ContactQuery:
         self.count = wp.zeros(1, dtype=int, device=self.device)
         self.dropped = wp.zeros(1, dtype=wp.int64, device=self.device)
         self.status = wp.zeros(1, dtype=int, device=self.device)
+        if initial_bounds is not None:
+            for lo, hi, out_lo, out_hi in (
+                (*initial_bounds[:2], self.face_lo, self.face_hi),
+                (*initial_bounds[2:], self.target_lo, self.target_hi),
+            ):
+                if len(lo) != len(out_lo) or len(hi) != len(out_hi):
+                    raise ValueError("Invalid initial contact query bounds")
+                wp.launch(_copy_bounds, len(lo), [lo, hi, out_lo, out_hi, self.status], device=self.device)
+            if self.status.numpy()[0]:
+                raise ValueError("Invalid initial contact query bounds")
+        # The Model adapter supplies real initial envelopes before building.
         self.bvh = wp.Bvh(self.face_lo, self.face_hi) if len(self.faces) else None
         self._bvh = self.bvh
         self._owned = {name: value for name, value in vars(self).items() if isinstance(value, wp.array)}
