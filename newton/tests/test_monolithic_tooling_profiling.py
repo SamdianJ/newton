@@ -14,6 +14,34 @@ from scripts.monolithic_reference.profiling import SolverProfiler
 from scripts.monolithic_reference.workload_scene import build_scene
 
 
+def test_spatial_solver_profile(test, device):
+    """Observe full reference/query/publication without changing the spatial trajectory."""
+    from newton.examples.softbody.monolithic_recording import state_arrays  # noqa: PLC0415
+    from scripts.monolithic_reference.workload_scene import compare_arrays  # noqa: PLC0415
+
+    routes = [
+        build_scene(
+            "tiny-contact",
+            device=device,
+            graph=device.is_cuda,
+            contact_dataflow="spatial",
+            spatial={"candidate_capacity": 256, "law_margin": 0.0},
+        )
+        for _ in range(2)
+    ]
+    for _, run, state, _ in routes:
+        run.step(state, state, run.model.control(), dt=0.001)
+    _, run, state, _ = routes[1]
+    with SolverProfiler(run) as profiler:
+        run.step(state, state, run.model.control(), dt=0.001)
+    _, baseline, expected, _ = routes[0]
+    baseline.step(expected, expected, baseline.model.control(), dt=0.001)
+    compare_arrays(state_arrays(state), state_arrays(expected))
+    modules = profiler.report()["modules"]
+    for name in ("initial_reference", "contact.refresh", "contact.begin_step", "contact.publish"):
+        test.assertGreater(modules[name]["calls"], 0)
+
+
 @wp.kernel
 def _increment(value: wp.array[int]):
     value[0] += 1
@@ -75,6 +103,7 @@ class TestProfiling(unittest.TestCase):
 
 for device in get_test_devices():
     add_function_test(TestProfiling, "test_solver_profile", test_solver_profile, devices=[device])
+    add_function_test(TestProfiling, "test_spatial_solver_profile", test_spatial_solver_profile, devices=[device])
     if device.is_cuda:
         add_function_test(TestProfiling, "test_graph_events", test_graph_events, devices=[device])
 

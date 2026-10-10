@@ -10,6 +10,7 @@ across algorithms. Contact audits run on separate instances outside step timing.
 
 import argparse
 import dataclasses
+import hashlib
 import json
 import time
 from pathlib import Path
@@ -146,12 +147,12 @@ def _physical_model_arrays(run):
 
 
 def verify_contract(left, right):
-    """Permit only the two declared complete-pool fields after exact physical checks."""
-    if left._contact_pool or not right._contact_pool:
-        raise ValueError("Comparison requires complete legacy/pool algorithms")
-    expected = np.frombuffer(b"complete-pool/fixed-tree/v1", dtype=np.uint8)
-    if not np.array_equal(right._contact.dataflow_identity, expected):
-        raise ValueError("Unreviewed contact algorithm")
+    """Authenticate B1/B2 or B2/B3, allowing only declared algorithm/resource fields."""
+    spatial = left._contact_pool and not left._contact_spatial and right._contact_spatial
+    if not spatial and (left._contact_pool or not right._contact_pool or right._contact_spatial):
+        raise ValueError("Comparison requires legacy/pooled or pooled/spatial algorithms")
+    algorithm_fields = ALGORITHM_FIELDS | ({"contact_spatial"} if spatial else set())
+    labels = ("pooled", "spatial") if spatial else ("legacy", "pooled")
     if left.precision.value != "fp64" or right.precision.value != "fp64":
         raise ValueError("Comparison requires native FP64")
     model_inputs = _physical_model_arrays(left)
@@ -190,30 +191,52 @@ def verify_contract(left, right):
     )
     _exact({name: getattr(left, name) for name in policies}, {name: getattr(right, name) for name in policies})
     a, b = left._coupled_config, right._coupled_config
-    if a.keys() & ALGORITHM_FIELDS or b.keys() - a.keys() != ALGORITHM_FIELDS or a.keys() - b.keys():
-        raise ValueError("Unreviewed configuration difference")
-    _exact(a, {name: value for name, value in b.items() if name not in ALGORITHM_FIELDS})
-    _exact({"identity": b["contact_dataflow"]}, {"identity": expected})
-    c = right._contact
-    resources = np.array(
-        [c.pool.capacity, c.pool.max_support, c._batch.batch_capacity, a["guard_capacity"][1]], np.int64
-    )
-    _exact({"resources": b["contact_resources"]}, {"resources": resources})
+    expected_fields = (ALGORITHM_FIELDS, algorithm_fields) if spatial else (set(), ALGORITHM_FIELDS)
+    for run, config, fields in zip((left, right), (a, b), expected_fields, strict=True):
+        if config.keys() & algorithm_fields != fields:
+            raise ValueError("Unreviewed configuration difference")
+        if not fields:
+            continue
+        c = run._contact
+        identity = b"spatial-pool/newton-frozen/v1" if run._contact_spatial else b"complete-pool/fixed-tree/v1"
+        _exact({"identity": config["contact_dataflow"]}, {"identity": np.frombuffer(identity, dtype=np.uint8)})
+        _exact({"identity": c.dataflow_identity}, {"identity": config["contact_dataflow"]})
+        resources = [c.pool.capacity, c.pool.max_support, c._batch.batch_capacity, config["guard_capacity"][1]]
+        if run._contact_spatial:
+            resources.append(c.candidate_capacity)
+            _exact({"margin": config["contact_spatial"]}, {"margin": np.array([c.law_margin], np.float64)})
+        _exact({"resources": config["contact_resources"]}, {"resources": np.array(resources, np.int64)})
+    common_config = {name: value for name, value in a.items() if name not in algorithm_fields}
+    right_config = {name: value for name, value in b.items() if name not in algorithm_fields}
+    differences = {
+        name: {label: serial(config.get(name)) for label, config in zip(labels, (a, b), strict=True)}
+        for name in sorted(algorithm_fields)
+    }
+    if spatial:
+        # The old combined field contains a physical guard and a contact resource
+        # budget. Only the latter may vary in the explicit capacity experiment.
+        for config in (common_config, right_config):
+            if config["guard_capacity"].shape != (2,):
+                raise ValueError("Invalid guard/resource configuration")
+            config["guard_capacity"] = config["guard_capacity"][:1]
+        differences["contact_factor_capacity"] = {
+            label: int(config["guard_capacity"][1]) for label, config in zip(labels, (a, b), strict=True)
+        }
+    _exact(common_config, right_config)
     # Bind the exact compared values, rather than asserting two different
     # aggregate configuration hashes happen to represent the same physics.
     common = {"model." + name: value for name, value in model_inputs.items()}
-    for prefix, values in (("config", a), ("sampling", left._contact.actor_samples.fields)):
+    for prefix, values in (("config", common_config), ("sampling", left._contact.actor_samples.fields)):
         common.update({prefix + "." + name: value for name, value in values.items()})
     common.update({"legacy_sampling." + name: value for name, value in legacy_sampling.items()})
     common["joint_parameters"] = left._joint_parameters_host
     common["layout"] = np.frombuffer(left._actors.layout_payload(), dtype=np.uint8)
     common.update({"effective_policy." + name: value for name, value in dataclasses.asdict(left._config).items()})
     return {
+        "comparison": "/".join(labels),
         "physical_contract_sha256": _configuration_digest(common).hex(),
         "model_identity_adapter": MODEL_IDENTITY_ADAPTER,
-        "algorithm_differences": {
-            name: {"legacy": None, "pooled": serial(b[name])} for name in sorted(ALGORITHM_FIELDS)
-        },
+        "algorithm_differences": differences,
         "config_digests": [run._kinematics.digest.hex() for run in (left, right)],
         "enumeration": {
             "legacy": left._contact.legacy_count,
@@ -259,7 +282,7 @@ def _sparse_bsr(matrix):
     return {"shape": (matrix.nrow, matrix.ncol), "row": rows, "column": columns, "value": values}
 
 
-def _contact_at(run, frame, start, dt, *, sparse=False):
+def _contact_at(run, frame, start, dt, *, sparse=False, frozen=None, allow_tainted=False):
     """Evaluate native contact inputs on an audit instance, without transplanting history."""
     c, k = run._contact, run._kinematics
     state = run.create_state(dt=dt)
@@ -267,12 +290,15 @@ def _contact_at(run, frame, start, dt, *, sparse=False):
 
     # Only geometry operands are needed by contact. This scratch state is not
     # a continuation or publication and must never be passed to solver.step.
-    def query(values, begin):
+    def query(values, begin, *, refresh=False):
         state.joint_q.assign(values["q"])
         state.particle_q.assign(values["x"])
         h.rigid_com.assign(values["com"])
         h.rigid_rotation.assign(values["rotation"])
         k.evaluate(k.gather_q(state))
+        if refresh:
+            c.refresh(k.gather_q(state), state.particle_q, rigid_com=h.rigid_com)
+            return
         method = c.begin_step if begin else c.evaluate
         method(
             state.particle_q,
@@ -282,14 +308,19 @@ def _contact_at(run, frame, start, dt, *, sparse=False):
             k.jw,
             rigid_com=h.rigid_com,
             rigid_rotation=h.rigid_rotation,
+            **({"kinematics": k, "q0": k.gather_q(state)} if begin and run._contact_spatial else {}),
             **({} if begin else {"dt": dt}),
         )
 
+    if frozen is not None and not run._contact_spatial:
+        raise ValueError("Frozen query state requires a spatial audit")
     query(start, True)
+    if run._contact_spatial:
+        query(frame if frozen is None else frozen, False, refresh=True)
     query(frame, False)
     if c.flags.numpy()[0] or c.start_flags.numpy()[0]:
         raise ValueError("Invalid native contact audit")
-    if run._contact_pool and c.evaluation_diagnostics()["tainted"]:
+    if run._contact_pool and c.evaluation_diagnostics()["tainted"] and not allow_tainted:
         raise ValueError("Capacity overflow cannot qualify complete contacts")
     sequence = run._assembly_sequence + 1
     run._assembly_sequence = sequence
@@ -455,6 +486,67 @@ def audit_contact_state(run, frame, start, dt, *, mesh_fields=None):
         "native_B_coordinates": actual["tangent"]["value"].size,
         "full_B_coordinates": full["full"]["tangent"]["value"].size,
         "errors": _check_contact_sparse(actual, full["full"]),
+    }
+
+
+def audit_spatial_contact_state(run, frame, start, dt, *, frozen=None, mesh_fields=None):
+    """Measure one frozen B3 state; selected correctness grants no full-system qualification.
+
+    The separate audit instance must never be advanced after contact-only assembly.
+    Full enumeration does not consume query bounds, margins or admission bitmaps.
+    Query overflow makes candidate exclusion ambiguous; report it as such instead
+    of attributing missing identities to spatial clipping. Unadmitted zero terms
+    are counted separately from lost contributions and actual pool overflow.
+    """
+    if not run._contact_spatial or run.precision.value != "fp64":
+        raise ValueError("Spatial audit requires the native FP64 experimental path")
+    actual = _contact_at(run, frame, start, dt, sparse=True, frozen=frozen, allow_tainted=True)
+    c, selection, records = run._contact, run._contact._spatial, run._contact.pool.records
+    samples = c._batch.all_samples
+    fields = np.column_stack([getattr(samples, name).numpy() for name in ("sources", "targets", "faces", "slots")])
+    candidates = selection.identities.numpy()[: int(selection.count.numpy()[0])].astype(np.int64)
+    admitted = records.identities.numpy()[: int(records.count.numpy()[0])].astype(np.int64)
+    stiffness, mu, velocity, width, radius = c.parameters
+    full = evaluate_stream(
+        run.model,
+        run._actors,
+        frame,
+        start,
+        c.contact_model,
+        candidate_keys=fields[candidates],
+        admitted_keys=fields[admitted],
+        radius=radius,
+        stiffness=stiffness,
+        mu=mu,
+        width=width,
+        falloff=velocity * dt,
+        mesh_fields=mesh_fields,
+        alignment_policy=c.alignment_policy,
+    )
+    if full["full_count"] != c.count:
+        raise ValueError("Independent full enumeration disagrees with the declared complete set")
+    errors = _check_contact_sparse(actual, full["admitted"])
+    query, pool = c.spatial_diagnostics(), c.evaluation_diagnostics()
+    return {
+        "status": "MEASURED_NOT_QUALIFIED",
+        "tainted": pool["tainted"],
+        "state_sha256": _configuration_digest(frame).hex(),
+        "step_start_sha256": _configuration_digest(start).hex(),
+        "frozen_sha256": _configuration_digest(frame if frozen is None else frozen).hex(),
+        "candidate_key_sha256": hashlib.sha256(fields[candidates].astype("<i8").tobytes()).hexdigest(),
+        "admitted_key_sha256": hashlib.sha256(fields[np.sort(admitted)].astype("<i8").tobytes()).hexdigest(),
+        "query": query,
+        "pool": pool,
+        "native_selected_errors": errors,
+        "candidate_zero_work": full["candidate_count"] - full["candidate_contributing_count"],
+        "unadmitted_zero_work": full["capacity_omission"]["count"] - full["capacity_omission"]["contributing_count"],
+        "spatial_omission": None if query["capacity_dropped"] else full["spatial_omission"],
+        "candidate_exclusion": full["spatial_omission"],
+        **{
+            name: value
+            for name, value in full.items()
+            if name not in ("full", "candidate", "admitted", "spatial_omission")
+        },
     }
 
 

@@ -156,6 +156,17 @@ class SolverProfiler:
         for name, owner in (("articulation", run._objective), ("tet", run._tet), ("contact", run._contact)):
             self._wrap(owner, "evaluate", name + ".evaluate")
         self._wrap(run._contact, "assemble_tangent", "contact.assemble")
+        self._wrap(run._contact, "begin_step", "contact.begin_step")
+        if run._contact_pool:
+            self._wrap(run._contact, "publish", "contact.publish")
+            self._wrap(run._contact._batch, "_stage", "contact.generate")
+            for method in ("begin", "append", "finish"):
+                self._wrap(run._contact.pool, method, "contact.pool." + method)
+            for name in ("energy", "residual", "force"):
+                self._wrap(getattr(run._contact.pool, name), "reduce", "contact.tree." + name)
+        if run._contact_spatial:
+            self._wrap(run._contact, "refresh", "contact.refresh")
+            self._wrap(run._contact._batch.reference_rows, "reduce", "contact.reference.tree")
         original = run._graphs.run
 
         def graph(name, parameters, buffers, execute):
