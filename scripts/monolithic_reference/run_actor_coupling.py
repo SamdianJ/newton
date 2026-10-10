@@ -485,13 +485,26 @@ def restore_midpoint(run, state, path, step):
     run.load_checkpoint(state, path)
 
 
-def record_run(run, state, output, *, before=False, start_step=0, end_step=2000, checkpoint_step=1000, component=False):
+def record_run(
+    run,
+    state,
+    output,
+    *,
+    before=False,
+    start_step=0,
+    end_step=2000,
+    checkpoint_step=1000,
+    component=False,
+    system_audit=None,
+):
     """Record a bounded prefix or complete trajectory; stop on every failure."""
     case = load_case()
     if Path(newton.__file__).resolve().parent != REPO / "newton":
         raise ValueError("Actor recording must import Newton from this checkout")
     if type(start_step) is not int or type(end_step) is not int or not 0 <= start_step < end_step <= case["steps"]:
         raise ValueError("Invalid recording clock range")
+    if system_audit is not None and system_audit.run is not run:
+        raise ValueError("Complete system audit belongs to another solver")
     output.mkdir(parents=True, exist_ok=False)
     metadata = {
         "schema": "actor-coupling-recording/v1",
@@ -520,6 +533,8 @@ def record_run(run, state, output, *, before=False, start_step=0, end_step=2000,
                 Path(__file__),
                 REPO / "scripts/monolithic_reference/check_recording.py",
                 REPO / "scripts/monolithic_reference/actor_recording.py",
+                REPO / "scripts/monolithic_reference/contact_system_audit.py",
+                REPO / "scripts/monolithic_reference/compare_contact_dataflows.py",
             ]
         },
     )
@@ -580,6 +595,7 @@ def record_run(run, state, output, *, before=False, start_step=0, end_step=2000,
         frames.clear()
 
     error = None
+    system_rows = []
     begin = time.perf_counter()
     with gzip.open(output / "steps.jsonl.gz", "wt") as log:
         try:
@@ -599,6 +615,11 @@ def record_run(run, state, output, *, before=False, start_step=0, end_step=2000,
                 log.write(json.dumps(serial(row), allow_nan=False) + "\n")
                 log.flush()
                 validate_row(row, case)
+                if system_audit is not None:
+                    system_rows.append(serial(system_audit.evaluate()))
+                    # This gate belongs to offline acceptance, not trial selection.
+                    if system_rows[-1]["status"] != "PASS_FULL_RESIDUAL":
+                        raise ValueError("Final state fails the complete system residual gates")
                 rows.append(row)
                 frames.append((step, "CONVERGED", state_arrays(state), q, v, cq, cv))
                 if len(frames) == 100:
@@ -639,6 +660,16 @@ def record_run(run, state, output, *, before=False, start_step=0, end_step=2000,
         "error": error,
         "elapsed_seconds": time.perf_counter() - begin,
     }
+    if system_audit is not None:
+        report = output / "full-system.jsonl"
+        report.write_text("".join(json.dumps(row, allow_nan=False) + "\n" for row in system_rows))
+        summary["full_system"] = {
+            "file": report.name,
+            "sha256": sha(report),
+            "contract": system_audit.contract,
+            "checked_steps": len(system_rows),
+            "failed_steps": sum(row["status"] != "PASS_FULL_RESIDUAL" for row in system_rows),
+        }
     if summary["complete"]:
         try:
             summary["hold"] = hold_gates(rows, case)
@@ -653,7 +684,10 @@ def record_run(run, state, output, *, before=False, start_step=0, end_step=2000,
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
-        "--output", type=Path, required=True, help="New directory for the manually started 5000-step comparison"
+        "--output",
+        type=Path,
+        required=True,
+        help="New directory for manual acceptance (5000 steps; spatial also runs a 2000-step full comparison)",
     )
     parser.add_argument("--retain-recordings", choices=("all", "failures"), default="failures")
     parser.add_argument("--contact-dataflow", choices=("legacy", "pooled", "spatial"), default="legacy")
@@ -674,6 +708,9 @@ def main():
     from scripts.monolithic_reference.check_recording import check_actor, compare_actor  # noqa: PLC0415
 
     reports = {name: {"status": "NOT_RUN"} for name in ("primary", "restored", "reordered")}
+    if args.contact_dataflow == "spatial":
+        reports["complete"] = {"status": "NOT_RUN"}
+    primary_run = None
     try:
         for name, before, start in (("primary", False, 0), ("restored", False, 1000), ("reordered", True, 0)):
             reports[name] = {"status": "IN_PROGRESS"}
@@ -687,7 +724,13 @@ def main():
             if start:
                 restore_midpoint(run, state, args.output / "primary/recording/midpoint.npz", start)
             folder = args.output / name / "recording"
-            summary = record_run(run, state, folder, before=before, start_step=start)
+            system_audit = None
+            if args.contact_dataflow == "spatial":
+                from scripts.monolithic_reference.contact_system_audit import ContactSystemAudit  # noqa: PLC0415
+
+                complete = make_solver(build_model(before=before), contact_dataflow="pooled", contact_factor_capacity=0)
+                system_audit = ContactSystemAudit(run, complete)
+            summary = record_run(run, state, folder, before=before, start_step=start, system_audit=system_audit)
             reports[name] = {
                 "status": summary["status"],
                 "summary": summary,
@@ -698,6 +741,8 @@ def main():
             if summary["status"] != "PASS":
                 raise ValueError(f"{name}: {summary['error']}")
             reports[name].update(status="PASS", audit=check_actor(folder))
+            if name == "primary":
+                primary_run = run
             if name != "primary":
                 reports[name]["comparison"] = compare_actor(
                     args.output / "primary/recording",
@@ -709,9 +754,46 @@ def main():
     except Exception as failure:
         reports[name].update(status="FAIL", error=f"{type(failure).__name__}: {failure}")
         reports["failure"] = {"status": "FAIL", "error": f"{type(failure).__name__}: {failure}"}
-    status = "PASS" if all(reports[n]["status"] == "PASS" for n in ("primary", "restored", "reordered")) else "FAIL"
+    # The complete counter-trajectory is independent of restored/reordered
+    # qualification; retain it even when either of those comparisons fails.
+    if args.contact_dataflow == "spatial" and reports["primary"]["status"] == "PASS":
+        name = "complete"
+        reports[name] = {"status": "IN_PROGRESS"}
+        try:
+            from scripts.monolithic_reference.compare_contact_dataflows import (  # noqa: PLC0415
+                compare_actor_contact_recordings,
+            )
+
+            complete = make_solver(build_model(), contact_dataflow="pooled")
+            folder = args.output / name / "recording"
+            summary = record_run(complete, complete.create_state(dt=load_case()["dt"]), folder)
+            reports[name] = {
+                "status": summary["status"],
+                "summary": summary,
+                "provenance": json.loads((folder / "command.json").read_text()),
+                "source_hashes": json.loads((folder / "source-hashes.json").read_text()),
+                "configuration_sha256": sha(folder / "configuration.json"),
+            }
+            if summary["status"] != "PASS":
+                raise ValueError(f"{name}: {summary['error']}")
+            reports[name]["comparison"] = compare_actor_contact_recordings(
+                folder,
+                args.output / "primary/recording",
+                reference_run=complete,
+                actual_run=primary_run,
+            )
+            if reports[name]["comparison"]["status"] != "PASS_FROZEN_ENVELOPE":
+                raise ValueError("Complete/spatial independent trajectories differ")
+        except Exception as failure:
+            reports[name].update(status="FAIL", error=f"{type(failure).__name__}: {failure}")
+    cases = (
+        ("primary", "restored", "reordered", "complete")
+        if args.contact_dataflow == "spatial"
+        else ("primary", "restored", "reordered")
+    )
+    status = "PASS" if all(reports[n]["status"] == "PASS" for n in cases) else "FAIL"
     retained = status != "PASS" or args.retain_recordings == "all"
-    for name in ("primary", "restored", "reordered"):
+    for name in cases:
         folder = args.output / name
         if folder.is_dir():
             reports[name]["recording_retained"] = retained

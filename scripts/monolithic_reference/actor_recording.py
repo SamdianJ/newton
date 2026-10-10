@@ -488,6 +488,12 @@ def check_actor(directory, *, expected_run=None, require_complete=True):
     hold = scene.hold_gates(rows, metadata["case"]) if expected_status == "PASS" else None
     if require_complete and expected_status != "PASS":
         raise ValueError("A short prefix is not full actor qualification")
+    if require_complete and run._contact_spatial and "full_system" not in summary:
+        raise ValueError("Spatial actor qualification requires a complete system residual report")
+    if "full_system" in summary:
+        from scripts.monolithic_reference.contact_system_audit import check_system_report  # noqa: PLC0415
+
+        check_system_report(directory, run, summary)
     if hold is not None and summary["hold"] != hold:
         raise ValueError("Actor hold summary differs")
     return {

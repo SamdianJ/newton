@@ -246,6 +246,59 @@ def verify_contract(left, right):
     }
 
 
+def compare_actor_contact_recordings(reference, actual, *, reference_run, actual_run, require_complete=True):
+    """Compare independent B2/B3 recordings under the original actor envelope."""
+    from scripts.monolithic_reference.actor_recording import actor_frames, check_actor  # noqa: PLC0415
+
+    contract = verify_contract(reference_run, actual_run)
+    if contract["comparison"] != "pooled/spatial":
+        raise ValueError("Actor contact trajectories require B2/B3")
+    paths = (Path(reference), Path(actual))
+    audits = [
+        check_actor(path, expected_run=run, require_complete=require_complete)
+        for path, run in zip(paths, (reference_run, actual_run), strict=True)
+    ]
+    metadata = [json.loads((path / "configuration.json").read_text()) for path in paths]
+    for name in ("fixture_sha256", "layout_digest", "input_scope", "start_step", "end_step"):
+        if audits[0][name] != audits[1][name]:
+            raise ValueError("Contact trajectory inputs, layout or clock differ")
+    if metadata[0]["execution"] != metadata[1]["execution"] or any(
+        m["input_scope"] == "frozen" and m["before"] for m in metadata
+    ):
+        raise ValueError("Contact trajectory execution or creation order differs")
+    sources = [json.loads((path / "source-hashes.json").read_text()) for path in paths]
+    if sources[0] != sources[1]:
+        raise ValueError("Mixed source identities in contact trajectory comparison")
+    current = provenance()["source_hashes"]
+    required = {name for name in current if name.startswith("newton/_src/solvers/monolithic/")} | {
+        "scripts/monolithic_reference/" + name + ".py"
+        for name in (
+            "run_actor_coupling",
+            "check_recording",
+            "actor_recording",
+            "contact_system_audit",
+            "compare_contact_dataflows",
+        )
+    }
+    if sources[0].keys() != required or any(sources[0][name] != current[name] for name in required):
+        raise ValueError("Contact trajectory recording differs from current source")
+    errors, passed, count = {}, True, 0
+    frames = [actor_frames(path, m) for path, m in zip(paths, metadata, strict=True)]
+    for left, right in zip(*frames, strict=True):
+        passed &= compare_semantic_fields(
+            _semantic(left, metadata[0]), _semantic(right, metadata[1]), load_case()["equivalence"], errors
+        )
+        count += 1
+    return {
+        "status": "PASS_FROZEN_ENVELOPE" if passed else "FAIL",
+        "frames": count,
+        "fields": errors,
+        "audits": audits,
+        "contract": contract,
+        "qualification": "INDEPENDENT_CONTACT_TRAJECTORIES",
+    }
+
+
 def _physical(state):
     h = state._monolithic_coupled
     return {
