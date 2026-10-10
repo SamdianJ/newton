@@ -13,6 +13,8 @@ from . import state_checks
 from .bsr import _MonolithicScalarTriplets
 from .contact import ContactObjective
 from .contact_batch import _ContactBatch
+from .contact_spatial import _ContactSpatial
+from .segment_graph import _SegmentGraphCache
 
 
 @wp.kernel
@@ -234,4 +236,130 @@ class _PooledContactObjective(ContactObjective):
                     "bounds": {},
                 }
             )
+        return result
+
+
+class _SpatialContactObjective(_PooledContactObjective):
+    """Private B3 experiment: refresh at Newton boundaries, freeze all trials and final checks."""
+
+    def __init__(self, *args, candidate_capacity, law_margin, **kwargs):
+        if type(candidate_capacity) is not int or not 0 <= candidate_capacity < 2**31:
+            raise ValueError("Invalid spatial candidate capacity")
+        if isinstance(law_margin, (bool, np.bool_)) or not np.isfinite(law_margin) or law_margin < 0:
+            raise ValueError("Invalid experimental law margin")
+        self.candidate_capacity, self.law_margin = candidate_capacity, float(law_margin)
+        self._spatial = None
+        self._selection_ready = self._reference_mode = False
+        super().__init__(*args, **kwargs)
+
+    def initialize_pool(self, factor_capacity, *, use_cuda_graph):
+        super().initialize_pool(factor_capacity, use_cuda_graph=use_cuda_graph)
+        self._batch.initialize_reference()
+        # Cold reference snapshots must not serialize uninitialized reduction
+        # scratch as nonfinite live-in data. Later evaluations overwrite it.
+        for owner in (
+            self.pool._identity,
+            self.pool.energy,
+            self.pool.residual,
+            self.pool.force,
+            self._batch.reference_rows,
+        ):
+            for array in owner.buffers():
+                array.zero_()
+        self.query_graphs = _SegmentGraphCache(self.model.device, enabled=use_cuda_graph and self.model.device.is_cuda)
+        self.dataflow_identity = np.frombuffer(b"spatial-pool/newton-frozen/v1", dtype=np.uint8)
+        self.resource_identity = np.append(self.resource_identity, self.candidate_capacity)
+        self.spatial_identity = np.array([self.law_margin], dtype=np.float64)
+
+    @property
+    def residual(self):
+        return self._batch.reference_residual if self._reference_mode else super().residual
+
+    @property
+    def energy(self):
+        return self._batch.reference_energy if self._reference_mode else super().energy
+
+    @property
+    def absolute_energy(self):
+        return self._batch.reference_energy if self._reference_mode else super().absolute_energy
+
+    def buffers(self):
+        return super().buffers() + (() if self._spatial is None else self._spatial.buffers())
+
+    def begin_step(self, *state, kinematics, q0, **options):
+        self._selection_ready = False
+        self._refreshes = self._query_dropped = 0
+        self._query_warned = False
+        if self._spatial is None:
+            self._spatial = _ContactSpatial(
+                self._batch,
+                kinematics,
+                q0,
+                state[0],
+                state[1],
+                rigid_com=options.get("rigid_com"),
+                capacity=self.candidate_capacity,
+                law_margin=self.law_margin,
+            )
+        else:
+            if kinematics is not self._spatial.kinematics:
+                raise ValueError("Spatial contact kinematics changed")
+            self._spatial.begin_step(q0, state[0], state[1], rigid_com=options.get("rigid_com"))
+        self._evaluated = False
+        self._assembled_generation = -1
+        self._tainted = self._warned = False
+        self._batch.begin_step(*state, **options)
+
+    def refresh(self, q, x, *, rigid_com):
+        selection = self._spatial
+        if selection is None:
+            raise ValueError("Freeze a physical step before querying candidates")
+        selection.validate_storage()
+        self.query_graphs.run(
+            "contact_candidates",
+            (),
+            (q, x, rigid_com, *selection.buffers()),
+            lambda: selection.update(q, x, rigid_com=rigid_com),
+        )
+        if selection.status.numpy()[0]:
+            raise ValueError("Invalid spatial contact envelope or identity")
+        selection.query.check(warn=False)
+        dropped = int(selection.query.dropped.numpy()[0])
+        self._query_dropped += dropped
+        if dropped and not self._query_warned:
+            warnings.warn(
+                f"Spatial capacity exceeded: discarded {dropped} complete candidates", RuntimeWarning, stacklevel=2
+            )
+            self._query_warned = True
+        self.candidate_generation += 1
+        self._refreshes += 1
+        self._selection_ready = True
+        self._evaluated = False
+        self._assembled_generation = -1
+
+    def evaluate(self, *state, **options):
+        if self._reference_mode:
+            self._batch.evaluate_reference(*state, **options)
+            return
+        if not self._selection_ready:
+            raise ValueError("Refresh Newton candidates before spatial evaluation")
+        # Out-of-envelope trials can miss contacts. Do not requery, reject or
+        # repair them here; a later Newton refresh cannot guarantee recovery.
+        super().evaluate(*state, selection=self._spatial, **options)
+
+    def spatial_diagnostics(self):
+        return {
+            "candidate_generation": self.candidate_generation,
+            "refreshes": self._refreshes,
+            "candidates": int(self._spatial.count.numpy()[0]),
+            "capacity_dropped": self._query_dropped,
+            "tainted": bool(self._query_dropped),
+            "scope": "clipped-system",
+            "graphs": self.query_graphs.summary(),
+            "reference_graphs": self._batch.reference_rows.graphs.summary(),
+        }
+
+    def evaluation_diagnostics(self):
+        result = super().evaluation_diagnostics()
+        result["tainted"] |= bool(self._query_dropped)
         return result

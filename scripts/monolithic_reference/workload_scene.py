@@ -4,6 +4,7 @@
 """Allowlisted scene recipes shared by profiling and computational replay."""
 
 from contextlib import nullcontext
+from functools import partial
 from unittest.mock import patch
 
 import numpy as np
@@ -14,17 +15,47 @@ from scripts.monolithic_reference.retained_assets import validate_inputs
 from scripts.monolithic_reference.run_precision import build, cases
 
 
-def build_scene(name, *, device="cuda:0", graph=True, contact_dataflow="legacy"):
+def build_scene(name, *, device="cuda:0", graph=True, contact_dataflow="legacy", spatial=None):
     """Select the contact algorithm at the existing offline constructor seam."""
-    if contact_dataflow not in ("legacy", "pooled"):
+    if contact_dataflow not in ("legacy", "pooled", "spatial"):
         raise ValueError("Unsupported contact dataflow")
+    if (contact_dataflow == "spatial") != (spatial is not None):
+        raise ValueError("Spatial experiments require explicit capacity and law margin")
     context = nullcontext()
     if contact_dataflow == "pooled":
         from newton._src.solvers.monolithic.contact_pipeline import _PooledContactObjective  # noqa: PLC0415
 
         context = patch("newton._src.solvers.monolithic.solver_monolithic.ContactObjective", _PooledContactObjective)
+    if contact_dataflow == "spatial":
+        from newton._src.solvers.monolithic.contact_pipeline import _SpatialContactObjective  # noqa: PLC0415
+
+        if type(spatial) is not dict or set(spatial) != {"candidate_capacity", "law_margin"}:
+            raise ValueError("Invalid spatial experiment parameters")
+        context = patch(
+            "newton._src.solvers.monolithic.solver_monolithic.ContactObjective",
+            partial(_SpatialContactObjective, **spatial),
+        )
     with context:
-        return _build_scene(name, device=device, graph=graph)
+        result = _build_scene(name, device=device, graph=graph)
+    if contact_dataflow == "spatial":
+        # Allocate fixed query topology before snapshot reconstruction. Actual
+        # steps overwrite these initial references from their physical input.
+        _, run, state, _ = result
+        k, h = run._kinematics, state._monolithic_coupled
+        q = k.gather_q(state)
+        k.evaluate(q)
+        run._contact.begin_step(
+            state.particle_q,
+            k.poses,
+            k.com,
+            k.jt,
+            k.jw,
+            kinematics=k,
+            q0=q,
+            rigid_com=h.rigid_com,
+            rigid_rotation=h.rigid_rotation,
+        )
+    return result
 
 
 def _build_scene(name, *, device, graph):

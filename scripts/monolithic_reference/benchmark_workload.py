@@ -37,7 +37,10 @@ def benchmark(root, *, device="cuda:0", warmup=2, repeat=5):
     root = Path(root)
     manifest = open_bundle(root)
     contact_dataflow = manifest.get("contact_dataflow", "legacy")
-    if contact_dataflow == "pooled" and manifest["source"]["source_hashes"] != provenance()["source_hashes"]:
+    if (
+        contact_dataflow in ("pooled", "spatial")
+        and manifest["source"]["source_hashes"] != provenance()["source_hashes"]
+    ):
         raise ValueError("Pooled workload source identity differs")
     selected = {step for first, last in manifest["windows"] for step in range(first, last + 1)}
     trace = {}
@@ -54,7 +57,11 @@ def benchmark(root, *, device="cuda:0", warmup=2, repeat=5):
     results = []
     for first, last in manifest["windows"]:
         model, run, state, _ = build_scene(
-            manifest["scene"], device=device, graph=manifest["graph"], contact_dataflow=contact_dataflow
+            manifest["scene"],
+            device=device,
+            graph=manifest["graph"],
+            contact_dataflow=contact_dataflow,
+            spatial=manifest.get("spatial"),
         )
         if run._kinematics.digest.hex() != manifest["physical_digest"]:
             raise ValueError("Scene physical identity changed")
@@ -91,6 +98,8 @@ def benchmark(root, *, device="cuda:0", warmup=2, repeat=5):
                 )
                 objective_captures = sum(run._graphs.captures[name] for name in objective_names)
                 contact_caches = (run._contact._batch.graphs, run._contact.pool.graphs) if run._contact_pool else ()
+                if run._contact_spatial:
+                    contact_caches += (run._contact._batch.reference_rows.graphs,)
                 objective_captures += sum(sum(cache.captures.values()) for cache in contact_caches)
                 seconds, work = [], []
                 objective_seconds.clear()

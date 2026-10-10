@@ -247,6 +247,8 @@ def iterate(solver, dt):
     reference = self._initial_reference(dt, device_result=True) if device else self._initial_reference(dt)
     small = False
     for iteration in range(self.newton_max_iterations + 1):
+        if getattr(self, "_contact_spatial", False):
+            self._refresh_candidates()
         e, evaluated, absolute = (
             self._evaluate(self._accepted, dt, device_result=True) if device else self._evaluate(self._accepted, dt)
         )

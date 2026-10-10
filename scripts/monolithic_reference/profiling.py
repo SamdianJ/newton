@@ -25,6 +25,8 @@ def capture_count(run):
     if run._contact_pool:
         caches.extend((run._contact._batch.graphs, run._contact.pool.graphs))
         caches.extend(owner.graphs for owner in run._linear._fixed_bsr)
+    if run._contact_spatial:
+        caches.extend((run._contact.query_graphs, run._contact._batch.reference_rows.graphs))
     return sum(sum(cache.captures.values()) for cache in caches)
 
 

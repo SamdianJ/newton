@@ -43,6 +43,18 @@ def arrays_for(run):
             owners["contact.pool." + name] = getattr(pool, name)
         for name, array in zip(("identities", "count", "base", "indices"), pool._stream, strict=True):
             arrays["contact.pool.stream." + name] = array
+        if run._contact_spatial:
+            selection = run._contact._spatial
+            owners.update(
+                {
+                    "contact.spatial": selection,
+                    "contact.spatial.sweep": selection.sweep,
+                    "contact.spatial.query": selection.query,
+                    "contact.reference": batch.reference_rows,
+                }
+            )
+            for name, array in zip(("rows", "ids", "local", "values", "count"), batch.reference_inputs, strict=True):
+                arrays["contact.reference.input." + name] = array
     else:
         owners.update({"contact.start": run._contact.start, "contact.current": run._contact.current})
     if not run._device_iteration or run._contact_pool:
@@ -113,6 +125,17 @@ def capture_input(run, boundary, args, kwargs):
                 "warned": c._warned,
             },
         )
+    if run._contact_spatial:
+        metadata["contact_dataflow"] = "spatial"
+        metadata["spatial"] = {
+            "candidate_capacity": c.candidate_capacity,
+            "law_margin": c.law_margin,
+            "selection_ready": c._selection_ready,
+            "reference_mode": c._reference_mode,
+            "refreshes": c._refreshes,
+            "capacity_dropped": c._query_dropped,
+            "warned": c._query_warned,
+        }
     return {name: array.numpy().copy() for name, array in arrays_for(run).items()}, metadata
 
 
@@ -248,7 +271,13 @@ def replay_objective(arrays, metadata, expected, *, scene, device, graph, repeat
     if metadata["state"] not in ("_original", "_accepted", "_trial"):
         raise ValueError("Unsupported candidate state owner")
     model, run, state, _ = build_scene(
-        scene, device=device, graph=graph, contact_dataflow=metadata.get("contact_dataflow", "legacy")
+        scene,
+        device=device,
+        graph=graph,
+        contact_dataflow=metadata.get("contact_dataflow", "legacy"),
+        spatial={name: metadata.get("spatial", {}).get(name) for name in ("candidate_capacity", "law_margin")}
+        if metadata.get("contact_dataflow") == "spatial"
+        else None,
     )
     if run._kinematics.digest.hex() != metadata["physical_digest"]:
         raise ValueError("Hotspot physical identity differs")
@@ -290,6 +319,24 @@ def replay_objective(arrays, metadata, expected, *, scene, device, graph, repeat
             raise ValueError("Invalid pooled hotspot generations")
     for name in ("_original", "_accepted", "_trial"):
         setattr(run, name, run._states.copy(state))
+    if run._contact_spatial:
+        spatial = metadata["spatial"]
+        if (
+            set(spatial)
+            != {
+                "candidate_capacity",
+                "law_margin",
+                "selection_ready",
+                "reference_mode",
+                "refreshes",
+                "capacity_dropped",
+                "warned",
+            }
+            or any(type(spatial[n]) is not bool for n in ("selection_ready", "reference_mode", "warned"))
+            or any(type(spatial[n]) is not int or spatial[n] < 0 for n in ("refreshes", "capacity_dropped"))
+            or (not spatial["reference_mode"] and not spatial["selection_ready"])
+        ):
+            raise ValueError("Invalid spatial hotspot lifecycle")
     targets = arrays_for(run)
     if arrays.keys() != targets.keys():
         raise ValueError("Hotspot live-in schema changed")
@@ -308,11 +355,58 @@ def replay_objective(arrays, metadata, expected, *, scene, device, graph, repeat
             name.startswith(("contact.batch.all_samples.", "contact.batch.support."))
             or name in {"_contact." + key for key in (*run._contact._batch.METADATA_ARRAYS, "_model_rows")}
         )
+        spatial_mutable = {
+            "q0",
+            "x0",
+            "poses0",
+            "com0",
+            "status",
+            "count",
+            "_ids",
+            "_scratch_ids",
+            "_indices",
+            "_scratch_indices",
+            "identities",
+            "face_lo",
+            "face_hi",
+            "target_lo",
+            "target_hi",
+        }
+        static_spatial = (
+            run._contact_spatial
+            and name.startswith("contact.spatial.")
+            and (
+                (name.count(".") == 2 and name.rsplit(".", 1)[1] not in spatial_mutable)
+                or (
+                    name.startswith("contact.spatial.sweep.")
+                    and name.rsplit(".", 1)[1]
+                    in {
+                        "radii",
+                        "incoming",
+                        "parent_length",
+                        "child_length",
+                        "axis_length",
+                    }
+                )
+                or (
+                    name.startswith("contact.spatial.query.")
+                    and name.rsplit(".", 1)[1]
+                    in {
+                        "face_sources",
+                        "plane_flags",
+                        "plane_targets",
+                        "offsets",
+                        "sources",
+                    }
+                )
+            )
+        )
         if (
             name in TOPOLOGY
             or static_actor
             or static_rigid
             or static_pool
+            or static_spatial
             or (name.startswith("_kinematics.") and actual.dtype.kind in "iu")
         ):
             if not np.array_equal(arrays[name], actual):
@@ -341,6 +435,13 @@ def replay_objective(arrays, metadata, expected, *, scene, device, graph, repeat
             # The fresh workspace has no previous append. New assembly tokens
             # still increase; recorded tokens/pointers are never restored.
             c._last_assembly = None
+        if run._contact_spatial:
+            c._selection_ready, c._reference_mode = spatial["selection_ready"], spatial["reference_mode"]
+            c._refreshes, c._query_dropped, c._query_warned = (
+                spatial["refreshes"],
+                spatial["capacity_dropped"],
+                spatial["warned"],
+            )
         if not run._device_iteration or run._contact_pool:
             run._rigid.has_torque = metadata["rigid_has_torque"]
         run._current_state = getattr(run, metadata["state"])

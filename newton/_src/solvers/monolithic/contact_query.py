@@ -229,10 +229,14 @@ class _ContactQuery:
     def keys(self):
         return self._result_keys
 
-    def update(self, face_lo, face_hi, target_lo, target_hi):
-        """Refit, enumerate and sort on device, without host reads or capacity changes."""
+    def validate_storage(self):
+        """Check owner bindings even when a captured graph bypasses update."""
         if self.bvh is not self._bvh or any(getattr(self, name) is not a for name, a in self._owned.items()):
             raise ValueError("Contact query storage changed")
+
+    def update(self, face_lo, face_hi, target_lo, target_hi):
+        """Refit, enumerate and sort on device, without host reads or capacity changes."""
+        self.validate_storage()
         for a, size in (
             (face_lo, len(self.faces)),
             (face_hi, len(self.faces)),
@@ -320,10 +324,10 @@ class _ContactQuery:
             indices, scratch_indices = scratch_indices, indices
             run *= 2
 
-    def check(self):
+    def check(self, *, warn=True):
         """Report hard errors separately from the permitted capacity warning."""
         if self.status.numpy()[0] != 0:
             raise ValueError("Invalid contact query bounds")
         dropped = int(self.dropped.numpy()[0])
-        if dropped:
+        if dropped and warn:
             warnings.warn(f"Contact query capacity dropped {dropped} candidates", RuntimeWarning, stacklevel=2)

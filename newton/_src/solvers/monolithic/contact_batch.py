@@ -12,7 +12,7 @@ import warp as wp
 
 from .contact import _geometry_type, _law, _reset_flags, _validate_start
 from .contact_actor import _actor_geometry, _center, _point_column
-from .contact_pool import _ContactPool
+from .contact_pool import _ContactPool, _ContactRows
 from .segment_graph import _SegmentGraphCache
 
 
@@ -157,6 +157,37 @@ def _contact_pool_failure(flags: wp.array[int], records: Any):
         status = wp.where((records.flags[0] & 4) != 0, 1, 2)
         wp.atomic_max(flags, 0, status)
         wp.atomic_min(flags, 1, -1)
+
+
+@wp.kernel
+def _reference_rows(
+    candidates: Any,
+    rows: wp.array[int],
+    identities: wp.array[wp.uint64],
+    local: wp.array[int],
+    values: wp.array[Any],
+    count: wp.array[int],
+    flags: wp.array[int],
+):
+    i, j = wp.tid()
+    if i < candidates.count[0]:
+        if j == 0 and (not wp.isfinite(candidates.energy[i, 0]) or not wp.isfinite(candidates.energy[i, 1])):
+            wp.atomic_max(flags, 0, 2)
+        if j < candidates.support_counts[i]:
+            slot = wp.atomic_add(count, 0, 1)
+            rows[slot] = candidates.columns[i, j]
+            identities[slot] = candidates.identities[i]
+            local[slot] = j
+            values[slot] = candidates.residual[i, j]
+
+
+@wp.kernel
+def _add_reference(source: wp.array[Any], result: wp.array[Any], status: wp.array[int], flags: wp.array[int]):
+    i = wp.tid()
+    value = result[i] + source[i]
+    if status[0] != 0 or not wp.isfinite(value):
+        wp.atomic_max(flags, 0, 2)
+    result[i] = value
 
 
 @wp.func
@@ -531,7 +562,75 @@ class _ContactBatch:
         # Shared metadata is a graph binding too: rebinding a shape/SDF array
         # must not replay a graph containing its retired pointer.
         metadata = tuple(getattr(self.contact, name) for name in self.METADATA_ARRAYS)
+        if hasattr(self, "reference_rows"):
+            arrays.extend(self.reference_rows.buffers())
+            arrays.extend(self.reference_inputs)
         return tuple(arrays) + self.pool.buffers() + metadata
+
+    def initialize_reference(self):
+        """Reserve batch-sized full-reference scratch, independent of contact admission budgets."""
+        k = self.pool.max_support
+        capacity = self.batch_capacity * k
+        self.reference_rows = _ContactRows(
+            self.pool.row_count,
+            capacity,
+            max(1, self.contact.count),
+            k,
+            self.dtype,
+            self.device,
+            use_cuda_graph=self.graphs.enabled,
+        )
+        self.reference_inputs = (
+            *(wp.zeros(capacity, dtype=dtype, device=self.device) for dtype in (int, wp.uint64, int, self.dtype)),
+            wp.zeros(1, dtype=int, device=self.device),
+        )
+        self.reference_residual = wp.zeros(self.pool.row_count, dtype=self.dtype, device=self.device)
+        self.reference_energy = wp.zeros(2, dtype=self.dtype, device=self.device)
+
+    def evaluate_reference(self, x, poses, com, jt, jw, *, dt, rigid_com=None, rigid_rotation=None):
+        """Stream every sample into a native residual without capacity truncation or tangent storage."""
+        if not self._started or not np.isfinite(dt) or dt <= 0:
+            raise ValueError("Freeze a physical step before its full reference")
+        dt = self.contact.numpy_dtype(dt)
+        falloff = self.contact.numpy_dtype(self.contact.parameters[2]) * dt
+        if (
+            not np.isfinite(dt)
+            or dt <= 0
+            or (self.contact.parameters[1] > 0 and (not np.isfinite(falloff) or falloff <= 0))
+        ):
+            raise ValueError("Invalid native contact displacement scale")
+        state = self._state(x, poses, com, jt, jw, rigid_com, rigid_rotation)
+        wp.copy(self.flags, self.start_flags)
+        self.pool.records.flags.zero_()
+        self.reference_residual.zero_()
+        for mode in self._chunks():
+            self.graphs.run(
+                "contact_reference_geometry",
+                (mode, float(dt)),
+                (*self.buffers(), *state),
+                partial(self._stage, state, mode, dt, begin=False),
+            )
+            wp.launch(
+                _merge_contact_chunk_flags,
+                1,
+                [self.flags, self._flags, self.pool.candidates.identities, self.pool.records],
+                device=self.device,
+            )
+            self.reference_inputs[-1].zero_()
+            wp.launch(
+                _reference_rows,
+                (self.batch_capacity, self.pool.max_support),
+                [self.pool.candidates, *self.reference_inputs, self.flags],
+                device=self.device,
+            )
+            self.reference_rows.reduce(*self.reference_inputs)
+            # Accumulation runs exactly once outside overwrite-only capture.
+            wp.launch(
+                _add_reference,
+                self.reference_residual.size,
+                [self.reference_rows.result, self.reference_residual, self.reference_rows.flags, self.flags],
+                device=self.device,
+            )
 
     def _state(self, x, poses, com, jt, jw, rigid_com, rigid_rotation):
         c = self.contact

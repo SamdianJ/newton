@@ -24,7 +24,7 @@ from .articulation_state import _predict, _recover_history
 from .collision import _validate_and_collect_boundary_faces
 from .contact import ContactObjective, ContactStatus
 from .contact_forces import MonolithicContactForces
-from .contact_pipeline import _PooledContactObjective
+from .contact_pipeline import _PooledContactObjective, _SpatialContactObjective
 from .coupled_state import CoupledState
 from .iteration import iterate, measure
 from .joint_parameters import JointParameters
@@ -195,6 +195,7 @@ class SolverMonolithic(SolverBase):
         if type(capacity) is not int or capacity < 0:
             raise ValueError("Contact factor capacity must be a nonnegative integer")
         self._contact_pool = isinstance(self._contact, _PooledContactObjective)
+        self._contact_spatial = isinstance(self._contact, _SpatialContactObjective)
         if self._contact_pool:
             self._contact.initialize_pool(capacity, use_cuda_graph=use_cuda_graph)
         self._guard = min_det_f_guard
@@ -225,6 +226,8 @@ class SolverMonolithic(SolverBase):
         if self._contact_pool:
             self._coupled_config["contact_dataflow"] = self._contact.dataflow_identity
             self._coupled_config["contact_resources"] = self._contact.resource_identity
+        if self._contact_spatial:
+            self._coupled_config["contact_spatial"] = self._contact.spatial_identity
         if self._rigid.count:
             self._coupled_config.update(
                 rigid_contact_pairs=self._rigid.values["shape_contact_pairs"],
@@ -689,6 +692,8 @@ class SolverMonolithic(SolverBase):
                     "bsr": self._linear._fixed_bsr[0].graphs.summary(),
                     "internal": self._linear._fixed_bsr[1].graphs.summary(),
                 }
+            if self._contact_spatial:
+                self._variational["contact_spatial"] = self._contact.spatial_diagnostics()
             self._last_stats = self.Stats(
                 status=status,
                 failure_reason=failure,
@@ -780,6 +785,7 @@ class SolverMonolithic(SolverBase):
             k.jw,
             rigid_com=history.rigid_com,
             rigid_rotation=history.rigid_rotation,
+            **({"kinematics": k, "q0": k.gather_q(state_in)} if self._contact_spatial else {}),
         )
         wp.launch(
             kernels.particle_predict,
@@ -869,14 +875,16 @@ class SolverMonolithic(SolverBase):
             if device_result:
                 iteration_device.evaluate(self)
 
-        key = (self._layout.identity, self.precision.value, dt, build_tangent, device_result)
+        reference_mode = self._contact_spatial and contact._reference_mode
+        key = (self._layout.identity, self.precision.value, dt, build_tangent, device_result, reference_mode)
         if self._contact_pool:
             self._graphs.run("coupled_objective_owners", key, buffers, evaluate_owners)
             # Pool begin/append have side effects; they must run once, never
             # inside the owner's warmup/capture/replay overwrite chain.
             evaluate_contact()
             self._graphs.run("coupled_objective_result", key, buffers, evaluate_result)
-            self._variational["contact_pool"] = contact.evaluation_diagnostics()
+            if not reference_mode:
+                self._variational["contact_pool"] = contact.evaluation_diagnostics()
         else:
 
             def evaluate():
@@ -922,11 +930,25 @@ class SolverMonolithic(SolverBase):
         return parts.sum(), residual, absolute
 
     def _initial_reference(self, dt, *, device_result=False):
-        residual = self._evaluate(self._original, dt, build_tangent=False, device_result=device_result)[1]
+        if self._contact_spatial:
+            self._contact._reference_mode = True
+        try:
+            residual = self._evaluate(self._original, dt, build_tangent=False, device_result=device_result)[1]
+        finally:
+            if self._contact_spatial:
+                self._contact._reference_mode = self._contact._evaluated = False
         if device_result:
             wp.copy(self._reference_device, residual)
             return self._reference_device
         return residual
+
+    def _refresh_candidates(self):
+        """Refresh before the current E/r/B/baseline, including the budget's final check."""
+        state, k = self._accepted, self._kinematics
+        try:
+            self._contact.refresh(k.gather_q(state), state.particle_q, rigid_com=state._monolithic_coupled.rigid_com)
+        except ValueError as error:
+            raise _StepFailure(self.Status.NONFINITE, str(error)) from error
 
     def _conservative_energy(self):
         return self._contact.conservative_energy and not self._rigid.has_torque

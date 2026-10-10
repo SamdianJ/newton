@@ -72,6 +72,9 @@ def _patch_bounds(
                 wp.atomic_or(status, 0, 1)
                 return
             a, b = wp.vec3d(x0[particle]), wp.vec3d(x1[particle])
+            if not wp.isfinite(a) or not wp.isfinite(b):
+                wp.atomic_or(status, 0, 1)
+                return
             lo, hi = wp.min(lo, wp.min(a, b)), wp.max(hi, wp.max(a, b))
             magnitude = wp.max(magnitude, wp.max(wp.length(a), wp.length(b)))
     else:
@@ -94,6 +97,9 @@ def _patch_bounds(
                 return
         if kind == 1:
             a, b = wp.vec3d(com0[local]), wp.vec3d(com1[local])
+            if not wp.isfinite(a) or not wp.isfinite(b):
+                wp.atomic_or(status, 0, 1)
+                return
             lo, hi = wp.min(a, b) - wp.vec3d(radii[i]), wp.max(a, b) + wp.vec3d(radii[i])
             magnitude = wp.max(wp.length(a), wp.length(b)) + radii[i]
         else:
@@ -181,11 +187,11 @@ def _transform_points(transform, points):
 class _ContactSpatial:
     """Build swept candidates from the existing directed sampling owner.
 
-    Construction snapshots the physical-step start. Updates only query q0→q1,
+    Construction and begin_step snapshot the physical-step start. Updates query q0→q1,
     vertex segments and COM segments. Trials consume the resulting frozen IDs;
     they can miss contacts outside these envelopes, without automatic repair.
     ``law_margin`` is an explicit experimental length, not a qualified default.
-    Newton refresh/freeze and rollback integration belong to the lifecycle owner.
+    The solver lifecycle owner controls refresh/freeze and rollback.
     """
 
     def __init__(self, batch, kinematics, q0, x0, poses0, *, rigid_com=None, rigid_rotation=None, capacity, law_margin):
@@ -371,6 +377,31 @@ class _ContactSpatial:
             or any(getattr(owner, name) is not a for owner, name, a in self._borrowed)
         ):
             raise ValueError("Spatial contact storage changed")
+        self.query.validate_storage()
+        self.sweep.validate_storage()
+
+    def begin_step(self, q, x, poses, *, rigid_com=None):
+        """Overwrite fixed physical-start snapshots; never reset them on Newton refresh."""
+        self.validate_storage()
+        com = self.com0 if rigid_com is None else rigid_com
+        pairs = ((q, self.q0), (x, self.x0), (poses, self.poses0), (com, self.com0))
+        for source, target in pairs:
+            if (
+                not isinstance(source, wp.array)
+                or (source.dtype, source.shape, source.device) != (target.dtype, target.shape, self.device)
+                or not source.is_contiguous
+            ):
+                raise ValueError("Invalid native spatial contact start")
+            if source.size and any(
+                b.size and source.ptr < b.ptr + b.capacity and b.ptr < source.ptr + source.capacity
+                for b in self.buffers()
+                if b is not source
+            ):
+                raise ValueError("Spatial contact start aliases owned storage")
+        for source, target in pairs:
+            wp.copy(target, source)
+        self.count.zero_()
+        self.status.zero_()
 
     def _bounds(self, q, x, com):
         self.status.zero_()

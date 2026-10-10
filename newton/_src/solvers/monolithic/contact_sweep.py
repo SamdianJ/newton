@@ -213,14 +213,19 @@ class _ArticulationSweep:
     def buffers(self):
         return tuple(self._owned.values())
 
-    def update(self, q0, q1):
-        """Overwrite fixed scalar scratch; callers must reject nonzero status."""
+    def validate_storage(self):
+        """Check native policy and bindings before captured query replay."""
         k = self.kinematics
         if wp.get_module_options(_forward.module).get("fast_math", False):
             raise ValueError("Native articulation sweep requires fast_math disabled")
         for source, fields in ((self, self._owned), (k, self._borrowed)):
             if any(getattr(source, name) is not original for name, original in fields.items()):
                 raise ValueError("Articulation sweep storage changed")
+
+    def update(self, q0, q1):
+        """Overwrite fixed scalar scratch; callers must reject nonzero status."""
+        self.validate_storage()
+        k = self.kinematics
         if any(
             (q.shape, q.dtype, q.device) != ((k.count,), k.dtype, self.device) or not q.is_contiguous for q in (q0, q1)
         ):

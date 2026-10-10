@@ -146,6 +146,7 @@ def record(
     device="cuda:0",
     graph=True,
     contact_dataflow="legacy",
+    spatial=None,
     steps=10,
     windows=None,
     boundaries=("pcg",),
@@ -159,7 +160,9 @@ def record(
         raise ValueError("Windows must be ordered and disjoint")
     root = Path(root)
     root.mkdir(parents=True, exist_ok=False)
-    model, run, state, samples = build_scene(scene, device=device, graph=graph, contact_dataflow=contact_dataflow)
+    model, run, state, samples = build_scene(
+        scene, device=device, graph=graph, contact_dataflow=contact_dataflow, spatial=spatial
+    )
     if samples is not None and steps >= len(samples):
         raise ValueError("Step range exceeds scene controls")
     control = model.control()
@@ -180,6 +183,8 @@ def record(
         "comparison": {"rtol": 2e-5, "atol": 2e-6},
     }
     starts = {a for a, _ in windows}
+    if spatial is not None:
+        manifest["spatial"] = spatial
     with (
         CallRecorder(run, root, boundaries=boundaries, call_ordinals=call_ordinals) as recorder,
         (root / "trace.jsonl").open("w") as trace,
@@ -233,7 +238,9 @@ def main():
     )
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--no-graph", action="store_true")
-    parser.add_argument("--contact-dataflow", choices=("legacy", "pooled"), default="legacy")
+    parser.add_argument("--contact-dataflow", choices=("legacy", "pooled", "spatial"), default="legacy")
+    parser.add_argument("--candidate-capacity", type=int)
+    parser.add_argument("--law-margin", type=float)
     parser.add_argument("--steps", type=int, default=10)
     parser.add_argument("--start", type=int, default=6)
     parser.add_argument(
@@ -242,6 +249,13 @@ def main():
     parser.add_argument("--selection", type=Path, help="JSON containing ordered inclusive windows")
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
+    spatial = None
+    if args.contact_dataflow == "spatial":
+        if args.candidate_capacity is None or args.law_margin is None:
+            parser.error("Spatial experiments require --candidate-capacity and --law-margin")
+        spatial = {"candidate_capacity": args.candidate_capacity, "law_margin": args.law_margin}
+    elif args.candidate_capacity is not None or args.law_margin is not None:
+        parser.error("Spatial parameters require --contact-dataflow spatial")
     selection = json.loads(args.selection.read_text()) if args.selection else {}
     for key, expected in (
         ("schema", "monolithic-workload-selection/1"),
@@ -259,6 +273,7 @@ def main():
         device=args.device,
         graph=not args.no_graph,
         contact_dataflow=args.contact_dataflow,
+        spatial=spatial,
         steps=args.steps,
         windows=windows,
         boundaries=args.boundaries,

@@ -31,9 +31,9 @@ def replay(root, *, mode="window", device="cuda:0", repeat=5, profile=False):
     root = Path(root)
     manifest = open_bundle(root)
     contact_dataflow = manifest.get("contact_dataflow", "legacy")
-    if (manifest["scene"].startswith("actor-coupling") or contact_dataflow == "pooled") and manifest["source"][
-        "source_hashes"
-    ] != provenance()["source_hashes"]:
+    if (manifest["scene"].startswith("actor-coupling") or contact_dataflow in ("pooled", "spatial")) and manifest[
+        "source"
+    ]["source_hashes"] != provenance()["source_hashes"]:
         raise ValueError("Mixed workload source identity differs")
     results = []
     if mode == "hotspot":
@@ -72,7 +72,11 @@ def replay(root, *, mode="window", device="cuda:0", repeat=5, profile=False):
             raise ValueError("Incomplete execution trace")
         for first, last in manifest["windows"]:
             model, run, state, _ = build_scene(
-                manifest["scene"], device=device, graph=manifest["graph"], contact_dataflow=contact_dataflow
+                manifest["scene"],
+                device=device,
+                graph=manifest["graph"],
+                contact_dataflow=contact_dataflow,
+                spatial=manifest.get("spatial"),
             )
             if run._kinematics.digest.hex() != manifest["physical_digest"]:
                 raise ValueError("Scene physical identity changed")
