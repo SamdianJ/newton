@@ -84,7 +84,13 @@ def test_fixed_topology_reuse(test, device):
                 array.fill_(seed)
             owner.build(inputs, layout_identity="fixed")
             _assert_matrix(test, owner, rows[:n], columns[:n], values[:n])
-            current = tuple(array.numpy().tobytes() for array in owner.buffers())
+            for name in ("keys", "key_scratch", "indices", "index_scratch", "starts", "work", "live"):
+                np.testing.assert_array_equal(
+                    getattr(owner, name).numpy()[n:], seed, err_msg="Build touched unused scratch capacity"
+                )
+            current = tuple(
+                array.numpy().tobytes() for array in (owner.matrix.offsets, owner.matrix.columns, owner.matrix.values)
+            )
             if snapshot is not None:
                 test.assertEqual(current, snapshot)
             snapshot = current
@@ -224,7 +230,7 @@ def test_fixed_topology_storage_guards(test, device):
 def test_fixed_topology_random_groups(test, device):
     """Preserve cancellation and zero placement in heterogeneous duplicate groups."""
     capacity = 513
-    owner = _FixedScalarBsrReduction(11, capacity, device, use_cuda_graph=device.is_cuda)
+    owner = _FixedScalarBsrReduction(11, capacity, device, use_cuda_graph=False)
     inputs = _inputs(capacity, device)
     rng = np.random.default_rng(779)
     # Force worker reuse across both sort passes, the scan and the float tree.

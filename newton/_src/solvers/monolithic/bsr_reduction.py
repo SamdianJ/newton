@@ -201,22 +201,23 @@ def _fixed_bsr_value_keys(
     size: int,
     keys: wp.array[wp.uint64],
     indices: wp.array[int],
-    scratch_keys: wp.array[wp.uint64],
-    scratch_indices: wp.array[int],
+    live: wp.array[int],
+    workers: int,
     status: wp.array[int],
 ):
     i = wp.tid()
-    key = wp.uint64(0) - wp.uint64(1)
-    if count[0] >= 0 and count[0] <= keys.shape[0] and i < count[0]:
+    n = count[0]
+    if n < 0 or n > keys.shape[0]:
+        return
+    while i < n:
         if rows[i] < 0 or rows[i] >= size or columns[i] < 0 or columns[i] >= size:
             wp.atomic_max(status, 0, int(MonolithicLinearStatus.TRIPLET_INDEX_OUT_OF_RANGE))
         if not wp.isfinite(values[i]):
             wp.atomic_max(status, 0, int(MonolithicLinearStatus.NONFINITE_CONTRIBUTION))
-        key = wp.uint64(bits[i])
-    keys[i] = key
-    indices[i] = i
-    scratch_keys[i] = wp.uint64(0) - wp.uint64(1)
-    scratch_indices[i] = i
+        keys[i] = wp.uint64(bits[i])
+        indices[i] = i
+        live[i] = 0
+        i += workers
 
 
 @wp.kernel
@@ -227,15 +228,20 @@ def _fixed_bsr_position_keys(
     size: int,
     indices: wp.array[int],
     keys: wp.array[wp.uint64],
+    workers: int,
 ):
     i = wp.tid()
-    key = wp.uint64(0) - wp.uint64(1)
-    if count[0] >= 0 and count[0] <= keys.shape[0] and i < count[0]:
+    n = count[0]
+    if n < 0 or n > keys.shape[0]:
+        return
+    while i < n:
+        key = wp.uint64(0) - wp.uint64(1)
         source = indices[i]
-        if source < count[0]:
+        if source >= 0 and source < n:
             if rows[source] >= 0 and rows[source] < size and columns[source] >= 0 and columns[source] < size:
                 key = wp.uint64(rows[source]) * wp.uint64(size) + wp.uint64(columns[source])
-    keys[i] = key
+        keys[i] = key
+        i += workers
 
 
 @wp.kernel
@@ -246,17 +252,24 @@ def _fixed_bsr_work(
     starts: wp.array[int],
     work: wp.array[float],
     live: wp.array[int],
+    count: wp.array[int],
+    workers: int,
 ):
     i = wp.tid()
-    first = i
-    value = float(0)
-    if keys[i] != wp.uint64(0) - wp.uint64(1):
-        first = _lower_bound(keys, keys[i], keys.shape[0])
-        value = values[indices[i]]
-        if value != 0.0:
-            wp.atomic_or(live, first, 1)
-    starts[i] = first
-    work[i] = value
+    n = count[0]
+    if n < 0 or n > keys.shape[0]:
+        return
+    while i < n:
+        first = i
+        value = float(0)
+        if keys[i] != wp.uint64(0) - wp.uint64(1):
+            first = _lower_bound(keys, keys[i], n)
+            value = values[indices[i]]
+            if value != 0.0:
+                wp.atomic_or(live, first, 1)
+        starts[i] = first
+        work[i] = value
+        i += workers
 
 
 @wp.kernel
@@ -287,13 +300,25 @@ def _fixed_bsr_pair(
 
 
 @wp.kernel
-def _fixed_bsr_scan_seed(starts: wp.array[int], live: wp.array[int], prefix: wp.array[int]):
+def _fixed_bsr_scan_seed(
+    starts: wp.array[int],
+    live: wp.array[int],
+    prefix: wp.array[int],
+    count: wp.array[int],
+    scan_size: wp.array[int],
+    workers: int,
+):
     i = wp.tid()
-    value = int(0)
-    if i < starts.shape[0]:
-        if starts[i] == i and live[i] != 0:
-            value = 1
-    prefix[i] = value
+    n = count[0]
+    if n < 0 or n > starts.shape[0]:
+        n = 0
+    while i < scan_size[0]:
+        value = int(0)
+        if i < n:
+            if starts[i] == i and live[i] != 0:
+                value = 1
+        prefix[i] = value
+        i += workers
 
 
 @wp.kernel
@@ -330,10 +355,14 @@ def _fixed_bsr_scan_down(prefix: wp.array[int], scan_size: wp.array[int], fixed_
 
 
 @wp.kernel
-def _fixed_bsr_offsets(keys: wp.array[wp.uint64], prefix: wp.array[int], size: int, offsets: wp.array[int]):
+def _fixed_bsr_offsets(
+    keys: wp.array[wp.uint64], prefix: wp.array[int], count: wp.array[int], size: int, offsets: wp.array[int]
+):
     row = wp.tid()
-    first = _lower_bound(keys, wp.uint64(row) * wp.uint64(size), keys.shape[0])
-    offsets[row] = prefix[first]
+    offsets[row] = 0
+    if count[0] >= 0 and count[0] <= keys.shape[0]:
+        first = _lower_bound(keys, wp.uint64(row) * wp.uint64(size), count[0])
+        offsets[row] = prefix[first]
 
 
 @wp.kernel
@@ -346,12 +375,19 @@ def _fixed_bsr_entries(
     size: int,
     columns: wp.array[int],
     values: wp.array[float],
+    count: wp.array[int],
+    workers: int,
 ):
     i = wp.tid()
-    if starts[i] == i and live[i] != 0:
-        entry = prefix[i]
-        columns[entry] = int(keys[i] % wp.uint64(size))
-        values[entry] = work[i]
+    n = count[0]
+    if n < 0 or n > keys.shape[0]:
+        return
+    while i < n:
+        if starts[i] == i and live[i] != 0:
+            entry = prefix[i]
+            columns[entry] = int(keys[i] % wp.uint64(size))
+            values[entry] = work[i]
+        i += workers
 
 
 @wp.kernel
@@ -474,16 +510,17 @@ class _FixedScalarBsrReduction:
 
     def _build(self, triplets):
         matrix, n = self.matrix, self.capacity
-        for array in (self.live, matrix.offsets, matrix.columns, matrix.values):
+        for array in (matrix.offsets, matrix.columns, matrix.values):
             array.zero_()
         wp.launch(
             _fixed_bsr_begin, 1, [triplets.count, triplets.status, self.status, self.scan_size, n], device=self.device
         )
         keys, indices = self.keys, self.indices
+        workers = min(n, self.MAX_WORKERS)
         if n:
             wp.launch(
                 _fixed_bsr_value_keys,
-                n,
+                workers,
                 [
                     triplets.rows,
                     triplets.columns,
@@ -493,8 +530,8 @@ class _FixedScalarBsrReduction:
                     self.size,
                     keys,
                     indices,
-                    self.key_scratch,
-                    self.index_scratch,
+                    self.live,
+                    workers,
                     self.status,
                 ],
                 device=self.device,
@@ -502,19 +539,18 @@ class _FixedScalarBsrReduction:
             keys, indices = self._sort(keys, indices, triplets.count)
             wp.launch(
                 _fixed_bsr_position_keys,
-                n,
-                [triplets.rows, triplets.columns, triplets.count, self.size, indices, keys],
+                workers,
+                [triplets.rows, triplets.columns, triplets.count, self.size, indices, keys, workers],
                 device=self.device,
             )
             keys, indices = self._sort(keys, indices, triplets.count)
             wp.launch(
                 _fixed_bsr_work,
-                n,
-                [keys, indices, triplets.values, self.starts, self.work, self.live],
+                workers,
+                [keys, indices, triplets.values, self.starts, self.work, self.live, triplets.count, workers],
                 device=self.device,
             )
             stride = 1
-            workers = min(n, self.MAX_WORKERS)
             while stride < n:
                 wp.launch(
                     _fixed_bsr_pair,
@@ -523,7 +559,13 @@ class _FixedScalarBsrReduction:
                     device=self.device,
                 )
                 stride *= 2
-        wp.launch(_fixed_bsr_scan_seed, self.prefix.size, [self.starts, self.live, self.prefix], device=self.device)
+        workers = min(self.prefix.size, self.MAX_WORKERS)
+        wp.launch(
+            _fixed_bsr_scan_seed,
+            workers,
+            [self.starts, self.live, self.prefix, triplets.count, self.scan_size, workers],
+            device=self.device,
+        )
         distance = 1
         while distance < self.prefix.size:
             workers = min(self.prefix.size // (2 * distance), self.MAX_WORKERS)
@@ -545,12 +587,29 @@ class _FixedScalarBsrReduction:
                 device=self.device,
             )
             distance //= 2
-        wp.launch(_fixed_bsr_offsets, self.size + 1, [keys, self.prefix, self.size, matrix.offsets], device=self.device)
+        wp.launch(
+            _fixed_bsr_offsets,
+            self.size + 1,
+            [keys, self.prefix, triplets.count, self.size, matrix.offsets],
+            device=self.device,
+        )
         if n:
+            workers = min(n, self.MAX_WORKERS)
             wp.launch(
                 _fixed_bsr_entries,
-                n,
-                [keys, self.starts, self.live, self.work, self.prefix, self.size, matrix.columns, matrix.values],
+                workers,
+                [
+                    keys,
+                    self.starts,
+                    self.live,
+                    self.work,
+                    self.prefix,
+                    self.size,
+                    matrix.columns,
+                    matrix.values,
+                    triplets.count,
+                    workers,
+                ],
                 device=self.device,
             )
         for array in (matrix.offsets, matrix.columns, matrix.values):
