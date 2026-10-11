@@ -26,11 +26,29 @@ from scripts.monolithic_reference.run_regression import (
     finalize_case,
     reference_binding,
     select_cases,
+    worker,
     write_report,
 )
 
 
 class TestSceneRunner(unittest.TestCase):
+    def test_rigid_recipe_mismatch_fails(self):
+        """Reject an otherwise passed rigid run whose recipe changed before qualification."""
+        case = select_cases("nightly")[-1]
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            patch("scripts.monolithic_reference.run_regression.validate_inputs", return_value="frozen"),
+            patch(
+                "scripts.monolithic_reference.run_rigid_stack.record_run",
+                return_value={"status": "PASS", "scene_input_sha256": "changed"},
+            ),
+        ):
+            output = Path(directory) / "case"
+            self.assertEqual(worker(case, output), 1)
+            receipt = json.loads((output / "receipt.json").read_text())
+            self.assertEqual(receipt["status"], "FAIL")
+            self.assertIn("fixture changed", receipt["exception"])
+
     def test_recording_retention(self):
         """Drop only passed output recordings; preserve failures, summaries and opt-in full data."""
         for status, exit_code, retention, keep in (
@@ -161,10 +179,14 @@ class TestSceneRunner(unittest.TestCase):
                 list(native_frames(root, controls))
 
     def test_profiles(self):
-        """Expand ten full and two dev cases without granting filtered qualification."""
+        """Add the rigid nightly case while retaining the ten references and two dev cases."""
         full, dev = select_cases("full"), select_cases("dev")
         self.assertEqual(len(full), 10)
-        self.assertEqual(select_cases("nightly"), full)
+        nightly = select_cases("nightly")
+        self.assertEqual(nightly[:10], full)
+        self.assertEqual(len(nightly), 11)
+        self.assertEqual(nightly[-1]["id"], "rigid-stack-64--C-IE--ArmijoOrResNorm")
+        self.assertEqual(select_cases("nightly", [nightly[-1]["id"]]), [nightly[-1]])
         self.assertEqual(dev, [full[0], full[-1]])
         self.assertEqual(select_cases("full", [full[2]["id"]]), [full[2]])
         self.assertEqual(aggregate([{"status": "PASS"}], True), "PARTIAL")
@@ -239,6 +261,9 @@ class TestManualAcceptance(unittest.TestCase):
     def test_collection_and_failures(self):
         """Preserve failure receipts and launch nightly only after complete actor qualification."""
         identity = {"commit": "tested", "dirty": False}
+        expected_count = (
+            11 if (ROOT / "scripts/monolithic_reference/fixtures/rigid_stack_large_v1.json").is_file() else 10
+        )
         for failure in (
             None,
             "actor_exit",
@@ -278,7 +303,12 @@ class TestManualAcceptance(unittest.TestCase):
                             "profile": "nightly",
                             "filtered": failure == "nightly_filtered",
                             "complete": True,
-                            "cases": [{"status": "PASS"} for _ in range(9 if failure == "nightly_incomplete" else 10)],
+                            "cases": [
+                                {"status": "PASS"}
+                                for _ in range(
+                                    expected_count - 1 if failure == "nightly_incomplete" else expected_count
+                                )
+                            ],
                         }
                     if failure != "missing":
                         (destination / "summary.json").write_text(json.dumps(summary))

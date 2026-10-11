@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 The Newton Developers
 # SPDX-License-Identifier: Apache-2.0
 
-"""Manually run retained FP64 scene regressions, including the ten-case nightly profile."""
+"""Manually run retained FP64 regressions and the large rigid collision nightly case."""
 
 import argparse
 import hashlib
@@ -33,6 +33,21 @@ def select_cases(profile, filters=()):
     if profile not in ("dev", "full", "nightly"):
         raise ValueError(f"Unknown scene profile: {profile}")
     selected = full if profile in ("full", "nightly") else [full[0], full[-1]]
+    if profile == "nightly":
+        path = ROOT / "scripts/monolithic_reference/fixtures/rigid_stack_large_v1.json"
+        rigid = json.loads(path.read_text())
+        selected = [
+            *selected,
+            {
+                "id": rigid["id"],
+                "law": "C-IE",
+                "globalization": "ArmijoOrResNorm",
+                "steps": rigid["steps"],
+                "kind": "rigid_stack",
+                "contact_dataflow": "spatial",
+                "input_sha256": sha(path),
+            },
+        ]
     if filters:
         unknown = set(filters) - {c["id"] for c in selected}
         if unknown:
@@ -81,16 +96,25 @@ def write_report(output, summary):
         f"Profile: {summary['profile']}; status: {summary['status']}; complete: {summary['complete']}.",
         "Component tests: NOT_RUN_BY_SCENE_RUNNER. Stopped is not convergence.",
         "",
-        "| Case | Result | Converged | Stopped | Recording retained | Receipt |",
-        "| --- | --- | --- | --- | --- | --- |",
+        "| Case | Result | Converged | Stopped | Recording retained | Median ms | Steps/s | Receipt |",
+        "| --- | --- | --- | --- | --- | --- | --- | --- |",
     ]
+    details = []
     for row in summary["cases"]:
+        performance = row.get("performance", {})
         lines.append(
             f"| {row['case']} | {row['status']} | {row['counts'].get('CONVERGED', '-')} | "
             f"{row['counts'].get('STOPPED_ACCEPTED', '-')} | {row['recording_retained']} | "
+            f"{performance.get('warm_median_ms', '-')} | {performance.get('warm_fps', '-')} | "
             f"[receipt]({row['case']}/receipt.json) |"
         )
-    lines += ["", "Receipts include source/input/reference identities, environment, scene metrics and first errors."]
+        if row.get("metrics"):
+            details += ["", f"{row['case']}: " + json.dumps(row["metrics"], sort_keys=True)]
+    lines += [
+        *details,
+        "",
+        "Receipts include source/input/reference identities, environment, scene metrics and first errors.",
+    ]
     (output / "RESULTS.md").write_text("\n".join(lines) + "\n")
 
 
@@ -172,6 +196,18 @@ def worker(case, output, *, contact_dataflow="legacy", max_steps=None):
     try:
         receipt["input_manifest_sha256"] = validate_inputs()
         receipt["input_manifest"] = str(FROZEN)
+        if case.get("kind") == "rigid_stack":
+            from scripts.monolithic_reference.run_rigid_stack import record_run  # noqa: PLC0415
+
+            scene = record_run(output, max_steps=max_steps)
+            receipt.update({name: value for name, value in scene.items() if name != "status"})
+            if receipt["scene_input_sha256"] != case["input_sha256"]:
+                raise ValueError("Rigid fixture changed after case selection")
+            receipt["modules"] = module_origins(ROOT, source_hashes)
+            if any(not (ROOT / name).is_file() or sha(ROOT / name) != value for name, value in source_hashes.items()):
+                raise ValueError("Source changed during rigid acceptance")
+            receipt["status"] = scene["status"]
+            return int(receipt["status"] not in ("PASS", "PARTIAL"))
         reference, controls, native_controls, envelopes, binding = reference_binding(case)
         receipt["reference"] = binding
         import numpy as np  # noqa: PLC0415
@@ -301,7 +337,7 @@ def main():
         "--contact-dataflow",
         choices=("legacy", "spatial"),
         default="legacy",
-        help="Explicit frozen B3 experimental recipe; default legacy Q1",
+        help="Robot recipe: legacy Q1 or frozen B3; the added rigid nightly case always uses B3/lambda-zero",
     )
     parser.add_argument("--max-steps", type=int, help="Bounded smoke only; always PARTIAL, no trajectory qualification")
     args = parser.parse_args()
@@ -362,6 +398,10 @@ def main():
                 ).hexdigest(),
                 "input_manifest_sha256": receipt.get("input_manifest_sha256"),
                 "contact_dataflow": args.contact_dataflow,
+                "effective_contact_dataflow": receipt.get("effective_contact_dataflow", args.contact_dataflow),
+                "scene_input_sha256": receipt.get("scene_input_sha256"),
+                "performance": receipt.get("performance", {}),
+                "metrics": receipt.get("metrics", {}),
             }
         )
         summary = {
@@ -371,6 +411,7 @@ def main():
             "filtered": bool(args.case),
             "contact_dataflow": args.contact_dataflow,
             "max_steps": args.max_steps,
+            "planned_cases": [c["id"] for c in selected],
             "cases": results,
         }
         if not summary["complete"] and summary["status"] == "PASS":

@@ -5,38 +5,30 @@
 
 import tempfile
 import unittest
-from dataclasses import replace
-from functools import partial
 from pathlib import Path
-from unittest.mock import patch
 
 import numpy as np
-import warp as wp
 
-import newton
-from newton._src.solvers.monolithic import solver_monolithic
-from newton._src.solvers.monolithic.contact_pipeline import _PooledContactObjective, _SpatialContactObjective
-from newton.solvers.experimental.monolithic import SolverMonolithic
-from newton.tests.monolithic_test_utils import add_contact_free_tet
 from newton.tests.test_monolithic_solver_actor_contacts import frame
 from newton.tests.test_monolithic_solver_rigid import assert_physical
 from newton.tests.unittest_utils import add_function_test, get_test_devices
 from scripts.monolithic_reference.articulation_oracle import transform
 from scripts.monolithic_reference.contact_system_audit import ContactSystemAudit
+from scripts.monolithic_reference.rigid_stack_scene import (
+    BALANCE_RELATIVE,
+    DT,
+    GAP,
+    HALF_EXTENT,
+    HOLD_STEPS,
+    PENETRATION_LIMIT,
+    SETTLE_SPEED,
+    STEPS,
+    SUPPORT_RELATIVE,
+    WEIGHT,
+    stack_scene,
+    stack_solver,
+)
 
-DT = 0.001
-STEPS = 120
-HALF_EXTENT = 0.02
-MASS = 0.01
-GAP = 0.0005
-# Retain the existing contact E2E penetration and balance envelopes. The
-# settling speed allows at most one initial gap of motion in the 20 ms hold.
-PENETRATION_LIMIT = 0.002
-BALANCE_RELATIVE = 1e-5
-SUPPORT_RELATIVE = 0.05
-HOLD_STEPS = 20
-SETTLE_SPEED = GAP / (HOLD_STEPS * DT)
-WEIGHT = MASS * 9.81
 PAIR_LOADS = {
     (0, 1): -2 * WEIGHT,
     (1, 2): -WEIGHT,
@@ -45,59 +37,6 @@ PAIR_LOADS = {
     (4, 5): -WEIGHT,
     (3, 6): 3 * WEIGHT,
 }
-
-
-def stack_scene(device):
-    """Build two initially separated three-box stacks above an infinite plane."""
-    builder = newton.ModelBuilder(gravity=(0, 0, -9.81))
-    # The supported coupled entry requires an articulation and a tet. Neither
-    # has a collision shape or moves in this rigid-only contact experiment.
-    auxiliary = builder.add_link(mass=1.0, inertia=wp.diag(wp.vec3(0.01)), label="auxiliary")
-    joint = builder.add_joint_prismatic(-1, auxiliary, axis=newton.Axis.X, limit_ke=0, limit_kd=0)
-    builder.add_articulation([joint])
-    add_contact_free_tet(builder)
-    builder.particle_mass[:] = [0.0] * builder.particle_count
-    cfg = builder.ShapeConfig(density=0, margin=0, has_particle_collision=False)
-    for column, x in enumerate((-0.03, 0.03)):
-        for layer in range(3):
-            z = HALF_EXTENT + GAP + layer * (2 * HALF_EXTENT + GAP)
-            body = builder.add_link(
-                xform=wp.transform((x, 0, z), wp.quat_identity()),
-                mass=MASS,
-                inertia=wp.diag(wp.vec3(MASS * (2 * HALF_EXTENT) ** 2 / 6)),
-                label=f"box_{column}_{layer}",
-            )
-            joint = builder.add_joint_free(body)
-            builder.add_articulation([joint])
-            builder.add_shape_box(body, hx=HALF_EXTENT, hy=HALF_EXTENT, hz=HALF_EXTENT, cfg=cfg)
-    builder.add_shape_plane(body=-1, width=0, length=0, cfg=cfg)
-    return builder.finalize(device=device)
-
-
-def stack_solver(model, *, spatial, graph=False):
-    """Select an explicit contact route without changing production defaults."""
-    factory = (
-        partial(_SpatialContactObjective, candidate_capacity=4096, law_margin=0.0)
-        if spatial
-        else _PooledContactObjective
-    )
-    with patch.object(solver_monolithic, "ContactObjective", factory):
-        run = SolverMonolithic(
-            model,
-            contact_model="C-IE",
-            globalization="ArmijoOrResNorm",
-            allow_nonconservative_energy=True,
-            friction_velocity_scale=0.01,
-            pcg_mode="production",
-            use_cuda_graph=graph,
-            precision="fp64",
-            publish_policy="strict",
-            tet_rest_density=wp.full(model.tet_count, 1000, dtype=float, device=model.device),
-        )
-    # Match the currently selected numerical experiment; retain all physical
-    # convergence gates and the normal Newton/line-search/PCG budgets.
-    run._config = replace(run._config, regularization_values=(0.0,))
-    return run
 
 
 def check_stack_step(test, run, state):

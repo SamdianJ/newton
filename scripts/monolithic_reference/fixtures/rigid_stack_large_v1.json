@@ -1,0 +1,30 @@
+{
+  "schema": "rigid-stack-nightly/v1",
+  "id": "rigid-stack-64--C-IE--ArmijoOrResNorm",
+  "grid": [4, 4],
+  "layers": 4,
+  "pitch_m": 0.0405,
+  "half_extent_m": 0.02,
+  "mass_kg": 0.01,
+  "gap_m": 0.0005,
+  "gravity_m_s2": 9.81,
+  "dt": 0.001,
+  "steps": 2000,
+  "hold_steps": 100,
+  "warmup_steps": 120,
+  "query_capacity": 147456,
+  "support_capacity": 32768,
+  "factor_capacity": 98304,
+  "law_margin_m": 0.0,
+  "audit_steps": [1, 20, 65, 120],
+  "audit_stride": 100,
+  "gates": {
+    "penetration_m": 0.002,
+    "balance_relative": 0.00001,
+    "support_relative": 0.05,
+    "surface_speed_m_s": 0.025,
+    "hold_drift_m": 0.00005,
+    "lateral_drift_m": 0.00005,
+    "min_pair_force_n": 0.0001
+  }
+}
