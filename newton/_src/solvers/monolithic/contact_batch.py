@@ -660,12 +660,10 @@ class _ContactBatch:
 
     def _chunks(self, selection=None):
         if selection is not None:
-            for mode in (2, 3):
-                if (mode == 2 and self.contact.legacy_count == 0) or (
-                    mode == 3 and self.contact.count == self.contact.legacy_count
-                ):
-                    continue
-                for offset in range(0, selection.capacity, max(1, self.batch_capacity)):
+            if selection.mode_counts is None:
+                raise ValueError("Check spatial selection before scheduling batches")
+            for mode, count in zip((2, 3), selection.mode_counts, strict=True):
+                for offset in range(0, count, max(1, self.batch_capacity)):
                     wp.launch(
                         _select_sparse_chunk,
                         1,

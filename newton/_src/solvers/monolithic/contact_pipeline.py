@@ -321,10 +321,7 @@ class _SpatialContactObjective(_PooledContactObjective):
             (q, x, rigid_com, *selection.buffers()),
             lambda: selection.update(q, x, rigid_com=rigid_com),
         )
-        if selection.status.numpy()[0]:
-            raise ValueError("Invalid spatial contact envelope or identity")
-        selection.query.check(warn=False)
-        dropped = int(selection.query.dropped.numpy()[0])
+        dropped = selection.check(warn=False)
         self._query_dropped += dropped
         if dropped and not self._query_warned:
             warnings.warn(

@@ -3,6 +3,7 @@
 
 """Model sampling adapter for private swept patch queries and stable batch selections."""
 
+import warnings
 from typing import Any
 
 import numpy as np
@@ -174,6 +175,34 @@ def _selection_count(source: wp.array[int], status: wp.array[int], count: wp.arr
         count[0] = 0
 
 
+@wp.kernel
+def _selection_packet(
+    ids: wp.array[wp.uint64],
+    count: wp.array[int],
+    status: wp.array[int],
+    query_status: wp.array[int],
+    dropped: wp.array[wp.int64],
+    legacy: int,
+    packet: wp.array[wp.int64],
+):
+    n = count[0]
+    flag = status[0] | query_status[0]
+    if n < 0 or n > ids.shape[0]:
+        flag = flag | 1
+        n = 0
+    lo, hi = int(0), n + 0
+    while lo < hi:
+        mid = lo + (hi - lo) // 2
+        if ids[mid] < wp.uint64(legacy):
+            lo = mid + 1
+        else:
+            hi = mid
+    packet[0] = wp.int64(flag)
+    packet[1] = wp.int64(lo)
+    packet[2] = wp.int64(n - lo)
+    packet[3] = dropped[0]
+
+
 def _corners(lower, upper):
     return np.array([np.where(np.array([i & 1, i & 2, i & 4]) != 0, upper, lower) for i in range(8)])
 
@@ -243,6 +272,8 @@ class _ContactSpatial:
         self.q0, self.x0, self.poses0 = wp.clone(q0), wp.clone(x0), wp.clone(poses0)
         self.com0 = wp.clone(rigid_com)
         self.status, self.count = (wp.zeros(1, dtype=int, device=self.device) for _ in range(2))
+        self.packet = wp.zeros(4, dtype=wp.int64, device=self.device)
+        self.mode_counts = None
         kinds, indices, body_com = (getattr(batch.support, n).numpy() for n in ("kinds", "indices", "com"))
         transforms, bodies, types, scales = (getattr(c, n).numpy() for n in ("transforms", "bodies", "types", "scales"))
         local_lo, local_hi, source_shapes, source_faces = [], [], [], []
@@ -402,6 +433,7 @@ class _ContactSpatial:
             wp.copy(target, source)
         self.count.zero_()
         self.status.zero_()
+        self.mode_counts = None
 
     def _bounds(self, q, x, com):
         self.status.zero_()
@@ -440,6 +472,7 @@ class _ContactSpatial:
     def update(self, q, x, *, rigid_com=None):
         """Overwrite the fixed query and selection, without runtime allocations or host reads."""
         self.validate_storage()
+        self.mode_counts = None
         com = self.com0 if rigid_com is None else rigid_com
         for a, original in ((q, self.q0), (x, self.x0), (com, self.com0)):
             if (
@@ -485,8 +518,26 @@ class _ContactSpatial:
             ids, scratch, indices, scratch_indices = scratch, ids, scratch_indices, indices
             run *= 2
 
-    def check(self):
-        """Raise hard envelope/identity errors and separately report permitted capacity drops."""
-        if self.status.numpy()[0]:
+    def check(self, *, warn=True):
+        """Freeze host batch counts once with the existing Newton status readback."""
+        wp.launch(
+            _selection_packet,
+            1,
+            [
+                self.identities,
+                self.count,
+                self.status,
+                self.query.status,
+                self.query.dropped,
+                self.batch.contact.legacy_count,
+                self.packet,
+            ],
+            device=self.device,
+        )
+        flags, left, right, dropped = map(int, self.packet.numpy())
+        self.mode_counts = (left, right) if flags == 0 else (0, 0)
+        if flags:
             raise ValueError("Invalid spatial contact envelope or identity")
-        self.query.check()
+        if dropped and warn:
+            warnings.warn(f"Contact query capacity dropped {dropped} candidates", RuntimeWarning, stacklevel=2)
+        return dropped

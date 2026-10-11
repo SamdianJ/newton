@@ -99,6 +99,7 @@ def test_spatial_pairs(test, device):
                 sparse[: len(keep)] = keep
                 spatial.identities.assign(sparse)
                 spatial.count.fill_(len(keep))
+                spatial.check()
                 batch.evaluate(*inputs, dt=0.001, selection=spatial, **options)
                 test.assertEqual(int(batch.flags.numpy()[0]), 0)
                 np.testing.assert_allclose(
@@ -396,6 +397,7 @@ def test_spatial_known_miss(test, device):
     )
     spatial.update(run._kinematics.gather_q(state), inputs[0], rigid_com=options["rigid_com"])
     test.assertEqual(int(spatial.count.numpy()[0]), 0)
+    spatial.check()
     frozen = batch.start.y.numpy().copy()
     state._monolithic_coupled.rigid_com.assign(original)
     inputs, options = native_inputs(run, state)
@@ -404,9 +406,29 @@ def test_spatial_known_miss(test, device):
     batch.evaluate(*inputs, dt=0.001, **options)
     test.assertGreater(np.linalg.norm(batch.pool.residual.result.numpy()), 1e-4)
     spatial.update(run._kinematics.gather_q(state), inputs[0], rigid_com=options["rigid_com"])
+    spatial.check()
     batch.evaluate(*inputs, dt=0.001, selection=spatial, **options)
     test.assertGreater(np.linalg.norm(batch.pool.residual.result.numpy()), 1e-4)
     np.testing.assert_array_equal(batch.start.y.numpy(), frozen)
+
+
+def test_spatial_chunk_counts(test, device):
+    """Schedule only occupied chunks across zero, batch and legacy/actor boundaries."""
+    run, _state, batch, spatial = spatial_fixture(device, "chain")
+    legacy, total = run._contact.legacy_count, run._contact.count
+    test.assertGreater(legacy, 8)
+    test.assertGreater(total - legacy, 8)
+    for left, right in ((0, 0), (1, 0), (7, 1), (8, 8), (legacy, total - legacy), (0, 1), (0, 0)):
+        ids = np.r_[np.arange(left), legacy + np.arange(right)].astype(np.uint64)
+        if len(ids):
+            spatial.identities[: len(ids)].assign(ids)
+        spatial.count.fill_(len(ids))
+        spatial.check()
+        actual = []
+        for mode in batch._chunks(spatial):
+            actual.append((mode, int(batch.pool.candidates.count.numpy()[0])))
+        expected = [(mode, min(7, n - offset)) for mode, n in ((2, left), (3, right)) for offset in range(0, n, 7)]
+        test.assertEqual(actual, expected)
 
 
 class TestContactSpatial(unittest.TestCase):
@@ -422,6 +444,7 @@ for _device in get_test_devices():
         test_spatial_projected_surface,
         test_spatial_native_precision,
         test_spatial_mesh_domain,
+        test_spatial_chunk_counts,
     ):
         add_function_test(TestContactSpatial, _test.__name__, _test, devices=[_device])
 

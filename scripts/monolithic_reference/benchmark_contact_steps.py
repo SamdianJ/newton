@@ -4,6 +4,7 @@
 """Benchmark four certified B3 robot steps with an explicit lambda-zero policy."""
 
 import argparse
+import gc
 import hashlib
 import json
 import time
@@ -145,6 +146,9 @@ def main():
             if digest(path) != item["sha256"]:
                 raise ValueError("Numerical fixture hash differs")
             expected_numerical = load_arrays(path, item["schema"])
+        # Keep deferred scene/fixture setup garbage outside production-step timing.
+        # Normal collection remains enabled throughout warmup and measurement.
+        gc.collect()
         for repetition in range(-2, args.samples):
             restore(case, arrays["start"])
             case.control.joint_target_q.assign(controls[step, 0])

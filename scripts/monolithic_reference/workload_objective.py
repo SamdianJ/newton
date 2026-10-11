@@ -362,6 +362,7 @@ def replay_objective(arrays, metadata, expected, *, scene, device, graph, repeat
             "com0",
             "status",
             "count",
+            "packet",
             "_ids",
             "_scratch_ids",
             "_indices",
@@ -437,6 +438,8 @@ def replay_objective(arrays, metadata, expected, *, scene, device, graph, repeat
             c._last_assembly = None
         if run._contact_spatial:
             c._selection_ready, c._reference_mode = spatial["selection_ready"], spatial["reference_mode"]
+            if c._selection_ready:
+                c._spatial.check(warn=False)
             c._refreshes, c._query_dropped, c._query_warned = (
                 spatial["refreshes"],
                 spatial["capacity_dropped"],
