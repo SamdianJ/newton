@@ -394,8 +394,8 @@ def replay_objective(arrays, metadata, expected, *, scene, device, graph, repeat
                     and name.rsplit(".", 1)[1]
                     in {
                         "face_sources",
-                        "plane_flags",
                         "plane_targets",
+                        "finite_targets",
                         "offsets",
                         "sources",
                     }

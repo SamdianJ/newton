@@ -62,11 +62,17 @@ def test_allowed_candidates(test, device):
         test.assertEqual(int(query.dropped.numpy()[0]), 0)
     # BVH traversal and permission duplicates cannot create duplicate contacts.
     test.assertEqual(len(selected(query)), len(set(selected(query))))
+    plane = _ContactQuery([[0, 0]], [1], [[0, 1]], planes=[1], capacity=3, device=device)
+    point = wp.zeros(1, dtype=wp.vec3d, device=device)
+    plane.update(point, point, point, point)
+    plane.check()
+    test.assertIsNone(plane.bvh)
+    np.testing.assert_array_equal(selected(plane), [0, 1, 2])
 
 
 def test_query_capacity(test, device):
     """Drop whole candidate records at zero, partial and exact capacity, without requiring overflow determinism."""
-    for capacity in (0, 1, 7, 24):
+    for capacity in (0, 1, 2, 7, 24):
         query, bounds = fixture(device, capacity)
         query.update(*bounds)
         expected = enumerate_keys(query, bounds)

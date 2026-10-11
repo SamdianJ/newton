@@ -73,28 +73,46 @@ def _emit_candidates(
     count: wp.array[int],
     dropped: wp.array[wp.int64],
 ):
-    for sample in range(3):
-        slot = wp.atomic_add(count, 0, 0)
-        while slot < keys.shape[0]:
-            previous = wp.atomic_cas(count, 0, slot, slot + 1)
-            if previous == slot:
-                break
-            slot = previous
-        if slot < keys.shape[0]:
-            # Stable geometric ordinal, independent of the reservation order.
-            keys[slot] = (wp.uint64(face) * wp.uint64(targets) + wp.uint64(target)) * wp.uint64(3) + wp.uint64(sample)
-            indices[slot] = slot
-        else:
-            wp.atomic_add(dropped, 0, wp.int64(1))
+    slot = wp.atomic_add(count, 0, 0)
+    reserved = int(0)
+    while slot < keys.shape[0]:
+        reserved = wp.min(3, keys.shape[0] - slot)
+        previous = wp.atomic_cas(count, 0, slot, slot + reserved)
+        if previous == slot:
+            break
+        slot = previous
+        reserved = 0
+    for sample in range(reserved):
+        # Stable geometric ordinal, independent of the reservation order.
+        keys[slot + sample] = (wp.uint64(face) * wp.uint64(targets) + wp.uint64(target)) * wp.uint64(3) + wp.uint64(
+            sample
+        )
+        indices[slot + sample] = slot + sample
+    if reserved < 3:
+        wp.atomic_add(dropped, 0, wp.int64(3 - reserved))
 
 
 @wp.kernel(enable_backward=False)
-def _query_targets(
-    bvh: wp.uint64,
-    face_sources: wp.array[int],
-    planes: wp.array[int],
+def _finite_bounds(
+    targets: wp.array[int],
     lower: wp.array[wp.vec3],
     upper: wp.array[wp.vec3],
+    finite_lower: wp.array[wp.vec3],
+    finite_upper: wp.array[wp.vec3],
+):
+    i = wp.tid()
+    finite_lower[i] = lower[targets[i]]
+    finite_upper[i] = upper[targets[i]]
+
+
+@wp.kernel(enable_backward=False)
+def _query_faces(
+    bvh: wp.uint64,
+    face_sources: wp.array[int],
+    lower: wp.array[wp.vec3],
+    upper: wp.array[wp.vec3],
+    finite_targets: wp.array[int],
+    targets: int,
     offsets: wp.array[int],
     sources: wp.array[int],
     keys: wp.array[wp.uint64],
@@ -103,14 +121,15 @@ def _query_targets(
     dropped: wp.array[wp.int64],
     status: wp.array[int],
 ):
-    target = wp.tid()
-    if status[0] != 0 or planes[target] != 0:
+    face = wp.tid()
+    if status[0] != 0:
         return
-    query = wp.bvh_query_aabb(bvh, lower[target], upper[target])
-    face = int(0)
-    while wp.bvh_query_next(query, face):
+    query = wp.bvh_query_aabb(bvh, lower[face], upper[face])
+    item = int(0)
+    while wp.bvh_query_next(query, item):
+        target = finite_targets[item]
         if _allowed(face_sources[face], target, offsets, sources):
-            _emit_candidates(face, target, lower.shape[0], keys, indices, count, dropped)
+            _emit_candidates(face, target, targets, keys, indices, count, dropped)
 
 
 @wp.kernel(enable_backward=False)
@@ -189,14 +208,18 @@ class _ContactQuery:
         self.face_sources = wp.array(self.faces[:, 0], dtype=int, device=self.device)
         self.offsets = wp.array(offsets, dtype=int, device=self.device)
         self.sources = wp.array(sources, dtype=int, device=self.device)
-        self.plane_flags = wp.array([int(t in self.planes) for t in self.targets], dtype=int, device=self.device)
         self.plane_targets = wp.array(
             [i for i, t in enumerate(self.targets) if t in self.planes], dtype=int, device=self.device
+        )
+        self.finite_targets = wp.array(
+            [i for i, t in enumerate(self.targets) if t not in self.planes], dtype=int, device=self.device
         )
         self.face_lo = wp.zeros(len(self.faces), dtype=wp.vec3, device=self.device)
         self.face_hi = wp.zeros_like(self.face_lo)
         self.target_lo = wp.zeros(len(self.targets), dtype=wp.vec3, device=self.device)
         self.target_hi = wp.zeros_like(self.target_lo)
+        self.finite_lo = wp.zeros(len(self.finite_targets), dtype=wp.vec3, device=self.device)
+        self.finite_hi = wp.zeros_like(self.finite_lo)
         self._keys = wp.empty(capacity, dtype=wp.uint64, device=self.device)
         self._scratch_keys = wp.empty_like(self._keys)
         self._indices = wp.empty(capacity, dtype=int, device=self.device)
@@ -214,8 +237,12 @@ class _ContactQuery:
                 wp.launch(_copy_bounds, len(lo), [lo, hi, out_lo, out_hi, self.status], device=self.device)
             if self.status.numpy()[0]:
                 raise ValueError("Invalid initial contact query bounds")
-        # The Model adapter supplies real initial envelopes before building.
-        self.bvh = wp.Bvh(self.face_lo, self.face_hi) if len(self.faces) else None
+        # Query faces in parallel against a fixed finite-target BVH. Plane
+        # patches use their separate path; original global target ordinals stay stable.
+        self.bvh = None
+        if len(self.faces) and len(self.finite_targets):
+            self._update_finite_bounds()
+            self.bvh = wp.Bvh(self.finite_lo, self.finite_hi)
         self._bvh = self.bvh
         self._owned = {name: value for name, value in vars(self).items() if isinstance(value, wp.array)}
         self._result_keys = self._scratch_keys if (max(1, capacity) - 1).bit_length() % 2 else self._keys
@@ -233,6 +260,14 @@ class _ContactQuery:
         """Check owner bindings even when a captured graph bypasses update."""
         if self.bvh is not self._bvh or any(getattr(self, name) is not a for name, a in self._owned.items()):
             raise ValueError("Contact query storage changed")
+
+    def _update_finite_bounds(self):
+        wp.launch(
+            _finite_bounds,
+            len(self.finite_targets),
+            [self.finite_targets, self.target_lo, self.target_hi, self.finite_lo, self.finite_hi],
+            device=self.device,
+        )
 
     def update(self, face_lo, face_hi, target_lo, target_hi):
         """Refit, enumerate and sort on device, without host reads or capacity changes."""
@@ -271,16 +306,18 @@ class _ContactQuery:
             device=self.device,
         )
         if self.bvh is not None:
+            self._update_finite_bounds()
             self.bvh.refit()
             wp.launch(
-                _query_targets,
-                len(self.targets),
+                _query_faces,
+                len(self.faces),
                 [
                     self.bvh.id,
                     self.face_sources,
-                    self.plane_flags,
-                    self.target_lo,
-                    self.target_hi,
+                    self.face_lo,
+                    self.face_hi,
+                    self.finite_targets,
+                    len(self.targets),
                     self.offsets,
                     self.sources,
                     self._keys,
