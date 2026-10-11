@@ -610,35 +610,37 @@ def _write_contacts(
 
 
 @wp.kernel
-def _write_contact_triplets(records: Any):
+def _write_contact_triplets(records: Any, workers: int):
     i = wp.tid()
-    if i >= records.triplet_count[0]:
-        return
-    lo = int(0)
-    hi = records.count[0]
-    while lo < hi:
-        mid = lo + (hi - lo) // 2
-        if records.triplet_offsets[mid + 1] <= i:
-            lo = mid + 1
-        else:
-            hi = mid
-    k = records.support_offsets[lo + 1] - records.support_offsets[lo]
-    local = i - records.triplet_offsets[lo]
-    remaining = local // (k * k)
-    component = int(0)
-    for axis in range(3):
-        if records.factor_weights[3 * lo + axis] > 0.0:
-            if remaining == 0:
-                component = axis
-            remaining -= 1
-    begin = records.factor_offsets[3 * lo + component]
-    row = begin + (local % (k * k)) // k
-    column = begin + local % k
-    records.triplet_rows[i] = records.factor_columns[row]
-    records.triplet_columns[i] = records.factor_columns[column]
-    records.triplet_values[i] = (
-        records.factor_weights[3 * lo + component] * records.factor_values[row]
-    ) * records.factor_values[column]
+    while i < records.triplet_count[0]:
+        lo = int(0)
+        hi = records.count[0]
+        while lo < hi:
+            mid = lo + (hi - lo) // 2
+            if records.triplet_offsets[mid + 1] <= i:
+                lo = mid + 1
+            else:
+                hi = mid
+        k = records.support_offsets[lo + 1] - records.support_offsets[lo]
+        local = i - records.triplet_offsets[lo]
+        remaining = local // (k * k)
+        component = int(0)
+        for axis in range(3):
+            if records.factor_weights[3 * lo + axis] > 0.0:
+                if remaining == 0:
+                    component = axis
+                remaining -= 1
+        begin = records.factor_offsets[3 * lo + component]
+        row = begin + (local % (k * k)) // k
+        column = begin + local % k
+        records.triplet_rows[i] = records.factor_columns[row]
+        records.triplet_columns[i] = records.factor_columns[column]
+        records.triplet_values[i] = (
+            records.factor_weights[3 * lo + component] * records.factor_values[row]
+        ) * records.factor_values[column]
+        if workers >= records.triplet_count[0] - i:
+            break
+        i += workers
 
 
 @wp.kernel
@@ -654,9 +656,14 @@ def _publish_contacts(records: Any, indices: wp.array[int], selected: wp.array[i
 
 
 @wp.kernel
-def _clear_failed_pool(values: wp.array[Any], flags: wp.array[int]):
+def _clear_failed_pool(values: wp.array[Any], flags: wp.array[int], workers: int):
     if flags[0] != 0:
-        values[wp.tid()] = values.dtype(0)
+        i = wp.tid()
+        while i < values.shape[0]:
+            values[i] = values.dtype(0)
+            if workers >= values.shape[0] - i:
+                break
+            i += workers
 
 
 @wp.kernel
@@ -998,7 +1005,8 @@ class _ContactPool:
     def _finish_records(self, indices=None):
         out = self.records
         if self.triplet_capacity:
-            wp.launch(_write_contact_triplets, self.triplet_capacity, [out], device=self.device)
+            workers = min(self.triplet_capacity, _CONTACT_WORKERS)
+            wp.launch(_write_contact_triplets, workers, [out, workers], device=self.device)
         for owner, prefix, count in (
             (self.energy, "e", out.energy_count),
             (self.residual, "r", out.support_count),
@@ -1020,7 +1028,8 @@ class _ContactPool:
             outputs.extend((owner.result, owner.offsets))
         for values in outputs:
             if values.size:
-                wp.launch(_clear_failed_pool, values.size, [values.flatten(), out.flags], device=self.device)
+                workers = min(values.size, _CONTACT_WORKERS)
+                wp.launch(_clear_failed_pool, workers, [values.flatten(), out.flags, workers], device=self.device)
 
     def begin(self):
         """Reset one evaluation; retain only bounded batch x support staging."""
@@ -1028,7 +1037,9 @@ class _ContactPool:
             raise ValueError("Contact pool has no bounded batch storage")
         self._validate_storage()
         for name in self._specs[1]:
-            getattr(self.records, name).zero_()
+            # COO consumers use triplet_count; generation overwrites that prefix.
+            if name not in ("triplet_rows", "triplet_columns", "triplet_values"):
+                getattr(self.records, name).zero_()
         for array in self._stream[:3]:
             array.zero_()
         for owner in (self.energy, self.residual, self.force):

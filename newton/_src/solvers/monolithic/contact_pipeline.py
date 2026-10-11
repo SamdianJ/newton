@@ -13,6 +13,7 @@ from . import state_checks
 from .bsr import _MonolithicScalarTriplets
 from .contact import ContactObjective
 from .contact_batch import _ContactBatch
+from .contact_pool import _CONTACT_WORKERS
 from .contact_spatial import _ContactSpatial
 from .segment_graph import _SegmentGraphCache
 
@@ -36,12 +37,17 @@ def _reserve_pool_triplets(
 
 
 @wp.kernel
-def _copy_pool_triplets(records: Any, triplets: _MonolithicScalarTriplets, base: wp.array[int]):
+def _copy_pool_triplets(records: Any, triplets: _MonolithicScalarTriplets, base: wp.array[int], workers: int):
     i = wp.tid()
-    if base[0] >= 0 and i < records.triplet_count[0] and triplets.status[0] == 0:
+    if base[0] < 0 or triplets.status[0] != 0:
+        return
+    while i < records.triplet_count[0]:
         triplets.rows[base[0] + i] = records.triplet_rows[i]
         triplets.columns[base[0] + i] = records.triplet_columns[i]
         triplets.values[base[0] + i] = records.triplet_values[i]
+        if workers >= records.triplet_count[0] - i:
+            break
+        i += workers
 
 
 @wp.kernel
@@ -178,10 +184,11 @@ class _PooledContactObjective(ContactObjective):
             device=self.model.device,
         )
         if self.triplet_capacity:
+            workers = min(self.triplet_capacity, _CONTACT_WORKERS)
             wp.launch(
                 _copy_pool_triplets,
-                self.triplet_capacity,
-                [self.pool.records, triplets, self._append_base],
+                workers,
+                [self.pool.records, triplets, self._append_base, workers],
                 device=self.model.device,
             )
         self._assembled_generation = self.evaluation_generation

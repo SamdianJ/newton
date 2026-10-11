@@ -34,6 +34,7 @@ def append_payload(pool, data, indices):
     pool.append()
 
 
+@patch("newton._src.solvers.monolithic.contact_pool._CONTACT_WORKERS", 7)
 def test_stream_order(test, device):
     """Match complete records and native output bits across batch size and discovery order."""
     for dtype, native in ((wp.float32, np.float32), (wp.float64, np.float64)):
@@ -107,6 +108,7 @@ def test_stream_overflow(test, device):
             test.assertLessEqual(int(pool.records.used.numpy()[0]), capacity)
 
 
+@patch("newton._src.solvers.monolithic.contact_pool._CONTACT_WORKERS", 7)
 def test_stream_invalid_late_batch(test, device):
     """Invalidate the whole evaluation for duplicates or bad payloads after the pool fills."""
     for capacity in (0, 3, 8):
@@ -124,12 +126,23 @@ def test_stream_invalid_late_batch(test, device):
             data = contact_payload(np.float64)
             data[name] = np.asarray(data[name]).copy()
             data[name][index] = value
+            pool.records.triplet_values.fill_(float("nan"))
             pool.begin()
             for indices in ([0, 1], [2, 3], [4]):
                 append_payload(pool, data, indices)
             pool.finish()
             test.assertNotEqual(int(pool.records.flags.numpy()[0]), 0, name)
-            for field in ("accepted", "count", "used", "support_count", "triplet_count", "pairs"):
+            for field in (
+                "accepted",
+                "count",
+                "used",
+                "support_count",
+                "triplet_count",
+                "pairs",
+                "triplet_rows",
+                "triplet_columns",
+                "triplet_values",
+            ):
                 test.assertFalse(getattr(pool.records, field).numpy().any(), field)
             for owner in (pool.energy, pool.residual, pool.force):
                 test.assertFalse(owner.result.numpy().any())
@@ -165,12 +178,21 @@ def test_stream_lifecycle(test, device):
             setattr(struct, name, wp.clone(getattr(struct, name)))
     pool._stream = tuple(wp.clone(a) for a in pool._stream)
     for count in (5, 0, 1, 5):
+        pool.records.triplet_rows.fill_(-7)
+        pool.records.triplet_columns.fill_(-11)
+        pool.records.triplet_values.fill_(float("nan"))
         pool.begin()
+        np.testing.assert_array_equal(pool.records.triplet_rows.numpy(), -7)
+        np.testing.assert_array_equal(pool.records.triplet_columns.numpy(), -11)
+        test.assertTrue(np.isnan(pool.records.triplet_values.numpy()).all())
         for start in range(0, count, 2):
             append_payload(pool, data, list(range(start, min(count, start + 2))))
         pool.finish()
         test.assertEqual(int(pool.records.flags.numpy()[0]), 0)
         test.assertEqual(int(pool.records.requested.numpy()[0]), [0, 3, 4, 6, 6, 8][count])
+        n = int(pool.records.triplet_count.numpy()[0])
+        test.assertTrue(np.isfinite(pool.records.triplet_values.numpy()[:n]).all())
+        test.assertTrue(np.isnan(pool.records.triplet_values.numpy()[n:]).all())
     if device.is_cuda:
         captures = pool.graphs.captures["contact_stream_finish"]
         stream = wp.Stream(device)

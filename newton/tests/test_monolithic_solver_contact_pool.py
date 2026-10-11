@@ -220,7 +220,9 @@ def test_pooled_assembly_generation(test, device):
     c = run._contact
     g = MonolithicLinearGeneration(1, 10, c.evaluation_generation, run._assembly_sequence + 1)
     a = run._linear.begin_assembly(g)
-    c.assemble_tangent(a)
+    with patch("newton._src.solvers.monolithic.contact_pipeline._CONTACT_WORKERS", 7):
+        c.assemble_tangent(a)
+    test.assertGreater(int(c.pool.records.triplet_count.numpy()[0]), 7)
     count = a.global_scalar_triplets.count.numpy().copy()
     with test.assertRaisesRegex(ValueError, "once"):
         c.assemble_tangent(a)
