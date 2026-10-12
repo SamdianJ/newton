@@ -21,13 +21,17 @@ ROOT = Path(__file__).resolve().parents[2]
 
 @contextmanager
 def contact_pair_diagnostics(run, *, enabled=True):
-    """Optionally omit host pair reports while retaining pooled force publication."""
+    """Optionally omit host pair reports while retaining native force publication."""
     if enabled:
         yield
         return
-    if not run._contact_pool:
-        raise ValueError("Disabling pair diagnostics requires pooled or spatial contact")
-    with patch.object(run._contact, "pair_diagnostics", new=lambda: []):
+    owner, method = (
+        (run._contact, "pair_diagnostics") if run._contact_pool else (run._contact.actor_contact, "diagnostics")
+    )
+    if owner is None:
+        yield
+        return
+    with patch.object(owner, method, new=lambda: []):
         yield
 
 

@@ -176,7 +176,7 @@ def main():
     parser.add_argument(
         "--no-contact-diagnostics",
         action="store_true",
-        help="Skip host pair reports for pooled/B3 performance only; retain physical forces",
+        help="Skip host pair reports while retaining physical forces",
     )
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
