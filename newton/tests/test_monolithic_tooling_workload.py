@@ -105,6 +105,26 @@ def test_repeated_window_measurement(test, device):
         test.assertTrue(all(sample["seconds"] > 0 for sample in samples))
 
 
+def test_spatial_benchmark_without_pair_diagnostics(test, device):
+    """Declare omitted pair reports while retaining frozen-state and work checks."""
+    with tempfile.TemporaryDirectory() as temporary:
+        root = Path(temporary) / "bundle"
+        record(
+            root,
+            device=device,
+            graph=device.is_cuda,
+            steps=1,
+            windows=[(1, 1)],
+            contact_dataflow="spatial",
+            spatial={"candidate_capacity": 256, "law_margin": 0.0},
+        )
+        with patch("scripts.monolithic_reference.benchmark_workload.check_gpu_idle"):
+            result = benchmark(root, device=device, warmup=1, repeat=1, contact_diagnostics=False)
+        test.assertEqual(result["status"], "PASS")
+        test.assertFalse(result["contact_pair_diagnostics"])
+        test.assertEqual(len(result["results"][0]["samples"]), 4)
+
+
 class TestWorkload(unittest.TestCase):
     def test_benchmark_contention(self):
         """Reject foreign GPU processes while allowing the measuring process itself."""
@@ -145,6 +165,12 @@ class TestWorkload(unittest.TestCase):
 add_function_test(TestWorkload, "test_window_and_pcg", test_window_and_pcg, devices=get_test_devices())
 add_function_test(
     TestWorkload, "test_repeated_window_measurement", test_repeated_window_measurement, devices=get_test_devices()
+)
+add_function_test(
+    TestWorkload,
+    "test_spatial_benchmark_without_pair_diagnostics",
+    test_spatial_benchmark_without_pair_diagnostics,
+    devices=get_test_devices(),
 )
 
 

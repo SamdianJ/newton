@@ -17,7 +17,7 @@ import warp as wp
 
 from newton.examples.softbody.monolithic_recording import serial, state_arrays
 from scripts.monolithic_reference.compare_contact_dataflows import verify_contract
-from scripts.monolithic_reference.profiling import capture_count, provenance
+from scripts.monolithic_reference.profiling import capture_count, contact_pair_diagnostics, provenance
 from scripts.monolithic_reference.replay_direction import recorded_frame, restore
 from scripts.monolithic_reference.retained_assets import validate_inputs
 from scripts.monolithic_reference.robot_contact_acceptance import FrozenRobotFactory
@@ -64,6 +64,11 @@ def main():
     parser.add_argument("--prepare", action="store_true")
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--samples", type=int, default=5)
+    parser.add_argument(
+        "--no-contact-diagnostics",
+        action="store_true",
+        help="Skip host pair reports during step timing; retain physical forces and validation",
+    )
     args = parser.parse_args()
     if not 1 <= args.samples <= 10 or args.prepare != (args.recording_root is not None):
         parser.error("Use 1..10 samples and --recording-root only with --prepare")
@@ -156,10 +161,11 @@ def main():
             wp.synchronize_device(model.device)
             captures = capture_count(run)
             plan = getattr(run._linear, "_masked_pcg_plan", None)
-            begin = time.perf_counter()
-            run.step(state, state, case.control, dt=spec["dt"])
-            wp.synchronize_device(model.device)
-            elapsed = (time.perf_counter() - begin) * 1000
+            with contact_pair_diagnostics(run, enabled=not args.no_contact_diagnostics):
+                begin = time.perf_counter()
+                run.step(state, state, case.control, dt=spec["dt"])
+                wp.synchronize_device(model.device)
+                elapsed = (time.perf_counter() - begin) * 1000
             stats = serial(run.last_stats)
             actual = state_arrays(state)
             assert int(actual["history.force_generation"][0]) == stats["step_generation"]
@@ -211,6 +217,7 @@ def main():
             "driver_sha256": digest(Path(__file__)),
             "steps": rows,
             "timing_scope": "step + device sync; restore/verification outside timing",
+            "contact_pair_diagnostics": not args.no_contact_diagnostics,
         },
     )
 

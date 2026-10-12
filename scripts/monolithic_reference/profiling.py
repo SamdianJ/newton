@@ -19,6 +19,18 @@ import warp as wp
 ROOT = Path(__file__).resolve().parents[2]
 
 
+@contextmanager
+def contact_pair_diagnostics(run, *, enabled=True):
+    """Optionally omit host pair reports while retaining pooled force publication."""
+    if enabled:
+        yield
+        return
+    if not run._contact_pool:
+        raise ValueError("Disabling pair diagnostics requires pooled or spatial contact")
+    with patch.object(run._contact, "pair_diagnostics", new=lambda: []):
+        yield
+
+
 def capture_count(run):
     """Include pooled generation, reduction and BSR captures in tool accounting."""
     caches = [run._graphs]

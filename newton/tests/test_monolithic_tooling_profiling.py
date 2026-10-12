@@ -42,6 +42,40 @@ def test_spatial_solver_profile(test, device):
         test.assertGreater(modules[name]["calls"], 0)
 
 
+def test_contact_pair_diagnostics_switch(test, device):
+    """Skip pair reports while preserving native states, forces and solver work."""
+    from newton.examples.softbody.monolithic_recording import state_arrays  # noqa: PLC0415
+    from scripts.monolithic_reference.profiling import contact_pair_diagnostics  # noqa: PLC0415
+    from scripts.monolithic_reference.rigid_stack_scene import DT, stack_scene, stack_solver  # noqa: PLC0415
+
+    for graph in (False, True) if device.is_cuda else (False,):
+        model = stack_scene(device, columns=((0.0, 0.0),), layers=2)
+        outputs, work = [], []
+        for enabled in (True, False):
+            run = stack_solver(model, spatial=True, graph=graph)
+            state, control = run.create_state(dt=DT), model.control()
+            original = run._contact.pair_diagnostics
+            counts = []
+            with contact_pair_diagnostics(run, enabled=enabled):
+                for _ in range(20):
+                    run.step(state, state, control, dt=DT)
+                    stats = run.last_stats
+                    test.assertTrue(stats.converged)
+                    counts.append((stats.nonlinear_iterations, stats.linear_iterations, stats.line_search_iterations))
+            test.assertEqual(run._contact.pair_diagnostics, original)
+            test.assertEqual(bool(stats.variational["actor_contact_pairs"]), enabled)
+            outputs.append(state_arrays(state))
+            work.append(counts)
+            test.assertGreater(np.linalg.norm(outputs[-1]["history.contact_body_force"]), 0)
+        test.assertEqual(work[0], work[1])
+        for name in outputs[0]:
+            np.testing.assert_array_equal(outputs[0][name], outputs[1][name], err_msg=name)
+        with test.assertRaisesRegex(RuntimeError, "probe failure"):
+            with contact_pair_diagnostics(run, enabled=False):
+                raise RuntimeError("probe failure")
+        test.assertEqual(run._contact.pair_diagnostics, original)
+
+
 @wp.kernel
 def _increment(value: wp.array[int]):
     value[0] += 1
@@ -85,6 +119,15 @@ def test_solver_profile(test, device):
 
 
 class TestProfiling(unittest.TestCase):
+    def test_contact_diagnostics_legacy_rejection(self):
+        """Reject unsupported diagnostic suppression before changing a legacy solver."""
+        from scripts.monolithic_reference.profiling import contact_pair_diagnostics  # noqa: PLC0415
+
+        _, run, _, _ = build_scene("tiny-contact", device="cpu", graph=False)
+        with self.assertRaisesRegex(ValueError, "pooled or spatial"):
+            with contact_pair_diagnostics(run, enabled=False):
+                self.fail("Unsupported context was entered")
+
     def test_nested_accounting(self):
         """Subtract only immediate children and exclude capture-contaminated calls."""
         _, run, _, _ = build_scene("tiny-contact", device="cpu", graph=False)
@@ -104,6 +147,9 @@ class TestProfiling(unittest.TestCase):
 for device in get_test_devices():
     add_function_test(TestProfiling, "test_solver_profile", test_solver_profile, devices=[device])
     add_function_test(TestProfiling, "test_spatial_solver_profile", test_spatial_solver_profile, devices=[device])
+    add_function_test(
+        TestProfiling, "test_contact_pair_diagnostics_switch", test_contact_pair_diagnostics_switch, devices=[device]
+    )
     if device.is_cuda:
         add_function_test(TestProfiling, "test_graph_events", test_graph_events, devices=[device])
 

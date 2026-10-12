@@ -15,7 +15,7 @@ from unittest.mock import patch
 import warp as wp
 
 from newton.examples.softbody.monolithic_recording import state_arrays
-from scripts.monolithic_reference.profiling import capture_count, provenance
+from scripts.monolithic_reference.profiling import capture_count, contact_pair_diagnostics, provenance
 from scripts.monolithic_reference.record_workload import apply_inputs
 from scripts.monolithic_reference.replay_workload import acceptance_trace
 from scripts.monolithic_reference.workload_io import digest, load_arrays, open_bundle, write_json
@@ -30,7 +30,7 @@ def check_gpu_idle(device):
             raise RuntimeError("Another process is using the GPU")
 
 
-def benchmark(root, *, device="cuda:0", warmup=2, repeat=5):
+def benchmark(root, *, device="cuda:0", warmup=2, repeat=5, contact_diagnostics=True):
     """Keep setup, restoration, validation and objective probes outside step timing."""
     if warmup < 1 or repeat < 1:
         raise ValueError("Positive warmup and repeat counts are required")
@@ -103,7 +103,10 @@ def benchmark(root, *, device="cuda:0", warmup=2, repeat=5):
                 objective_captures += sum(sum(cache.captures.values()) for cache in contact_caches)
                 seconds, work = [], []
                 objective_seconds.clear()
-                with patch.object(run, "_evaluate", timed_objective) if scope == "objective" else nullcontext():
+                with (
+                    contact_pair_diagnostics(run, enabled=contact_diagnostics),
+                    patch.object(run, "_evaluate", timed_objective) if scope == "objective" else nullcontext(),
+                ):
                     for step in range(first, last + 1):
                         apply_inputs(inputs[step], model, state, control)
                         wp.synchronize_device(model.device)
@@ -158,8 +161,9 @@ def benchmark(root, *, device="cuda:0", warmup=2, repeat=5):
         "bundle_manifest_sha256": digest(root / "manifest.json"),
         "warmup": warmup,
         "repeat": repeat,
+        "contact_pair_diagnostics": contact_diagnostics,
         "results": results,
-        "measurement": "Production step sums without profiler; objective probes separate. Initial warmup excluded; recurring cache eviction/capture remains real execution cost.",
+        "measurement": "Step sums without profiler; pair report mode declared above; force publication retained. Objective probes separate. Initial warmup excluded; recurring cache eviction/capture remains real execution cost.",
     }
 
 
@@ -169,10 +173,21 @@ def main():
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--warmup", type=int, default=2)
     parser.add_argument("--repeat", type=int, default=5)
+    parser.add_argument(
+        "--no-contact-diagnostics",
+        action="store_true",
+        help="Skip host pair reports for pooled/B3 performance only; retain physical forces",
+    )
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
     args.output.mkdir(parents=True, exist_ok=False)
-    result = benchmark(args.bundle, device=args.device, warmup=args.warmup, repeat=args.repeat)
+    result = benchmark(
+        args.bundle,
+        device=args.device,
+        warmup=args.warmup,
+        repeat=args.repeat,
+        contact_diagnostics=not args.no_contact_diagnostics,
+    )
     write_json(args.output / "receipt.json", result)
     print(json.dumps({"status": result["status"], "output": str(args.output)}))
 
