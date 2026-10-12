@@ -4,9 +4,11 @@
 """Authenticate frozen robot policies and record pooled contact diagnostics."""
 
 import gzip
+import hashlib
 import json
 import tempfile
 import unittest
+from dataclasses import asdict, replace
 from pathlib import Path
 from unittest.mock import patch
 
@@ -32,6 +34,20 @@ def test_robot_policy_certificate(test, device):
     factory.JointTerms = SolverMonolithic.JointTerms
     with patch("newton.tests.test_monolithic_solver_coupled.SolverMonolithic", factory):
         run = solver(scene(device))
+    recipe = factory.recipe()
+    policy = recipe["numerical_policy"]
+    test.assertEqual(policy["effective_internal_config"], asdict(run._config))
+    test.assertEqual(policy["effective_internal_config"]["regularization_values"], (0.0,))
+    test.assertEqual(policy["constructor_digest"], run._kinematics.digest.hex())
+    test.assertEqual(
+        recipe["numerical_policy_sha256"],
+        hashlib.sha256(json.dumps(policy, sort_keys=True, separators=(",", ":")).encode()).hexdigest(),
+    )
+    original = run._config
+    run._config = replace(original, regularization_values=(0.0, 0.01))
+    test.assertNotEqual(factory.recipe()["numerical_policy_sha256"], recipe["numerical_policy_sha256"])
+    run._config = original
+    test.assertEqual(factory.recipe(), recipe)
     fields = factory.fields
     old = {name: value.copy() for name, value in fields.items() if name != "direction_policy"}
     digest = _configuration_digest(old).hex()
@@ -102,6 +118,8 @@ def test_robot_diagnostics(test, device):
         factory.JointTerms = SolverMonolithic.JointTerms
         with patch("newton.tests.test_monolithic_solver_coupled.SolverMonolithic", factory):
             run = solver(scene(device), law=law, mode="production", graph=device.is_cuda)
+        test.assertEqual(run._config.regularization_values, (0.0,))
+        test.assertEqual(factory.recorder.audit.complete._config, run._config)
         legacy = solver(scene(device), law=law, mode="production", graph=device.is_cuda)
         states = [owner.create_state(dt=0.001) for owner in (run, legacy)]
         for owner, state in zip((run, legacy), states, strict=True):

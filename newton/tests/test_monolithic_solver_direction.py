@@ -5,6 +5,7 @@
 
 import unittest
 from dataclasses import replace
+from unittest.mock import patch
 
 import numpy as np
 import warp as wp
@@ -12,13 +13,39 @@ import warp.sparse as sparse
 
 from newton._src.solvers.monolithic.iteration import blocks
 from newton.tests.test_monolithic_solver_actor_contacts import contact_scene, contact_solver, contact_state
-from newton.tests.test_monolithic_solver_coupled import scene, solver
+from newton.tests.test_monolithic_solver_coupled import assert_snapshot, scene, snapshot, solver
 from newton.tests.unittest_utils import add_function_test, get_test_devices
 from scripts.monolithic_reference.benchmark_pcg import pcg_config
 
 
 def modes(device):
     return [("diagnostic", False), ("production", False)] + ([("production", True)] if device.is_cuda else [])
+
+
+def test_default_unregularized_failure(test, device):
+    """Stop after a failed default zero-lambda direction and preserve explicit retry support."""
+    for mode, graph in modes(device):
+        model = scene(device, contact=False)
+        run = solver(model, mode=mode, graph=graph)
+        state = run.create_state(dt=0.001)
+        before = snapshot(state)
+        for configured in (False, True):
+            if configured:
+                run._config = replace(run._config, regularization_values=(0.0, 0.01))
+            attempted = []
+
+            def decline(*args, attempted=attempted, **kwargs):
+                attempted.append(kwargs["regularization"])
+                return False
+
+            with patch("newton._src.solvers.monolithic.iteration.solve_direction", side_effect=decline):
+                run.step(state, state, model.control(), dt=0.001)
+            test.assertEqual(attempted, [0.0, 0.01] if configured else [0.0])
+            test.assertEqual(run.last_stats.regularization_retries, int(configured))
+            test.assertEqual(run.last_stats.status, run.Status.REGULARIZATION_EXHAUSTED)
+            test.assertFalse(run.last_stats.converged)
+            test.assertTrue(run.last_stats.rolled_back)
+            assert_snapshot(test, state, before)
 
 
 def identity_workspace(device, mode, graph, *, mixed=False):
@@ -191,6 +218,7 @@ class TestDirection(unittest.TestCase):
 
 add_function_test(TestDirection, "test_regularized_posterior", test_regularized_posterior, devices=get_test_devices())
 for _test in (
+    test_default_unregularized_failure,
     test_native_correction,
     test_precision_floor_and_budget,
     test_regularized_trial_and_final_gate,

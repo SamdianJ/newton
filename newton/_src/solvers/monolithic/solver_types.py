@@ -249,7 +249,7 @@ class _SolverMonolithicInternalConfig:
     step_tolerance_q: float = 9.100770221088748e-10
     step_tolerance_x: float = 1.8225743746537296e-6
     det_f_guard: float = 0.2
-    regularization_values: tuple[float, ...] = (0.0, 1.0e-4, 1.0e-3, 1.0e-2, 0.1, 1.0, 10.0)
+    regularization_values: tuple[float, ...] = (0.0,)
 
 
 class _StepFailure(RuntimeError):

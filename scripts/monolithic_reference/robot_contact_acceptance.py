@@ -3,6 +3,9 @@
 
 """Private frozen-reference admission and offline robot contact recording seams."""
 
+import hashlib
+import json
+from dataclasses import asdict
 from functools import partial
 from unittest.mock import patch
 
@@ -203,6 +206,11 @@ class FrozenRobotFactory:
 
     def recipe(self):
         c = self.run._contact
+        # The constructor digest does not authenticate the internal lambda schedule.
+        policy = {
+            "constructor_digest": self.run._kinematics.digest.hex(),
+            "effective_internal_config": asdict(self.run._config),
+        }
         return {
             "scene": self.scene,
             "dataflow": self.dataflow,
@@ -212,6 +220,10 @@ class FrozenRobotFactory:
             "law_margin": c.law_margin if self.run._contact_spatial else None,
             "zero_overflow_required": True,
             "additional_approximation_budget": None,
+            "numerical_policy": policy,
+            "numerical_policy_sha256": hashlib.sha256(
+                json.dumps(policy, sort_keys=True, separators=(",", ":")).encode()
+            ).hexdigest(),
         }
 
 

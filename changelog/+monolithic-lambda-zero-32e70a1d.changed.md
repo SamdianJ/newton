@@ -1,0 +1,1 @@
+Use an unregularized direction (λ = 0) by default in the experimental monolithic solver; preserve explicit positive regularization for internal experiments and report the effective numerical policy in robot regression recipes.
