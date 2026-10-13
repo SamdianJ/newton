@@ -524,14 +524,15 @@ class _FixedScalarBsrReduction:
                 ],
                 device=self.device,
             )
-            radix_sort_pairs(keys, indices, n)
+            # One extra bit separates every uint32 value bit pattern from padding.
+            radix_sort_pairs(keys, indices, n, end_bit=33)
             wp.launch(
                 _fixed_bsr_position_keys,
                 workers,
                 [triplets.rows, triplets.columns, triplets.count, self.size, indices, keys, workers],
                 device=self.device,
             )
-            radix_sort_pairs(keys, indices, n)
+            radix_sort_pairs(keys, indices, n, end_bit=max(1, (self.size * self.size).bit_length()))
             wp.launch(
                 _fixed_bsr_work,
                 workers,

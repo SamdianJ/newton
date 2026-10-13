@@ -299,7 +299,8 @@ class _ContactRows:
                 device=self.device,
             )
             # Inactive entries sort last; the device count never needs a host read.
-            radix_sort_pairs(keys, indices, self.capacity)
+            end_bit = max(1, (self.row_count * self.identity_count * self.local_count).bit_length())
+            radix_sort_pairs(keys, indices, self.capacity, end_bit=end_bit)
         wp.launch(
             _contact_offsets, self.row_count + 1, [keys, self.capacity, self.stride, self.offsets], device=self.device
         )
