@@ -79,7 +79,7 @@ def main():
         control.joint_target_qd.assign(qd)
         wp.synchronize_device(model.device)
         captures = capture_count(run)
-        plan = run._linear._masked_pcg_plan
+        plan = getattr(run._linear, "_masked_pcg_plan", None)
         start = time.perf_counter()
         run.step(state, state, control, dt=case["dt"])
         wp.synchronize_device(model.device)
@@ -96,7 +96,8 @@ def main():
                 {
                     "step": step,
                     "seconds": elapsed,
-                    "capture_affected": captures != capture_count(run) or plan is not run._linear._masked_pcg_plan,
+                    "capture_affected": captures != capture_count(run)
+                    or plan is not getattr(run._linear, "_masked_pcg_plan", None),
                     **{key: getattr(stats, key) for key in COUNTERS},
                 }
             )
