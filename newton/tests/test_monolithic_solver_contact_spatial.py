@@ -5,6 +5,7 @@
 
 import tempfile
 import unittest
+from dataclasses import replace
 from functools import partial
 from pathlib import Path
 from unittest.mock import patch
@@ -70,6 +71,7 @@ def test_spatial_retry_freeze(test, device):
         line_search_max_iterations=2,
         newton_max_iterations=1,
     )
+    run._config = replace(run._config, regularization_values=(0.0, 0.01))
     state = contact_state(run, "chain")
     before = snapshot(state)
     calls, queries = [], []

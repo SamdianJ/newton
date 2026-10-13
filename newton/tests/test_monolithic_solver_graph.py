@@ -23,6 +23,29 @@ def _copy_scaled(source: wp.array[float], result: wp.array[float], factor: float
     result[i] = factor * source[i]
 
 
+@wp.kernel
+def _increment(result: wp.array[int]):
+    result[wp.tid()] += 1
+
+
+def test_segment_additive_capture(test, device):
+    """Execute additive work once on first capture, replay and buffer rebinding."""
+    cache = _SegmentGraphCache(device, enabled=True)
+    for _ in range(2):
+        result = wp.zeros(4, dtype=int, device=device)
+
+        def execute(result=result):
+            wp.launch(_increment, 4, [result], device=device)
+
+        for expected in range(1, 4):
+            cache.run("increment", (), (result,), execute, warmup=False)
+            np.testing.assert_array_equal(result.numpy(), expected)
+    test.assertEqual(cache.captures["increment"], 2)
+    cache.enabled = False
+    cache.run("increment", (), (result,), execute, warmup=False)
+    np.testing.assert_array_equal(result.numpy(), 4)
+
+
 def test_segments_continuous(test, device):
     """Match optional linear segments to PCG-only graphs across loads and dt changes."""
     scenes = [build_contact_free_coupled_fixture(device, pcg_mode="production", use_cuda_graph=True) for _ in range(2)]
@@ -191,6 +214,7 @@ class TestMonolithicSegmentGraphs(unittest.TestCase):
 
 
 for function in (
+    test_segment_additive_capture,
     test_segments_continuous,
     test_segment_warm_replay,
     test_objective_candidate_reuse,

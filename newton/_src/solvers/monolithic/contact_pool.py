@@ -1035,7 +1035,11 @@ class _ContactPool:
         """Reset one evaluation; retain only bounded batch x support staging."""
         if self._stream is None:
             raise ValueError("Contact pool has no bounded batch storage")
-        self._validate_storage()
+        buffers = self._validate_storage()
+        self.graphs.run("contact_stream_begin", (), buffers, self._begin_stream, warmup=False)
+        self._stream_started = True
+
+    def _begin_stream(self):
         for name in self._specs[1]:
             # COO consumers use triplet_count; generation overwrites that prefix.
             if name not in ("triplet_rows", "triplet_columns", "triplet_values"):
@@ -1045,18 +1049,29 @@ class _ContactPool:
         for owner in (self.energy, self.residual, self.force):
             owner.result.zero_()
             owner.offsets.zero_()
-        self._stream_started = True
 
     def append(self):
-        """Validate a whole batch and append once against the shared CAS budget.
-
-        This additive chain must not use the overwrite-only graph cache: its
-        warmup and capture would reserve/append the same contacts multiple times.
-        The producer may use a cached graph to overwrite candidates before here.
-        """
+        """Validate a whole batch and append once against the shared CAS budget."""
         if not self._stream_started:
             raise ValueError("Begin a contact evaluation before appending")
-        self._validate_storage()
+        buffers = self._validate_storage()
+        self.graphs.run(
+            "contact_stream_append",
+            (
+                self.row_count,
+                self.force_row_count,
+                self.candidate_capacity,
+                self.capacity,
+                self.max_support,
+                self.identity_count,
+                self.dtype,
+            ),
+            buffers,
+            self._append_stream,
+            warmup=False,
+        )
+
+    def _append_stream(self):
         identities, count, base, indices = self._stream
         a, out = self.candidates, self.records
         wp.launch(_begin_contact_batch, 1, [a, out, count, base, self.candidate_capacity], device=self.device)

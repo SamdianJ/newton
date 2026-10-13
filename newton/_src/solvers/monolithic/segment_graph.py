@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 The Newton Developers
 # SPDX-License-Identifier: Apache-2.0
 
-"""Bounded graphs for overwrite-only device chains; host contracts stay with callers."""
+"""Bounded device graphs; host contracts and execution policy stay with callers."""
 
 import time
 from collections import Counter, OrderedDict
@@ -19,7 +19,7 @@ class _SegmentGraphCache:
         self.capture_seconds = Counter()
         self.evictions = Counter()
 
-    def run(self, name, parameters, buffers, execute):
+    def run(self, name, parameters, buffers, execute, *, warmup=True):
         if not self.enabled:
             execute()
             return
@@ -34,9 +34,10 @@ class _SegmentGraphCache:
         entry = entries.get(key)
         if entry is None:
             start = time.perf_counter()
-            # Only overwrite-only derived scratch is eligible: warmup cannot
-            # advance physical state, append contributions, or commit history.
-            execute()
+            # Additive chains must skip warmup: capture records their work,
+            # and the single launch below performs it exactly once.
+            if warmup:
+                execute()
             with wp.ScopedCapture(stream=stream) as capture:
                 execute()
             graph = capture.graph

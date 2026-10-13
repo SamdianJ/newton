@@ -87,7 +87,8 @@ def test_stream_order(test, device):
                     baseline,
                 )
             if device.is_cuda:
-                test.assertEqual(pool.graphs.captures["contact_stream_finish"], 1)
+                for name in ("contact_stream_begin", "contact_stream_append", "contact_stream_finish"):
+                    test.assertEqual(pool.graphs.captures[name], 1)
 
 
 def test_stream_overflow(test, device):
@@ -194,7 +195,8 @@ def test_stream_lifecycle(test, device):
         test.assertTrue(np.isfinite(pool.records.triplet_values.numpy()[:n]).all())
         test.assertTrue(np.isnan(pool.records.triplet_values.numpy()[n:]).all())
     if device.is_cuda:
-        captures = pool.graphs.captures["contact_stream_finish"]
+        names = ("contact_stream_begin", "contact_stream_append", "contact_stream_finish")
+        captures = {name: pool.graphs.captures[name] for name in names}
         stream = wp.Stream(device)
         # Order existing default-stream writes before overwriting on this stream.
         wp.synchronize_device(device)
@@ -205,7 +207,8 @@ def test_stream_lifecycle(test, device):
             pool.finish()
         wp.synchronize_stream(stream)
         check_admitted(test, pool, data, stable_order=False)
-        test.assertEqual(pool.graphs.captures["contact_stream_finish"], captures + 1)
+        for name in names:
+            test.assertEqual(pool.graphs.captures[name], captures[name] + 1)
     with test.assertRaises(ValueError):
         pool.finish()
     empty = _ContactPool(0, 0, 0, 0, 1, 1, wp.float64, device, batch_capacity=0, use_cuda_graph=device.is_cuda)
