@@ -544,6 +544,8 @@ class _ContactBatch:
         self._empty_ids = wp.empty(0, dtype=wp.uint64, device=self.device)
         self.graphs = _SegmentGraphCache(self.device, enabled=use_cuda_graph and self.device.is_cuda)
         self._started = False
+        self._storage_bindings = None
+        self._storage_intervals = ()
 
     def _geometry(self, count, *, rotation):
         geometry = _geometry_type(self.dtype)()
@@ -650,7 +652,11 @@ class _ContactBatch:
                 raise ValueError("Invalid native contact batch state")
         state = x, poses, com, jt, jw, rigid_com, rigid_rotation
         owned = self.buffers()[: -len(self.METADATA_ARRAYS)]
-        intervals = [_storage_interval(a) for a in owned if a.size]
+        bindings = tuple((a.ptr, a.shape, a.strides, a.dtype) for a in owned if a.size)
+        if bindings != self._storage_bindings:
+            self._storage_intervals = tuple(_storage_interval(a) for a in owned if a.size)
+            self._storage_bindings = bindings
+        intervals = self._storage_intervals
         for a in state:
             if a.size:
                 begin, end = _storage_interval(a)

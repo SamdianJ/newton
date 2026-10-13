@@ -329,6 +329,48 @@ def test_batch_storage_contract(test, device):
     test.assertFalse(batch.pool.energy.result.numpy().any())
 
 
+def test_batch_storage_rebinding(test, device):
+    """Reject aliases introduced by workspace rebinding after successful state validation."""
+    model, xn = fixture(device, "plane")
+    obj = contact(model, "C-EE")
+    batch = _ContactBatch(obj, batch_capacity=2, capacity=obj.count * 11, use_cuda_graph=device.is_cuda)
+    inputs = list(state(model, xn, np.zeros(2)))
+    external = wp.zeros(model.particle_count + 2, dtype=wp.vec3d, device=device)
+    inputs[0] = external[2:]
+    inputs[0].assign(xn)
+    size = wp.types.type_size_in_bytes(wp.vec3d)
+    for changed in (
+        external[2:4],
+        wp.array(ptr=external.ptr, dtype=wp.vec3d, shape=(3,), capacity=external.capacity, device=device),
+        wp.array(
+            ptr=external.ptr,
+            dtype=wp.vec3d,
+            shape=(2,),
+            strides=(2 * size,),
+            capacity=external.capacity,
+            device=device,
+        ),
+        wp.array(ptr=external.ptr, dtype=wp.spatial_vectord, shape=(2,), capacity=external.capacity, device=device),
+    ):
+        batch.points = external[:2]
+        batch.begin_step(*inputs)
+        batch.points = changed
+        with patch.object(wp, "launch", side_effect=AssertionError("Launch before validating rebound alias")):
+            with test.assertRaisesRegex(ValueError, "aliases producer storage"):
+                batch.begin_step(*inputs)
+        batch.points = external[:2]
+        batch.begin_step(*inputs)
+
+    batch.initialize_reference()
+    backing = batch.reference_residual
+    inputs[0] = wp.array(
+        ptr=backing.ptr, dtype=wp.vec3d, shape=(model.particle_count,), capacity=backing.capacity, device=device
+    )
+    with patch.object(wp, "launch", side_effect=AssertionError("Launch before validating new reference storage")):
+        with test.assertRaisesRegex(ValueError, "aliases producer storage"):
+            batch.begin_step(*inputs)
+
+
 class TestContactBatch(unittest.TestCase):
     pass
 
@@ -342,6 +384,7 @@ for _device in get_test_devices():
         test_batch_new_activation,
         test_batch_mesh,
         test_batch_storage_contract,
+        test_batch_storage_rebinding,
     ):
         add_function_test(TestContactBatch, _test.__name__, _test, devices=[_device])
 
