@@ -140,6 +140,52 @@ def evaluation_packet(
     packet[5] = det[0]
 
 
+@wp.kernel
+def host_evaluation_packet(
+    rigid: wp.array[Any],
+    link: wp.array[Any],
+    joint: wp.array[Any],
+    tet: wp.array[Any],
+    contact: wp.array[Any],
+    absolute: wp.array[Any],
+    tet_flags: wp.array[int],
+    contact_flags: wp.array[int],
+    det: wp.array[Any],
+    pooled: bool,
+    packet: wp.array[Any],
+):
+    i = wp.tid()
+    value = packet.dtype(0)
+    if i == 0:
+        value = packet.dtype(tet_flags[0])
+    elif i == 1:
+        value = packet.dtype(contact_flags[0])
+    elif i == 2:
+        value = det[0]
+    elif i < 5:
+        if pooled:
+            value = absolute[i - 3]
+    else:
+        j = i - 5
+        if j < rigid.shape[0]:
+            value = rigid[j]
+        else:
+            j -= rigid.shape[0]
+            if j < link.shape[0]:
+                value = link[j]
+            else:
+                j -= link.shape[0]
+                if j < joint.shape[0]:
+                    value = joint[j]
+                else:
+                    j -= joint.shape[0]
+                    if j < tet.shape[0]:
+                        value = tet[j]
+                    else:
+                        value = contact[j - tet.shape[0]]
+    packet[i] = value
+
+
 def initialize(solver):
     """Allocate overwrite-only scratch once, without changing physical owners."""
     self = solver
@@ -158,6 +204,8 @@ def initialize(solver):
     self._energy_sums = wp.zeros((2, 1), dtype=dtype, device=device)
     self._evaluation_status = wp.zeros(1, dtype=int, device=device)
     self._evaluation_packet = wp.zeros(6, dtype=dtype, device=device)
+    # Copy terms without reducing them: the host path retains NumPy's sum order.
+    self._host_evaluation_packet = wp.zeros(5 + self._rigid.energy.size + energy_size, dtype=dtype, device=device)
 
 
 def evaluate(solver):

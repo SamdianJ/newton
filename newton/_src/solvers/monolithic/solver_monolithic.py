@@ -816,6 +816,8 @@ class SolverMonolithic(SolverBase):
         ]
         if device_result:
             buffers.extend((self._energy_terms, self._energy_sums, self._evaluation_status, self._evaluation_packet))
+        else:
+            buffers.append(self._host_evaluation_packet)
         rigid_history = state._monolithic_coupled
         buffers.extend([rigid_history.rigid_com, rigid_history.rigid_rotation])
         owners = (self._objective, k, tet, contact, self._rigid)
@@ -875,6 +877,25 @@ class SolverMonolithic(SolverBase):
             )
             if device_result:
                 iteration_device.evaluate(self)
+            else:
+                wp.launch(
+                    iteration_device.host_evaluation_packet,
+                    self._host_evaluation_packet.size,
+                    [
+                        self._rigid.energy,
+                        self._objective.link_energy,
+                        self._objective.joint_energy,
+                        tet.parts,
+                        contact.energy.flatten(),
+                        contact.absolute_energy if self._contact_pool else contact.energy.flatten(),
+                        tet.flags,
+                        contact.flags,
+                        tet.min_det_f,
+                        self._contact_pool,
+                        self._host_evaluation_packet,
+                    ],
+                    device=self.model.device,
+                )
 
         reference_mode = self._contact_spatial and contact._reference_mode
         key = (self._layout.identity, self.precision.value, dt, build_tangent, device_result, reference_mode)
@@ -907,27 +928,23 @@ class SolverMonolithic(SolverBase):
                 raise _StepFailure(self.Status.NONFINITE, "Nonfinite coupled E/r")
             self._metrics["min_det_f"] = float(packet[5])
             return packet[3], self._complete_r, packet[4]
-        if tet.flags.numpy()[0]:
-            status = self.Status.TET_INVERSION if tet.flags.numpy()[0] == 1 else self.Status.NONFINITE
+        packet = self._host_evaluation_packet.numpy()
+        if packet[0]:
+            status = self.Status.TET_INVERSION if packet[0] == 1 else self.Status.NONFINITE
             raise _StepFailure(status, "Invalid tet candidate")
-        if contact.flags.numpy()[0]:
+        if packet[1]:
+            # The offending contact identity is int32 and may not fit FP32 exactly.
             raise _StepFailure(self.Status.NONFINITE, f"Invalid contact geometry: {contact.flags.numpy().tolist()}")
         # Graph replay executes device work, not evaluate()'s host-side marker.
         contact._evaluated = True
         residual = self._complete_r.numpy().copy()
-        parts = np.r_[
-            self._rigid.energy.numpy(),
-            self._objective.link_energy.numpy(),
-            self._objective.joint_energy.numpy(),
-            tet.parts.numpy(),
-            contact.energy.numpy().ravel(),
-        ]
+        parts = packet[5:]
         if not np.isfinite(residual).all() or not np.isfinite(parts).all() or not np.isfinite(parts.sum()):
             raise _StepFailure(self.Status.NONFINITE, "Nonfinite coupled E/r")
-        self._metrics["min_det_f"] = float(tet.min_det_f.numpy()[0])
+        self._metrics["min_det_f"] = float(packet[2])
         absolute = abs(parts).sum()
         if self._contact_pool:
-            absolute = abs(parts[: -contact.energy.size]).sum() + contact.absolute_energy.numpy().sum()
+            absolute = abs(parts[: -contact.energy.size]).sum() + packet[3:5].sum()
         return parts.sum(), residual, absolute
 
     def _initial_reference(self, dt, *, device_result=False):

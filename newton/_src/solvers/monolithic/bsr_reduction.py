@@ -11,7 +11,7 @@ import warp as wp
 from warp import sparse
 from warp.utils import radix_sort_pairs
 
-from .contact_pool import _CONTACT_WORKERS, _merge_contact_keys
+from .contact_pool import _CONTACT_WORKERS
 from .linear_types import MonolithicLinearStatus
 from .segment_graph import _SegmentGraphCache
 
@@ -207,14 +207,18 @@ def _fixed_bsr_value_keys(
 ):
     i = wp.tid()
     n = count[0]
-    if n < 0 or n > keys.shape[0]:
-        return
-    while i < n:
-        if rows[i] < 0 or rows[i] >= size or columns[i] < 0 or columns[i] >= size:
-            wp.atomic_max(status, 0, int(MonolithicLinearStatus.TRIPLET_INDEX_OUT_OF_RANGE))
-        if not wp.isfinite(values[i]):
-            wp.atomic_max(status, 0, int(MonolithicLinearStatus.NONFINITE_CONTRIBUTION))
-        keys[i] = wp.uint64(bits[i])
+    capacity = rows.shape[0]
+    if n < 0 or n > capacity:
+        n = 0
+    while i < capacity:
+        key = wp.uint64(0) - wp.uint64(1)
+        if i < n:
+            if rows[i] < 0 or rows[i] >= size or columns[i] < 0 or columns[i] >= size:
+                wp.atomic_max(status, 0, int(MonolithicLinearStatus.TRIPLET_INDEX_OUT_OF_RANGE))
+            if not wp.isfinite(values[i]):
+                wp.atomic_max(status, 0, int(MonolithicLinearStatus.NONFINITE_CONTRIBUTION))
+            key = wp.uint64(bits[i])
+        keys[i] = key
         indices[i] = i
         live[i] = 0
         i += workers
@@ -232,12 +236,13 @@ def _fixed_bsr_position_keys(
 ):
     i = wp.tid()
     n = count[0]
-    if n < 0 or n > keys.shape[0]:
-        return
-    while i < n:
+    capacity = rows.shape[0]
+    if n < 0 or n > capacity:
+        n = 0
+    while i < capacity:
         key = wp.uint64(0) - wp.uint64(1)
         source = indices[i]
-        if source >= 0 and source < n:
+        if i < n and source >= 0 and source < n:
             if rows[source] >= 0 and rows[source] < size and columns[source] >= 0 and columns[source] < size:
                 key = wp.uint64(rows[source]) * wp.uint64(size) + wp.uint64(columns[source])
         keys[i] = key
@@ -257,7 +262,7 @@ def _fixed_bsr_work(
 ):
     i = wp.tid()
     n = count[0]
-    if n < 0 or n > keys.shape[0]:
+    if n < 0 or n > keys.shape[0] // 2:
         return
     while i < n:
         first = i
@@ -284,7 +289,7 @@ def _fixed_bsr_pair(
 ):
     i = wp.tid()
     n = count[0]
-    if n < 0 or n > keys.shape[0] or stride >= n:
+    if n < 0 or n > keys.shape[0] // 2 or stride >= n:
         return
     while i < n:
         if keys[i] != wp.uint64(0) - wp.uint64(1) and (i - starts[i]) % (2 * stride) == 0:
@@ -380,7 +385,7 @@ def _fixed_bsr_entries(
 ):
     i = wp.tid()
     n = count[0]
-    if n < 0 or n > keys.shape[0]:
+    if n < 0 or n > keys.shape[0] // 2:
         return
     while i < n:
         if starts[i] == i and live[i] != 0:
@@ -406,7 +411,8 @@ class _FixedScalarBsrReduction:
 
     Device effective counts change contents, not graph bindings or allocation.
     All input zeros remain in the tree; only zero-only coordinates are pruned.
-    No sparse topology builder, native sort/scan or floating atomic sum runs.
+    Native stable radix sorting preserves the value tree's order. No sparse
+    topology builder or floating atomic sum runs.
     Generation/token guards stay with the assembly workspace. This private
     component owns its compact matrix; nnz is a capacity bound until nnz_sync.
     """
@@ -429,8 +435,8 @@ class _FixedScalarBsrReduction:
             raise ValueError("Fixed scalar BSR byte capacity exceeds int64")
         self.size, self.capacity, self.output_capacity = size, capacity, output_capacity
         self.device = wp.get_device(device)
-        self._spec = dict.fromkeys(("keys", "key_scratch"), (capacity, wp.uint64))
-        self._spec.update(dict.fromkeys(("indices", "index_scratch", "starts", "live"), (capacity, wp.int32)))
+        self._spec = {"keys": (2 * capacity, wp.uint64), "indices": (2 * capacity, wp.int32)}
+        self._spec.update(dict.fromkeys(("starts", "live"), (capacity, wp.int32)))
         self._spec.update(
             work=(capacity, wp.float32), prefix=(p, wp.int32), scan_size=(1, wp.int32), status=(1, wp.int32)
         )
@@ -490,24 +496,6 @@ class _FixedScalarBsrReduction:
             lambda: self._build(triplets),
         )
 
-    def _sort(self, keys, indices, count):
-        out_keys, out_indices = self.key_scratch, self.index_scratch
-        if keys.ptr == out_keys.ptr:
-            out_keys, out_indices = self.keys, self.indices
-        run = 1
-        workers = min(self.capacity, self.MAX_WORKERS)
-        while run < self.capacity:
-            wp.launch(
-                _merge_contact_keys,
-                workers,
-                [keys, indices, out_keys, out_indices, count, run, workers],
-                device=self.device,
-            )
-            keys, out_keys = out_keys, keys
-            indices, out_indices = out_indices, indices
-            run *= 2
-        return keys, indices
-
     def _build(self, triplets):
         matrix, n = self.matrix, self.capacity
         for array in (matrix.offsets, matrix.columns, matrix.values):
@@ -536,14 +524,14 @@ class _FixedScalarBsrReduction:
                 ],
                 device=self.device,
             )
-            keys, indices = self._sort(keys, indices, triplets.count)
+            radix_sort_pairs(keys, indices, n)
             wp.launch(
                 _fixed_bsr_position_keys,
                 workers,
                 [triplets.rows, triplets.columns, triplets.count, self.size, indices, keys, workers],
                 device=self.device,
             )
-            keys, indices = self._sort(keys, indices, triplets.count)
+            radix_sort_pairs(keys, indices, n)
             wp.launch(
                 _fixed_bsr_work,
                 workers,

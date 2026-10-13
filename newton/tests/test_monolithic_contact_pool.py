@@ -125,7 +125,7 @@ def test_counts_and_tails(test, device):
         inputs[4].assign([count])
         snapshot = None
         for seed in range(3):
-            for array in (reducer.keys, reducer.key_scratch, reducer.indices, reducer.index_scratch):
+            for array in (reducer.keys, reducer.indices):
                 array.fill_(seed)
             reducer.reduce(*inputs)
             test.assertEqual(int(reducer.flags.numpy()[0]), 0)
@@ -133,7 +133,7 @@ def test_counts_and_tails(test, device):
             np.add.at(expected, np.arange(count) % 3, values[:count])
             np.testing.assert_array_equal(reducer.result.numpy(), expected)
             test.assertEqual(int(reducer.offsets.numpy()[-1]), count)
-            current = tuple(array.numpy().tobytes() for array in reducer.buffers())
+            current = tuple(array.numpy().tobytes() for array in (reducer.offsets, reducer.result, reducer.flags))
             if snapshot is not None:
                 test.assertEqual(current, snapshot)
             snapshot = current
@@ -185,6 +185,7 @@ def test_key_and_storage_contracts(test, device):
             (1, -1, 1, 1),
             (2**31 - 1, 1, 1, 1),
             (1, 2**31, 1, 1),
+            (1, 2**30, 1, 1),
             (1, 1, 0, 1),
             (1, 1, 1, 0),
             (2, 1, 2**63, 1),
@@ -207,9 +208,10 @@ def test_key_and_storage_contracts(test, device):
         (2, wp.zeros((1, 2), dtype=int, device=device)),
         (3, wp.zeros(2, dtype=wp.float32, device=device)),
         (4, wp.zeros(2, dtype=int, device=device)),
-        (0, reducer.indices),
-        (1, reducer.keys),
-        (2, reducer.index_scratch),
+        (0, reducer.indices[:2]),
+        (0, reducer.indices[2:]),
+        (1, reducer.keys[:2]),
+        (1, reducer.keys[2:]),
         (3, reducer.work),
         (4, reducer.flags),
     ):
@@ -266,7 +268,7 @@ def test_graph_rebinding(test, device):
         inputs[i] = wp.clone(inputs[i])
         reducer.reduce(*inputs)
         test.assertEqual(reducer.graphs.captures["contact_rows"], captures + 1)
-    for name in ("keys", "key_scratch", "indices", "index_scratch", "work", "offsets", "result", "flags"):
+    for name in ("keys", "indices", "work", "offsets", "result", "flags"):
         captures = reducer.graphs.captures["contact_rows"]
         setattr(reducer, name, wp.clone(getattr(reducer, name)))
         reducer.reduce(*inputs)
@@ -627,9 +629,18 @@ def test_pool_capacity_contracts(test, device):
     test.assertEqual(int(empty.records.flags.numpy()[0]), 0)
     test.assertEqual(empty.payload_bytes, sum(a.capacity for a in empty.buffers()))
     pool = _ContactPool(4, 2, 5, 8, 3, 64, wp.float64, device)
+    assign_contacts(pool, contact_payload(np.float64))
+    pool.graphs.enabled = device.is_cuda
+    pool.evaluate()
+    original = pool.records.identities
     pool.records.identities = pool.candidates.identities
-    with test.assertRaisesRegex(ValueError, "alias"):
-        pool.evaluate()
+    with patch.object(wp, "launch", side_effect=AssertionError("aliased storage reached a kernel")):
+        for _ in range(2):
+            with test.assertRaisesRegex(ValueError, "alias"):
+                pool.evaluate()
+    pool.records.identities = original
+    pool.evaluate()
+    check_admitted(test, pool, contact_payload(np.float64))
 
 
 def test_pool_reuse_and_failure(test, device):
@@ -757,6 +768,8 @@ def test_pool_invalid_scratch(test, device):
     for target in ("prefix", "row_work"):
         pool = _ContactPool(4, 2, 5, 8, 3, 64, wp.float64, device)
         assign_contacts(pool, contact_payload(np.float64))
+        pool.graphs.enabled = device.is_cuda
+        pool.evaluate()
         if target == "prefix":
             pool._prefix = wp.zeros(1, dtype=wp.vec4i, device=device)
         else:

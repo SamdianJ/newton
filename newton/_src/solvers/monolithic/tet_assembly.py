@@ -287,15 +287,16 @@ def _assemble_elastic_residual_tangent(
                         continue
                     gb = _shape_gradient(tet_poses[tet], b)
                     block = wp.mat33(0.0)
-                    for row in range(3):
-                        for col in range(3):
-                            for i in range(3):
-                                for j in range(3):
-                                    block[row, col] += ga[i] * projected[3 * i + row, 3 * j + col] * gb[j]
                     if material_model == 1:
                         for row in range(3):
                             for col in range(3):
                                 block[row, col] = nodal[3 * a + row, 3 * b + col]
+                    else:
+                        for row in range(3):
+                            for col in range(3):
+                                for i in range(3):
+                                    for j in range(3):
+                                        block[row, col] += ga[i] * projected[3 * i + row, 3 * j + col] * gb[j]
                     if consistent == 1:
                         coefficient = mass_coefficients[tet] * inv_dt_sq
                         if a == b:

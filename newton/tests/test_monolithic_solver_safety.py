@@ -198,6 +198,28 @@ def test_modes_and_identity(test, device):
                     assert_snapshot(test, states[i], before)
 
 
+def test_host_contact_failure_identity(test, device):
+    """Preserve the original int32 contact identity even beyond FP32's exact range."""
+    for precision in ("fp64", "fp32"):
+        run = solver(scene(device), precision=precision)
+        state = run.create_state(dt=0.001)
+        run.step(state, state, run.model.control(), dt=0.001)
+        test.assertFalse(run.last_stats.rolled_back)
+        run._graphs.enabled = False
+        evaluate = run._contact.evaluate
+        for identity in (2**24 + 1, 2**31 - 1):
+
+            def invalid(*args, identity=identity, evaluate=evaluate, run=run, **kwargs):
+                evaluate(*args, **kwargs)
+                run._contact.flags.assign([1, identity])
+
+            with patch.object(run._contact, "evaluate", side_effect=invalid):
+                with test.assertRaises(_StepFailure) as failure:
+                    run._evaluate(run._accepted, 0.001)
+            test.assertEqual(failure.exception.status, run.Status.NONFINITE)
+            test.assertIn(f"[1, {identity}]", str(failure.exception))
+
+
 class TestPrecisionSafety(unittest.TestCase):
     pass
 
@@ -209,6 +231,7 @@ for _device in get_test_devices():
         test_native_trials,
         test_checkpoint_corruption,
         test_modes_and_identity,
+        test_host_contact_failure_identity,
     ):
         add_function_test(TestPrecisionSafety, _test.__name__, _test, devices=[_device])
 

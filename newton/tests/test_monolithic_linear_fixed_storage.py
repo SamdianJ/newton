@@ -84,7 +84,7 @@ def test_fixed_topology_reuse(test, device):
                 array.fill_(seed)
             owner.build(inputs, layout_identity="fixed")
             _assert_matrix(test, owner, rows[:n], columns[:n], values[:n])
-            for name in ("keys", "key_scratch", "indices", "index_scratch", "starts", "work", "live"):
+            for name in ("starts", "work"):
                 np.testing.assert_array_equal(
                     getattr(owner, name).numpy()[n:], seed, err_msg="Build touched unused scratch capacity"
                 )
@@ -145,7 +145,7 @@ def test_fixed_topology_errors(test, device):
         _fill(inputs, [2], [2], [3])
         owner.build(inputs)
         _assert_matrix(test, owner, [2], [2], [3])
-    for count in (-1, 9):
+    for count in (-1, 9, 16, 17):
         inputs.status.zero_()
         inputs.count.fill_(count)
         owner.build(inputs)

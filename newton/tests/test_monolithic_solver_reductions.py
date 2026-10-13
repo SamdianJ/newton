@@ -59,6 +59,35 @@ class TestReductions(unittest.TestCase):
     pass
 
 
+def test_host_energy_packet(test, device):
+    """Keep term order, native bits and error metadata through the fused readback."""
+    for dtype, native in ((wp.float32, np.float32), (wp.float64, np.float64)):
+        for lengths in ((0, 0, 0, 0, 0), (1, 2, 3, 4, 2), (3, 0, 5, 3, 6)):
+            host = [np.arange(n, dtype=native) - 2 for n in lengths]
+            terms = [wp.array(a, dtype=dtype, device=device) for a in host]
+            absolute = wp.array([11, 13], dtype=dtype, device=device)
+            tet_flags = wp.array([5], dtype=int, device=device)
+            contact_flags = wp.array([9, 7], dtype=int, device=device)
+            det = wp.array([-0.5], dtype=dtype, device=device)
+            packet = wp.empty(5 + sum(lengths), dtype=dtype, device=device)
+            for pooled in (False, True):
+                for value in (-0.0, np.inf, np.nan):
+                    if lengths[-1]:
+                        host[-1][0] = value
+                        terms[-1].assign(host[-1])
+                    packet.fill_(99)
+                    wp.launch(
+                        kernels.host_evaluation_packet,
+                        packet.size,
+                        [*terms, absolute, tet_flags, contact_flags, det, pooled, packet],
+                        device=device,
+                    )
+                    result = packet.numpy()
+                    np.testing.assert_array_equal(result[:5], [5, 9, -0.5, 11 if pooled else 0, 13 if pooled else 0])
+                    test.assertEqual(result[5:].tobytes(), np.concatenate(host).tobytes())
+
+
+add_function_test(TestReductions, "test_host_energy_packet", test_host_energy_packet, devices=get_test_devices())
 add_function_test(TestReductions, "test_reductions", test_reductions, devices=get_test_devices())
 
 
