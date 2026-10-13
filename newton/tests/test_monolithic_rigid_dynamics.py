@@ -349,7 +349,7 @@ def test_rigid_failures_and_reset(test, device):
         assert_snapshot(test, state, original)
         assert_snapshot(test, output, previous)
 
-    def posterior(*args):
+    def posterior(*args, **kwargs):
         value = np.zeros(run._layout.scalar_dof_count)
         value[run._rigid.rows_numpy[1, 3]] = 1
         return value

@@ -521,7 +521,8 @@ class SolverMonolithic(SolverBase):
             raise ValueError("Articulation step requires no contacts and finite positive dt")
         dt = self._kinematics.timestep(dt)
         self._states.validate(state_in)
-        self._states.validate(state_out)
+        if state_out is not state_in:
+            self._states.validate(state_out)
         for name in ("joint_f", "joint_target_q", "joint_target_qd"):
             array = getattr(control, name, None)
             if not isinstance(array, wp.array) or (array.shape, array.dtype, array.device) != (
