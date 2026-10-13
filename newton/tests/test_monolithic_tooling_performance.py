@@ -10,6 +10,7 @@ import unittest
 import numpy as np
 
 from scripts.monolithic_reference import run_performance as performance
+from scripts.monolithic_reference.run_actor_coupling import build_model, load_case
 from scripts.monolithic_reference.run_paired_performance import paired_summary, run_order
 from scripts.monolithic_reference.run_performance import summarize
 
@@ -53,6 +54,24 @@ class TestPerformanceSummary(unittest.TestCase):
             samples.append(control)
         for field in (0, 1):
             np.testing.assert_array_equal(samples[0][field], samples[1][field])
+
+    def test_actor_chain_scaling(self):
+        """Extend only the rigid chain while retaining the frozen default geometry."""
+        case = load_case()
+        for count in (2, 4):
+            model = build_model(device="cpu", rigid_count=count)
+            self.assertEqual(model.body_count, count + 1)
+            self.assertEqual(model.particle_count, 125)
+            self.assertEqual(model.tet_count, 384)
+            centers = model.body_q.numpy()[:, :3]
+            self.assertAlmostEqual(centers[-1, 0], -0.0303)
+            np.testing.assert_allclose(np.diff(centers[:, 0]), 0.0202, atol=1e-8)
+            if count == 2:
+                expected = [case["centers_m"][name] for name in ("pusher", "rigid_1", "rigid_2")]
+                np.testing.assert_array_equal(centers, np.asarray(expected, dtype=np.float32))
+        for value in (0, 1, True, 2.5):
+            with self.assertRaises(ValueError):
+                build_model(device="cpu", rigid_count=value)
 
     def test_actor_fp32_rejected(self):
         """Reject a precision change to the frozen actor acceptance recipe."""
