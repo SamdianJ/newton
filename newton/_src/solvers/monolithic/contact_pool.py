@@ -9,6 +9,7 @@ from typing import Any
 
 import numpy as np
 import warp as wp
+from warp.utils import array_scan
 
 from .segment_graph import _SegmentGraphCache
 
@@ -514,27 +515,23 @@ def _reserve_contacts(
 
 
 @wp.kernel
-def _scan_seed(demands: wp.array[wp.vec4i], prefix: wp.array[wp.vec4i]):
+def _scan_seed(demands: wp.array[wp.vec4i], prefix: wp.array[wp.vec4i], records: Any, append: bool):
     i = wp.tid()
     value = wp.vec4i(0)
-    if i < demands.shape[0]:
-        value = demands[i]
+    # Inclusive scan of [base, demands...] yields offsets and a final total.
+    if i == 0:
+        if append:
+            value = wp.vec4i(
+                records.count[0], records.support_count[0], records.triplet_count[0], records.force_count[0]
+            )
+    else:
+        value = demands[i - 1]
     prefix[i] = value
 
 
 @wp.kernel
-def _scan_up(prefix: wp.array[wp.vec4i], distance: int):
-    right = (wp.tid() + 1) * 2 * distance - 1
-    prefix[right] = prefix[right] + prefix[right - distance]
-
-
-@wp.kernel
-def _scan_root(prefix: wp.array[wp.vec4i], records: Any, append: bool):
-    last = prefix.shape[0] - 1
-    base = wp.vec4i(0)
-    if append:
-        base = wp.vec4i(records.count[0], records.support_count[0], records.triplet_count[0], records.force_count[0])
-    total = prefix[last] + base
+def _scan_counts(prefix: wp.array[wp.vec4i], records: Any):
+    total = prefix[prefix.shape[0] - 1]
     records.count[0] = total[0]
     records.support_count[0] = total[1]
     records.triplet_count[0] = total[2]
@@ -544,16 +541,6 @@ def _scan_root(prefix: wp.array[wp.vec4i], records: Any, append: bool):
     records.support_offsets[total[0]] = total[1]
     records.triplet_offsets[total[0]] = total[2]
     records.factor_offsets[3 * total[0]] = 3 * total[1]
-    prefix[last] = base
-
-
-@wp.kernel
-def _scan_down(prefix: wp.array[wp.vec4i], distance: int):
-    right = (wp.tid() + 1) * 2 * distance - 1
-    left = right - distance
-    value = prefix[left]
-    prefix[left] = prefix[right]
-    prefix[right] = prefix[right] + value
 
 
 @wp.kernel
@@ -794,7 +781,7 @@ class _ContactPool:
                 c = min(c, int(limit) // (3 * k))
         n, r, f = min(m, c), min(m * k, c), self.FORCE_TERMS
         t = 3 * k * r
-        p = 1 << b.bit_length()  # Power of two >= batch size+1, including zero.
+        p = b + 1  # Include the existing base and the final total.
         if 3 * k * k >= 2**31:
             raise ValueError("Contact triplet demand exceeds int32")
         for rows, local in ((1, 1), (4, 1), (row_count, k), (force_row_count, f)):
@@ -988,16 +975,9 @@ class _ContactPool:
                 [a, out, indices, self._active, self.capacity, self._selected, self._demands],
                 device=self.device,
             )
-        wp.launch(_scan_seed, self._prefix.size, [self._demands, self._prefix], device=self.device)
-        distance = 1
-        while distance < self._prefix.size:
-            wp.launch(_scan_up, self._prefix.size // (2 * distance), [self._prefix, distance], device=self.device)
-            distance *= 2
-        wp.launch(_scan_root, 1, [self._prefix, out, False], device=self.device)
-        distance //= 2
-        while distance:
-            wp.launch(_scan_down, self._prefix.size // (2 * distance), [self._prefix, distance], device=self.device)
-            distance //= 2
+        wp.launch(_scan_seed, self._prefix.size, [self._demands, self._prefix, out, False], device=self.device)
+        array_scan(self._prefix, self._prefix)
+        wp.launch(_scan_counts, 1, [self._prefix, out], device=self.device)
         if m:
             wp.launch(_write_contacts, m, [a, out, indices, self._selected, self._prefix], device=self.device)
         self._finish_records(indices)
@@ -1092,16 +1072,9 @@ class _ContactPool:
                 [a, out, indices, self._active, self.capacity, self._selected, self._demands],
                 device=self.device,
             )
-        wp.launch(_scan_seed, self._prefix.size, [self._demands, self._prefix], device=self.device)
-        distance = 1
-        while distance < self._prefix.size:
-            wp.launch(_scan_up, self._prefix.size // (2 * distance), [self._prefix, distance], device=self.device)
-            distance *= 2
-        wp.launch(_scan_root, 1, [self._prefix, out, True], device=self.device)
-        distance //= 2
-        while distance:
-            wp.launch(_scan_down, self._prefix.size // (2 * distance), [self._prefix, distance], device=self.device)
-            distance //= 2
+        wp.launch(_scan_seed, self._prefix.size, [self._demands, self._prefix, out, True], device=self.device)
+        array_scan(self._prefix, self._prefix)
+        wp.launch(_scan_counts, 1, [self._prefix, out], device=self.device)
         if b:
             wp.launch(_write_contacts, b, [a, out, indices, self._selected, self._prefix], device=self.device)
             wp.launch(_contact_batch_sources, b, [out, self._selected, self._prefix, base], device=self.device)
