@@ -456,7 +456,14 @@ class _FixedScalarBsrReduction:
             self.matrix.values,
         )
 
-    def build(self, triplets, *, layout_identity=""):
+    def build(self, triplets, *, layout_identity="", active_count=None):
+        if active_count is not None and (type(active_count) is not int or not 0 <= active_count <= self.capacity):
+            raise ValueError("Invalid scalar BSR active count")
+        # Power-of-two spans reuse graphs across small count changes without
+        # allocating new storage or sorting the entire reserved capacity.
+        span = (
+            self.capacity if active_count is None else min(self.capacity, 1 << (max(1, active_count) - 1).bit_length())
+        )
         matrix = self.matrix
         if matrix.nrow != self.size or matrix.ncol != self.size or matrix.row_counts is not None:
             raise ValueError("Invalid fixed scalar BSR matrix layout")
@@ -491,13 +498,15 @@ class _FixedScalarBsrReduction:
         matrix.nnz = self.output_capacity
         self.graphs.run(
             "fixed_scalar_bsr",
-            (self.size, self.capacity, layout_identity),
+            (self.size, self.capacity, span, layout_identity),
             arrays,
-            lambda: self._build(triplets),
+            lambda: self._build(triplets, span),
         )
 
-    def _build(self, triplets):
-        matrix, n = self.matrix, self.capacity
+    def _build(self, triplets, span):
+        matrix, n = self.matrix, span
+        prefix_size = min(self.prefix.size, 1 << n.bit_length())
+        rows = triplets.rows[:n] if n else triplets.rows
         for array in (matrix.offsets, matrix.columns, matrix.values):
             array.zero_()
         wp.launch(
@@ -510,7 +519,7 @@ class _FixedScalarBsrReduction:
                 _fixed_bsr_value_keys,
                 workers,
                 [
-                    triplets.rows,
+                    rows,
                     triplets.columns,
                     triplets.values,
                     triplets.values.view(wp.uint32),
@@ -529,7 +538,7 @@ class _FixedScalarBsrReduction:
             wp.launch(
                 _fixed_bsr_position_keys,
                 workers,
-                [triplets.rows, triplets.columns, triplets.count, self.size, indices, keys, workers],
+                [rows, triplets.columns, triplets.count, self.size, indices, keys, workers],
                 device=self.device,
             )
             radix_sort_pairs(keys, indices, n, end_bit=max(1, (self.size * self.size).bit_length()))
@@ -548,7 +557,7 @@ class _FixedScalarBsrReduction:
                     device=self.device,
                 )
                 stride *= 2
-        workers = min(self.prefix.size, self.MAX_WORKERS)
+        workers = min(prefix_size, self.MAX_WORKERS)
         wp.launch(
             _fixed_bsr_scan_seed,
             workers,
@@ -556,8 +565,8 @@ class _FixedScalarBsrReduction:
             device=self.device,
         )
         distance = 1
-        while distance < self.prefix.size:
-            workers = min(self.prefix.size // (2 * distance), self.MAX_WORKERS)
+        while distance < prefix_size:
+            workers = min(prefix_size // (2 * distance), self.MAX_WORKERS)
             wp.launch(
                 _fixed_bsr_scan_up,
                 workers,
@@ -568,7 +577,7 @@ class _FixedScalarBsrReduction:
         wp.launch(_fixed_bsr_scan_root, 1, [self.prefix, self.scan_size, 0], device=self.device)
         distance //= 2
         while distance:
-            workers = min(self.prefix.size // (2 * distance), self.MAX_WORKERS)
+            workers = min(prefix_size // (2 * distance), self.MAX_WORKERS)
             wp.launch(
                 _fixed_bsr_scan_down,
                 workers,

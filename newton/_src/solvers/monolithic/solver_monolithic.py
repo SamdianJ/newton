@@ -22,9 +22,10 @@ from .actors import ActorTable
 from .articulation import ArticulationObjective, _TreeKinematics
 from .articulation_state import _predict, _recover_history
 from .collision import _validate_and_collect_boundary_faces
-from .contact import ContactObjective, ContactStatus
+from .contact import ContactStatus
 from .contact_forces import MonolithicContactForces
 from .contact_pipeline import _PooledContactObjective, _SpatialContactObjective
+from .contact_pipeline import _SpatialContactObjective as ContactObjective
 from .coupled_state import CoupledState
 from .iteration import iterate, measure
 from .joint_parameters import JointParameters
@@ -64,6 +65,13 @@ class SolverMonolithic(SolverBase):
     changes; runtime mutation of these inputs is unsupported and not checked.
     Control targets/forces, state external forces, gravity and dt are step inputs.
     Edit coordinates through reset_state or load_checkpoint to keep history valid.
+
+    Spatial contact candidates refresh at Newton boundaries and remain frozen
+    through trials, with zero additional law margin. Unbounded trials can miss
+    contacts; the complete step-start residual remains the convergence reference.
+    Candidate capacity defaults to the model's static sample upper bound, and
+    factor capacity defaults to three times that bound. Capacity is fixed for
+    the solver lifetime; overflow discards complete contacts and reports taint.
 
     Nonconservative energy acceptance is heuristic, not a variational guarantee.
     ``fp32_absolute_tolerance`` optionally overrides the global/q/x absolute

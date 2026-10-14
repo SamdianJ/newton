@@ -1,0 +1,1 @@
+Make experimental `SolverMonolithic` use Newton-frozen spatial contacts with zero additional law margin and model-derived fixed capacities by default. Start new spatial runs for the new configuration identity; inspect previous complete-contact recordings through the offline legacy tools.

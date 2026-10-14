@@ -105,6 +105,22 @@ def test_fixed_topology_reuse(test, device):
     test.assertEqual(owner.payload_bytes, actual)
 
 
+def test_active_count_reuse(test, device):
+    """Preserve the value tree across empty, full and changing bounded sort spans."""
+    owner = _FixedScalarBsrReduction(3, 65, device, use_cuda_graph=device.is_cuda)
+    inputs = _inputs(65, device)
+    values = np.resize(np.array([2**24, 1, -(2**24), -0.0, 1, -1], np.float32), 65)
+    for count in (65, 0, 1, 33, 7, 0, 65):
+        rows = np.zeros(count, np.int32)
+        _fill(inputs, rows, rows, values[:count])
+        with patch.object(wp.array, "numpy", side_effect=AssertionError("Builder added a host read")):
+            owner.build(inputs, active_count=count)
+        _assert_matrix(test, owner, rows, rows, values[:count])
+    for count in (-1, 66, True, 1.5):
+        with test.assertRaises(ValueError):
+            owner.build(inputs, active_count=count)
+
+
 def test_fixed_topology_long_tree(test, device):
     """Preserve value-bit order and odd carries for long duplicate groups and permutations."""
     rng = np.random.default_rng(893)
@@ -273,6 +289,7 @@ class TestMonolithicLinearFixedStorage(unittest.TestCase):
 
 for device in get_test_devices():
     for function in (
+        test_active_count_reuse,
         test_fixed_topology_reuse,
         test_fixed_topology_long_tree,
         test_fixed_topology_errors,

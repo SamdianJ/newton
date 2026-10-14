@@ -28,14 +28,20 @@ class Example:
         self.output = Path(args.output) if args.output else None
         if self.output:
             self.output.mkdir(parents=True, exist_ok=False)
+        solver_factory = getattr(args, "solver_factory", None)
+        self.contact_recorder = getattr(args, "contact_recorder", None)
+        if solver_factory is None:
+            from scripts.monolithic_reference.robot_contact_acceptance import FrozenRobotFactory  # noqa: PLC0415
+
+            solver_factory = FrozenRobotFactory("franka-cube", dataflow="default")
+            self.contact_recorder = solver_factory.measure
         self.case = FrankaGrasp(
             args.asset_cache,
             device=args.device,
             law=args.law,
             globalization=args.globalization,
-            **({"solver_factory": args.solver_factory} if hasattr(args, "solver_factory") else {}),
+            solver_factory=solver_factory,
         )
-        self.contact_recorder = getattr(args, "contact_recorder", None)
         self.step_limit = min(getattr(args, "max_steps", None) or round(TIMES[-1] / DT), round(TIMES[-1] / DT))
         self.viewer = viewer
         self.viewer.set_model(self.case.model)

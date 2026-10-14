@@ -16,6 +16,7 @@ import newton
 from newton._src.geometry import GeoType
 from newton._src.geometry.sdf_texture import TextureSDFData, create_sparse_sdf_textures
 from newton._src.solvers.monolithic.articulation import ArticulationKinematics
+from newton._src.solvers.monolithic.contact import ContactObjective
 from newton._src.solvers.monolithic.solver_monolithic import SolverMonolithic, _StepFailure
 from newton.tests.test_monolithic_contact_mesh import synthetic
 from newton.tests.unittest_utils import add_function_test, get_test_devices
@@ -250,7 +251,7 @@ def test_modes_and_sparse_posterior(test, device):
                 actual, scale * (matrix @ direction.astype(float) + residual), atol=2e-12, rtol=2e-14
             )
             if graph:
-                test.assertGreater(run._graphs.summary()["segments"]["coupled_objective"]["captures"], 1)
+                test.assertGreater(run._graphs.summary()["segments"]["coupled_objective_owners"]["captures"], 1)
                 test.assertGreater(run._graphs.summary()["segments"]["coupled_posterior"]["replays"], 0)
             if law != "C-EE":
                 test.assertTrue(all(row.get("Armijo") is None for row in run.last_stats.variational["trials"]))
@@ -263,13 +264,30 @@ def test_modes_and_sparse_posterior(test, device):
 
 
 def test_failure_gates(test, device):
-    """Refuse overflow, bad geometry/tets, false linear success and exhausted budgets."""
-    for failure in ("capacity", "posterior", "budget", "trial", "tet", "geometry", "small", "final", "postpublish"):
+    """Preserve capacity policies and roll back hard, linear and nonlinear failures."""
+    for failure in (
+        "capacity",
+        "legacy_capacity",
+        "posterior",
+        "budget",
+        "trial",
+        "tet",
+        "geometry",
+        "small",
+        "final",
+        "postpublish",
+    ):
         model = scene(device)
-        options = {"contact_factor_capacity": 0} if failure == "capacity" else {}
+        options = {"contact_factor_capacity": 0} if failure in ("capacity", "legacy_capacity") else {}
         if failure == "budget":
             options["newton_max_iterations"] = 1
-        run = solver(model, **options)
+        factory = (
+            patch("newton._src.solvers.monolithic.solver_monolithic.ContactObjective", ContactObjective)
+            if failure == "legacy_capacity"
+            else nullcontext()
+        )
+        with factory:
+            run = solver(model, **options)
         state = run.create_state(dt=0.001)
         out = run._states.copy(state)
         expected, expected_out = snapshot(state), snapshot(out)
@@ -318,6 +336,15 @@ def test_failure_gates(test, device):
             context = nullcontext()
         with context:
             run.step(state, out, model.control(), dt=0.001)
+        if failure == "capacity":
+            pool = run.last_stats.variational["contact_pool"]
+            test.assertTrue(pool["tainted"])
+            test.assertGreater(pool["dropped"], 0)
+            test.assertEqual(pool["admitted"], 0)
+            test.assertFalse(run.last_stats.rolled_back)
+            run._states.validate(out)
+            assert_snapshot(test, state, expected)
+            continue
         test.assertFalse(run.last_stats.converged, (failure, run.last_stats))
         test.assertTrue(run.last_stats.rolled_back)
         assert_snapshot(test, state, expected)

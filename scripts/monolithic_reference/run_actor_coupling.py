@@ -168,14 +168,18 @@ def build_model(*, device="cuda:0", before=False, rigid_count=2):
     return model
 
 
-def make_solver(model, *, mode=None, graph=None, contact_dataflow="legacy", spatial=None, contact_factor_capacity=None):
-    """Select an execution route without modifying physical solver options."""
-    if contact_dataflow not in ("legacy", "pooled", "spatial"):
+def make_solver(model, *, mode=None, graph=None, contact_dataflow=None, spatial=None, contact_factor_capacity=None):
+    """Use the solver default unless an offline comparison route is explicitly requested."""
+    if contact_dataflow not in (None, "legacy", "pooled", "spatial"):
         raise ValueError("Unsupported actor contact dataflow")
     if (contact_dataflow == "spatial") != (spatial is not None):
         raise ValueError("Spatial actor experiments require explicit capacity and law margin")
     context = nullcontext()
-    if contact_dataflow != "legacy":
+    if contact_dataflow == "legacy":
+        from newton._src.solvers.monolithic.contact import ContactObjective  # noqa: PLC0415
+
+        context = patch("newton._src.solvers.monolithic.solver_monolithic.ContactObjective", ContactObjective)
+    elif contact_dataflow is not None:
         from newton._src.solvers.monolithic.contact_pipeline import (  # noqa: PLC0415
             _PooledContactObjective,
             _SpatialContactObjective,

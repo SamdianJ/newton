@@ -298,17 +298,16 @@ def check_contact_step(test, run, state, control, kind, step):
 
 def case_record(run, **values):
     c = run._contact
-    arrays = c.actor_contact.buffers()
+    arrays = c.buffers() if run._contact_pool else c.actor_contact.buffers()
     return {
         **values,
         "device": str(run.model.device),
         "layout": run._layout.identity,
         "physical_digest": run._kinematics.digest.hex(),
         "keys": c.count,
-        "new_keys": c.actor_contact.count,
-        "scalar_support": len(c.factor_support[1]),
+        "new_keys": c.actor_samples.count,
         "contact_triplets": c.triplet_capacity,
-        "native_contact_bytes": sum(a.size * wp.types.type_size_in_bytes(a.dtype) for a in arrays),
+        "contact_buffer_bytes": sum(a.size * wp.types.type_size_in_bytes(a.dtype) for a in arrays),
         "converged": run.last_stats.converged,
     }
 
@@ -497,21 +496,20 @@ def test_contact_transactions(test, device):
             assert_snapshot(test, state, source)
             assert_snapshot(test, output, target)
             test.assertNotIn("actor_contact_pairs", run.last_stats.variational)
-        with patch.object(
-            run._linear._scalar_reduction, "build", side_effect=RuntimeError("injected reduction failure")
-        ):
+        reduction = run._linear._fixed_bsr[0]
+        with patch.object(reduction, "build", side_effect=RuntimeError("injected reduction failure")):
             run.step(state, output, control, dt=0.001)
         test.assertTrue(run.last_stats.rolled_back)
         assert_snapshot(test, state, source)
         assert_snapshot(test, output, target)
         np.testing.assert_array_equal(run.get_contact_forces(state).body_wrench, previous_forces)
-        build = run._linear._scalar_reduction.build
+        build = reduction.build
 
-        def overflow_reduction(matrix, triplets, count, build=build, **kwargs):
+        def overflow_reduction(triplets, build=build, **kwargs):
             triplets.values.fill_(np.finfo(np.float32).max)
-            return build(matrix, triplets, count, **kwargs)
+            return build(triplets, **kwargs)
 
-        with patch.object(run._linear._scalar_reduction, "build", overflow_reduction):
+        with patch.object(reduction, "build", overflow_reduction):
             run.step(state, output, control, dt=0.001)
         test.assertTrue(run.last_stats.rolled_back)
         assert_snapshot(test, state, source)

@@ -8,6 +8,7 @@ from unittest.mock import patch
 
 import numpy as np
 
+from newton._src.solvers.monolithic.contact_pipeline import _PooledContactObjective
 from newton.tests.unittest_utils import add_function_test, get_test_devices
 from scripts.monolithic_reference.coupled_fixtures import make_solver, make_tiny, set_control
 from scripts.monolithic_reference.coupled_oracle import CoupledOracle
@@ -19,7 +20,9 @@ def test_reference_jacobian(test, device):
     for case in ("normal_loading", "tangent_reversal", "curved_release"):
         for law in ("C-EE", "C-IE", "C-II"):
             model = make_tiny(case, device)
-            run = make_solver(model, case, law)
+            # Arbitrary oracle perturbations are outside a Newton-frozen candidate list.
+            with patch("newton._src.solvers.monolithic.solver_monolithic.ContactObjective", _PooledContactObjective):
+                run = make_solver(model, case, law)
             state = run.create_state(dt=0.001)
             run.step(state, state, model.control(), dt=0.001)
             test.assertTrue(run.last_stats.converged)
@@ -74,7 +77,7 @@ def test_graph_after_early_convergence(test, device):
         results.append(np.r_[state.joint_q.numpy(), state.particle_q.numpy().ravel()])
         if graph:
             test.assertTrue(run._contact._evaluated)
-            test.assertGreater(run._graphs.summary()["segments"]["coupled_objective"]["replays"], 3)
+            test.assertGreater(run._graphs.summary()["segments"]["coupled_objective_owners"]["replays"], 3)
     np.testing.assert_allclose(results[0], results[1], atol=1e-14, rtol=0)
 
 

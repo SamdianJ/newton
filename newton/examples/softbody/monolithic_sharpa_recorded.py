@@ -14,7 +14,7 @@ from pathlib import Path
 
 import numpy as np
 import warp as wp
-from newton.solvers.experimental.monolithic import SolverMonolithic, build_smooth_sdf
+from newton.solvers.experimental.monolithic import build_smooth_sdf
 
 import newton
 from newton.examples.softbody.monolithic_grasp_trajectory import RecordedGrasp
@@ -76,7 +76,14 @@ def run(args):
     payload = json.loads(args.trajectory.read_text())
     model, scene, mapping, curve, terms, trajectory, palm = build_recorded(payload)
     smooth = build_smooth_sdf(model, qualified_directory=ASSETS / "sharpa/geometry-rebuilt")
-    solver = getattr(args, "solver_factory", SolverMonolithic)(
+    solver_factory = getattr(args, "solver_factory", None)
+    contact_recorder = getattr(args, "contact_recorder", None)
+    if solver_factory is None:
+        from scripts.monolithic_reference.robot_contact_acceptance import FrozenRobotFactory  # noqa: PLC0415
+
+        solver_factory = FrozenRobotFactory("sharpa-recorded-10mm", dataflow="default")
+        contact_recorder = solver_factory.measure
+    solver = solver_factory(
         model,
         contact_model="C-IE",
         globalization="ArmijoOrResNorm",
@@ -231,7 +238,6 @@ def run(args):
                 "pcg_calls": list(calls),
             }
             if not stats.rolled_back:
-                contact_recorder = getattr(args, "contact_recorder", None)
                 fields = contact_recorder(solver, state) if contact_recorder else measure(solver, state)
                 com = np.average(fields["x"], axis=0, weights=weights)
                 body_force = state._monolithic_coupled.contact_body_force.numpy()

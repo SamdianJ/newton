@@ -5,6 +5,7 @@
 
 import gzip
 import hashlib
+import itertools
 import json
 import tempfile
 import unittest
@@ -15,6 +16,7 @@ from unittest.mock import patch
 import numpy as np
 
 from newton._src.solvers.monolithic.articulation import _configuration_digest
+from newton._src.solvers.monolithic.contact import ContactObjective
 from newton.tests import test_monolithic_tooling_recording_compatibility as compatibility
 from newton.tests.test_monolithic_solver_coupled import scene, snapshot, solver
 from newton.tests.unittest_utils import add_function_test, get_test_devices
@@ -113,14 +115,18 @@ def test_robot_diagnostics(test, device):
     from newton.examples.softbody.monolithic_recording import measure, serial  # noqa: PLC0415
     from newton.solvers.experimental.monolithic import SolverMonolithic  # noqa: PLC0415
 
-    for law in ("C-EE", "C-IE", "C-II"):
-        factory = FrozenRobotFactory("franka-cube", dataflow="spatial")
+    for law, dataflow in itertools.product(("C-EE", "C-IE", "C-II"), ("spatial", "default")):
+        factory = FrozenRobotFactory("franka-cube", dataflow=dataflow)
         factory.JointTerms = SolverMonolithic.JointTerms
         with patch("newton.tests.test_monolithic_solver_coupled.SolverMonolithic", factory):
             run = solver(scene(device), law=law, mode="production", graph=device.is_cuda)
         test.assertEqual(run._config.regularization_values, (0.0,))
+        test.assertEqual(factory.recipe()["production_default"], dataflow == "default")
+        if dataflow == "default":
+            test.assertEqual(run._contact.candidate_capacity, run._contact.count)
         test.assertEqual(factory.recorder.audit.complete._config, run._config)
-        legacy = solver(scene(device), law=law, mode="production", graph=device.is_cuda)
+        with patch("newton._src.solvers.monolithic.solver_monolithic.ContactObjective", ContactObjective):
+            legacy = solver(scene(device), law=law, mode="production", graph=device.is_cuda)
         states = [owner.create_state(dt=0.001) for owner in (run, legacy)]
         for owner, state in zip((run, legacy), states, strict=True):
             owner.step(state, state, owner.model.control(), dt=0.001)

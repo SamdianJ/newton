@@ -19,6 +19,7 @@ import warp as wp
 
 import newton
 from newton._src.solvers.monolithic.actors import ActorTable
+from newton._src.solvers.monolithic.contact import ContactObjective
 from newton.tests.test_monolithic_solver_actor_contacts import contact_scene, contact_solver, contact_state
 from newton.tests.test_monolithic_solver_coupled import assert_snapshot, snapshot
 from newton.tests.unittest_utils import add_function_test, get_test_devices
@@ -379,7 +380,8 @@ class TestActorCoupling(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             for device in ("cpu", "cuda:0"):
-                run, state = frozen_case(device, mode="production", graph=device != "cpu")
+                with patch("newton._src.solvers.monolithic.solver_monolithic.ContactObjective", ContactObjective):
+                    run, state = frozen_case(device, mode="production", graph=device != "cpu")
                 summary = coupling.record_run(run, state, root / device, end_step=20)
                 self.assertEqual(summary["status"], "PASS_PREFIX", summary)
             comparison = compare_actor(root / "cpu", root / "cuda:0", require_complete=False)
