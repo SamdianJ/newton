@@ -178,7 +178,7 @@ def test_batch_trial_and_failure(test, device):
     batch.evaluate(*inputs, dt=0.001, **options)
     test.assertEqual(int(batch.flags.numpy()[0]), 0)
     if device.is_cuda:
-        # One binding per law mode, independent of the chunk's first/contact count.
+        # Reuse the complete evaluation graph, including all fixed producer chunks.
         test.assertLessEqual(batch.graphs.captures["contact_batch_eval"], 3)
         captures = batch.graphs.captures["contact_batch_eval"]
         run._contact.margins = wp.clone(run._contact.margins)
@@ -397,12 +397,36 @@ def test_reference_graph_submission(test, device):
             test.assertEqual(int(batch.flags.numpy()[0]), 0)
 
 
+def test_batch_graph_submission(test, device):
+    """Use bounded submissions while preserving whole-contact admission across chunks."""
+    if not device.is_cuda:
+        test.skipTest("CUDA graph submission check")
+    run = contact_solver(contact_scene(device, "R-static"))
+    current = contact_state(run, "R-static")
+    inputs, options = native_inputs(run, current)
+    expected = None
+    for graph in (False, True):
+        batch = _ContactBatch(run._contact, batch_capacity=5, capacity=run._contact.count * 12, use_cuda_graph=graph)
+        batch.begin_step(*inputs, **options)
+        batch.evaluate(*inputs, dt=0.001, **options)
+        if expected is None:
+            expected = batch.pool.residual.result.numpy().copy()
+        for _ in range(2):
+            with patch.object(wp, "capture_launch", wraps=wp.capture_launch) as launch:
+                batch.evaluate(*inputs, dt=0.001, **options)
+            if graph:
+                test.assertEqual(launch.call_count, 2)
+            np.testing.assert_array_equal(batch.pool.residual.result.numpy(), expected)
+            test.assertEqual(int(batch.flags.numpy()[0]), 0)
+
+
 class TestContactBatch(unittest.TestCase):
     pass
 
 
 for _device in get_test_devices():
     for _test in (
+        test_batch_graph_submission,
         test_reference_graph_submission,
         test_batch_legacy,
         test_batch_actor_pairs,

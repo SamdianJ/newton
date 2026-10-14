@@ -415,7 +415,8 @@ def test_spatial_known_miss(test, device):
 
 def test_spatial_chunk_counts(test, device):
     """Schedule only occupied chunks across zero, batch and legacy/actor boundaries."""
-    run, _state, batch, spatial = spatial_fixture(device, "chain")
+    run, state, batch, spatial = spatial_fixture(device, "chain")
+    inputs, options = native_inputs(run, state)
     legacy, total = run._contact.legacy_count, run._contact.count
     test.assertGreater(legacy, 8)
     test.assertGreater(total - legacy, 8)
@@ -430,6 +431,16 @@ def test_spatial_chunk_counts(test, device):
             actual.append((mode, int(batch.pool.candidates.count.numpy()[0])))
         expected = [(mode, min(7, n - offset)) for mode, n in ((2, left), (3, right)) for offset in range(0, n, 7)]
         test.assertEqual(actual, expected)
+        batch.graphs.enabled = False
+        batch.evaluate(*inputs, dt=0.001, selection=spatial, **options)
+        outputs = [owner.result.numpy().copy() for owner in (batch.pool.energy, batch.pool.residual, batch.pool.force)]
+        batch.graphs.enabled = device.is_cuda
+        batch.evaluate(*inputs, dt=0.001, selection=spatial, **options)
+        for owner, expected_output in zip(
+            (batch.pool.energy, batch.pool.residual, batch.pool.force), outputs, strict=True
+        ):
+            np.testing.assert_array_equal(owner.result.numpy(), expected_output)
+        test.assertEqual(int(batch.flags.numpy()[0]), 0)
 
 
 def test_spatial_active_order(test, device):

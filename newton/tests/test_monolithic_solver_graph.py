@@ -116,6 +116,26 @@ def test_objective_candidate_reuse(test, device):
     test.assertEqual(capture_count(solver), captures)
 
 
+def test_objective_contact_rebinding(test, device):
+    """Rebind contact outputs without recapturing unrelated objective work."""
+    model = coupled.scene(device)
+    solver = coupled.solver(model, mode="production", graph=True)
+    state = solver.create_state(dt=0.001)
+    solver.step(state, state, model.control(), dt=0.001)
+    for device_result in (False, True):
+        energy, residual, absolute = solver._evaluate(solver._accepted, 0.001, device_result=device_result)
+        expected = residual.numpy().copy() if device_result else residual.copy()
+        owners = solver._graphs.captures["coupled_objective_owners"]
+        results = solver._graphs.captures["coupled_objective_result"]
+        solver._contact.pool.residual.result = wp.clone(solver._contact.pool.residual.result)
+        got, residual, total = solver._evaluate(solver._accepted, 0.001, device_result=device_result)
+        np.testing.assert_array_equal(residual.numpy() if device_result else residual, expected)
+        test.assertEqual(got, energy)
+        test.assertEqual(total, absolute)
+        test.assertEqual(solver._graphs.captures["coupled_objective_owners"], owners)
+        test.assertEqual(solver._graphs.captures["coupled_objective_result"], results + 1)
+
+
 def test_binding_and_stream_changes(test, device):
     """Rebind replaced buffers and streams while bounding retained graph allocations."""
     cache = _SegmentGraphCache(device, enabled=True)
@@ -221,6 +241,7 @@ for function in (
     test_segment_additive_capture,
     test_segments_continuous,
     test_segment_warm_replay,
+    test_objective_contact_rebinding,
     test_objective_candidate_reuse,
     test_binding_and_stream_changes,
     test_factor_scaling_and_failures,

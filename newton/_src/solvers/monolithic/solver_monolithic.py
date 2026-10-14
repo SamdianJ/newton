@@ -828,15 +828,13 @@ class SolverMonolithic(SolverBase):
             buffers.append(self._host_evaluation_packet)
         rigid_history = state._monolithic_coupled
         buffers.extend([rigid_history.rigid_com, rigid_history.rigid_rotation])
-        owners = (self._objective, k, tet, contact, self._rigid)
+        owners = (self._objective, k, tet, self._rigid)
         if not self._contact_pool:
-            owners += (contact.start, contact.current)
+            owners += (contact, contact.start, contact.current)
         for owner in owners:
             buffers.extend(value for value in vars(owner).values() if isinstance(value, wp.array))
         if contact.actor_contact is not None:
             buffers.extend(contact.actor_contact.buffers())
-        if self._contact_pool:
-            buffers.extend(contact.buffers())
 
         def evaluate_owners():
             self._objective.evaluate(local_q, dt, build_tangent=build_tangent)
@@ -912,7 +910,29 @@ class SolverMonolithic(SolverBase):
             # Pool begin/append have side effects; they must run once, never
             # inside the owner's warmup/capture/replay overwrite chain.
             evaluate_contact()
-            self._graphs.run("coupled_objective_result", key, buffers, evaluate_result)
+            result_buffers = (
+                self._objective.residual,
+                tet.residual,
+                contact.residual,
+                self._complete_r,
+                self._rigid.rows,
+                self._rigid.residual,
+                self._rigid.energy,
+                self._objective.link_energy,
+                self._objective.joint_energy,
+                tet.parts,
+                contact.energy,
+                contact.absolute_energy,
+                tet.flags,
+                contact.flags,
+                tet.min_det_f,
+                self._energy_terms,
+                self._energy_sums,
+                self._evaluation_status,
+                self._evaluation_packet,
+                self._host_evaluation_packet,
+            )
+            self._graphs.run("coupled_objective_result", key, result_buffers, evaluate_result)
             if not reference_mode:
                 self._variational["contact_pool"] = contact.evaluation_diagnostics()
         else:

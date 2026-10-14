@@ -895,13 +895,34 @@ class _ContactBatch:
                 raise ValueError("Spatial selection belongs to another contact batch")
             selection.validate_storage()
             bindings = selection.buffers()
-        self.pool.begin()
+        chunks = None
+        if selection is not None:
+            if selection.mode_counts is None:
+                raise ValueError("Check spatial selection before scheduling batches")
+            chunks = tuple(
+                (count + max(1, self.batch_capacity) - 1) // max(1, self.batch_capacity)
+                for count in selection.mode_counts
+            )
+        self.pool._validate_storage()
+        self.graphs.run(
+            "contact_batch_eval",
+            (float(dt), chunks),
+            (*self.buffers(), *state, *bindings),
+            partial(self._evaluate_batches, state, dt, selection),
+        )
+        self.pool._stream_started = True
+        self.pool.finish()
+        wp.launch(_contact_pool_failure, 1, [self.flags, self.pool.records], device=self.device)
+
+    def _evaluate_batches(self, state, dt, selection):
+        # Reset the entire stream inside the graph before any additive append.
+        self.pool._begin_stream()
         wp.copy(self.flags, self.start_flags)
         wp.launch(_contact_pool_start_flags, 1, [self.pool.records, self.start_flags], device=self.device)
         if selection is not None:
             if selection.mode_counts is None:
                 raise ValueError("Check spatial selection before scheduling batches")
-            workers = max(1, sum(selection.mode_counts))
+            workers = max(1, min(selection.capacity, 256))
             wp.launch(
                 _validate_selection,
                 workers,
@@ -916,18 +937,11 @@ class _ContactBatch:
                 device=self.device,
             )
         for mode in self._chunks(selection):
-            self.graphs.run(
-                "contact_batch_eval",
-                (mode, float(dt), selection is not None),
-                (*self.buffers(), *state, *bindings),
-                partial(self._stage, state, mode, dt, begin=False, selection=selection),
-            )
+            self._stage(state, mode, dt, begin=False, selection=selection)
             wp.launch(
                 _merge_contact_chunk_flags,
                 1,
                 [self.flags, self._flags, self.pool.candidates.identities, self.pool.records],
                 device=self.device,
             )
-            self.pool.append()
-        self.pool.finish()
-        wp.launch(_contact_pool_failure, 1, [self.flags, self.pool.records], device=self.device)
+            self.pool._append_stream()
