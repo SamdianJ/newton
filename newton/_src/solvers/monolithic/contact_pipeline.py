@@ -211,10 +211,12 @@ class _PooledContactObjective(ContactObjective):
         return self.pair_diagnostics()
 
     def pair_diagnostics(self):
+        if not self.actor_samples.pair_kinds:
+            return []
         records = self.pool.records
         count = int(records.count.numpy()[0])
-        identities = records.identities.numpy()[:count]
-        values = records.pairs.numpy()[:count]
+        identities = records.identities[:count].numpy()
+        values = records.pairs[:count].numpy()
         samples = self._batch.all_samples
         sources, targets = samples.sources.numpy(), samples.targets.numpy()
         grouped = {pair: [] for pair in self.actor_samples.pair_kinds}

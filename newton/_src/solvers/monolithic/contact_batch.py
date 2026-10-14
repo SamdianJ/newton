@@ -604,16 +604,20 @@ class _ContactBatch:
         ):
             raise ValueError("Invalid native contact displacement scale")
         state = self._state(x, poses, com, jt, jw, rigid_com, rigid_rotation)
+        self.reference_rows._validate_inputs(*self.reference_inputs)
+        self.graphs.run(
+            "contact_reference",
+            (float(dt),),
+            (*self.buffers(), *state),
+            partial(self._evaluate_reference, state, dt),
+        )
+
+    def _evaluate_reference(self, state, dt):
         wp.copy(self.flags, self.start_flags)
         self.pool.records.flags.zero_()
         self.reference_residual.zero_()
         for mode in self._chunks():
-            self.graphs.run(
-                "contact_reference_geometry",
-                (mode, float(dt)),
-                (*self.buffers(), *state),
-                partial(self._stage, state, mode, dt, begin=False),
-            )
+            self._stage(state, mode, dt, begin=False)
             wp.launch(
                 _merge_contact_chunk_flags,
                 1,
@@ -627,8 +631,8 @@ class _ContactBatch:
                 [self.pool.candidates, *self.reference_inputs, self.flags],
                 device=self.device,
             )
-            self.reference_rows.reduce(*self.reference_inputs)
-            # Accumulation runs exactly once outside overwrite-only capture.
+            self.reference_rows._reduce(*self.reference_inputs)
+            # The full graph clears the accumulator before processing any chunk.
             wp.launch(
                 _add_reference,
                 self.reference_residual.size,
@@ -859,23 +863,19 @@ class _ContactBatch:
 
     def begin_step(self, x, poses, com, jt, jw, *, rigid_com=None, rigid_rotation=None):
         state = self._state(x, poses, com, jt, jw, rigid_com, rigid_rotation)
+        self.graphs.run("contact_start", (), (*self.buffers(), *state), partial(self._begin_step, state))
+        self._started = True
+
+    def _begin_step(self, state):
         wp.launch(_reset_flags, 1, [self.start_flags], device=self.device)
         for mode in self._chunks():
-            # This overwrite stage freezes every complete step-start sample,
-            # independently of pool capacity or currently nonzero forces.
-            self.graphs.run(
-                "contact_batch_start",
-                (mode,),
-                (*self.buffers(), *state),
-                partial(self._stage, state, mode, 0, begin=True),
-            )
+            self._stage(state, mode, 0, begin=True)
             wp.launch(
                 _merge_contact_chunk_flags,
                 1,
                 [self.start_flags, self._flags, self.pool.candidates.identities, self.pool.records],
                 device=self.device,
             )
-        self._started = True
 
     def evaluate(self, x, poses, com, jt, jw, *, dt, rigid_com=None, rigid_rotation=None, selection=None):
         if not self._started or not math.isfinite(dt) or dt <= 0:

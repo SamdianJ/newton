@@ -245,7 +245,7 @@ class _ContactRows:
         """Report current arrays, excluding inputs and graph-retained previous bindings."""
         return sum(a.capacity for a in self.buffers())
 
-    def reduce(self, rows, identities, local_ids, values, count):
+    def _validate_inputs(self, rows, identities, local_ids, values, count):
         self._validate_storage()
         for array, dtype, size in (
             (rows, wp.int32, self.capacity),
@@ -261,6 +261,9 @@ class _ContactRows:
                 for owned in self.buffers():
                     if owned.size and array.ptr < owned.ptr + owned.capacity and owned.ptr < end:
                         raise ValueError("Contact row inputs alias owned scratch")
+
+    def reduce(self, rows, identities, local_ids, values, count):
+        self._validate_inputs(rows, identities, local_ids, values, count)
         inputs = (rows, identities, local_ids, values, count)
         self.graphs.run(
             "contact_rows",
