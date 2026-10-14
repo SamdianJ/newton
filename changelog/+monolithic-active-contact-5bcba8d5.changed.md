@@ -1,0 +1,1 @@
+Reduce experimental Monolithic spatial-contact work using active counts while retaining fixed storage: bound contact and candidate sorting, avoid clearing unused contact payloads, and preserve complete cleanup on hard failures.

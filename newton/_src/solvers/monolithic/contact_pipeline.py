@@ -332,8 +332,13 @@ class _SpatialContactObjective(_PooledContactObjective):
             "contact_candidates",
             (),
             (q, x, rigid_com, *selection.buffers()),
-            lambda: selection.update(q, x, rigid_com=rigid_com),
+            lambda: selection._query(q, x, rigid_com=rigid_com),
         )
+        count = int(selection.query.count.numpy()[0])
+        if not 0 <= count <= selection.capacity:
+            raise ValueError("Invalid spatial candidate count")
+        span = min(selection.capacity, 1 << (max(1, count) - 1).bit_length())
+        self.query_graphs.run("contact_candidate_order", (span,), selection.buffers(), lambda: selection._order(span))
         dropped = selection.check(warn=False)
         self._query_dropped += dropped
         if dropped and not self._query_warned:

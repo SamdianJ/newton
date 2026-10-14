@@ -470,7 +470,11 @@ class _ContactSpatial:
             )
 
     def update(self, q, x, *, rigid_com=None):
-        """Overwrite the fixed query and selection, without runtime allocations or host reads."""
+        """Overwrite query and selection in a single capturable device chain."""
+        self._query(q, x, rigid_com=rigid_com)
+        self._order(self.capacity)
+
+    def _query(self, q, x, *, rigid_com=None):
         self.validate_storage()
         self.mode_counts = None
         com = self.com0 if rigid_com is None else rigid_com
@@ -488,10 +492,13 @@ class _ContactSpatial:
             ):
                 raise ValueError("Spatial contact input aliases output")
         self._bounds(q, x, com)
-        self.query.update(self.face_lo, self.face_hi, self.target_lo, self.target_hi)
+        # Only the mapped contact identities need ordering; sorting query keys first is redundant.
+        self.query.update(self.face_lo, self.face_hi, self.target_lo, self.target_hi, sort=False)
+
+    def _order(self, span):
         wp.launch(
             _map_query_keys,
-            max(1, self.capacity),
+            max(1, span),
             [
                 self.query.keys,
                 self.query.count,
@@ -507,8 +514,8 @@ class _ContactSpatial:
         )
         wp.launch(_selection_count, 1, [self.query.count, self.status, self.count], device=self.device)
         ids, scratch, indices, scratch_indices = self._ids, self._scratch_ids, self._indices, self._scratch_indices
-        run, workers = 1, min(self.capacity, _CONTACT_WORKERS)
-        while run < self.capacity:
+        run, workers = 1, min(span, _CONTACT_WORKERS)
+        while run < span:
             wp.launch(
                 _merge_contact_keys,
                 workers,
@@ -517,6 +524,8 @@ class _ContactSpatial:
             )
             ids, scratch, indices, scratch_indices = scratch, ids, scratch_indices, indices
             run *= 2
+        if span and ids is not self.identities:
+            wp.copy(self.identities, ids, count=span)
 
     def check(self, *, warn=True):
         """Freeze host batch counts once with the existing Newton status readback."""

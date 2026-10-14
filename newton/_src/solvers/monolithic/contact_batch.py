@@ -52,15 +52,17 @@ def _select_contact_chunk(first: int, end: int, capacity: int, begin: wp.array[i
 
 @wp.kernel(enable_backward=False)
 def _validate_selection(
-    ids: wp.array[wp.uint64], count: wp.array[int], status: wp.array[int], limit: int, records: Any
+    ids: wp.array[wp.uint64], count: wp.array[int], status: wp.array[int], limit: int, records: Any, workers: int
 ):
     i = wp.tid()
     n = count[0]
     if status[0] != 0 or n < 0 or n > ids.shape[0]:
         wp.atomic_or(records.flags, 0, 2)
-    elif i < n:
+        return
+    while i < n:
         if ids[i] >= wp.uint64(limit) or (i > 0 and ids[i] <= ids[i - 1]):
             wp.atomic_or(records.flags, 0, 2)
+        i += workers
 
 
 @wp.kernel(enable_backward=False)
@@ -897,10 +899,20 @@ class _ContactBatch:
         wp.copy(self.flags, self.start_flags)
         wp.launch(_contact_pool_start_flags, 1, [self.pool.records, self.start_flags], device=self.device)
         if selection is not None:
+            if selection.mode_counts is None:
+                raise ValueError("Check spatial selection before scheduling batches")
+            workers = max(1, sum(selection.mode_counts))
             wp.launch(
                 _validate_selection,
-                max(1, selection.capacity),
-                [selection.identities, selection.count, selection.status, self.contact.count, self.pool.records],
+                workers,
+                [
+                    selection.identities,
+                    selection.count,
+                    selection.status,
+                    self.contact.count,
+                    self.pool.records,
+                    workers,
+                ],
                 device=self.device,
             )
         for mode in self._chunks(selection):

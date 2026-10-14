@@ -265,12 +265,45 @@ def test_stream_many_contacts(test, device):
             test.assertTrue(mask.all())
 
 
+def test_stream_active_work(test, device):
+    """Ignore poisoned unused storage and bound sorting across changing active counts."""
+    from newton._src.solvers.monolithic import contact_pool  # noqa: PLC0415
+
+    pool = _ContactPool(4, 2, 4096, 12288, 3, 8192, wp.float64, device, batch_capacity=5, use_cuda_graph=device.is_cuda)
+    data = contact_payload(np.float64)
+    original = contact_pool.radix_sort_pairs
+    for count in (5, 0, 1, 5):
+        pool.records.r_values.fill_(float("nan"))
+        pool.begin()
+        test.assertTrue(np.isnan(pool.records.r_values.numpy()).all(), "Cleared unused payload")
+        test.assertFalse(pool.records.accepted.numpy().any())
+        if count:
+            append_payload(pool, data, list(range(count)))
+        calls = []
+
+        def sort(keys, values, length, calls=calls, **kwargs):
+            calls.append(length)
+            test.assertLessEqual(length, 128, "Sorted unused pool capacity")
+            return original(keys, values, length, **kwargs)
+
+        with patch.object(contact_pool, "radix_sort_pairs", sort):
+            pool.finish()
+        test.assertEqual(int(pool.records.flags.numpy()[0]), 0)
+        if count:
+            test.assertTrue(pool.records.accepted.numpy()[:count].any())
+        else:
+            for owner in (pool.energy, pool.residual, pool.force):
+                np.testing.assert_array_equal(owner.result.numpy(), 0)
+        test.assertFalse(pool.records.accepted.numpy()[count:].any())
+
+
 class TestContactStream(unittest.TestCase):
     pass
 
 
 for _device in get_test_devices():
     for _test in (
+        test_stream_active_work,
         test_stream_order,
         test_stream_overflow,
         test_stream_invalid_late_batch,
