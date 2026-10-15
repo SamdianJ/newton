@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright (c) Meta Platforms, Inc. and affiliates.
 # SPDX-License-Identifier: Apache-2.0
 
-"""NumPy reference for Mochi's StVK membrane and six-node curvature energy.
+"""NumPy reference for stable Neo-Hookean membrane and Mochi six-node curvature energy.
 
 The curvature convention follows mochi_core/element_operations/fem_shell.h
 and fem_shell.cpp in the workspace's superdex-reference-54ae749a checkout.
@@ -79,16 +79,24 @@ def _prepare(reference, positions, material, boundary):
     edges = (reference[1:3] - reference[0]).T
     metric = edges.T @ edges
     area = np.linalg.norm(np.cross(edges[:, 0], edges[:, 1])) / 2
-    return reference, positions, material, boundary, metric, np.linalg.inv(metric), area
+    return reference, positions, material, boundary, np.linalg.inv(metric), area
 
 
-def _energy(reference, positions, material, boundary, metric, inverse, area):
+def _energy(reference, positions, material, boundary, inverse, area):
     points = _extrapolate(positions, boundary)
     edges = (points[1:3] - points[0]).T
-    strain = inverse @ ((edges.T @ edges - metric) / 2)
+    gradient = edges @ np.linalg.cholesky(inverse)
+    current_metric = gradient.T @ gradient
+    normal = np.cross(edges[:, 0], edges[:, 1])
+    jacobian = np.sqrt(normal @ normal) / (2 * area)
+    # tr(C)-2J = ((C00-C11)^2+4*C01^2)/(tr(C)+2J). Avoid cancellation
+    # near rest and in small simple shear; do not clamp the area or its derivatives.
+    distortion = ((current_metric[0, 0] - current_metric[1, 1]) ** 2 + 4 * current_metric[0, 1] ** 2) / (
+        np.trace(current_metric) + 2 * jacobian
+    )
     curvature = inverse @ (_curvature(reference) - _curvature(points))
     lam, mu, alpha, beta = material
-    membrane = area * (lam / 2 * np.trace(strain) ** 2 + mu * np.trace(strain @ strain))
+    membrane = area / 2 * (mu * distortion + (lam + mu) * (jacobian - 1) ** 2)
     bending = area / 2 * (alpha * np.trace(curvature) ** 2 + beta * np.trace(curvature @ curvature))
     return np.array([membrane, bending])
 
@@ -99,7 +107,7 @@ def shell_energy(reference, positions, material, *, boundary=(False, False, Fals
     Args:
         reference: Six rest positions [m]; nodes 3+i lie opposite node i across its opposite edge.
         positions: Six current positions [m], in the same stencil order.
-        material: Membrane lambda/mu [N/m], followed by bending alpha/beta [N m].
+        material: Two-dimensional Lame lambda/mu [N/m], followed by bending alpha/beta [N m].
         boundary: Missing-neighbor flags; missing coordinates are replaced by boundary extrapolation.
 
     Returns:
@@ -115,14 +123,46 @@ def shell_energy(reference, positions, material, *, boundary=(False, False, Fals
 def shell_residual(reference, positions, material, *, boundary=(False, False, False)):
     """Differentiate the energy in all 18 coordinates by complex steps; return dE/dx [N]."""
     with np.errstate(over="raise", divide="raise", invalid="raise"):
-        reference, positions, material, boundary, metric, inverse, area = _prepare(
-            reference, positions, material, boundary
-        )
+        reference, positions, material, boundary, inverse, area = _prepare(reference, positions, material, boundary)
         result = np.empty((6, 3))
         for index in range(18):
             trial = positions.astype(np.complex128)
             trial.flat[index] += 1e-30j
-            result.flat[index] = _energy(reference, trial, material, boundary, metric, inverse, area).sum().imag / 1e-30
+            result.flat[index] = _energy(reference, trial, material, boundary, inverse, area).sum().imag / 1e-30
     if not np.isfinite(result).all():
         raise ValueError("Nonfinite shell residual")
     return result
+
+
+def shell_membrane_derivatives(reference, positions, material):
+    """Return analytic membrane dE/dx [N] and the exact 9x9 Hessian [N/m].
+
+    Use the same six-node inputs as :func:`shell_energy`, but only the central
+    triangle contributes. Neighbor slots are extrapolated and ignored. Return
+    a (3, 3) residual and a (9, 9) matrix in node-major xyz order. The Hessian
+    includes geometric stiffness and can be indefinite under compression;
+    it is not the production PSD tangent or a curvature-bending derivative.
+    """
+    with np.errstate(over="raise", divide="raise", invalid="raise"):
+        _, positions, material, _, inverse, area = _prepare(reference, positions, material, (True, True, True))
+        edges = (positions[1:3] - positions[0]).T
+        normal = np.cross(edges[:, 0], edges[:, 1])
+        norm = np.linalg.norm(normal)
+        unit = normal / norm
+        jacobian = norm / (2 * area)
+        incidence = np.array([[-1, -1], [1, 0], [0, 1]])
+        edge_derivatives = np.kron(incidence.T, np.eye(3))
+        de, df = edge_derivatives[:3].T, edge_derivatives[3:].T
+        dn = np.cross(de, edges[:, 1]) + np.cross(edges[:, 0], df)
+        dj = dn @ unit / (2 * area)
+        d2n = np.cross(de[:, None, :], df[None, :, :]) + np.cross(de[None, :, :], df[:, None, :])
+        d2j = (dn @ (np.eye(3) - np.outer(unit, unit)) @ dn.T / norm + d2n @ unit) / (2 * area)
+        lam, mu = material[:2]
+        pressure = (lam + mu) * (jacobian - 1) - mu
+        residual = area * (mu * incidence @ inverse @ edges.T + pressure * dj.reshape(3, 3))
+        hessian = area * (
+            mu * np.kron(incidence @ inverse @ incidence.T, np.eye(3)) + (lam + mu) * np.outer(dj, dj) + pressure * d2j
+        )
+    if not np.isfinite(residual).all() or not np.isfinite(hessian).all():
+        raise ValueError("Nonfinite membrane derivatives")
+    return residual, hessian

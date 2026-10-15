@@ -7,7 +7,7 @@ import unittest
 
 import numpy as np
 
-from scripts.monolithic_reference.cloth_oracle import shell_energy, shell_residual
+from scripts.monolithic_reference.cloth_oracle import shell_energy, shell_membrane_derivatives, shell_residual
 
 
 def flat_stencil():
@@ -34,24 +34,107 @@ class TestMonolithicClothMaterial(unittest.TestCase):
                 np.testing.assert_allclose(shell_residual(reference, reference, self.material), 0, atol=1e-12)
 
     def test_affine_membrane(self):
-        """Match the continuum StVK density for stretch, shear and compression."""
+        """Match stable Neo-Hookean energy and stress for stretch, shear and compression."""
         transforms = (np.diag([1.2, 0.9, 1]), np.array([[1, 0.3, 0], [0, 1, 0], [0, 0, 1]]), np.diag([0.7, 0.8, 1]))
         references = (flat_stencil(), flat_stencil() @ np.array([[1, 0.2, 0], [0.4, 1.3, 0], [0, 0, 1]]))
         for reference, transform in ((r, t) for r in references for t in transforms):
             with self.subTest(reference=reference.tolist(), transform=transform.tolist()):
                 positions = reference @ transform.T
                 gradient = transform[:, :2]
-                strain = (gradient.T @ gradient - np.eye(2)) / 2
+                metric = gradient.T @ gradient
+                jacobian = np.linalg.det(transform[:2, :2])
                 lam, mu, _, _ = self.material
                 rest_edges = (reference[1:3, :2] - reference[0, :2]).T
                 area = np.linalg.det(rest_edges) / 2
-                expected = area * (lam / 2 * np.trace(strain) ** 2 + mu * np.trace(strain @ strain))
+                expected = area * (
+                    mu / 2 * (np.trace(metric) - 2) - mu * (jacobian - 1) + (lam + mu) / 2 * (jacobian - 1) ** 2
+                )
                 energy = shell_energy(reference, positions, self.material)
                 np.testing.assert_allclose(energy, [expected, 0], atol=1e-14, rtol=1e-13)
-                stress = gradient @ (lam * np.trace(strain) * np.eye(2) + 2 * mu * strain) @ np.linalg.inv(rest_edges).T
+                pressure = (lam + mu) * (jacobian - 1) - mu
+                stress = mu * gradient + pressure * jacobian * gradient @ np.linalg.inv(metric)
+                stress = stress @ np.linalg.inv(rest_edges).T
                 expected_r = np.zeros((6, 3))
                 expected_r[:3] = area * np.array([-stress.sum(axis=1), stress[:, 0], stress[:, 1]])
                 np.testing.assert_allclose(shell_residual(reference, positions, self.material), expected_r, atol=1e-12)
+
+    def test_area_preserving_shear(self):
+        """Recover the exact quadratic simple-shear energy at small and large strains."""
+        reference = flat_stencil()
+        for shear in (1e-7, 0.3, 2.0):
+            with self.subTest(shear=shear):
+                positions = reference.copy()
+                positions[:, 0] += shear * reference[:, 1]
+                energy = shell_energy(reference, positions, self.material)[0]
+                self.assertAlmostEqual(energy / (self.material[1] * shear**2 / 4), 1, places=8)
+
+    def test_membrane_compression_domain(self):
+        """Keep positive area ratios unclamped and reject collapsed triangles."""
+        reference = flat_stencil()
+        lam, mu, _, _ = self.material
+        for stretch in (1e-8, 0.01, 0.5, 1.5):
+            with self.subTest(stretch=stretch):
+                positions = reference * [stretch, 1, 1]
+                expected = (lam + 2 * mu) * (stretch - 1) ** 2 / 4
+                np.testing.assert_allclose(shell_energy(reference, positions, self.material), [expected, 0], atol=1e-13)
+                residual = shell_residual(reference, positions, self.material)
+                self.assertAlmostEqual(residual[1, 0], (lam + 2 * mu) * (stretch - 1) / 2, places=11)
+        positions = reference * [0, 1, 1]
+        for evaluate in (shell_energy, shell_residual, shell_membrane_derivatives):
+            with self.assertRaises(ValueError):
+                evaluate(reference, positions, self.material)
+
+    def test_negative_lame_parameter(self):
+        """Admit negative lambda when the two-dimensional bulk modulus remains positive."""
+        reference = flat_stencil()
+        material = (-30.0, 40.0, 0.02, 0.07)
+        positions = reference * [0.8, 1.2, 1]
+        self.assertGreater(shell_energy(reference, positions, material)[0], 0)
+        np.testing.assert_allclose(shell_residual(reference, reference, material), 0, atol=1e-12)
+
+    def test_membrane_hessian(self):
+        """Check every analytic membrane block against independent residual differences."""
+        boundary = (True, True, True)
+        references = (flat_stencil(), flat_stencil() @ np.array([[1, 0.2, 0], [0.4, 1.3, 0], [0, 0, 1]]))
+        for reference in references:
+            for stretch in (0.6, 1.0, 1.4):
+                with self.subTest(reference=reference.tolist(), stretch=stretch):
+                    positions = reference * [stretch, 0.9, 1]
+                    positions[1, 2] += 0.15
+                    residual, hessian = shell_membrane_derivatives(reference, positions, self.material)
+                    np.testing.assert_allclose(
+                        residual, shell_residual(reference, positions, self.material, boundary=boundary)[:3], atol=1e-12
+                    )
+                    numerical = np.empty((9, 9))
+                    for index in range(9):
+                        offset = np.zeros_like(positions)
+                        offset.flat[index] = 1e-6
+                        numerical[:, index] = (
+                            shell_residual(reference, positions + offset, self.material, boundary=boundary)[:3]
+                            - shell_residual(reference, positions - offset, self.material, boundary=boundary)[:3]
+                        ).ravel() / 2e-6
+                    np.testing.assert_allclose(hessian, numerical, atol=2e-8, rtol=1e-7)
+                    np.testing.assert_allclose(hessian, hessian.T, atol=1e-13)
+                    np.testing.assert_allclose(hessian @ np.tile(np.eye(3), (3, 1)), 0, atol=1e-13)
+                    self.assertGreater(np.linalg.norm(hessian[:3, 3:6]), 1)
+
+    def test_membrane_hessian_geometry(self):
+        """Distinguish the exact compressed Hessian from a PSD production tangent."""
+        reference = flat_stencil()
+        _, rest_hessian = shell_membrane_derivatives(reference, reference, self.material)
+        self.assertGreaterEqual(np.linalg.eigvalsh(rest_hessian).min(), -1e-12)
+        positions = reference * [0.6, 0.7, 1]
+        residual, hessian = shell_membrane_derivatives(reference, positions, self.material)
+        self.assertLess(np.linalg.eigvalsh(hessian).min(), -1)
+        rotation, _ = np.linalg.qr(np.array([[1.0, 2, 3], [-2, 1, 1], [1, -1, 2]]))
+        block_rotation = np.kron(np.eye(3), rotation)
+        rotated_r, rotated_h = shell_membrane_derivatives(reference, positions @ rotation.T, self.material)
+        np.testing.assert_allclose(rotated_r, residual @ rotation.T, atol=1e-12)
+        np.testing.assert_allclose(rotated_h, block_rotation @ hessian @ block_rotation.T, atol=1e-12)
+        for scale in (1e-3, 10.0):
+            scaled_r, scaled_h = shell_membrane_derivatives(reference * scale, positions * scale, self.material)
+            np.testing.assert_allclose(scaled_r, scale * residual, atol=1e-12)
+            np.testing.assert_allclose(scaled_h, hessian, atol=1e-12)
 
     def test_folded_bending(self):
         """Match the analytic single-fold curvature energy and angular derivative."""
@@ -150,8 +233,9 @@ class TestMonolithicClothMaterial(unittest.TestCase):
             (np.nan, 40, 0.02, 0.07),
         )
         for material in bad_materials:
-            with self.subTest(material=material), self.assertRaises(ValueError):
-                shell_energy(reference, reference, material)
+            for evaluate in (shell_energy, shell_residual, shell_membrane_derivatives):
+                with self.subTest(material=material, evaluate=evaluate.__name__), self.assertRaises(ValueError):
+                    evaluate(reference, reference, material)
         invalid = [reference[:3], reference * np.nan, folded_stencil(np.pi)]
         collapsed = reference.copy()
         collapsed[2] = collapsed[1]
