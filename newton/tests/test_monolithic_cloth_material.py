@@ -7,7 +7,13 @@ import unittest
 
 import numpy as np
 
-from scripts.monolithic_reference.cloth_oracle import shell_energy, shell_membrane_derivatives, shell_residual
+from scripts.monolithic_reference.cloth_oracle import (
+    shell_bending_tangent,
+    shell_energy,
+    shell_membrane_derivatives,
+    shell_membrane_tangent,
+    shell_residual,
+)
 
 
 def flat_stencil():
@@ -24,6 +30,60 @@ def folded_stencil(angle):
 
 class TestMonolithicClothMaterial(unittest.TestCase):
     material = (30.0, 40.0, 0.02, 0.07)
+
+    def test_projected_membrane_tangent(self):
+        """Preserve rest stiffness and full coupling while projecting compressed material modes."""
+        reference = flat_stencil()
+        _, exact = shell_membrane_derivatives(reference, reference, self.material)
+        np.testing.assert_allclose(shell_membrane_tangent(reference, reference, self.material), exact, atol=1e-12)
+        rotation, _ = np.linalg.qr(np.array([[1.0, 2, 3], [-2, 1, 1], [1, -1, 2]]))
+        block_rotation = np.kron(np.eye(3), rotation)
+        for stretch in (0.3, 0.9, 1.2, 2.0):
+            positions = reference * [stretch, 0.8, 1]
+            tangent = shell_membrane_tangent(reference, positions, self.material)
+            np.testing.assert_allclose(tangent, tangent.T, atol=1e-12)
+            self.assertGreaterEqual(np.linalg.eigvalsh(tangent).min(), -1e-12)
+            np.testing.assert_allclose(tangent @ np.tile(np.eye(3), (3, 1)), 0, atol=1e-12)
+            self.assertGreater(np.linalg.norm(tangent[:3, 3:6]), 1)
+            np.testing.assert_allclose(
+                shell_membrane_tangent(reference, positions @ rotation.T, self.material),
+                block_rotation @ tangent @ block_rotation.T,
+                atol=1e-12,
+            )
+            _, exact = shell_membrane_derivatives(reference, positions, self.material)
+            self.assertGreaterEqual(np.linalg.eigvalsh(tangent - exact).min(), -1e-12)
+
+    def test_bending_material_tangent(self):
+        """Verify full curvature material stiffness and eliminate missing-neighbor coordinates."""
+        reference = folded_stencil(0.3)
+        for boundary in ((False, False, False), (False, False, True), (True, True, True)):
+            positions = folded_stencil(0.8)
+            tangent = shell_bending_tangent(reference, positions, self.material, boundary=boundary)
+            np.testing.assert_allclose(tangent, tangent.T, atol=1e-13)
+            self.assertGreaterEqual(np.linalg.eigvalsh(tangent).min(), -1e-12)
+            np.testing.assert_allclose(tangent @ np.tile(np.eye(3), (6, 1)), 0, atol=1e-12)
+            for i, missing in enumerate(boundary):
+                if missing:
+                    np.testing.assert_array_equal(tangent[9 + 3 * i : 12 + 3 * i], 0)
+            if not any(boundary):
+                derivative = np.zeros(18)
+                derivative[15:] = [0, np.sin(0.8), np.cos(0.8)]
+                expected = (self.material[2] + self.material[3]) / (2 * np.cos(0.4) ** 4)
+                self.assertAlmostEqual(derivative @ tangent @ derivative, expected, places=12)
+                self.assertGreater(np.linalg.norm(tangent[:3, 15:]), 0.01)
+        # At rest the omitted geometric term vanishes: compare all columns to d(r)/dx.
+        membrane = shell_membrane_tangent(reference, reference, self.material)
+        full = shell_bending_tangent(reference, reference, self.material)
+        full[:9, :9] += membrane
+        numerical = np.empty((18, 18))
+        for index in range(18):
+            offset = np.zeros((6, 3))
+            offset.flat[index] = 1e-6
+            numerical[:, index] = (
+                shell_residual(reference, reference + offset, self.material)
+                - shell_residual(reference, reference - offset, self.material)
+            ).ravel() / 2e-6
+        np.testing.assert_allclose(full, numerical, atol=2e-8, rtol=2e-7)
 
     def test_reference_shape(self):
         """Keep flat and pre-folded reference shapes stress free."""

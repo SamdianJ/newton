@@ -8,7 +8,8 @@ The curvature convention follows mochi_core/element_operations/fem_shell.h
 and fem_shell.cpp in the workspace's superdex-reference-54ae749a checkout.
 This small oracle imports no Newton/Warp code. Complex-step differentiation
 provides an independent residual reference, not a production solver kernel.
-Inertia, damping, contact and a production PSD tangent are outside this module.
+PSD tangents below are independent references for the production approximation;
+inertia, damping, contact and Warp assembly are outside this module.
 """
 
 import numpy as np
@@ -166,3 +167,41 @@ def shell_membrane_derivatives(reference, positions, material):
     if not np.isfinite(residual).all() or not np.isfinite(hessian).all():
         raise ValueError("Nonfinite membrane derivatives")
     return residual, hessian
+
+
+def shell_membrane_tangent(reference, positions, material):
+    """Project the complete 6x6 material Hessian, then map to all nine vertex DoFs."""
+    _, positions, material, _, inverse, area = _prepare(reference, positions, material, (True, True, True))
+    transform = np.linalg.cholesky(inverse)
+    gradient = (positions[1:3] - positions[0]).T @ transform
+    f, g = gradient.T
+    normal = np.cross(f, g)
+    jacobian = np.linalg.norm(normal)
+    unit = normal / jacobian
+    df, dg = np.eye(6)[:, :3], np.eye(6)[:, 3:]
+    dn = np.cross(df, g) + np.cross(f, dg)
+    dj = dn @ unit
+    d2n = np.cross(df[:, None, :], dg[None, :, :]) + np.cross(df[None, :, :], dg[:, None, :])
+    d2j = dn @ (np.eye(3) - np.outer(unit, unit)) @ dn.T / jacobian + d2n @ unit
+    lam, mu = material[:2]
+    density_hessian = mu * np.eye(6) + (lam + mu) * np.outer(dj, dj) + ((lam + mu) * (jacobian - 1) - mu) * d2j
+    values, vectors = np.linalg.eigh(density_hessian)
+    projected = (vectors * np.maximum(values, 0)) @ vectors.T
+    incidence = np.array([[-1, -1], [1, 0], [0, 1]])
+    mapping = np.kron((incidence @ transform).T, np.eye(3))
+    return area * mapping.T @ projected @ mapping
+
+
+def shell_bending_tangent(reference, positions, material, *, boundary=(False, False, False)):
+    """Return the full 18x18 curvature material tangent; omit geometric stiffness."""
+    reference, positions, material, boundary, inverse, area = _prepare(reference, positions, material, boundary)
+    transform = np.linalg.cholesky(inverse)
+    jacobian = np.empty((3, 18))
+    for index in range(18):
+        trial = positions.astype(np.complex128)
+        trial.flat[index] += 1e-30j
+        curvature = transform.T @ _curvature(_extrapolate(trial, boundary)) @ transform
+        jacobian[:, index] = np.array([curvature[0, 0], curvature[1, 1], np.sqrt(2) * curvature[0, 1]]).imag / 1e-30
+    alpha, beta = material[2:]
+    constitutive = beta * np.eye(3) + alpha * np.outer([1, 1, 0], [1, 1, 0])
+    return area * jacobian.T @ constitutive @ jacobian
