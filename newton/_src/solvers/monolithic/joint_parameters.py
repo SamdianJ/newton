@@ -15,7 +15,7 @@ from .actors import _joint_layout
 def _validate_joint_coordinate_layout(model: Model, actor=None) -> np.ndarray:
     """Return mechanical DOF-to-Model coordinates, keeping FREE outside scalar terms."""
     types, starts, _, _ = _joint_layout(model)
-    joints = np.arange(model.joint_count) if actor is None else np.asarray(actor.joint_indices)
+    joints = np.arange(model.joint_count) if actor is None else np.asarray(actor.joint_indices, dtype=np.int32)
     if not np.isin(types[joints], [JointType.FIXED, JointType.REVOLUTE, JointType.PRISMATIC]).all():
         raise ValueError("Monolithic supports only FIXED, REVOLUTE and PRISMATIC joints")
     return starts[joints[types[joints] != JointType.FIXED]].astype(np.int32)

@@ -71,19 +71,23 @@ class MonolithicPcgConfig:
     None leaves standalone PCG acceptance unchanged. These are per-solve numeric data."""
     group_norm_limits: tuple[float, ...] | None = None
     """Private outer-solve caps ordered by the complete actor convergence groups."""
+    group_residual_floors: tuple[float, ...] | None = None
+    """Explicit floors in each group's units, required with material layouts."""
 
     def __post_init__(self):
-        if self.group_norm_limits is not None:
-            if not isinstance(self.group_norm_limits, tuple) or not self.group_norm_limits:
-                raise ValueError("Group residual limits must be a nonempty tuple")
-            for limit in self.group_norm_limits:
+        for values in (self.group_norm_limits, self.group_residual_floors):
+            if values is None:
+                continue
+            if not isinstance(values, tuple) or not values:
+                raise ValueError("Group residual limits/floors must be a nonempty tuple")
+            for limit in values:
                 if (
                     isinstance(limit, (bool, np.bool_))
                     or not isinstance(limit, (int, float, np.integer, np.floating))
                     or not np.isfinite(limit)
                     or not float(np.finfo(np.float32).smallest_subnormal) <= limit <= float(np.finfo(np.float32).max)
                 ):
-                    raise ValueError("Group residual limits must be positive and finite in float32")
+                    raise ValueError("Group residual limits/floors must be positive and finite in float32")
         if self.residual_norm_limits is not None:
             if not isinstance(self.residual_norm_limits, tuple) or len(self.residual_norm_limits) != 3:
                 raise ValueError("residual_norm_limits must be a global/q/x tuple")
@@ -140,6 +144,7 @@ class MonolithicLinearLayout:
     identity: str = ""
     actor_ranges: tuple[tuple[str, int, int], ...] = ()
     rigid_ranges: tuple[tuple[int, int], ...] = ()
+    material_ranges: tuple[tuple[str, int, int, int, int], ...] = ()
 
     def __post_init__(self):
         for value in (self.q_dof_count, self.dynamic_particle_count, self.q_scalar_offset, self.x_scalar_offset):
@@ -177,23 +182,46 @@ class MonolithicLinearLayout:
             (start, 6) for _, start in self.rigid_ranges
         ):
             raise ValueError("Rigid ranges must match six-dimensional actor blocks")
+        identities = set()
+        for kind, source, start, xyz, theta in self.material_ranges:
+            if (
+                kind not in ("cloth", "cable")
+                or (kind, source) in identities
+                or any(
+                    isinstance(v, (bool, np.bool_)) or not isinstance(v, (int, np.integer)) or not 0 <= v < 2**31
+                    for v in (source, start, xyz, theta)
+                )
+                or xyz % 3
+                or (kind == "cloth" and theta)
+            ):
+                raise ValueError("Material ranges require unique owners and exact xyz/theta counts")
+            identities.add((kind, source))
+        if sorted(
+            (kind, start, count) for kind, start, count in self.actor_ranges if kind in ("cloth", "cable")
+        ) != sorted((kind, start, xyz + theta) for kind, _, start, xyz, theta in self.material_ranges):
+            raise ValueError("Material ranges must match actor blocks")
 
     @classmethod
     def from_actors(cls, table):
         """Derive the supported linear view without imposing an actor order."""
         arms = [actor for actor in table.actors if actor.kind == "articulation"]
         tets = [actor for actor in table.actors if actor.kind == "tet"]
-        if len(arms) != 1 or len(tets) != 1:
-            raise ValueError("Coupled entry requires one articulation and one tet")
-        arm, tet = arms[0], tets[0]
+        if len(arms) > 1 or len(tets) > 1:
+            raise ValueError("Coupled entry permits at most one articulation and one tet")
+        arm, tet = next(iter(arms), None), next(iter(tets), None)
         return cls(
-            arm.dof_count,
-            len(tet.dynamic_particle_indices),
-            arm.dof_start,
-            tet.dof_start,
+            0 if arm is None else arm.dof_count,
+            0 if tet is None else len(tet.dynamic_particle_indices),
+            0 if arm is None else arm.dof_start,
+            0 if tet is None else tet.dof_start,
             table.identity,
             tuple((actor.kind, actor.dof_start, actor.dof_count) for actor in table.actors),
             tuple((actor.source_index, actor.dof_start) for actor in table.actors if actor.kind == "rigid"),
+            tuple(
+                (a.kind, a.source_index, a.dof_start, 3 * len(a.dynamic_particle_indices), len(a.free_theta_indices))
+                for a in table.actors
+                if a.kind in ("cloth", "cable")
+            ),
         )
 
     @property
@@ -205,24 +233,49 @@ class MonolithicLinearLayout:
         """Return the global group followed by each nonempty actor range."""
         groups = [("global", 0, self.scalar_dof_count)]
         rigid_ids = {start: source for source, start in self.rigid_ranges}
+        material_ids = {(kind, start): (source, xyz, theta) for kind, source, start, xyz, theta in self.material_ranges}
         for kind, start, count in self.actor_ranges:
             if kind == "rigid":
                 groups.extend(
                     ((f"rigid_{rigid_ids[start]}_t", start, 3), (f"rigid_{rigid_ids[start]}_r", start + 3, 3))
                 )
+            elif kind in ("cloth", "cable") and count:
+                source, xyz, theta = material_ids[kind, start]
+                if xyz:
+                    groups.append((f"{kind}_{source}_x", start, xyz))
+                if theta:
+                    groups.append((f"{kind}_{source}_theta", start + xyz, theta))
             elif count:
                 groups.append((kind, start, count))
         return tuple(groups)
 
-    def indices(self, kind):
+    def indices(self, kind, source_index=None):
         """Return local-to-global scalar rows for one supported actor type."""
-        start = self.q_scalar_offset if kind == "articulation" else self.x_scalar_offset
-        count = self.q_dof_count if kind == "articulation" else 3 * self.dynamic_particle_count
+        if kind in ("cloth", "cable"):
+            matches = [
+                (start, xyz + theta)
+                for k, source, start, xyz, theta in self.material_ranges
+                if k == kind and (source_index is None or source == source_index)
+            ]
+            if len(matches) != 1:
+                raise ValueError("Material indices require one unambiguous actor")
+            start, count = matches[0]
+        elif kind == "articulation":
+            start, count = self.q_scalar_offset, self.q_dof_count
+        elif kind == "tet":
+            start, count = self.x_scalar_offset, 3 * self.dynamic_particle_count
+        else:
+            raise ValueError(f"Unsupported actor kind: {kind}")
         return np.arange(start, start + count, dtype=np.int32)
 
     @property
     def scalar_dof_count(self) -> int:
-        return self.q_dof_count + 3 * self.dynamic_particle_count + 6 * len(self.rigid_ranges)
+        return (
+            self.q_dof_count
+            + 3 * self.dynamic_particle_count
+            + 6 * len(self.rigid_ranges)
+            + sum(xyz + theta for _, _, _, xyz, theta in self.material_ranges)
+        )
 
 
 @dataclass(frozen=True, slots=True)

@@ -54,6 +54,45 @@ Contacts, contact updates and collision scheduling are rejected. Use
 
 .. autoclass:: SolverMonolithic
 
+Material input and continuation (experimental)
+---------------------------------------------
+
+``SolverMonolithic.ClothInput`` and ``SolverMonolithic.CableInput`` describe
+independently owned shell meshes and open, anisotropic DER chains. Pass tuples
+through the keyword-only ``cloth_inputs`` and ``cable_inputs`` arguments.
+This interface is under development: material scenes provide construction,
+layout, control and continuation storage only. Their ``step()`` explicitly
+raises ``NotImplementedError`` until material assembly is connected. The
+existing articulation/rigid/tet stepping path is unchanged.
+
+Cloth inputs select Model triangle rows, bending coefficients ``(alpha, beta)``,
+thickness [m] and surface density [kg/m²]. Cable inputs select ordered particle
+IDs, ``EA`` [N], a symmetric positive definite 2x2 ``bending`` tensor [N m²],
+``GJ`` [N m²], radius [m], linear density [kg/m], unwrapped ``rest_theta`` [rad],
+unit perpendicular ``rest_director`` vectors and boolean ``fixed_theta`` flags.
+Dynamic particle masses must match reference density lumping. Multiple separate
+objects are supported; each input must describe one connected object. Shared
+particles, invalid topology and conflicting native forces are rejected.
+Inputs are copied at construction; later caller edits do not alter the solver.
+
+Material scenes may omit both the mechanical tree and tet. They use version-five
+checkpoint history containing theta, directors and the unwrapped reference twist.
+``create_state(dt=...)`` initializes the reference configuration. Explicit
+``source`` initialization with cables requires compatible material history; an
+ordinary ``model.state()`` can initialize cloth-only scenes but is insufficient
+for cable orientation. Resetting integration
+history preserves the frozen natural shape. Older checkpoints cannot supply
+missing material history.
+
+``create_control()`` retains ordinary joint controls and owns a
+``_monolithic_cable`` namespace with ``target_theta`` [rad] and ``torque`` [N m]
+arrays. Targets apply only to physically fixed theta; torques apply only to
+physically free theta. This control namespace is experimental. No theta inertia
+or angular velocity is allocated. USD authoring/import support is separate and
+is not provided by these Python inputs.
+
+.. rubric:: Other classes
+
 .. autoclass:: MonolithicContactForces
 
 .. autoclass:: SmoothSDFSet

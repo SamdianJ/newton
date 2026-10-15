@@ -21,7 +21,7 @@ from ...sim import Contacts, Model, State
 from .aabb import _CandidateBounds, _overlap, aggregate_overlap
 
 
-def _validate_and_collect_boundary_faces(model: Model) -> tuple[np.ndarray, np.ndarray]:
+def _validate_and_collect_boundary_faces(model: Model, *, excluded_triangle_ids=()) -> tuple[np.ndarray, np.ndarray]:
     """Return deterministic model face indices and all referenced particle ids."""
     error = MonolithicCollisionPipeline.Error
     status = MonolithicCollisionPipeline.Status.INVALID_BOUNDARY
@@ -77,6 +77,8 @@ def _validate_and_collect_boundary_faces(model: Model) -> tuple[np.ndarray, np.n
                 raise error(status, "nonmanifold_boundary_vertex")
             incident = pending
     triangles = model.tri_indices.numpy()
+    triangle_ids = np.delete(np.arange(len(triangles)), excluded_triangle_ids)
+    triangles = triangles[triangle_ids]
     if triangles.shape != (len(boundary), 3):
         raise error(status, "missing_or_extra_faces")
     face_to_index = {}
@@ -84,7 +86,7 @@ def _validate_and_collect_boundary_faces(model: Model) -> tuple[np.ndarray, np.n
         key = tuple(sorted(face))
         if len(set(face)) != 3 or key in face_to_index:
             raise error(status, "duplicate_or_repeated_vertices")
-        face_to_index[key] = index
+        face_to_index[key] = int(triangle_ids[index])
     if set(face_to_index) != set(boundary):
         raise error(status, "boundary_set_mismatch")
     for face in boundary:

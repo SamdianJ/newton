@@ -12,6 +12,43 @@ from dataclasses import dataclass, field
 from types import MappingProxyType
 
 
+@dataclass(frozen=True, slots=True, kw_only=True)
+class ClothInput:
+    """Experimental monolithic shell input; arrays are copied during construction.
+
+    Triangle IDs select Model triangles. Bending is (alpha, beta) in N m;
+    thickness is in m and surface density in kg/m^2. Native membrane
+    coefficients come from Model.tri_materials. Material stepping is not yet
+    available through this input.
+    """
+
+    triangle_ids: tuple[int, ...]
+    bending: tuple[float, float]
+    thickness: float
+    surface_density: float
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class CableInput:
+    """Experimental finite-EA open DER chain with quasi-static material angles.
+
+    EA is in N; bending is an SPD 2x2 material tensor and GJ is in N m^2.
+    Radius is a circular contact envelope in m, density is in kg/m, and
+    rest_theta is unwrapped radians. Each rest_director is a unit vector
+    perpendicular to its edge. Material stepping is not yet available.
+    """
+
+    particle_ids: tuple[int, ...]
+    EA: float
+    bending: tuple[tuple[float, float], tuple[float, float]]
+    GJ: float
+    radius: float
+    linear_density: float
+    rest_theta: tuple[float, ...]
+    rest_director: tuple[tuple[float, float, float], ...]
+    fixed_theta: tuple[bool, ...]
+
+
 class Status(enum.Enum):
     NOT_RUN = "not_run"
     SUCCESS = "success"

@@ -66,6 +66,8 @@ class MonolithicLinearWorkspace:
         use_cuda_graph: bool = False,
         contact_support=None,
     ):
+        if layout.material_ranges:
+            raise NotImplementedError("Material linear assembly and preconditioning are not yet connected")
         if pcg_mode not in ("diagnostic", "production"):
             raise ValueError("pcg_mode must be diagnostic or production")
         if type(use_cuda_graph) is not bool or (

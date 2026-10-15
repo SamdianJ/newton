@@ -50,7 +50,10 @@ def _joint_layout(model):
     dimensions = np.stack(
         (np.where(free, 3, types == JointType.PRISMATIC), np.where(free, 3, types == JointType.REVOLUTE)), axis=1
     )
-    if not np.array_equal(model.joint_dof_dim.numpy(), dimensions):
+    actual_dimensions = model.joint_dof_dim.numpy()
+    if not np.array_equal(actual_dimensions, dimensions) and not (
+        model.joint_count == 0 and actual_dimensions.size == 0
+    ):
         raise ValueError("Invalid joint_dof_dim")
     targets = model.joint_target_q_start
     if targets is None or targets.shape != (model.joint_count + 1,) or targets.dtype != wp.int32:
@@ -77,6 +80,8 @@ class Actor:
     dof_start: int = 0
     dof_count: int = 0
     state_count: int = 0
+    theta_indices: tuple[int, ...] = ()
+    free_theta_indices: tuple[int, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -89,8 +94,8 @@ class ActorTable:
     static_shape_indices: tuple[int, ...]
 
     @classmethod
-    def from_model(cls, model, *, actor_order=None):
-        """Classify one anchored tree, single-body FREE actors and one connected tet."""
+    def from_model(cls, model, *, actor_order=None, materials=None):
+        """Classify at most one tree/tet and independently owned rigid/material actors."""
         types, qs, vs, ts = _joint_layout(model)
         starts, ends = model.articulation_start.numpy(), model.articulation_end.numpy()
         if (
@@ -110,9 +115,16 @@ class ActorTable:
         masses, inertias = model.body_mass.numpy(), model.body_inertia.numpy().astype(float)
         if not model.joint_enabled.numpy().all() or not np.isin(flags, [BodyFlags.DYNAMIC, BodyFlags.KINEMATIC]).all():
             raise ValueError("Actors require enabled joints and supported body flags")
-        if len(worlds) == 0 or len(np.unique(worlds)) != 1 or worlds[0] < -1 or worlds[0] >= model.world_count:
+        material_mode = materials is not None and bool(materials.cloth or materials.cable)
+        actor_worlds = np.r_[worlds, model.particle_world.numpy()] if material_mode else worlds
+        if (
+            len(actor_worlds) == 0
+            or len(np.unique(actor_worlds)) != 1
+            or actor_worlds[0] < -1
+            or actor_worlds[0] >= model.world_count
+        ):
             raise ValueError("Actors must share one valid world")
-        if not np.all(model.joint_world.numpy() == worlds[0]):
+        if not np.all(model.joint_world.numpy() == actor_worlds[0]):
             raise ValueError("Joint and body actors must share one world")
         actors, owned = [], set()
         for source, (start, end) in enumerate(zip(starts[:-1], ends, strict=True)):
@@ -168,29 +180,70 @@ class ActorTable:
                     state_count=len(coords),
                 )
             )
-        if len(owned) != model.body_count or sum(a.kind == "articulation" for a in actors) != 1:
-            raise ValueError("Monolithic requires one mechanical articulation and uniquely owned bodies")
-        _, particles = _validate_and_collect_boundary_faces(model)
+        arm_count = sum(a.kind == "articulation" for a in actors)
+        if len(owned) != model.body_count or arm_count > 1 or (not material_mode and arm_count != 1):
+            raise ValueError("Monolithic requires uniquely owned bodies and at most one mechanical articulation")
         inv_mass = model.particle_inv_mass.numpy()
         dynamic = np.flatnonzero(inv_mass > 0)
-        if np.any(~np.isin(dynamic, particles)) or not np.all(model.particle_world.numpy()[particles] == worlds[0]):
-            raise ValueError("Tet particles must belong to the actor world and connected body")
         actors.sort(key=lambda a: (a.kind != "articulation", a.source_index))
-        actors.append(
-            Actor(
-                "tet",
-                0,
-                particle_indices=tuple(map(int, particles)),
-                dynamic_particle_indices=tuple(map(int, dynamic)),
-                dof_count=3 * len(dynamic),
-                state_count=3 * len(particles),
+        if model.tet_count or not material_mode:
+            if material_mode:
+                # Validate only the native tet boundary; cloth faces are independently owned.
+                selected = np.concatenate([obj["triangle_ids"] for obj in materials.cloth]) if materials.cloth else []
+                _, particles = _validate_and_collect_boundary_faces(model, excluded_triangle_ids=selected)
+            else:
+                _, particles = _validate_and_collect_boundary_faces(model)
+            tet_dynamic = dynamic[np.isin(dynamic, particles)]
+            if not material_mode and np.any(~np.isin(dynamic, particles)):
+                raise ValueError("Tet particles must belong to the actor world and connected body")
+            if not np.all(model.particle_world.numpy()[particles] == actor_worlds[0]):
+                raise ValueError("Tet particles must belong to the actor world and connected body")
+            actors.append(
+                Actor(
+                    "tet",
+                    0,
+                    particle_indices=tuple(map(int, particles)),
+                    dynamic_particle_indices=tuple(map(int, tet_dynamic)),
+                    dof_count=3 * len(tet_dynamic),
+                    state_count=3 * len(particles),
+                )
             )
-        )
+        if material_mode:
+            if not model.tet_count:
+                faces = [int(i) for obj in materials.cloth for i in obj["triangle_ids"]]
+                if sorted(faces) != list(range(model.tri_count)):
+                    raise ValueError("Every triangle requires a cloth or tet owner")
+            for kind, objects in (("cloth", materials.cloth), ("cable", materials.cable)):
+                for source, obj in enumerate(objects):
+                    ids = tuple(map(int, obj["particle_ids"]))
+                    free = tuple(i for i, fixed in zip(ids, obj["fixed"], strict=True) if not fixed)
+                    theta, free_theta = (), ()
+                    if kind == "cable":
+                        offset = int(obj["theta_offset"])
+                        theta = tuple(range(offset, offset + len(obj["rest_theta"])))
+                        free_theta = tuple(offset + int(i) for i in obj["free_theta"])
+                    actors.append(
+                        Actor(
+                            kind,
+                            source,
+                            particle_indices=ids,
+                            dynamic_particle_indices=free,
+                            dof_count=3 * len(free) + len(free_theta),
+                            state_count=3 * len(ids) + len(theta),
+                            theta_indices=theta,
+                            free_theta_indices=free_theta,
+                        )
+                    )
+            owned_particles = {i for a in actors for i in a.particle_indices}
+            if owned_particles != set(range(model.particle_count)):
+                raise ValueError("Every material-scene particle must have exactly one actor owner")
         if actor_order is not None:
             if any(type(i) is not int for i in actor_order) or sorted(actor_order) != list(range(len(actors))):
                 raise ValueError("actor_order must be a complete permutation")
             actors = [actors[i] for i in actor_order]
         total = _checked_dof_count(tuple(a.dof_count for a in actors))
+        if not total:
+            raise ValueError("Monolithic requires at least one dynamic degree of freedom")
         offset = 0
         for i, actor in enumerate(actors):
             actors[i] = replace(actor, dof_start=offset)
@@ -219,9 +272,15 @@ class ActorTable:
             for i, index in enumerate(actor.dynamic_particle_indices):
                 particles[index] = actor.dof_start + 3 * i
         maps.update(joint_dof_to_global=tuple(dofs), particle_to_global=tuple(particles))
-        identity = hashlib.sha256(
-            json.dumps({"version": 1, "actors": [asdict(a) for a in actors], "maps": maps}, sort_keys=True).encode()
-        ).hexdigest()
+        if material_mode:
+            owners, local, rows = ([-1] * materials.theta_count for _ in range(3))
+            for actor_id, actor in enumerate(actors):
+                for i, index in enumerate(actor.theta_indices):
+                    owners[index], local[index] = actor_id, i
+                for i, index in enumerate(actor.free_theta_indices):
+                    rows[index] = actor.dof_start + 3 * len(actor.dynamic_particle_indices) + i
+            maps.update(theta_owner=tuple(owners), theta_local=tuple(local), theta_to_global=tuple(rows))
+        identity = hashlib.sha256(cls._payload(actors, maps)).hexdigest()
         device_maps = {name: wp.array(value, dtype=wp.int32, device=model.device) for name, value in maps.items()}
         return cls(
             tuple(actors),
@@ -234,6 +293,15 @@ class ActorTable:
 
     def layout_payload(self):
         """Return the complete versioned host description used by the layout digest."""
+        return self._payload(self.actors, dict(self.maps))
+
+    @staticmethod
+    def _payload(actors, maps):
+        descriptions = [asdict(a) for a in actors]
+        material_mode = "theta_to_global" in maps
+        if not material_mode:
+            for actor in descriptions:
+                del actor["theta_indices"], actor["free_theta_indices"]
         return json.dumps(
-            {"version": 1, "actors": [asdict(a) for a in self.actors], "maps": dict(self.maps)}, sort_keys=True
+            {"version": 2 if material_mode else 1, "actors": descriptions, "maps": maps}, sort_keys=True
         ).encode()

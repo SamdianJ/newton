@@ -14,11 +14,11 @@ from types import MappingProxyType
 import numpy as np
 import warp as wp
 
-from ...sim import JointType
+from ...sim import JointType, Model
 from ..solver import SolverBase
 from . import coupled_kernels as kernels
 from . import iteration_device, state_checks
-from .actors import ActorTable
+from .actors import Actor, ActorTable
 from .articulation import ArticulationObjective, _TreeKinematics
 from .articulation_state import _predict, _recover_history
 from .collision import _validate_and_collect_boundary_faces
@@ -35,9 +35,12 @@ from .linear_types import (
     MonolithicLinearLayout,
     MonolithicLinearStatus,
 )
+from .material_inputs import _MaterialInputs
 from .rigid import RigidObjective, _scatter_residual, _scatter_tangent
 from .segment_graph import _SegmentGraphCache
 from .solver_types import (
+    CableInput,
+    ClothInput,
     JointTerms,
     MassMode,
     MaterialModel,
@@ -89,6 +92,8 @@ class SolverMonolithic(SolverBase):
     PCGMode = PCGMode
     MaterialModel = MaterialModel
     MassMode = MassMode
+    ClothInput = ClothInput
+    CableInput = CableInput
 
     def __init__(
         self,
@@ -119,11 +124,15 @@ class SolverMonolithic(SolverBase):
         use_cuda_graph=False,
         precision=Precision.FP64,
         fp32_absolute_tolerance=None,
+        cloth_inputs=(),
+        cable_inputs=(),
     ):
-        self._actors = ActorTable.from_model(model)
+        cloth_inputs, cable_inputs = tuple(cloth_inputs), tuple(cable_inputs)
+        self._materials = _MaterialInputs(model, cloth_inputs, cable_inputs) if cloth_inputs or cable_inputs else None
+        self._actors = ActorTable.from_model(model, materials=self._materials)
         layout = MonolithicLinearLayout.from_actors(self._actors)
         self._layout = layout
-        self._articulation_actor = next(actor for actor in self._actors.actors if actor.kind == "articulation")
+        self._articulation_actor = next((actor for actor in self._actors.actors if actor.kind == "articulation"), None)
         self._precision = self.Precision(precision)
         self._dtype = wp.float64 if self._precision == self.Precision.FP64 else wp.float32
         self._numpy_dtype = np.float64 if self._precision == self.Precision.FP64 else np.float32
@@ -156,6 +165,62 @@ class SolverMonolithic(SolverBase):
         self._stopped_failure = None
         if not np.isfinite(min_det_f_guard) or min_det_f_guard <= 0:
             raise ValueError("Invalid detF guard")
+        if self._materials is not None:
+            self._use_cuda_graph = use_cuda_graph
+            density = "none"
+            if model.tet_count and mass_mode == self.MassMode.CONSISTENT:
+                if not isinstance(tet_rest_density, wp.array) or (
+                    tet_rest_density.shape,
+                    tet_rest_density.dtype,
+                    tet_rest_density.device,
+                ) != ((model.tet_count,), wp.float32, model.device):
+                    raise ValueError("consistent mass requires same-device float32 per-tet density")
+                density = tet_rest_density.numpy().copy()
+                if not np.isfinite(density).all() or np.any(density <= 0):
+                    raise ValueError("tet density must be finite and positive")
+            elif tet_rest_density is not None:
+                raise ValueError("tet_rest_density requires a tet with consistent mass")
+            if type(use_cuda_graph) is not bool or (
+                use_cuda_graph and (self.PCGMode(pcg_mode) != self.PCGMode.PRODUCTION or not model.device.is_cuda)
+            ):
+                raise ValueError("use_cuda_graph requires CUDA production PCG and a bool")
+            if contact_factor_capacity is not None and (
+                type(contact_factor_capacity) is not int or contact_factor_capacity < 0
+            ):
+                raise ValueError("Contact factor capacity must be a nonnegative integer")
+            self._initialize_material_lifecycle(
+                model,
+                joint_terms=joint_terms,
+                config={
+                    "contact_model": contact_model,
+                    "globalization": globalization,
+                    "contact_stiffness": contact_stiffness,
+                    "friction_coefficient": friction_coefficient,
+                    "friction_velocity_scale": friction_velocity_scale,
+                    "normal_smoothing": normal_smoothing,
+                    "material_model": self.MaterialModel(material_model).value,
+                    "mass_mode": self.MassMode(mass_mode).value,
+                    "min_det_f_guard": min_det_f_guard,
+                    "publish_policy": publish_policy,
+                    "alignment_policy": alignment_policy,
+                    "allow_nonconservative_energy": allow_nonconservative_energy,
+                    "newton_max_iterations": newton_max_iterations,
+                    "line_search_max_iterations": line_search_max_iterations,
+                    "linear_max_iterations": linear_max_iterations,
+                    "linear_tolerance": linear_tolerance,
+                    "linear_absolute_tolerance": linear_absolute_tolerance,
+                    "pcg_mode": self.PCGMode(pcg_mode).value,
+                    "tet_rest_density": density,
+                    "contact_factor_capacity": "automatic"
+                    if contact_factor_capacity is None
+                    else contact_factor_capacity,
+                    "fp32_absolute_tolerance": "default"
+                    if fp32_absolute_tolerance is None
+                    else fp32_absolute_tolerance,
+                    "smooth_sdf": "none" if smooth_sdf is None else smooth_sdf.digest,
+                },
+            )
+            return
         _validate_and_collect_boundary_faces(model)
         if not model.particle_count or not model.tet_count:
             raise ValueError("Coupled entry requires one tet body")
@@ -388,6 +453,120 @@ class SolverMonolithic(SolverBase):
         )
         iteration_device.initialize(self)
 
+    def _initialize_material_lifecycle(self, model, *, joint_terms, config):
+        """Allocate the shared layout/state API before material assembly is available.
+
+        No material, inertia or contact operator is substituted here. step()
+        rejects this staging path until the material objectives are connected.
+        """
+        if config["globalization"] not in ("Armijo", "ResNorm", "ArmijoOrResNorm") or config[
+            "alignment_policy"
+        ] not in ("guard", "mask"):
+            raise ValueError("Unknown material solver policy")
+        for name in ("newton_max_iterations", "line_search_max_iterations", "linear_max_iterations"):
+            if type(config[name]) is not int or config[name] <= 0:
+                raise ValueError("Iteration budgets must be positive integers")
+        for name in ("linear_tolerance", "linear_absolute_tolerance", "friction_coefficient"):
+            if isinstance(config[name], bool) or not np.isfinite(config[name]) or config[name] < 0:
+                raise ValueError(f"Invalid {name}")
+        for name in ("contact_stiffness", "friction_velocity_scale", "normal_smoothing"):
+            if isinstance(config[name], bool) or not np.isfinite(config[name]) or config[name] <= 0:
+                raise ValueError(f"Invalid {name}")
+        joint_terms = self.JointTerms() if joint_terms is None else joint_terms
+        if not isinstance(joint_terms, self.JointTerms):
+            raise ValueError("joint_terms must be SolverMonolithic.JointTerms")
+        # An empty kinematics view owns no Model bodies/joints and adds no actor.
+        view = self._articulation_actor or Actor("articulation", 0)
+        self._joint_terms = JointParameters(
+            model, actor=view, **{name: getattr(joint_terms, name) for name in joint_terms.__dataclass_fields__}
+        )
+        for name in ("joint_target_ke", "joint_target_kd", "joint_limit_ke", "joint_limit_kd", "joint_friction"):
+            if name not in self._joint_terms.allowed_properties and np.any(
+                getattr(model, name).numpy()[list(view.dof_indices)] != 0
+            ):
+                raise ValueError(f"Disabled joint term has nonzero parameters: {name}")
+        fields = {
+            "material_digest": np.frombuffer(bytes.fromhex(self._materials.identity), dtype=np.uint8),
+            "layout_digest": np.frombuffer(bytes.fromhex(self._actors.identity), dtype=np.uint8),
+            "joint_terms": self._joint_terms.params.numpy(),
+        }
+        for name, value in config.items():
+            fields[name] = (
+                np.frombuffer(value.encode(), dtype=np.uint8) if isinstance(value, str) else np.asarray(value)
+            )
+        for name in (
+            "tet_indices",
+            "tet_poses",
+            "tet_materials",
+            "particle_mass",
+            "particle_inv_mass",
+            "particle_flags",
+            "particle_q",
+            "particle_radius",
+            "shape_transform",
+            "shape_type",
+            "shape_scale",
+            "shape_margin",
+            "shape_body",
+            "shape_contact_pairs",
+            "_shape_sdf_index",
+        ):
+            value = getattr(model, name, None)
+            if value is not None:
+                fields[name] = value.numpy()
+        fields.update(self._freeze_sdf(model))
+        self._kinematics = _TreeKinematics(model, actor=view, extra_config=fields, dtype=self._dtype)
+        SolverBase.__init__(self, model)
+        self._states = CoupledState(self._kinematics, self._actors, self._rigid, self._materials)
+        self._last_stats = self.Stats(self.Status.NOT_RUN)
+        self._pcg_mode = self.PCGMode(config["pcg_mode"])
+        for name in (
+            "newton_max_iterations",
+            "line_search_max_iterations",
+            "linear_max_iterations",
+            "linear_tolerance",
+            "linear_absolute_tolerance",
+        ):
+            setattr(self, name, config[name])
+
+    def create_control(self):
+        """Create owned experimental theta targets [rad] and torques [N m].
+
+        Targets are used only on fixed_theta edges; torque is supported only
+        on physically free edges. The ordinary Model joint controls are retained.
+        """
+        control = self.model.control()
+        if self._materials is not None:
+            namespace = Model.AttributeNamespace("_monolithic_cable")
+            theta = [obj["rest_theta"] for obj in self._materials.cable]
+            namespace.target_theta = wp.array(
+                np.concatenate(theta) if theta else [], dtype=self._dtype, device=self.model.device
+            )
+            namespace.torque = wp.zeros(self._materials.theta_count, dtype=self._dtype, device=self.model.device)
+            control._monolithic_cable = namespace
+        return control
+
+    def _snapshot_material_control(self, control):
+        namespace = getattr(control, "_monolithic_cable", None)
+        values = {}
+        for name in ("target_theta", "torque"):
+            array = getattr(namespace, name, None)
+            if not isinstance(array, wp.array) or (array.shape, array.dtype, array.device) != (
+                (self._materials.theta_count,),
+                self._dtype,
+                self.model.device,
+            ):
+                raise ValueError(f"Invalid cable control: {name}")
+            values[name] = array.numpy().copy()
+            if not np.isfinite(values[name]).all():
+                raise ValueError(f"Nonfinite cable control: {name}")
+        for obj in self._materials.cable:
+            offset = int(obj["theta_offset"])
+            part = slice(offset, offset + len(obj["rest_theta"]))
+            if np.any(values["torque"][part][obj["fixed_theta"]] != 0):
+                raise ValueError("External cable torques require physically free theta")
+        return values
+
     def _freeze_sdf(self, model):
         """Bind actual texels and indirection, excluding process-specific GPU handles."""
         fields = {}
@@ -515,6 +694,10 @@ class SolverMonolithic(SolverBase):
                 raise ValueError(f"Rigid mapping changed: {name}")
 
     def step(self, state_in, state_out, control, contacts=None, dt=0.0):
+        if self._materials is not None:
+            raise NotImplementedError(
+                "Cloth/cable layout and state are available; material step assembly is not yet implemented"
+            )
         self._validate_components()
         self._stopped_failure = None
         if contacts is not None or not math.isfinite(dt) or dt <= 0:

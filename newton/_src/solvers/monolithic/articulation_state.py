@@ -163,8 +163,12 @@ class ArticulationState:
         for name, (shape, dtype) in self.schema.items():
             setattr(history, name, wp.zeros(shape, dtype=dtype, device=self.device))
         setattr(state, self.namespace, history)
+        self._initialize_history(state, source)
         self.reset(state, dt=dt)
         return state
+
+    def _initialize_history(self, state, source):
+        """Initialize nonzero component history before the first reset."""
 
     def copy(self, source):
         """Allocate an exact continuation without applying initialization rules."""

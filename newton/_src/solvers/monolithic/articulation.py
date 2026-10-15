@@ -179,7 +179,8 @@ class _TreeKinematics:
         self.matrix = wp.mat33d if dtype == wp.float64 else wp.mat33
         self.transform = wp.transformd if dtype == wp.float64 else wp.transform
         _validate_joint_coordinate_layout(model, actor)
-        if (actor is None and model.articulation_count != 1) or not model.joint_dof_count:
+        empty = actor is not None and not actor.joint_indices and not actor.body_indices and not actor.dof_indices
+        if not empty and ((actor is None and model.articulation_count != 1) or not model.joint_dof_count):
             raise ValueError("Monolithic articulation requires one nonempty tree")
         if model.requires_grad or model.constraint_mimic_count or model.actuators:
             raise ValueError("Monolithic articulation does not support autograd, mimic constraints or model actuators")
@@ -238,10 +239,10 @@ class _TreeKinematics:
             prefix = np.r_[0, np.cumsum(v["joint_type"] != JointType.FIXED)].astype(np.int32)
             v["joint_q_start"] = v["joint_qd_start"] = prefix
         self.values = v
-        if not v["joint_enabled"].all() or len(np.unique(v["body_world"])) != 1:
+        if not v["joint_enabled"].all() or (not empty and len(np.unique(v["body_world"])) != 1):
             raise ValueError("Monolithic requires enabled joints in one world")
         self.count, self.bodies, self.joints = len(dof_ids), len(body_ids), len(joint_ids)
-        if not self.count:
+        if not self.count and not empty:
             raise ValueError("Monolithic articulation requires one nonempty tree")
         seen, roots = set(), 0
         ancestors = np.zeros((self.bodies, self.count), dtype=np.int32)
@@ -257,7 +258,7 @@ class _TreeKinematics:
                 dof = v["joint_q_start"][j]
                 ancestors[child, dof] = 1
                 dof_joint[dof] = j
-        if roots != 1 or len(seen) != self.bodies:
+        if roots != (0 if empty else 1) or len(seen) != self.bodies:
             raise ValueError("Monolithic tree must own every body")
         if not np.isin(v["body_flags"], [int(BodyFlags.DYNAMIC), int(BodyFlags.KINEMATIC)]).all():
             raise ValueError(
@@ -354,6 +355,8 @@ class _TreeKinematics:
 
     def validate_inertia(self):
         """Require physical positive inertia at the currently evaluated private FK."""
+        if not self.count:
+            return
         v = self.values
         jt, jw, rotation = self.jt.numpy(), self.jw.numpy(), self.rotations.numpy()
         world_inertia = rotation @ v["body_inertia"].astype(self.numpy_dtype) @ rotation.transpose(0, 2, 1)
@@ -376,6 +379,8 @@ class _TreeKinematics:
         """Evaluate FK and COM/angular Jacobians without using public FP32 FK."""
         if (q.shape, q.dtype, q.device) != ((self.count,), self.dtype, self.device):
             raise ValueError("Monolithic FK requires owned-shape native coordinates on the model device")
+        if not self.joints:
+            return
         wp.launch(
             _forward,
             1,
