@@ -9,9 +9,9 @@ Experimental monolithic cables
    ``SolverMonolithic.CableInput`` and its state/control namespaces are
    experimental. Open, independent chains support finite axial stiffness,
    anisotropic bending and natural curvature/twist. Closed loops, branches,
-   connectors, self-collision and material contacts are outside this interface.
-   Material scenes with collision-enabled shapes are rejected. Contact-free
-   cloth can share the solve; see :doc:`monolithic_cloth`.
+   connectors, self-collision and soft-soft contacts are outside this interface.
+   Cable surfaces contact supported articulation, free rigid and static shapes.
+   Cloth can share the solve; see :doc:`monolithic_cloth`.
 
 Supply ordered Model particle IDs, reference directors and material angles
 through ``cable_inputs``. A director is perpendicular to its edge and specifies
@@ -33,6 +33,35 @@ material angles are never reduced modulo a full turn. Rejected steps preserve
 coordinates, directors, angles, velocities and force-publication history.
 Checkpoint continuation preserves this chart and validates material identity.
 
+Surface contact and spin
+------------------------
+
+Each edge samples its circular surface using two axial Gauss points and 64
+angular points. The two open ends additionally sample disks with two Gauss rings
+in the area coordinate. Areas use reference edge lengths and the supplied
+radius. Interior edge junctions add no caps or spherical joints. This discrete
+surface is not a continuous capsule union; narrow contact patches and sharply
+bent junctions need a resolution assessment.
+
+Surface positions and analytic Jacobians include xyz, transported directors and
+theta. Friction therefore applies spin torque as well as nodal forces. Common
+spin is retained whenever material contact can constrain it; temporary null
+modes are checked against both material and contact tangents. Radius and bending
+stiffness remain independent inputs.
+
+``solver.get_contact_forces(state).cable_torque`` is an independent, read-only
+array of generalized contact torque [N m], in input cable/edge order, including
+fixed-angle reactions. It shares the force validity flag, publication generation,
+checkpoint and rollback transaction with the existing force fields. This is a
+chart-coordinate torque: for a general transported chart, world torque balance
+uses the full xyz/theta virtual-rotation map rather than only nodal lever arms.
+Material checkpoint schema 6 is required for this history.
+
+Target types, normal selection, energy-acceptance opt-in and capacity behavior
+are described in :doc:`monolithic_cloth`. CPU/CUDA short-contact qualification
+and graph coverage do not establish long contact-trajectory or performance
+qualification, or remove the existing localized-helix acceptance limitations.
+
 Numerical contract
 ------------------
 
@@ -41,8 +70,9 @@ position and massless material-angle coordinates share one Newton direction,
 line search and publication transaction. There is no separate theta equilibration
 loop and no theta inertia. The full strain-Jacobian Gauss-Newton matrix includes
 position/angle cross terms; only Dirichlet constraints and the specified permanent
-isotropic gauge are eliminated. A straight anisotropic cable's temporary common
-angle mode is rechecked at each assembly and released after bending.
+isotropic gauge are eliminated when contact is absent. A temporary common
+angle mode is rechecked at each assembly and released when bending or contact
+constrains it.
 
 B and PCG vectors remain FP32. Per-cable band Cholesky uses interleaved vertex
 and angle rows only in the preconditioner; cross-object entries remain in the

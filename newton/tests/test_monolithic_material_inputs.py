@@ -24,6 +24,7 @@ class HostArray:
 
 def material_model():
     fields = {
+        "shape_flags": np.empty(0, dtype=int),
         "particle_q": [[0, 0, 0], [1, 0, 0], [0, 1, 0], [2, 0, 0], [3, 0, 0], [4, 0, 0]],
         "particle_mass": [1 / 6, 1 / 6, 1 / 6, 0.5, 1, 0.5],
         "particle_inv_mass": [0, 6, 6, 0, 1, 2],

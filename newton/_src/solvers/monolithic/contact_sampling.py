@@ -74,7 +74,7 @@ def _checked_contact_capacity(count, support, triplets, base=0):
 class ContactSamples:
     """Freeze Model-selected directed keys without rebuilding collision filters."""
 
-    def __init__(self, model, actors, *, radius, base_triplet_count, _expand_support=True):
+    def __init__(self, model, actors, *, radius, base_triplet_count, _expand_support=True, _materials=None):
         if type(_expand_support) is not bool:
             raise ValueError("Contact support expansion mode must be boolean")
         self.model = model
@@ -90,12 +90,15 @@ class ContactSamples:
         self.body_kind = np.full(model.body_count, -1, dtype=np.int32)
         self.body_local = np.full(model.body_count, -1, dtype=np.int32)
         rigids = [a for a in actors.actors if a.kind == "rigid"]
-        if not rigids:
+        if not rigids and _materials is None:
             self.rigid_shapes = ()
             return
-        arm = next(a for a in actors.actors if a.kind == "articulation")
-        self.body_kind[list(arm.body_indices)] = 0
-        self.body_local[list(arm.body_indices)] = np.arange(len(arm.body_indices))
+        arm = next((a for a in actors.actors if a.kind == "articulation"), None)
+        arm_bodies = () if arm is None else arm.body_indices
+        arm_joints = () if arm is None else arm.joint_indices
+        arm_dofs = () if arm is None else arm.dof_indices
+        self.body_kind[list(arm_bodies)] = 0
+        self.body_local[list(arm_bodies)] = np.arange(len(arm_bodies))
         for i, actor in enumerate(rigids):
             self.body_kind[actor.body_indices[0]], self.body_local[actor.body_indices[0]] = 1, i
         self.rigid_shapes = tuple(s for a in rigids for s in a.shape_indices)
@@ -113,11 +116,11 @@ class ContactSamples:
             getattr(model, n).numpy() for n in ("shape_body", "shape_type", "shape_scale", "shape_margin")
         )
         margins = margins.astype(np.float64)
-        incoming = {int(model.joint_child.numpy()[j]): j for j in arm.joint_indices}
+        incoming = {int(model.joint_child.numpy()[j]): j for j in arm_joints}
         parent, starts = model.joint_parent.numpy(), model.joint_qd_start.numpy()
-        local_dof = {d: i for i, d in enumerate(arm.dof_indices)}
+        local_dof = {d: i for i, d in enumerate(arm_dofs)}
         support = {}
-        for b in arm.body_indices:
+        for b in arm_bodies:
             js, cursor = [], b
             while cursor >= 0:
                 joint = incoming[cursor]
@@ -147,7 +150,7 @@ class ContactSamples:
             faces.append(face)
             slots.append(slot)
 
-        triangles = model.tri_indices.numpy()
+        triangles = model.tri_indices.numpy() if model.tri_indices is not None else np.empty((0, 3), dtype=np.int32)
         rest = model.particle_q.numpy().astype(np.float64)
         rest_area = (
             np.linalg.norm(
@@ -157,10 +160,21 @@ class ContactSamples:
             / 2
         )
         tet_targets = sorted(s for s in self.rigid_shapes if flags[s] & int(ShapeFlags.COLLIDE_PARTICLES))
+        cloth_faces = set() if _materials is None else {int(f) for obj in _materials.cloth for f in obj["triangle_ids"]}
+        if _materials is not None:
+            tet_targets = np.flatnonzero(flags & int(ShapeFlags.COLLIDE_PARTICLES)).tolist()
+        particle_world = model.particle_world.numpy() if _materials is not None else None
         for face, tri in enumerate(triangles):
+            if face in cloth_faces:
+                continue
             for slot in range(3):
                 for target in tet_targets:
-                    self.pair_kinds[-1, target] = "R-T"
+                    if _materials is not None:
+                        world = int(particle_world[tri[0]])
+                        target_world = int(self.values["shape_world"][target])
+                        if world >= 0 and target_world >= 0 and world != target_world:
+                            continue
+                    self.pair_kinds[-1, target] = "R-T" if _materials is None else "tet-shape"
                     cols, sels = [], []
                     for node, particle in enumerate(tri):
                         row = actors.maps["particle_to_global"][particle]
@@ -168,7 +182,7 @@ class ContactSamples:
                             for j in range(3):
                                 cols.append(row + j)
                                 sels.append((0, 3 * node + j))
-                    for col, j in support[int(bodies[target])]:
+                    for col, j in support.get(int(bodies[target]), ()):
                         cols.append(col)
                         sels.append((1, j))
                     append(
@@ -231,7 +245,12 @@ class ContactSamples:
                         cols,
                         sels,
                     )
-        used_shapes = targets_used | set(source_shapes) - {-1}
+        self.material_start = self.count
+        if _materials is not None:
+            from .contact_material_sampling import _append_material_samples  # noqa: PLC0415
+
+            targets_used.update(_append_material_samples(self, _materials, support, append))
+        used_shapes = targets_used | {s for s in source_shapes if s >= 0}
         for s in used_shapes:
             geo, scale = types[s], scales[s]
             if geo not in (GeoType.PLANE, GeoType.SPHERE, GeoType.BOX, GeoType.MESH):
@@ -268,6 +287,10 @@ class ContactSamples:
                 "actor_contact.group": self.values["shape_collision_group"],
                 "actor_contact.filters": self.filters,
             }
+            if _materials is not None:
+                self.fields["material_contact.rule"] = np.frombuffer(b"shell-p1q3-rod-gauss2-ring64/v1", dtype=np.uint8)
+                for name in ("cable_edges", "cable_coordinates", "cable_normals"):
+                    self.fields["material_contact." + name] = getattr(self, name)
             for s, (_, vertices, indices) in self.meshes.items():
                 self.fields[f"actor_contact.mesh.{s}.vertices"] = vertices
                 self.fields[f"actor_contact.mesh.{s}.indices"] = indices

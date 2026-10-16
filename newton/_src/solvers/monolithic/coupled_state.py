@@ -25,7 +25,7 @@ class CoupledState(ArticulationState):
         self.rigid = rigid
         self.materials = materials
         if materials is not None:
-            self.version = 5
+            self.version = 6
         self.layout_metadata = {
             "layout_version": np.array([2 if materials is not None else 1], dtype=np.int32),
             "layout_digest": np.frombuffer(bytes.fromhex(actors.identity), dtype=np.uint8),
@@ -47,6 +47,7 @@ class CoupledState(ArticulationState):
             edges = materials.theta_count
             twists = sum(len(obj["ref_twist"]) for obj in materials.cable)
             for name, shape, dtype in (
+                ("contact_cable_torque", (edges,), self.dtype),
                 ("cable_theta", (edges,), self.dtype),
                 ("cable_ref_director", (edges,), self.vector),
                 ("cable_ref_twist", (twists,), self.dtype),
@@ -255,6 +256,8 @@ class CoupledState(ArticulationState):
     def _reset(self, state, *, dt):
         super().reset(state, dt=dt)
         history = getattr(state, self.namespace)
+        if self.materials is not None:
+            history.contact_cable_torque.zero_()
         for name in (
             "contact_particle_force",
             "contact_body_force",
@@ -274,12 +277,12 @@ class CoupledState(ArticulationState):
             if "history.schema_version" not in checkpoint.files:
                 raise ValueError("Missing checkpoint schema version")
             version = checkpoint["history.schema_version"]
-            if version.shape != (1,) or version.dtype != np.int32 or version[0] not in (2, 3, 4, 5):
+            if version.shape != (1,) or version.dtype != np.int32 or version[0] not in (2, 3, 4, 5, 6):
                 raise ValueError("Unsupported checkpoint schema version")
             version = int(version[0])
-        if self.materials is not None and version != 5:
+        if self.materials is not None and version != self.version:
             raise ValueError("Material checkpoints require complete theta and frame history")
-        if version == 5 and self.materials is None:
+        if version in (5, 6) and self.materials is None:
             raise ValueError("Material checkpoint cannot be loaded into an A/R/T solver")
         if version == self.version:
             return super().load_checkpoint(state, path)

@@ -209,6 +209,7 @@ class SolverMonolithic(SolverBase):
                 type(contact_factor_capacity) is not int or contact_factor_capacity < 0
             ):
                 raise ValueError("Contact factor capacity must be a nonnegative integer")
+            self._material_smooth_sdf = smooth_sdf
             self._initialize_material_lifecycle(
                 model,
                 joint_terms=joint_terms,
@@ -535,6 +536,18 @@ class SolverMonolithic(SolverBase):
             value = getattr(model, name, None)
             if value is not None:
                 fields[name] = value.numpy()
+        self._contact = material_runtime.create_contact(self, model, config, self._material_smooth_sdf)
+        if (
+            self._contact.count
+            and not self._contact.conservative_energy
+            and config["globalization"] != "ResNorm"
+            and not self._allow_nonconservative_energy
+        ):
+            raise ValueError("Material surface selection requires explicit nonconservative energy opt-in")
+        fields.update(self._contact.actor_samples.fields)
+        fields["material_contact.backend"] = np.frombuffer(type(self._contact).__name__.encode(), dtype=np.uint8)
+        if isinstance(self._contact, _SpatialContactObjective):
+            fields["material_contact.spatial"] = np.array([self._contact.candidate_capacity, self._contact.law_margin])
         fields.update(self._freeze_sdf(model))
         self._kinematics = _TreeKinematics(model, actor=view, extra_config=fields, dtype=self._dtype)
         SolverBase.__init__(self, model)
@@ -691,6 +704,7 @@ class SolverMonolithic(SolverBase):
             history.contact_joint_force.numpy(),
             bool(history.force_valid.numpy()[0]),
             int(history.force_generation.numpy()[0]),
+            cable_torque=history.contact_cable_torque.numpy() if self._materials is not None else None,
         )
 
     @property
@@ -1047,6 +1061,21 @@ class SolverMonolithic(SolverBase):
                     dt,
                     predict=True,
                 )
+            if self._contact_pool:
+                k = self._kinematics
+                k.evaluate(k.gather_q(state_in))
+                h = state_in._monolithic_coupled
+                self._contact._batch.material_surface.update(state_in, begin=True)
+                self._contact.begin_step(
+                    state_in.particle_q,
+                    k.poses,
+                    k.com,
+                    k.jt,
+                    k.jw,
+                    rigid_com=h.rigid_com,
+                    rigid_rotation=h.rigid_rotation,
+                    **({"kinematics": k, "q0": k.gather_q(state_in)} if self._contact_spatial else {}),
+                )
             return
         k = self._kinematics
         k.evaluate(k.gather_q(state_in))
@@ -1227,7 +1256,7 @@ class SolverMonolithic(SolverBase):
             raise _StepFailure(self.Status.NONFINITE, str(error)) from error
 
     def _conservative_energy(self):
-        if self._materials is not None:
+        if self._materials is not None and not self._contact_pool:
             return not self._rigid.has_torque
         return self._contact.conservative_energy and not self._rigid.has_torque
 
@@ -1514,15 +1543,9 @@ class SolverMonolithic(SolverBase):
     def _finish_candidate(self, state, dt):
         self._rigid.recover(state, dt)
         if self._materials is not None:
-            history = state._monolithic_coupled
-            for array in (history.contact_joint_force, history.contact_particle_force, history.contact_body_force):
-                array.zero_()
-            history.force_generation.fill_(self._step_generation)
-            history.force_valid.fill_(1)
-            self._variational["contact_force_generation"] = self._step_generation
             self._variational["cloth_reactions"] = tuple(c.raw.numpy().tolist() for c in self._cloths)
             self._variational["cable_reactions"] = tuple(c.raw.numpy().tolist() for c in self._cables)
-            return
+            state._monolithic_coupled.contact_cable_torque.zero_()
         contact, k = self._contact, self._kinematics
         history = getattr(state, self._states.namespace)
         arrays = [history.contact_joint_force, history.contact_particle_force, history.contact_body_force]
@@ -1530,7 +1553,7 @@ class SolverMonolithic(SolverBase):
             array.zero_()
         if self._contact_pool:
             self._variational["actor_contact_pairs"] = contact.publish(state)
-        elif contact.legacy_count:
+        elif self._materials is None and contact.legacy_count:
             wp.launch(
                 kernels.contact_forces,
                 contact.legacy_count,
@@ -1553,11 +1576,16 @@ class SolverMonolithic(SolverBase):
         for pair in self._variational.get("actor_contact_pairs", ()):
             pair["force_generation"] = self._step_generation
         self._force_status.zero_()
+        if self._materials is not None:
+            arrays.append(history.contact_cable_torque)
         for index, array in enumerate(arrays):
             values = state_checks.scalar_view(array)
             if values.size:
                 wp.launch(
-                    state_checks.finite, values.size, [values, self._force_status, index], device=self.model.device
+                    state_checks.finite,
+                    values.size,
+                    [values, self._force_status, min(index, 2)],
+                    device=self.model.device,
                 )
         if self._force_status.numpy().any():
             raise _StepFailure(self.Status.NONFINITE, "Final contact force is nonfinite")

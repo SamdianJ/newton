@@ -6,11 +6,12 @@ Experimental monolithic cloth
 
 .. experimental::
 
-   ``SolverMonolithic.ClothInput`` supports independent, contact-free triangular
+   ``SolverMonolithic.ClothInput`` supports independent triangular
    shells, including naturally folded reference geometry. Multiple disjoint
    cloth and cable objects can share the global solve with supported articulation,
-   free rigid and tet actors. Material contact, self-collision, attachments and
-   moving cloth boundary controls remain outside this interface.
+   free rigid and tet actors. Cloth contacts supported articulation, free rigid
+   and static shapes. Self-collision, soft-soft contact, attachments and moving
+   cloth boundary controls remain outside this interface.
 
 Use native Model triangles and specify their row IDs in ``cloth_inputs``. The
 triangle ``tri_ke`` and ``tri_ka`` fields supply two-dimensional membrane mu and
@@ -31,6 +32,31 @@ forces are frozen at step entry. No mechanical tree or placeholder tet is needed
 Create state/control through the solver. Reset and checkpoint restore preserve
 reference shape; failure leaves published coordinates, velocities and force
 history unchanged.
+
+Material contact
+----------------
+
+Enable particle collision on the target shapes. Each cloth triangle contributes
+P1Q3 samples on both sides of its middle surface, with reference area divided
+by three per sample and a half-thickness gap offset. Back-facing terms use the
+existing contact law's normal selection. The middle-surface xyz coordinates
+carry the forces; this model adds no through-thickness rotational coordinates.
+Both endpoints contribute to the global residual and full cross blocks.
+
+Targets support analytic planes, spheres and boxes, and CUDA mesh targets with
+an existing bound C2 SDF. Planes must be infinite and static. Material samples
+respect Model world membership; solver actors still share one world.
+Reference areas stay fixed during deformation.
+C-EE, C-IE and C-II share the existing smoothed penalty/friction law. Use
+``globalization="ResNorm"``; energy-based acceptance with material face selection
+requires ``allow_nonconservative_energy=True`` and is reported as heuristic.
+
+Contact uses the bounded deterministic pool. Insufficient material contact
+capacity rolls back the step; it does not publish a truncated force sum.
+``get_contact_forces()`` returns particle forces and body/joint reactions from
+the same finally assembled candidate. Material checkpoint schema 6 also carries
+cable contact torque. Earlier material schemas are rejected because they lack
+this history; the existing A/R/T schema compatibility remains unchanged.
 
 Numerical contract
 ------------------

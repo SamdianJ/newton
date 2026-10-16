@@ -200,7 +200,13 @@ class _PooledContactObjective(ContactObjective):
         history = state._monolithic_coupled
         n = 3 * self.model.particle_count
         wp.copy(state_checks.scalar_view(history.contact_particle_force), self.pool.force.result[:n])
-        wp.copy(state_checks.scalar_view(history.contact_body_force), self.pool.force.result[n:])
+        if self.model.body_count:
+            wp.copy(
+                state_checks.scalar_view(history.contact_body_force),
+                self.pool.force.result[n : n + 6 * self.model.body_count],
+            )
+        if self._materials is not None and self._materials.theta_count:
+            wp.copy(history.contact_cable_torque, self.pool.force.result[n + 6 * self.model.body_count :])
         if self._model_rows.size:
             wp.launch(
                 _publish_pool_joint_force,

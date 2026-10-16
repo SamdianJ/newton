@@ -8,7 +8,7 @@ from types import MappingProxyType
 
 import numpy as np
 
-from ...geometry.flags import ParticleFlags
+from ...geometry.flags import ParticleFlags, ShapeFlags
 from .solver_types import CableInput, ClothInput
 
 
@@ -264,6 +264,9 @@ class _MaterialInputs:
             mass[1:] += lengths * fields["linear_density"] / 2
             fields.update(common(ids, mass))
             gauge = np.array_equal(bending, np.eye(2) * bending[0, 0]) and np.all(curvature == 0) and not fixed.any()
+            # Surface friction and finite quadrature can constrain common spin.
+            if np.any(model.shape_flags.numpy() & int(ShapeFlags.COLLIDE_PARTICLES)):
+                gauge = False
             eliminated = fixed.copy()
             if gauge:
                 eliminated[0] = True

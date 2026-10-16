@@ -9,11 +9,11 @@ from typing import Any
 import numpy as np
 import warp as wp
 
-from ...geometry import ShapeFlags
 from . import coupled_kernels as kernels
 from .articulation import ArticulationObjective
 from .cable_system import CableBlock
 from .cloth_system import ClothBlock
+from .contact_pipeline import _PooledContactObjective, _SpatialContactObjective
 from .linear import MonolithicLinearWorkspace
 from .linear_types import MonolithicLinearCapacities, MonolithicLinearGeneration
 from .rigid import _scatter_residual, _scatter_tangent
@@ -35,11 +35,47 @@ def _scatter(values: wp.array[Any], start: int, output: wp.array[Any]):
     output[start + i] = values[i]
 
 
+@wp.kernel
+def _add_contact(source: wp.array[Any], target: wp.array[Any]):
+    i = wp.tid()
+    target[i] += source[i]
+
+
+def create_contact(self, model, config, smooth_sdf):
+    mapping = np.full(model.particle_count, -1, dtype=np.int32)
+    dynamic = model.particle_inv_mass.numpy() > 0
+    mapping[dynamic] = np.arange(dynamic.sum())
+    radius = model.particle_radius.numpy()
+    tet = next((a for a in self._actors.actors if a.kind == "tet"), None)
+    tet_radius = 0.0
+    if tet is not None:
+        radii = radius[list(tet.particle_indices)]
+        if not np.all(radii == radii[0]):
+            raise ValueError("Tet contact requires a uniform particle radius")
+        tet_radius = float(radii[0])
+    return _PooledContactObjective(
+        model,
+        mapping,
+        q_dof_count=self._layout.q_dof_count,
+        layout=self._layout,
+        articulation_actor=self._articulation_actor,
+        actors=self._actors,
+        contact_model=config["contact_model"],
+        normal_stiffness=config["contact_stiffness"],
+        friction_coefficient=config["friction_coefficient"],
+        friction_velocity_scale=config["friction_velocity_scale"],
+        smoothing_width=config["normal_smoothing"],
+        particle_radius=tet_radius,
+        smooth_sdf=smooth_sdf,
+        alignment_policy=config["alignment_policy"],
+        dtype=self._dtype,
+        _materials=self._materials,
+    )
+
+
 def initialize(self):
     """Allocate material producers once; retain the existing Newton/PCG driver."""
     config, model, layout = self._material_config, self.model, self._layout
-    if np.any(model.shape_flags.numpy() & (int(ShapeFlags.COLLIDE_PARTICLES) | int(ShapeFlags.COLLIDE_SHAPES))):
-        raise NotImplementedError("Material-scene contact assembly belongs to the contact integration")
     device, dtype = model.device, self._dtype
     self._cloths = []
     self._cables = []
@@ -80,8 +116,14 @@ def initialize(self):
         )
     self._graphs = _SegmentGraphCache(device, enabled=self._use_cuda_graph)
     self._states._graphs = self._graphs
-    self._contact = None
-    self._contact_pool = self._contact_spatial = self._device_iteration = False
+    self._contact_pool = self._contact.count > 0
+    self._contact_spatial = isinstance(self._contact, _SpatialContactObjective)
+    self._device_iteration = False
+    if self._contact_pool:
+        capacity = config["contact_factor_capacity"]
+        self._contact.initialize_pool(
+            3 * self._contact.count if capacity == "automatic" else capacity, use_cuda_graph=self._use_cuda_graph
+        )
     self._original = self._accepted = self._trial = self._out_backup = None
     self._step_generation = self._assembly_sequence = 0
     self._dt = None
@@ -130,7 +172,11 @@ def initialize(self):
     self._linear = MonolithicLinearWorkspace(
         layout,
         MonolithicLinearCapacities(
-            len(global_rows), len(internal_rows), 0, self.linear_max_iterations, self.linear_max_iterations + 2
+            len(global_rows) + (self._contact.triplet_capacity if self._contact_pool else 0),
+            len(internal_rows),
+            0,
+            self.linear_max_iterations,
+            self.linear_max_iterations + 2,
         ),
         self._particle_mapping,
         device=device,
@@ -146,6 +192,8 @@ def initialize(self):
         internal_rows=internal_rows,
         internal_columns=internal_columns,
     )
+    if self._contact_pool:
+        self._linear._enable_fixed_bsr_storage()
     for name in ("_rhs", "_y", "_delta", "_diagonal", "_correction_rhs", "_correction_delta", "_direction_base"):
         setattr(self, name, wp.zeros(layout.scalar_dof_count, dtype=float, device=device))
     for name in ("_native_delta", "_complete_r", "_post_r", "_post_error", "_post_original", "_post_regularization"):
@@ -232,13 +280,68 @@ def evaluate(self, state, dt, *, build_tangent=True):
             raise _StepFailure(self.Status.NONFINITE, str(error)) from error
         total += e
         absolute += a
+    reference_mode = self._contact_spatial and self._contact._reference_mode
+    if self._contact_pool:
+        h = state._monolithic_coupled
+        try:
+            self._contact._batch.material_surface.update(state)
+        except ValueError as error:
+            raise _StepFailure(self.Status.NONFINITE, str(error)) from error
+        self._contact.evaluate(
+            state.particle_q, k.poses, k.com, k.jt, k.jw, dt=dt, rigid_com=h.rigid_com, rigid_rotation=h.rigid_rotation
+        )
+        diagnostics = {} if reference_mode else self._contact.evaluation_diagnostics()
+        if not reference_mode:
+            self._variational["contact_pool"] = diagnostics
+        if (
+            self._contact.flags.numpy()[0]
+            or diagnostics.get("dropped", 0)
+            or (self._contact_spatial and self._contact._query_dropped)
+        ):
+            raise _StepFailure(self.Status.NONFINITE, "Invalid or incomplete material contact evaluation")
+        wp.launch(
+            _add_contact, self._complete_r.size, [self._contact.residual, self._complete_r], device=self.model.device
+        )
+        total += self._contact.energy.numpy().sum()
+        absolute += self._contact.absolute_energy.numpy().sum()
+        forces = self._contact.pool.force.result.numpy()
+        for block in self._cloths + self._cables:
+            raw = block.raw.numpy()
+            if reference_mode:
+                rows = block.rows_host
+                free = rows >= 0
+                raw[free] += self._contact.residual.numpy()[rows[free]]
+                block.raw.assign(raw)
+                continue
+            ids = block.ids.numpy()
+            raw[: 3 * len(ids)] -= forces[: 3 * self.model.particle_count].reshape(-1, 3)[ids].ravel()
+            if block in self._cables:
+                offset = (
+                    3 * self.model.particle_count + 6 * self.model.body_count + int(block.reference["theta_offset"])
+                )
+                raw[3 * len(ids) :] -= forces[offset : offset + len(ids) - 1]
+            block.raw.assign(raw)
+    for cable in self._cables:
         raw = cable.raw.numpy()[3 * cable.ids.size :]
         self._cable_raw_theta_norms[f"cable_{cable.actor.source_index}_theta"] = float(
             np.linalg.norm(raw[~cable.reference["fixed_theta"]])
         )
-        if not cable.reference["fixed_theta"].any():
+        if not reference_mode and not cable.reference["fixed_theta"].any():
             jacobian = cable.objective.jacobian.numpy()
             null = np.array_equal(jacobian[:, :, 9], -jacobian[:, :, 10])
+            if self._contact_pool and null:
+                rows = cable.rows_host[3 * cable.ids.size :]
+                records = self._contact.pool.records
+                count = int(records.factor_count.numpy()[0])
+                offsets = records.factor_offsets.numpy()
+                columns = records.factor_columns.numpy()
+                values = records.factor_values.numpy()
+                weights = records.factor_weights.numpy()
+                for factor in range(count):
+                    first, end = offsets[factor : factor + 2]
+                    if weights[factor] > 0 and values[first:end][np.isin(columns[first:end], rows)].sum() != 0:
+                        null = False
+                        break
             if bool(cable.reference["gauge"]) or null:
                 if abs(raw.sum()) > self._config.merit_absolute_cable_theta:
                     raise _StepFailure(
@@ -259,7 +362,7 @@ def assemble(self, iteration):
     self._generation = MonolithicLinearGeneration(
         self._step_generation,
         iteration,
-        self._step_generation,
+        self._contact.evaluation_generation if self._contact_pool else self._step_generation,
         self._assembly_sequence,
         history_epoch=self._step_generation,
     )
@@ -308,6 +411,8 @@ def assemble(self, iteration):
     )
     for block in self._cloths + self._cables:
         block.assemble(assembly, self._dt)
+    if self._contact_pool:
+        self._contact.assemble_tangent(assembly)
     self._require_linear(self._linear.finalize_assembly(generation=self._generation).status)
     self._require_linear(self._linear.build_coordinate_scaling(self._material_scale, generation=self._generation))
     self._assembly_gauges = tuple(self._temporary_gauges)

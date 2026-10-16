@@ -474,10 +474,14 @@ class ContactObjective:
         base_triplet_count=0,
         actors=None,
         _metadata_only=False,
+        _materials=None,
     ):
         if type(_metadata_only) is not bool:
             raise ValueError("Contact metadata mode must be boolean")
         self._metadata_only = _metadata_only
+        self._materials = _materials
+        if _materials is not None and not _metadata_only:
+            raise ValueError("Material surfaces require the bounded contact producer")
         if dtype not in (wp.float64, wp.float32):
             raise ValueError("Contact requires float64 or float32")
         self.dtype = dtype
@@ -532,7 +536,12 @@ class ContactObjective:
             "tri_indices",
             "particle_q",
         )
-        self.values = {name: getattr(model, name).numpy().copy() for name in names}
+        self.values = {
+            name: getattr(model, name).numpy().copy()
+            if getattr(model, name) is not None
+            else np.empty((0, 3), dtype=np.int32)
+            for name in names
+        }
         v = self.values
         self.actor_samples = (
             None
@@ -543,6 +552,7 @@ class ContactObjective:
                 radius=particle_radius,
                 base_triplet_count=base_triplet_count,
                 _expand_support=not _metadata_only,
+                _materials=_materials,
             )
         )
         shapes = np.flatnonzero(v["shape_flags"] & int(ShapeFlags.COLLIDE_PARTICLES)).astype(np.int32)
@@ -552,6 +562,8 @@ class ContactObjective:
             v["shape_type"][shapes], [int(GeoType.PLANE), int(GeoType.SPHERE), int(GeoType.BOX), int(GeoType.MESH)]
         ).all():
             raise ValueError("Unsupported contact shape")
+        if _materials is not None:
+            shapes = np.empty(0, dtype=np.int32)
         table = model._texture_sdf_data
         descriptors = table.numpy() if table is not None else None
         for i in shapes:
@@ -591,7 +603,9 @@ class ContactObjective:
         if 3 * count >= 2**31:
             raise ValueError("Contact query capacity exceeds int32")
         self.layout = layout or MonolithicLinearLayout(q_dof_count, len(dynamic))
-        if (self.layout.q_dof_count, self.layout.dynamic_particle_count) != (q_dof_count, len(dynamic)):
+        if self.layout.q_dof_count != q_dof_count or (
+            _materials is None and self.layout.dynamic_particle_count != len(dynamic)
+        ):
             raise ValueError("Contact layout does not match endpoint DoFs")
         ancestors = {}
         if articulation_actor is not None:
@@ -627,6 +641,16 @@ class ContactObjective:
                     raise ValueError("Contact support/triplet capacity exceeds int32")
         self.legacy_count = count
         samples = self.actor_samples
+        if _materials is not None:
+            for name in ("weights", "offsets", "cable_coordinates"):
+                original = getattr(samples, name)
+                converted = original.astype(self.numpy_dtype)
+                if (
+                    not np.isfinite(converted).all()
+                    or np.any((original != 0) & (converted == 0))
+                    or (name == "weights" and np.any(converted <= 0))
+                ):
+                    raise ValueError("Unrepresentable material contact sampling")
         if samples is not None:
             _checked_contact_capacity(
                 count + samples.count,
@@ -677,10 +701,16 @@ class ContactObjective:
             self._support_local = wp.array(local, dtype=int, device=model.device)
         self.triplet_capacity = triplet_count
         self.model, self.contact_model = model, contact_model
-        self.body_count = model.body_count if articulation_actor is None else len(articulation_actor.body_indices)
+        self.body_count = (
+            (model.body_count if _materials is None else 0)
+            if articulation_actor is None
+            else len(articulation_actor.body_indices)
+        )
         self.parameters, self.nq, self.count = parameters, q_dof_count, count
         self._descriptors = descriptors.copy() if descriptors is not None else None
         self.conservative_energy = contact_model == "C-EE" and alignment_policy == "guard"
+        if _materials is not None and samples.material_start < samples.count:
+            self.conservative_energy = False
         self.table = table if table is not None else wp.empty(0, dtype=TextureSDFData, device=model.device)
         self.smooth_sdf = smooth_sdf
         if smooth_sdf is not None:
@@ -699,7 +729,7 @@ class ContactObjective:
         )
         self.shapes = wp.array(shapes, dtype=int, device=model.device)
         self.mapping = wp.array(mapping.astype(np.int32), device=model.device)
-        self.triangles = wp.clone(model.tri_indices)
+        self.triangles = wp.array(triangles, dtype=int, device=model.device)
         self.types = wp.clone(model.shape_type)
         self.bodies = wp.clone(model.shape_body)
         body_local = np.arange(model.body_count, dtype=np.int32)

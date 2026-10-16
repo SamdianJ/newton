@@ -155,14 +155,19 @@ def _actor_geometry(
         return
     source, target = source_shapes[key], target_shapes[key]
     point, normal = type(x[0])(0.0), type(x[0])(0.0)
-    if source < 0:
-        face, quadrature = faces[key], slots[key]
+    if source == -3:
+        point = local_points[key] + type(point)(0.0)
+        normal = local_normals[key] + type(normal)(0.0)
+    elif source < 0:
+        face, quadrature = faces[key], slots[key] % 3
         for node in range(3):
             bary = type(x[0][0])(1.0) / type(x[0][0])(6.0)
             if node == quadrature:
                 bary = type(x[0][0])(2.0) / type(x[0][0])(3.0)
             point += bary * x[triangles[face, node]]
         normal = wp.cross(x[triangles[face, 1]] - x[triangles[face, 0]], x[triangles[face, 2]] - x[triangles[face, 0]])
+        if source == -2:
+            normal *= local_normals[key][2]
     else:
         pose = (
             _body_pose(bodies[source], kinds, indices, body_com, poses, rigid_com, rigid_rotation) * transforms[source]

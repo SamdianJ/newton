@@ -1,0 +1,1 @@
+Add experimental monolithic cloth and circular-cable contact with articulation, free rigid and static shapes, including coupled position/spin Jacobians, contact torque snapshots, bounded contact admission and transactional checkpoint history.

@@ -10,9 +10,10 @@ Monolithic Coupled Solver
 
    :mod:`newton.solvers.experimental.monolithic` supports one articulation and
    one connected tetrahedral body, with optional single-body world-root FREE
-   rigid actors. Independent cloth/open cables and contact-free mixed material
-   scenes are also supported; see :doc:`monolithic_cloth` and :doc:`monolithic_cable`. Its interfaces may change without the normal
-   deprecation period. The old BE, q-only and tet-only solver entry points and
+   rigid actors. Independent cloth/open cables and mixed material scenes support
+   contact with articulation, free rigid and static shapes; see
+   :doc:`monolithic_cloth` and :doc:`monolithic_cable`. Its interfaces may change
+   without the normal deprecation period. The old BE, q-only and tet-only solver entry points and
    their examples have been retired.
 
 Use the public API

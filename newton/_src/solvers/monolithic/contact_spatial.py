@@ -11,6 +11,7 @@ import warp as wp
 
 from ...geometry import GeoType
 from .aabb import _CandidateBounds
+from .cable import _transport
 from .contact_pool import _CONTACT_WORKERS, _merge_contact_keys
 from .contact_query import _ContactQuery
 from .contact_sampling import _surface_samples
@@ -28,6 +29,40 @@ from .contact_sweep import _ArticulationSweep, _length_upper, _product_upper, _s
     return result;
 """)
 def _lower(x: wp.float64) -> wp.float64: ...
+
+
+@wp.kernel(enable_backward=False)
+def _material_reach(
+    samples: wp.array[int],
+    radii: wp.array[wp.float64],
+    edges: wp.array[wp.vec3i],
+    x0: wp.array[Any],
+    x1: wp.array[Any],
+    directors: wp.array[Any],
+    gamma: wp.float64,
+    reach: wp.array[wp.float64],
+    status: wp.array[int],
+):
+    i = wp.tid()
+    sample = samples[i]
+    if sample < 0:
+        return
+    a, b, angle = edges[sample][0], edges[sample][1], edges[sample][2]
+    old = wp.normalize(x0[b] - x0[a])
+    tangent = wp.normalize(x1[b] - x1[a])
+    if type(old[0])(1.0) + wp.dot(old, tangent) <= type(old[0])(1e-10):
+        wp.atomic_or(status, 0, 1)
+        return
+    d = _transport(old, tangent, directors[angle])
+    v, w = wp.vec3d(d), wp.vec3d(wp.cross(tangent, d))
+    # Frobenius norm bounds every angular phase, including native chart drift.
+    current = wp.sqrt(wp.dot(v, v) + wp.dot(w, w))
+    v, w = wp.vec3d(directors[angle]), wp.vec3d(wp.cross(old, directors[angle]))
+    initial = wp.sqrt(wp.dot(v, v) + wp.dot(w, w))
+    value = radii[i] * wp.max(current, initial) * (wp.float64(1.0) + gamma)
+    reach[i] = -_lower(-value)
+    if not wp.isfinite(value):
+        wp.atomic_or(status, 0, 1)
 
 
 @wp.kernel(enable_backward=False)
@@ -183,6 +218,7 @@ def _selection_packet(
     query_status: wp.array[int],
     dropped: wp.array[wp.int64],
     legacy: int,
+    material: int,
     packet: wp.array[wp.int64],
 ):
     n = count[0]
@@ -201,6 +237,14 @@ def _selection_packet(
     packet[1] = wp.int64(lo)
     packet[2] = wp.int64(n - lo)
     packet[3] = dropped[0]
+    lo, hi = int(0), n + 0
+    while lo < hi:
+        mid = lo + (hi - lo) // 2
+        if ids[mid] < wp.uint64(material):
+            lo = mid + 1
+        else:
+            hi = mid
+    packet[4] = wp.int64(lo)
 
 
 def _corners(lower, upper):
@@ -252,6 +296,13 @@ class _ContactSpatial:
                 raise ValueError("Invalid native spatial contact start")
         fields = [getattr(batch.all_samples, n).numpy() for n in ("sources", "targets", "faces", "slots")]
         sources, targets, faces, _slots = fields
+        material = c._materials is not None
+        slots_per_patch = 1 if material else 3
+        sample_stride = int(max(_slots, default=0)) + 1
+        if material:
+            fields[2] = faces * sample_stride + _slots
+            fields[3] = np.zeros_like(_slots)
+            faces = fields[2]
         unique_faces = sorted(set(zip(sources.tolist(), faces.tolist(), strict=True)))
         unique_targets = sorted(set(targets.tolist()))
         self.face_index = {key: i for i, key in enumerate(unique_faces)}
@@ -259,7 +310,7 @@ class _ContactSpatial:
         allowed = sorted(set(zip(sources.tolist(), targets.tolist(), strict=True)))
         keys = np.array(
             [
-                (self.face_index[s, f] * len(unique_targets) + target_index[t]) * 3 + slot
+                (self.face_index[s, f] * len(unique_targets) + target_index[t]) * slots_per_patch + slot
                 for s, t, f, slot in zip(*fields, strict=True)
             ],
             dtype=np.uint64,
@@ -272,15 +323,28 @@ class _ContactSpatial:
         self.q0, self.x0, self.poses0 = wp.clone(q0), wp.clone(x0), wp.clone(poses0)
         self.com0 = wp.clone(rigid_com)
         self.status, self.count = (wp.zeros(1, dtype=int, device=self.device) for _ in range(2))
-        self.packet = wp.zeros(4, dtype=wp.int64, device=self.device)
+        self.packet = wp.zeros(5, dtype=wp.int64, device=self.device)
         self.mode_counts = None
         kinds, indices, body_com = (getattr(batch.support, n).numpy() for n in ("kinds", "indices", "com"))
         transforms, bodies, types, scales = (getattr(c, n).numpy() for n in ("transforms", "bodies", "types", "scales"))
         local_lo, local_hi, source_shapes, source_faces = [], [], [], []
         surface = {}
-        for source, face in unique_faces:
-            source_shapes.append(source)
-            source_faces.append(face)
+        bound_triangles = c.triangles.numpy().tolist()
+        face_reach, face_material = [], []
+        for source, ordinal in unique_faces:
+            face = ordinal // sample_stride if material else ordinal
+            source_shapes.append(max(-1, source))
+            face_material.append(face if source == -3 else -1)
+            reach = 0.0
+            bound_face = face
+            if source == -3:
+                edge = c.actor_samples.cable_edges[face]
+                bound_face = len(bound_triangles)
+                bound_triangles.append([edge[0], edge[1], edge[1]])
+                reach = np.linalg.norm(c.actor_samples.cable_coordinates[face, 1:])
+                reach = np.nextafter(reach * (1 + 128 * np.finfo(c.numpy_dtype).eps), np.inf)
+            source_faces.append(bound_face)
+            face_reach.append(reach)
             if source < 0:
                 lo, hi = np.zeros(3), np.zeros(3)
             else:
@@ -371,7 +435,12 @@ class _ContactSpatial:
             setattr(self, prefix + "_lo", wp.zeros(len(shapes), dtype=wp.vec3d, device=self.device))
             setattr(self, prefix + "_hi", wp.zeros(len(shapes), dtype=wp.vec3d, device=self.device))
 
-        geometry("face", source_shapes, source_faces, local_lo, local_hi, np.zeros(len(unique_faces)))
+        self.bound_triangles = wp.array(
+            np.asarray(bound_triangles, dtype=np.int32).reshape(-1, 3), dtype=int, device=self.device
+        )
+        geometry("face", source_shapes, source_faces, local_lo, local_hi, face_reach)
+        self.face_material = wp.array(face_material, dtype=int, device=self.device)
+        self.face_radius = wp.array(face_reach, dtype=wp.float64, device=self.device)
         gaps = batch.all_samples.gaps.numpy().astype(float)
         reach = [float(gaps[targets == target].max()) + c.parameters[3] + self.law_margin for target in unique_targets]
         geometry("target", unique_targets, np.zeros(len(unique_targets), np.int32), target_lo, target_hi, reach)
@@ -379,20 +448,27 @@ class _ContactSpatial:
         self._bounds(q0, x0, self.com0)
         if self.status.numpy()[0] or self.sweep.status.numpy()[0]:
             raise ValueError("Invalid initial contact envelopes")
+        query_faces = unique_faces
+        if material:
+            query_faces = [(i, 0) for i in range(len(unique_faces))]
+            allowed = sorted({(self.face_index[s, f], int(t)) for s, t, f in zip(sources, targets, faces, strict=True)})
         self.query = _ContactQuery(
-            unique_faces,
+            query_faces,
             unique_targets,
             allowed,
             planes=[t for t in unique_targets if types[t] == GeoType.PLANE],
             capacity=capacity,
             device=self.device,
             initial_bounds=(self.face_lo, self.face_hi, self.target_lo, self.target_hi),
+            _samples_per_patch=slots_per_patch,
         )
         self._ids, self._scratch_ids = (wp.empty(capacity, dtype=wp.uint64, device=self.device) for _ in range(2))
         self._indices, self._scratch_indices = (wp.empty(capacity, dtype=int, device=self.device) for _ in range(2))
         self.identities = self._scratch_ids if (max(1, capacity) - 1).bit_length() % 2 else self._ids
         self._owned = {name: a for name, a in vars(self).items() if isinstance(a, wp.array)}
-        self._metadata = batch.all_samples, batch.support
+        self._metadata = (batch.all_samples, batch.support)
+        if batch.material_surface is not None:
+            self._metadata += (batch.material_surface,)
         self._borrowed = tuple((c, name, getattr(c, name)) for name in batch.METADATA_ARRAYS)
         self._borrowed += tuple(
             (owner, name, a) for owner in self._metadata for name, a in vars(owner).items() if isinstance(a, wp.array)
@@ -402,8 +478,11 @@ class _ContactSpatial:
         return tuple(self._owned.values()) + self.sweep.buffers() + self.query.buffers()
 
     def validate_storage(self):
+        metadata = (self.batch.all_samples, self.batch.support)
+        if self.batch.material_surface is not None:
+            metadata += (self.batch.material_surface,)
         if (
-            (self.batch.all_samples, self.batch.support) != self._metadata
+            metadata != self._metadata
             or any(getattr(self, name) is not a for name, a in self._owned.items())
             or any(getattr(owner, name) is not a for owner, name, a in self._borrowed)
         ):
@@ -438,6 +517,24 @@ class _ContactSpatial:
     def _bounds(self, q, x, com):
         self.status.zero_()
         self.sweep.update(self.q0, q)
+        surface = self.batch.material_surface
+        if surface is not None:
+            wp.launch(
+                _material_reach,
+                self.face_material.size,
+                [
+                    self.face_material,
+                    self.face_radius,
+                    surface.edges,
+                    self.x0,
+                    x,
+                    surface.anchor_d,
+                    self.gamma,
+                    self.face_reach,
+                    self.status,
+                ],
+                device=self.device,
+            )
         for prefix in ("face", "target"):
             data = [
                 getattr(self, prefix + "_" + n) for n in ("shapes", "faces", "local_lo", "local_hi", "radii", "reach")
@@ -452,7 +549,7 @@ class _ContactSpatial:
                     c.transforms,
                     s.kinds,
                     s.indices,
-                    c.triangles,
+                    self.bound_triangles,
                     self.x0,
                     x,
                     self.poses0,
@@ -530,12 +627,17 @@ class _ContactSpatial:
                 self.query.status,
                 self.query.dropped,
                 self.batch.contact.legacy_count,
+                self.batch.contact.legacy_count + self.batch.contact.actor_samples.material_start
+                if self.batch.material_surface is not None
+                else self.batch.contact.count,
                 self.packet,
             ],
             device=self.device,
         )
-        flags, left, right, dropped = map(int, self.packet.numpy())
+        flags, left, right, dropped, middle = map(int, self.packet.numpy())
         self.mode_counts = (left, right) if flags == 0 else (0, 0)
+        if self.batch.material_surface is not None:
+            self.mode_counts = (left, middle - left, left + right - middle) if flags == 0 else (0, 0, 0)
         if flags:
             raise ValueError("Invalid spatial contact envelope or identity")
         if dropped and warn:

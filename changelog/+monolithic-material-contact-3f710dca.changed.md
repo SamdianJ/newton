@@ -1,0 +1,1 @@
+Require material checkpoint schema 6 to retain cable contact torque; reject earlier material checkpoints and recreate material state explicitly, while preserving existing A/R/T checkpoint compatibility. Require the existing nonconservative-energy opt-in for energy-based acceptance with material face selection.

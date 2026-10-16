@@ -68,8 +68,8 @@ def _select_sparse_chunk(
     ids: wp.array[wp.uint64],
     size: wp.array[int],
     records: Any,
-    legacy: int,
-    mode: int,
+    lower: int,
+    upper: int,
     offset: int,
     capacity: int,
     begin: wp.array[int],
@@ -79,13 +79,19 @@ def _select_sparse_chunk(
     lo, hi = int(0), n + 0
     while lo < hi:
         mid = lo + (hi - lo) // 2
-        if ids[mid] < wp.uint64(legacy):
+        if ids[mid] < wp.uint64(lower):
             lo = mid + 1
         else:
             hi = mid
-    start, end = lo + 0, n + 0
-    if mode == 2:
-        start, end = 0, lo + 0
+    start = lo + 0
+    hi = n + 0
+    while lo < hi:
+        mid = lo + (hi - lo) // 2
+        if ids[mid] < wp.uint64(upper):
+            lo = mid + 1
+        else:
+            hi = mid
+    end = lo + 0
     begin[0] = start + offset
     count[0] = wp.max(0, wp.min(capacity, end - start - offset))
     if records.flags[0] != 0:
@@ -168,6 +174,7 @@ def _reference_rows(
     values: wp.array[Any],
     count: wp.array[int],
     flags: wp.array[int],
+    row_count: int,
 ):
     i, j = wp.tid()
     if i < candidates.count[0]:
@@ -179,6 +186,14 @@ def _reference_rows(
             identities[slot] = candidates.identities[i]
             local[slot] = j
             values[slot] = candidates.residual[i, j]
+
+        if j == 0:
+            for axis in range(2):
+                slot = wp.atomic_add(count, 0, 1)
+                rows[slot] = row_count + axis
+                identities[slot] = candidates.identities[i]
+                local[slot] = 0
+                values[slot] = candidates.energy[i, axis]
 
 
 @wp.kernel
@@ -245,6 +260,8 @@ def _project_contact_chunk(
     if i >= candidates.count[0] or flags[0] != 0:
         return
     source, target = samples.sources[i] + 0, samples.targets[i] + 0
+    if source == -3:
+        return
     point, rotation, n = points[i], geometry.rotation[i], normal[i]
     axis = type(point)(1.0, 0.0, 0.0)
     if wp.abs(n[1]) < wp.abs(n[0]) and wp.abs(n[1]) <= wp.abs(n[2]):
@@ -270,7 +287,7 @@ def _project_contact_chunk(
                 row = support.particles[particle]
                 if row >= 0:
                     bary = type(point[0])(1.0) / type(point[0])(6.0)
-                    if node == samples.slots[i]:
+                    if node == samples.slots[i] % 3:
                         bary = type(point[0])(2.0) / type(point[0])(3.0)
                     for coordinate in range(3):
                         vector = type(point)(0.0)
@@ -339,7 +356,7 @@ def _project_contact_chunk(
         if shape < 0:
             for node in range(3):
                 bary = type(point[0])(1.0) / type(point[0])(6.0)
-                if node == samples.slots[i]:
+                if node == samples.slots[i] % 3:
                     bary = type(point[0])(2.0) / type(point[0])(3.0)
                 for coordinate in range(3):
                     candidates.force_rows[i, f] = 3 * triangles[samples.faces[i], node] + coordinate
@@ -415,13 +432,16 @@ class _ContactBatch:
         if actors is not None:
             kinds.fill(-1)
             indices = np.full(model.body_count, -1, np.int32)
-            arm = next(a for a in actors.actors if a.kind == "articulation")
+            arm = next((a for a in actors.actors if a.kind == "articulation"), None)
+            arm_joints = () if arm is None else arm.joint_indices
+            arm_dofs = () if arm is None else arm.dof_indices
+            arm_bodies = () if arm is None else arm.body_indices
             parent, child, starts = (
                 getattr(model, n).numpy() for n in ("joint_parent", "joint_child", "joint_qd_start")
             )
-            incoming = {int(child[j]): j for j in arm.joint_indices}
-            local_dofs = {j: i for i, j in enumerate(arm.dof_indices)}
-            for local, body in enumerate(arm.body_indices):
+            incoming = {int(child[j]): j for j in arm_joints}
+            local_dofs = {j: i for i, j in enumerate(arm_dofs)}
+            for local, body in enumerate(arm_bodies):
                 kinds[body], indices[body] = 0, local
                 selected, cursor = [], body
                 while cursor >= 0:
@@ -498,7 +518,11 @@ class _ContactBatch:
         demands = []
         for source, target, face in zip(arrays["sources"], arrays["targets"], arrays["faces"], strict=True):
             k = len(body_support.get(int(bodies[target]), ()))
-            if source < 0:
+            if source == -3:
+                edge = a.cable_edges[face]
+                k += 3 * int(np.count_nonzero(particles[edge[:2]] >= 0))
+                k += int(actors.maps["theta_to_global"][edge[2]] >= 0)
+            elif source < 0:
                 k += 3 * int(np.count_nonzero(particles[triangles[face]] >= 0))
             else:
                 k += len(body_support.get(int(bodies[source]), ()))
@@ -507,7 +531,9 @@ class _ContactBatch:
             capacity = sum(max(1, k) for k in demands)
         self.pool = _ContactPool(
             contact.layout.scalar_dof_count,
-            3 * model.particle_count + 6 * model.body_count,
+            3 * model.particle_count
+            + 6 * model.body_count
+            + (0 if contact._materials is None else contact._materials.theta_count),
             m,
             capacity,
             max(1, max(demands, default=0)),
@@ -544,6 +570,11 @@ class _ContactBatch:
         self._empty_ids = wp.empty(0, dtype=wp.uint64, device=self.device)
         self.graphs = _SegmentGraphCache(self.device, enabled=use_cuda_graph and self.device.is_cuda)
         self._started = False
+        self.material_surface = None
+        if contact._materials is not None:
+            from .contact_material import _MaterialSurface  # noqa: PLC0415
+
+            self.material_surface = _MaterialSurface(self)
 
     def _geometry(self, count, *, rotation):
         geometry = _geometry_type(self.dtype)()
@@ -561,6 +592,8 @@ class _ContactBatch:
             arrays.extend(a for a in vars(owner).values() if isinstance(a, wp.array))
         # Shared metadata is a graph binding too: rebinding a shape/SDF array
         # must not replay a graph containing its retired pointer.
+        if self.material_surface is not None:
+            arrays.extend(self.material_surface.buffers())
         metadata = tuple(getattr(self.contact, name) for name in self.METADATA_ARRAYS)
         if hasattr(self, "reference_rows"):
             arrays.extend(self.reference_rows.buffers())
@@ -570,9 +603,9 @@ class _ContactBatch:
     def initialize_reference(self):
         """Reserve batch-sized full-reference scratch, independent of contact admission budgets."""
         k = self.pool.max_support
-        capacity = self.batch_capacity * k
+        capacity = self.batch_capacity * (k + 2)
         self.reference_rows = _ContactRows(
-            self.pool.row_count,
+            self.pool.row_count + 2,
             capacity,
             max(1, self.contact.count),
             k,
@@ -603,6 +636,7 @@ class _ContactBatch:
         wp.copy(self.flags, self.start_flags)
         self.pool.records.flags.zero_()
         self.reference_residual.zero_()
+        self.reference_energy.zero_()
         for mode in self._chunks():
             self.graphs.run(
                 "contact_reference_geometry",
@@ -620,7 +654,7 @@ class _ContactBatch:
             wp.launch(
                 _reference_rows,
                 (self.batch_capacity, self.pool.max_support),
-                [self.pool.candidates, *self.reference_inputs, self.flags],
+                [self.pool.candidates, *self.reference_inputs, self.flags, self.pool.row_count],
                 device=self.device,
             )
             self.reference_rows.reduce(*self.reference_inputs)
@@ -629,6 +663,17 @@ class _ContactBatch:
                 _add_reference,
                 self.reference_residual.size,
                 [self.reference_rows.result, self.reference_residual, self.reference_rows.flags, self.flags],
+                device=self.device,
+            )
+            wp.launch(
+                _add_reference,
+                2,
+                [
+                    self.reference_rows.result[self.pool.row_count :],
+                    self.reference_energy,
+                    self.reference_rows.flags,
+                    self.flags,
+                ],
                 device=self.device,
             )
 
@@ -662,7 +707,15 @@ class _ContactBatch:
         if selection is not None:
             if selection.mode_counts is None:
                 raise ValueError("Check spatial selection before scheduling batches")
-            for mode, count in zip((2, 3), selection.mode_counts, strict=True):
+            middle = (
+                self.contact.count
+                if self.material_surface is None
+                else self.contact.legacy_count + self.contact.actor_samples.material_start
+            )
+            bounds = ((0, self.contact.legacy_count), (self.contact.legacy_count, middle))
+            if self.material_surface is not None:
+                bounds += ((middle, self.contact.count),)
+            for mode, ((lower, upper), count) in enumerate(zip(bounds, selection.mode_counts, strict=True), start=2):
                 for offset in range(0, count, max(1, self.batch_capacity)):
                     wp.launch(
                         _select_sparse_chunk,
@@ -671,8 +724,8 @@ class _ContactBatch:
                             selection.identities,
                             selection.count,
                             self.pool.records,
-                            self.contact.legacy_count,
-                            mode,
+                            lower,
+                            upper,
                             offset,
                             self.batch_capacity,
                             self.first,
@@ -682,7 +735,14 @@ class _ContactBatch:
                     )
                     yield mode
             return
-        for begin, end, mode in ((0, self.contact.legacy_count, 2), (self.contact.legacy_count, self.contact.count, 3)):
+        middle = self.contact.count
+        if self.material_surface is not None:
+            middle = self.contact.legacy_count + self.contact.actor_samples.material_start
+        for begin, end, mode in (
+            (0, self.contact.legacy_count, 2),
+            (self.contact.legacy_count, middle, 3),
+            (middle, self.contact.count, 4),
+        ):
             for first in range(begin, end, max(1, self.batch_capacity)):
                 wp.launch(
                     _select_contact_chunk,
@@ -764,7 +824,7 @@ class _ContactBatch:
                     c.margins if mode == 2 else self.samples.gaps,
                     self.dtype(c.parameters[4] if mode == 2 else 0),
                     self.dtype(c.parameters[3]),
-                    int(c._alignment_policy == "mask"),
+                    int(mode == 4 or c._alignment_policy == "mask"),
                     self._flags,
                     True,
                     out.count,
@@ -803,7 +863,7 @@ class _ContactBatch:
                 self.dtype(c.parameters[1]),
                 self.dtype(c.numpy_dtype(c.parameters[2]) * c.numpy_dtype(dt)),
                 ("C-EE", "C-IE", "C-II").index(c.contact_model),
-                int(c._alignment_policy == "mask"),
+                int(mode == 4 or c._alignment_policy == "mask"),
                 self._flags,
                 out.energy,
                 self._empty_scalar,
@@ -848,6 +908,9 @@ class _ContactBatch:
             ],
             device=self.device,
         )
+
+        if self.material_surface is not None:
+            self.material_surface.project(state)
 
     def begin_step(self, x, poses, com, jt, jw, *, rigid_com=None, rigid_rotation=None):
         state = self._state(x, poses, com, jt, jw, rigid_com, rigid_rotation)

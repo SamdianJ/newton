@@ -68,6 +68,7 @@ def _emit_candidates(
     face: int,
     target: int,
     targets: int,
+    samples_per_patch: int,
     keys: wp.array[wp.uint64],
     indices: wp.array[int],
     count: wp.array[int],
@@ -76,7 +77,7 @@ def _emit_candidates(
     slot = wp.atomic_add(count, 0, 0)
     reserved = int(0)
     while slot < keys.shape[0]:
-        reserved = wp.min(3, keys.shape[0] - slot)
+        reserved = wp.min(samples_per_patch, keys.shape[0] - slot)
         previous = wp.atomic_cas(count, 0, slot, slot + reserved)
         if previous == slot:
             break
@@ -84,12 +85,12 @@ def _emit_candidates(
         reserved = 0
     for sample in range(reserved):
         # Stable geometric ordinal, independent of the reservation order.
-        keys[slot + sample] = (wp.uint64(face) * wp.uint64(targets) + wp.uint64(target)) * wp.uint64(3) + wp.uint64(
-            sample
-        )
+        keys[slot + sample] = (wp.uint64(face) * wp.uint64(targets) + wp.uint64(target)) * wp.uint64(
+            samples_per_patch
+        ) + wp.uint64(sample)
         indices[slot + sample] = slot + sample
-    if reserved < 3:
-        wp.atomic_add(dropped, 0, wp.int64(3 - reserved))
+    if reserved < samples_per_patch:
+        wp.atomic_add(dropped, 0, wp.int64(samples_per_patch - reserved))
 
 
 @wp.kernel(enable_backward=False)
@@ -113,6 +114,7 @@ def _query_faces(
     upper: wp.array[wp.vec3],
     finite_targets: wp.array[int],
     targets: int,
+    samples_per_patch: int,
     offsets: wp.array[int],
     sources: wp.array[int],
     keys: wp.array[wp.uint64],
@@ -129,7 +131,7 @@ def _query_faces(
     while wp.bvh_query_next(query, item):
         target = finite_targets[item]
         if _allowed(face_sources[face], target, offsets, sources):
-            _emit_candidates(face, target, targets, keys, indices, count, dropped)
+            _emit_candidates(face, target, targets, samples_per_patch, keys, indices, count, dropped)
 
 
 @wp.kernel(enable_backward=False)
@@ -137,6 +139,7 @@ def _query_planes(
     face_sources: wp.array[int],
     planes: wp.array[int],
     targets: int,
+    samples_per_patch: int,
     offsets: wp.array[int],
     sources: wp.array[int],
     keys: wp.array[wp.uint64],
@@ -149,7 +152,7 @@ def _query_planes(
     target = planes[plane]
     # Keep allowed plane patches, parallel across faces instead of one long loop.
     if status[0] == 0 and _allowed(face_sources[face], target, offsets, sources):
-        _emit_candidates(face, target, targets, keys, indices, count, dropped)
+        _emit_candidates(face, target, targets, samples_per_patch, keys, indices, count, dropped)
 
 
 class _ContactQuery:
@@ -166,7 +169,9 @@ class _ContactQuery:
     a frozen list can omit contacts. This component supplies no automatic repair.
     """
 
-    def __init__(self, faces, targets, allowed, *, planes=(), capacity, device, initial_bounds=None):
+    def __init__(
+        self, faces, targets, allowed, *, planes=(), capacity, device, initial_bounds=None, _samples_per_patch=3
+    ):
         def integers(values, columns):
             a = np.asarray(values)
             if a.size == 0:
@@ -178,6 +183,9 @@ class _ContactQuery:
                 raise ValueError("Invalid contact query metadata")
             return a.astype(np.int32)
 
+        if type(_samples_per_patch) is not int or _samples_per_patch not in (1, 3):
+            raise ValueError("Contact patches require one surface sample or three P1Q3 slots")
+        self.samples_per_patch = _samples_per_patch
         self.faces = integers(faces, 2)
         self.targets = np.unique(integers(targets, 1))
         self.allowed = np.unique(integers(allowed, 2), axis=0)
@@ -196,7 +204,7 @@ class _ContactQuery:
             not isinstance(capacity, int)
             or isinstance(capacity, bool)
             or not 0 <= capacity <= np.iinfo(np.int32).max
-            or len(self.faces) * len(self.targets) * 3 > np.iinfo(np.int64).max
+            or len(self.faces) * len(self.targets) * self.samples_per_patch > np.iinfo(np.int64).max
         ):
             raise ValueError("Invalid contact query capacity")
         self.device = wp.get_device(device)
@@ -318,6 +326,7 @@ class _ContactQuery:
                     self.face_hi,
                     self.finite_targets,
                     len(self.targets),
+                    self.samples_per_patch,
                     self.offsets,
                     self.sources,
                     self._keys,
@@ -336,6 +345,7 @@ class _ContactQuery:
                     self.face_sources,
                     self.plane_targets,
                     len(self.targets),
+                    self.samples_per_patch,
                     self.offsets,
                     self.sources,
                     self._keys,
