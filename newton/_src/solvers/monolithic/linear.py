@@ -31,6 +31,7 @@ from .bsr_reduction import (
     _FixedScalarBsrReduction,
     _ScalarBsrReduction,
 )
+from .cable_preconditioner import CablePreconditioner
 from .linear_types import (
     MonolithicDenseLinearOracle,
     MonolithicLinearBuildResult,
@@ -65,9 +66,10 @@ class MonolithicLinearWorkspace:
         pcg_mode: str = "diagnostic",
         use_cuda_graph: bool = False,
         contact_support=None,
+        cable_row_order=None,
     ):
-        if layout.material_ranges:
-            raise NotImplementedError("Material linear assembly and preconditioning are not yet connected")
+        if layout.material_ranges and cable_row_order is None:
+            raise ValueError("Material layouts require an explicit cable preconditioner ordering")
         if pcg_mode not in ("diagnostic", "production"):
             raise ValueError("pcg_mode must be diagnostic or production")
         if type(use_cuda_graph) is not bool or (
@@ -92,6 +94,9 @@ class MonolithicLinearWorkspace:
         self.group_limits = wp.full(self.group_count, float("inf"), dtype=float, device=device)
         self.capacities = capacities
         self.device = wp.get_device(device)
+        self._cable_preconditioner = (
+            CablePreconditioner(layout, cable_row_order, device=self.device) if layout.material_ranges else None
+        )
         if (
             particle_to_dynamic.device != self.device
             or particle_to_dynamic.dtype != wp.int32
@@ -544,6 +549,8 @@ class MonolithicLinearWorkspace:
             self.rigid_rows,
             self.row_groups,
         )
+        if self._cable_preconditioner is not None:
+            arrays += self._cable_preconditioner.buffers()
         return (
             self._generation,
             y.ptr,
@@ -556,6 +563,8 @@ class MonolithicLinearWorkspace:
 
     def _factor_storage_binding(self):
         arrays = (self.scale, self._q_cholesky, self._x_cholesky, self._rigid_cholesky, self.rigid_rows)
+        if self._cable_preconditioner is not None:
+            arrays += self._cable_preconditioner.buffers()
         return self._generation, self.layout, tuple((a.ptr, a.shape, a.strides, a.dtype, a.device) for a in arrays)
 
     def _vector_valid(self, vector) -> bool:
@@ -577,6 +586,25 @@ class MonolithicLinearWorkspace:
 
     def _build_scaling_device(self, dynamic_diagonal, epsilon_d):
         return bsr._build_scaling_device(self, dynamic_diagonal, epsilon_d)
+
+    def build_coordinate_scaling(self, scale, *, generation):
+        """Bind an explicit positive change of units for massless material angles."""
+        if not self._current(generation):
+            return MonolithicLinearStatus.STALE_GENERATION
+        self._scaling_valid = False
+        self._factor_valid = False
+        self._warm_start_key = None
+        values = np.asarray(scale, dtype=np.float32)
+        if values.shape != self.scale.shape or not np.isfinite(values).all() or np.any(values <= 0):
+            return MonolithicLinearStatus.INVALID_ARGUMENT
+        diagonal = 1.0 / values**2
+        if not np.isfinite(diagonal).all() or np.any(diagonal <= 0):
+            return MonolithicLinearStatus.INVALID_ARGUMENT
+        self.scale.assign(values)
+        self.diagonal.assign(diagonal)
+        self.dynamic_diagonal.assign(diagonal)
+        self._scaling_valid = True
+        return MonolithicLinearStatus.SUCCESS
 
     def set_regularization(
         self, lambda_value: float, *, generation: MonolithicLinearGeneration

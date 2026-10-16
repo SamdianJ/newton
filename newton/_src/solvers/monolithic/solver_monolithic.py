@@ -17,7 +17,7 @@ import warp as wp
 from ...sim import JointType, Model
 from ..solver import SolverBase
 from . import coupled_kernels as kernels
-from . import iteration_device, state_checks
+from . import iteration_device, material_runtime, state_checks
 from .actors import Actor, ActorTable
 from .articulation import ArticulationObjective, _TreeKinematics
 from .articulation_state import _predict, _recover_history
@@ -73,6 +73,10 @@ class SolverMonolithic(SolverBase):
     scaled RMS residual goals for an FP32 experiment. Relative goals and trial
     acceptance are unchanged; the option is included in checkpoint identity.
 
+    ``cable_position_tolerance`` [N] and ``cable_theta_tolerance`` [N m]
+    set per-cable original-unit L2 residual goals (defaults 1e-9 and 1e-11).
+    Both are experimental numerical policies included in checkpoint identity.
+
     Stopped publication retains all physical/state gates except the residual goal.
     ``last_accepted`` requires an accepted Newton update; ``current_iterate``
     also permits the initialized predictor when no update was accepted. Neither
@@ -126,6 +130,8 @@ class SolverMonolithic(SolverBase):
         fp32_absolute_tolerance=None,
         cloth_inputs=(),
         cable_inputs=(),
+        cable_position_tolerance=1e-9,
+        cable_theta_tolerance=1e-11,
     ):
         cloth_inputs, cable_inputs = tuple(cloth_inputs), tuple(cable_inputs)
         self._materials = _MaterialInputs(model, cloth_inputs, cable_inputs) if cloth_inputs or cable_inputs else None
@@ -136,6 +142,21 @@ class SolverMonolithic(SolverBase):
         self._precision = self.Precision(precision)
         self._dtype = wp.float64 if self._precision == self.Precision.FP64 else wp.float32
         self._numpy_dtype = np.float64 if self._precision == self.Precision.FP64 else np.float32
+        for name, value in (
+            ("cable_position_tolerance", cable_position_tolerance),
+            ("cable_theta_tolerance", cable_theta_tolerance),
+        ):
+            if (
+                isinstance(value, (bool, np.bool_))
+                or not isinstance(value, (int, float, np.integer, np.floating))
+                or not np.isfinite(float(value))
+                or float(value) <= 0
+            ):
+                raise ValueError(f"{name} must be a positive finite physical residual tolerance")
+            with np.errstate(over="ignore", under="ignore"):
+                representable = self._numpy_dtype(value)
+            if not np.isfinite(representable) or representable <= 0:
+                raise ValueError(f"{name} must be representable in the selected precision")
         self._rigid = RigidObjective(model, self._actors, dtype=self._dtype)
         if fp32_absolute_tolerance is not None:
             if self._dtype != wp.float32 or isinstance(fp32_absolute_tolerance, (bool, np.bool_)):
@@ -209,6 +230,8 @@ class SolverMonolithic(SolverBase):
                     "linear_max_iterations": linear_max_iterations,
                     "linear_tolerance": linear_tolerance,
                     "linear_absolute_tolerance": linear_absolute_tolerance,
+                    "cable_position_tolerance": cable_position_tolerance,
+                    "cable_theta_tolerance": cable_theta_tolerance,
                     "pcg_mode": self.PCGMode(pcg_mode).value,
                     "tet_rest_density": density,
                     "contact_factor_capacity": "automatic"
@@ -454,11 +477,8 @@ class SolverMonolithic(SolverBase):
         iteration_device.initialize(self)
 
     def _initialize_material_lifecycle(self, model, *, joint_terms, config):
-        """Allocate the shared layout/state API before material assembly is available.
-
-        No material, inertia or contact operator is substituted here. step()
-        rejects this staging path until the material objectives are connected.
-        """
+        """Allocate shared material layout and continuation before lazy operator setup."""
+        self._material_config = config
         if config["globalization"] not in ("Armijo", "ResNorm", "ArmijoOrResNorm") or config[
             "alignment_policy"
         ] not in ("guard", "mask"):
@@ -486,6 +506,7 @@ class SolverMonolithic(SolverBase):
             ):
                 raise ValueError(f"Disabled joint term has nonzero parameters: {name}")
         fields = {
+            "material_iteration_policy": np.array([2], dtype=np.int32),
             "material_digest": np.frombuffer(bytes.fromhex(self._materials.identity), dtype=np.uint8),
             "layout_digest": np.frombuffer(bytes.fromhex(self._actors.identity), dtype=np.uint8),
             "joint_terms": self._joint_terms.params.numpy(),
@@ -530,19 +551,25 @@ class SolverMonolithic(SolverBase):
             setattr(self, name, config[name])
 
     def create_control(self):
-        """Create owned experimental theta targets [rad] and torques [N m].
+        """Create experimental cable position [m], angle [rad] and torque [N m] controls.
 
-        Targets are used only on fixed_theta edges; torque is supported only
-        on physically free edges. The ordinary Model joint controls are retained.
+        Position/angle targets apply only to their fixed vertices/edges; torque
+        is supported only on physically free edges. The ordinary Model joint controls are retained.
         """
         control = self.model.control()
         if self._materials is not None:
+            if not self.model.joint_count:
+                for name in ("joint_f", "joint_target_q", "joint_target_qd"):
+                    setattr(control, name, wp.zeros(0, dtype=float, device=self.model.device))
             namespace = Model.AttributeNamespace("_monolithic_cable")
             theta = [obj["rest_theta"] for obj in self._materials.cable]
             namespace.target_theta = wp.array(
                 np.concatenate(theta) if theta else [], dtype=self._dtype, device=self.model.device
             )
             namespace.torque = wp.zeros(self._materials.theta_count, dtype=self._dtype, device=self.model.device)
+            namespace.target_position = wp.array(
+                self.model.particle_q.numpy(), dtype=self._states.vector, device=self.model.device
+            )
             control._monolithic_cable = namespace
         return control
 
@@ -565,6 +592,19 @@ class SolverMonolithic(SolverBase):
             part = slice(offset, offset + len(obj["rest_theta"]))
             if np.any(values["torque"][part][obj["fixed_theta"]] != 0):
                 raise ValueError("External cable torques require physically free theta")
+        array = getattr(namespace, "target_position", None)
+        if (
+            not isinstance(array, wp.array)
+            or (array.shape, array.dtype, array.device)
+            != (
+                (self.model.particle_count,),
+                self._states.vector,
+                self.model.device,
+            )
+            or not np.isfinite(array.numpy()).all()
+        ):
+            raise ValueError("Invalid cable control: target_position")
+        values["target_position"] = array.numpy().copy()
         return values
 
     def _freeze_sdf(self, model):
@@ -695,9 +735,12 @@ class SolverMonolithic(SolverBase):
 
     def step(self, state_in, state_out, control, contacts=None, dt=0.0):
         if self._materials is not None:
-            raise NotImplementedError(
-                "Cloth/cable layout and state are available; material step assembly is not yet implemented"
-            )
+            if not hasattr(self, "_cables"):
+                material_runtime.initialize(self)
+            inputs = self._snapshot_material_control(control)
+            self._cable_target_x.assign(inputs["target_position"])
+            self._cable_target_theta.assign(inputs["target_theta"])
+            self._cable_torque.assign(inputs["torque"])
         self._validate_components()
         self._stopped_failure = None
         if contacts is not None or not math.isfinite(dt) or dt <= 0:
@@ -708,7 +751,11 @@ class SolverMonolithic(SolverBase):
         for name in ("joint_f", "joint_target_q", "joint_target_qd"):
             array = getattr(control, name, None)
             if not isinstance(array, wp.array) or (array.shape, array.dtype, array.device) != (
-                (self.model.joint_target_q.size if name == "joint_target_q" else self.model.joint_dof_count,),
+                (
+                    self.model.joint_target_q.size
+                    if name == "joint_target_q" and self.model.joint_count
+                    else self.model.joint_dof_count,
+                ),
                 wp.float32,
                 self.model.device,
             ):
@@ -717,7 +764,7 @@ class SolverMonolithic(SolverBase):
         self._input_status.zero_()
         wp.launch(
             kernels.freeze_step_forces,
-            max(self.model.joint_dof_count, self.model.joint_target_q.size, k.bodies, self.model.gravity.size),
+            max(self.model.joint_dof_count, control.joint_target_q.size, k.bodies, self.model.gravity.size),
             [
                 state_in.body_f,
                 self.model.gravity,
@@ -884,7 +931,7 @@ class SolverMonolithic(SolverBase):
                 rolled_back=not published,
                 step_generation=self._step_generation,
                 preconditioner_kind="actor_block",
-                q_block_count=1,
+                q_block_count=int(k.count > 0),
                 variational=MappingProxyType(self._variational.copy()),
                 **self._metrics,
             )
@@ -894,7 +941,9 @@ class SolverMonolithic(SolverBase):
         detail.update(
             publication_status="STOPPED_ACCEPTED" if stopped else "CONVERGED" if stats.converged else "HARD_FAILURE",
             publish_policy=self._coupled_publish_policy,
-            alignment_policy=self._contact.alignment_policy,
+            alignment_policy=self._material_config["alignment_policy"]
+            if self._materials is not None
+            else self._contact.alignment_policy,
             energy_acceptance="variational"
             if self._conservative_energy()
             else "heuristic"
@@ -911,8 +960,16 @@ class SolverMonolithic(SolverBase):
                 "final_ratios": {
                     name: self._metrics["convergence_ratio" + suffix]
                     for name, suffix in (("global", ""), ("q", "_q"), ("x", "_x"))
+                    if "convergence_ratio" + suffix in self._metrics
                 },
             }
+            if self._materials is not None:
+                detail["stopped_candidate"]["final_ratios"].update(
+                    {
+                        name: values["convergence_ratio_" + name]
+                        for name, values in detail.get("material_blocks", {}).items()
+                    }
+                )
         self._last_stats = replace(
             stats,
             variational=MappingProxyType(detail),
@@ -957,6 +1014,34 @@ class SolverMonolithic(SolverBase):
             self._out_backup.assign(state_out)
         wp.copy(self._frozen_force, state_in.particle_f)
         wp.copy(self._frozen_gravity, self.model.gravity)
+        if self._materials is not None:
+            wp.launch(
+                kernels.particle_predict,
+                self.model.particle_count,
+                [
+                    state_in.particle_q,
+                    state_in.particle_qd,
+                    self._particle_mapping,
+                    self._dtype(dt),
+                    self._accepted.particle_q,
+                    self._accepted.particle_qd,
+                ],
+                device=self.model.device,
+            )
+            for cable in self._cables:
+                cable.begin_step(self._original, self._frozen_force)
+                cable.candidate(
+                    self._original,
+                    self._original,
+                    self._accepted,
+                    self._delta,
+                    self._cable_target_x,
+                    self._cable_target_theta,
+                    0.0,
+                    dt,
+                    predict=True,
+                )
+            return
         k = self._kinematics
         k.evaluate(k.gather_q(state_in))
         history = state_in._monolithic_coupled
@@ -985,6 +1070,8 @@ class SolverMonolithic(SolverBase):
         )
 
     def _evaluate(self, state, dt, *, build_tangent=True, device_result=False):
+        if self._materials is not None:
+            return material_runtime.evaluate(self, state, dt, build_tangent=build_tangent)
         k, contact, tet = self._kinematics, self._contact, self._tet
         local_q = k.gather_q(state)
         buffers = [
@@ -1134,6 +1221,8 @@ class SolverMonolithic(SolverBase):
             raise _StepFailure(self.Status.NONFINITE, str(error)) from error
 
     def _conservative_energy(self):
+        if self._materials is not None:
+            return not self._rigid.has_torque
         return self._contact.conservative_energy and not self._rigid.has_torque
 
     def _trial_evaluation(self, dt, *, device_result=False):
@@ -1144,12 +1233,13 @@ class SolverMonolithic(SolverBase):
             return None
 
     def _take_trial(self, alpha, dt):
+        direction = self._native_delta if self._materials is not None else self._delta
         wp.launch(
             kernels._coordinate_trial,
             self._kinematics.count,
             [
                 self._accepted.joint_q,
-                self._delta,
+                direction,
                 self._layout.q_scalar_offset,
                 self._dtype(alpha),
                 self._objective.qn,
@@ -1161,15 +1251,15 @@ class SolverMonolithic(SolverBase):
             ],
             device=self.model.device,
         )
-        self._rigid.trial(self._accepted, self._trial, self._delta, alpha)
+        self._rigid.trial(self._accepted, self._trial, direction, alpha)
         wp.launch(
             kernels.particle_trial,
             self.model.particle_count,
             [
                 self._accepted.particle_q,
                 self._original.particle_q,
-                self._tet.mapping,
-                self._delta,
+                self._particle_mapping if self._materials is not None else self._tet.mapping,
+                direction,
                 self._layout.x_scalar_offset,
                 self._dtype(alpha),
                 self._dtype(dt),
@@ -1178,6 +1268,19 @@ class SolverMonolithic(SolverBase):
             ],
             device=self.model.device,
         )
+
+        if self._materials is not None:
+            for cable in self._cables:
+                cable.candidate(
+                    self._accepted,
+                    self._original,
+                    self._trial,
+                    direction,
+                    self._cable_target_x,
+                    self._cable_target_theta,
+                    alpha,
+                    dt,
+                )
 
     def _effective_displacement(self, *, device_result=False):
         if device_result:
@@ -1197,13 +1300,26 @@ class SolverMonolithic(SolverBase):
             return self._effective_device
         ids = self._dynamic_ids_host
         displacement = np.empty(self._layout.scalar_dof_count, dtype=self._numpy_dtype)
+        coords = [] if self._articulation_actor is None else list(self._articulation_actor.coord_indices)
         displacement[self._layout.indices("articulation")] = (
-            self._trial.joint_q.numpy()[list(self._articulation_actor.coord_indices)]
-            - self._accepted.joint_q.numpy()[list(self._articulation_actor.coord_indices)]
+            self._trial.joint_q.numpy()[coords] - self._accepted.joint_q.numpy()[coords]
         )
         displacement[self._layout.indices("tet")] = (
             self._trial.particle_q.numpy()[ids] - self._accepted.particle_q.numpy()[ids]
         ).ravel()
+        if self._materials is not None:
+            ax, bx = self._accepted.particle_q.numpy(), self._trial.particle_q.numpy()
+            at, bt = (
+                self._accepted._monolithic_coupled.cable_theta.numpy(),
+                self._trial._monolithic_coupled.cable_theta.numpy(),
+            )
+            for cable in self._cables:
+                local = np.r_[
+                    (bx[cable.actor.particle_indices, :] - ax[cable.actor.particle_indices, :]).ravel(),
+                    bt[list(cable.actor.theta_indices)] - at[list(cable.actor.theta_indices)],
+                ]
+                free = cable.rows_host >= 0
+                displacement[cable.rows_host[free]] = local[free]
         if self._rigid.count:
             a, b = self._accepted._monolithic_coupled, self._trial._monolithic_coupled
             displacement[self._rigid.rows_numpy[:, :3]] = b.rigid_com.numpy() - a.rigid_com.numpy()
@@ -1221,6 +1337,8 @@ class SolverMonolithic(SolverBase):
         return displacement
 
     def _assemble(self, iteration, *, device_result=False):
+        if self._materials is not None:
+            return material_runtime.assemble(self, iteration)
         k, linear, obj = self._kinematics, self._linear, self._objective
         self._assembly_sequence += 1
         self._generation = MonolithicLinearGeneration(
@@ -1317,7 +1435,7 @@ class SolverMonolithic(SolverBase):
             b.offsets,
             b.columns,
             b.values,
-            self._delta,
+            self._native_delta if self._materials is not None else self._delta,
             self._post_r,
             self._linear.scale,
             self._post_lambda,
@@ -1383,6 +1501,15 @@ class SolverMonolithic(SolverBase):
 
     def _finish_candidate(self, state, dt):
         self._rigid.recover(state, dt)
+        if self._materials is not None:
+            history = state._monolithic_coupled
+            for array in (history.contact_joint_force, history.contact_particle_force, history.contact_body_force):
+                array.zero_()
+            history.force_generation.fill_(self._step_generation)
+            history.force_valid.fill_(1)
+            self._variational["contact_force_generation"] = self._step_generation
+            self._variational["cable_reactions"] = tuple(c.raw.numpy().tolist() for c in self._cables)
+            return
         contact, k = self._contact, self._kinematics
         history = getattr(state, self._states.namespace)
         arrays = [history.contact_joint_force, history.contact_particle_force, history.contact_body_force]
@@ -1431,6 +1558,8 @@ class SolverMonolithic(SolverBase):
         state.assign(self._out_backup)
 
     def _domain(self, state):
+        if self._materials is not None and not all(c.path_valid(self._accepted, state) for c in self._cables):
+            return False
         return iteration_device.domain(self, state, int(JointType.REVOLUTE)) and self._rigid.domain(state)
 
     def _joint_force_metrics(self, state):

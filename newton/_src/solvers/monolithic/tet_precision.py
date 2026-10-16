@@ -128,19 +128,29 @@ def _finite(residual: wp.array[Any], flags: wp.array[int]):
 class TetObjective:
     """Own native E/r scratch; input coordinates and step history remain read-only."""
 
-    def __init__(self, model, *, material_model, mass_mode, density=None, dtype=wp.float64):
+    def __init__(self, model, *, material_model, mass_mode, density=None, dtype=wp.float64, actor=None):
         if dtype not in (wp.float64, wp.float32):
             raise ValueError("Tet E/r requires float64 or float32")
         self.dtype = dtype
         self.vector = wp.vec3d if dtype == wp.float64 else wp.vec3
-        ids = np.flatnonzero(model.particle_inv_mass.numpy() > 0).astype(np.int32)
+        ids = (
+            np.flatnonzero(model.particle_inv_mass.numpy() > 0)
+            if actor is None
+            else np.asarray(actor.dynamic_particle_indices)
+        ).astype(np.int32)
         mapping = np.full(model.particle_count, -1, dtype=np.int32)
         mapping[ids] = np.arange(len(ids))
         validate_tet_scope(model, dynamic_particle_ids=ids, particle_to_dynamic=mapping)
         if 4 * model.tet_count >= 2**31:
             raise ValueError("Tet residual contribution capacity exceeds int32")
         self.model = model
-        self.physics = TetPhysicsWorkspace(model, material_model=material_model, mass_mode=mass_mode, density=density)
+        self.physics = TetPhysicsWorkspace(
+            model,
+            material_model=material_model,
+            mass_mode=mass_mode,
+            density=density,
+            particle_ids=None if actor is None else actor.particle_indices,
+        )
         self.ids = wp.array(ids, dtype=int, device=model.device)
         self.mapping = wp.array(mapping, dtype=int, device=model.device)
         self._residual_offsets, self._residual_slots = _row_gather_map(

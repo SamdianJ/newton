@@ -76,6 +76,11 @@ class CoupledState(ArticulationState):
         if materials is not None:
             for obj in (*materials.cloth, *materials.cable):
                 self.fixed[obj["particle_ids"]] = obj["fixed"]
+        # Cable Dirichlet coordinates may move through step controls. Their
+        # committed values are authenticated by bound_x/bound_v, not Model rest.
+        if materials is not None:
+            for obj in materials.cable:
+                self.fixed[obj["particle_ids"]] = False
         self.fixed_positions = self.model.particle_q.numpy().astype(kinematics.numpy_dtype)[self.fixed].copy()
         self._fixed_ids = wp.array(np.flatnonzero(self.fixed), dtype=int, device=self.device)
         self._fixed_positions = wp.array(self.fixed_positions, dtype=self.vector, device=self.device)

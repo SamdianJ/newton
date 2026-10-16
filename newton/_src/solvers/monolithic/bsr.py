@@ -324,9 +324,57 @@ def _scaled_matvec_finish(
     result[i] = value
 
 
+@wp.func
+def _cable_csr_product(
+    offsets: wp.array[int],
+    columns: wp.array[int],
+    values: wp.array[float],
+    scale: wp.array[float],
+    x: wp.array[float],
+    row: int,
+    regularization: float,
+):
+    # B and all PCG vectors remain FP32. Accumulate cancellation-prone rod
+    # stencil products before rounding once, as with the PCG dot reductions.
+    total = wp.float64(0.0)
+    for k in range(offsets[row], offsets[row + 1]):
+        j = columns[k]
+        total += wp.float64(values[k]) * wp.float64(scale[j]) * wp.float64(x[j])
+    return float(wp.float64(scale[row]) * total + wp.float64(regularization) * wp.float64(x[row]))
+
+
+@wp.kernel
+def _cable_scaled_matvec(
+    offsets: wp.array[int],
+    columns: wp.array[int],
+    values: wp.array[float],
+    scale: wp.array[float],
+    x: wp.array[float],
+    y: wp.array[float],
+    z: wp.array[float],
+    regularization: float,
+    alpha: float,
+    beta: float,
+):
+    i = wp.tid()
+    value = alpha * _cable_csr_product(offsets, columns, values, scale, x, i, regularization)
+    if beta != 0.0:
+        value += beta * y[i]
+    z[i] = value
+
+
 def _monolithic_scaled_matvec(workspace, x, y, z, alpha, beta) -> None:
     if not workspace._scaling_valid or workspace.layout != workspace._layout_identity:
         raise ValueError("Scaled operator requires current valid scaling")
+    if workspace.layout.material_ranges:
+        b = workspace.k_global_scalar_bsr
+        wp.launch(
+            _cable_scaled_matvec,
+            x.size,
+            [b.offsets, b.columns, b.values, workspace.scale, x, y, z, workspace._lambda, alpha, beta],
+            device=workspace.device,
+        )
+        return
     wp.launch(_scale_vector, x.size, [workspace.scale, x, workspace._scaled_x], device=workspace.device)
     sparse.bsr_mv(workspace.k_global_scalar_bsr, workspace._scaled_x, workspace._k_scaled)
     wp.launch(

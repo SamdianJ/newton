@@ -51,6 +51,15 @@ def blocks(solver):
 
 
 def _block_policy(config, prefix, name):
+    if name.startswith("cable_"):
+        if prefix == "merit_absolute":
+            return config.merit_absolute_cable_theta if name.endswith("_theta") else config.merit_absolute_cable_x
+        if prefix == "merit_relative":
+            return 0.0
+        if prefix == "step_tolerance":
+            # Stiff rods can need representable sub-picometre force corrections.
+            return 0.0
+        return 1e-12
     if not name.startswith("rigid_"):
         return getattr(config, prefix + "_" + name)
     translation = name.endswith("_t")
@@ -64,8 +73,9 @@ def _block_policy(config, prefix, name):
 
 
 def _record_block(solver, name, key, value):
-    if name.startswith("rigid_"):
-        solver._variational.setdefault("rigid_blocks", {}).setdefault(name, {})[key] = value
+    if name.startswith(("rigid_", "cable_")):
+        category = "rigid_blocks" if name.startswith("rigid_") else "material_blocks"
+        solver._variational.setdefault(category, {}).setdefault(name, {})[key] = value
     else:
         solver._metrics[key] = value
 
@@ -88,6 +98,17 @@ def measure(solver, residual, reference, scale):
             native(_block_policy(solver._config, "merit_absolute", name))
             + native(_block_policy(solver._config, "merit_relative", name)) * ref
         )
+        if name.startswith("cable_"):
+            # A fixed per-object unit scale makes this an L2 physical-force cap.
+            goal = (
+                native(_block_policy(solver._config, "merit_absolute", name))
+                * scale[part.start]
+                / np.sqrt(native(size))
+            )
+        raw_norm = float(norms[index, 2] if norms is not None else np.linalg.norm(residual[part]))
+        if name in getattr(solver, "_cable_raw_theta_norms", {}):
+            raw_norm = solver._cable_raw_theta_norms[name]
+            merit = raw_norm * scale[part.start] / np.sqrt(native(size))
         values[name] = (merit, ref, goal, size)
         suffix = "" if name == "global" else "_" + name
         _record_block(solver, name, "merit" + suffix + "_final", merit)
@@ -98,7 +119,7 @@ def measure(solver, residual, reference, scale):
                 solver,
                 name,
                 "raw_residual_" + name + "_norm",
-                float(norms[index, 2] if norms is not None else np.linalg.norm(residual[part])),
+                raw_norm,
             )
     return values
 
@@ -111,12 +132,33 @@ def direction_norms(solver, vector):
     return {name: np.linalg.norm(vector[part]) for name, part in blocks(solver)}
 
 
+def material_merit(solver, residual, values, scale):
+    """Balance line-search progress against every frozen physical convergence goal."""
+    native = solver._numpy_dtype
+    ratios = []
+    for name, part in blocks(solver):
+        norm = np.linalg.norm(scale[part] * residual[part])
+        if name in solver._cable_raw_theta_norms:
+            norm = solver._cable_raw_theta_norms[name] * scale[part.start]
+        ratios.append(norm / np.sqrt(native(part.stop - part.start)) / values[name][2])
+    return np.linalg.norm(np.asarray(ratios, dtype=native))
+
+
 def solve_direction(solver, residual, scale, limits, pcg, *, iteration, retry, regularization):
     """Qualify the delivered direction, correcting native error within one budget."""
     self = solver
     remaining = pcg.maximum_iterations
     correction = 0
     solve_config = pcg
+    material = self._materials is not None
+    if material:
+        # Each FP32 inner solve need only contract its own residual. Qualification
+        # of the native accumulated direction still uses the frozen physical caps.
+        inner = direction_norms(self, scale * residual)
+        solve_config = replace(
+            pcg,
+            group_norm_limits=tuple(max(limits[name], pcg.linear_tolerance * inner[name]) for name, _ in blocks(self)),
+        )
     rhs, output = self._rhs, self._delta
     attempt = {
         "iteration": iteration,
@@ -154,7 +196,12 @@ def solve_direction(solver, residual, scale, limits, pcg, *, iteration, retry, r
                 self._require_linear(self._linear.recover_delta(self._y, output, generation=self._generation))
             elif not result.output_valid:
                 raise _StepFailure(self.Status.NONFINITE, "Invalid PCG output")
-            changed = self._combine_direction_correction() if correction else True
+            if getattr(self, "_materials", None) is not None:
+                from .material_runtime import accumulate_direction  # noqa: PLC0415
+
+                changed = accumulate_direction(self, correction)
+            else:
+                changed = self._combine_direction_correction() if correction else True
         except _StepFailure as error:
             attempt["failure_reason"] = (
                 "direction_accuracy_budget_exhausted"
@@ -162,7 +209,8 @@ def solve_direction(solver, residual, scale, limits, pcg, *, iteration, retry, r
                 else error.status.value
             )
             return False
-        direction = self._delta if self._device_iteration else self._delta.numpy().astype(self._numpy_dtype)
+        delivered = self._native_delta if self._materials is not None else self._delta
+        direction = delivered if self._device_iteration else delivered.numpy().astype(self._numpy_dtype)
         error = self._physical_linear_error(None, direction, residual, scale, device_result=self._device_iteration)
         errors = direction_norms(self, error)
         if np.float32(regularization) == 0:
@@ -221,7 +269,10 @@ def solve_direction(solver, residual, scale, limits, pcg, *, iteration, retry, r
         # An original RHS floor can otherwise accept the correction's zero
         # guess. Apply the same rtol to its native error norm, without that floor.
         targets = {
-            name: max(float(np.finfo(np.float32).smallest_subnormal), min(limits[name], pcg.linear_tolerance * value))
+            name: max(
+                float(np.finfo(np.float32).smallest_subnormal),
+                pcg.linear_tolerance * value if material else min(limits[name], pcg.linear_tolerance * value),
+            )
             if value
             else limits[name]
             for name, value in errors.items()
@@ -259,6 +310,9 @@ def iterate(solver, dt):
         self._reference_residual = reference
         values = measure(self, residual, reference, scale)
         merit = values["global"][0]
+        if self._materials is not None:
+            merit = material_merit(self, residual, values, scale)
+            self._variational["residual_merit"] = "block_goal_normalized_l2"
         self._metrics["nonlinear_iterations"] = iteration
         if iteration == 0:
             for name, (m, _, _, _) in values.items():
@@ -289,7 +343,10 @@ def iterate(solver, dt):
             linear_absolute_tolerance=self.linear_absolute_tolerance,
             residual_norm_limits=tuple(caps.get(name, 1.0) for name in ("global", "q", "x")),
             group_norm_limits=tuple(caps[name] for name, _ in blocks(self))
-            if self._linear.layout.rigid_ranges
+            if self._linear.layout.rigid_ranges or self._linear.layout.material_ranges
+            else None,
+            group_residual_floors=tuple(_block_policy(config, "residual_floor", name) for name, _ in blocks(self))
+            if self._linear.layout.material_ranges
             else None,
             residual_floor_global=config.residual_floor_global,
             residual_floor_q=config.residual_floor_q,
@@ -326,7 +383,8 @@ def iterate(solver, dt):
                 self, residual, scale, limits, pcg, iteration=iteration, retry=retry, regularization=regularization
             ):
                 continue
-            direction = self._delta if device else self._delta.numpy().astype(native)
+            delivered = self._native_delta if self._materials is not None else self._delta
+            direction = delivered if device else delivered.numpy().astype(native)
             for search in range(self.line_search_max_iterations):
                 alpha = native(0.5**search)
                 self._metrics["line_search_iterations"] += 1
@@ -354,6 +412,8 @@ def iterate(solver, dt):
                 )
                 slope = terms[0] / alpha
                 trial_merit = (np.sqrt(terms[1]) if device else np.linalg.norm(scale * tr)) / np.sqrt(native(tr.size))
+                if self._materials is not None:
+                    trial_merit = material_merit(self, tr, values, scale)
                 # Keep the PR2 common envelope; the coupled entry qualifies the
                 # complete E/r against it before any physical trajectory use.
                 eps = native(128 * np.finfo(float).eps)
@@ -369,6 +429,11 @@ def iterate(solver, dt):
                     native(2.0935893019213836e-9) * terms[4],
                     eps * max(native(1.0), terms[5]),
                 )
+                if self._linear.layout.material_ranges:
+                    eps = native(128 * np.finfo(native).eps)
+                    en = eps * max(native(1e-30), absolute, ta)
+                    rn = eps * max(native(1e-30), merit, trial_merit)
+                    sn = eps * max(native(1e-30), terms[5])
                 passes, a, r, improved = acceptance(
                     self._globalization,
                     e,

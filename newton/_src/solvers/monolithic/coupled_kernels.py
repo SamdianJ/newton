@@ -66,7 +66,7 @@ def particle_trial(
     x: wp.array[Any],
     xn: wp.array[Any],
     mapping: wp.array[int],
-    direction: wp.array[float],
+    direction: wp.array[Any],
     x_start: int,
     alpha: Any,
     dt: Any,
@@ -143,7 +143,7 @@ def sparse_posterior(
     offsets: wp.array[int],
     columns: wp.array[int],
     values: wp.array[float],
-    direction: wp.array[float],
+    direction: wp.array[Any],
     residual: wp.array[Any],
     scale: wp.array[float],
     regularization: wp.array[float],
@@ -233,7 +233,7 @@ def _scatter(matrix: wp.array2d[float], actor: wp.array2d[float], values: wp.arr
 @wp.kernel
 def _coordinate_trial(
     q: wp.array[Any],
-    direction: wp.array[float],
+    direction: wp.array[Any],
     q_start: int,
     alpha: Any,
     qn: wp.array[Any],

@@ -10,7 +10,8 @@ Monolithic Coupled Solver
 
    :mod:`newton.solvers.experimental.monolithic` supports one articulation and
    one connected tetrahedral body, with optional single-body world-root FREE
-   rigid actors. Its interfaces may change without the normal
+   rigid actors. Independent open cables and contact-free mixed cable scenes
+   are also supported; see :doc:`monolithic_cable`. Its interfaces may change without the normal
    deprecation period. The old BE, q-only and tet-only solver entry points and
    their examples have been retired.
 
@@ -66,7 +67,8 @@ The experimental constructor parameter ``precision`` accepts
 ``SolverMonolithic.Precision.FP64`` / ``FP32`` or ``"fp64"`` / ``"fp32"``.
 It cannot change after construction. FP32 selects native state, history,
 contact forces, E/r, posterior checks and host acceptance arithmetic; B/PCG
-arrays and directions remain FP32 in both modes. Existing PCG scalar threshold
+arrays remain FP32 in both modes. Nonmaterial delivered directions remain
+FP32; cable scenes accumulate direction corrections in native precision. Existing PCG scalar threshold
 and restart checks retain their original FP64 arithmetic in both modes.
 Global scalar B assembly orders duplicate contributions by row, column and
 unsigned FP32 value bits, then sums them with a fixed pairwise FP32 tree on CPU

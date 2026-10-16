@@ -241,6 +241,8 @@ def _monolithic_preconditioner_matvec(workspace, x, y, z, alpha, beta) -> None:
             [workspace._x_cholesky, workspace.layout.x_scalar_offset, x, workspace._preconditioned],
             device=workspace.device,
         )
+    if workspace._cable_preconditioner is not None:
+        workspace._cable_preconditioner.apply(x, workspace._preconditioned)
     wp.launch(_combine_vectors, x.size, [workspace._preconditioned, y, z, alpha, beta], device=workspace.device)
 
 
@@ -281,7 +283,8 @@ def factor_actor_preconditioner(
                 matrix.offsets,
                 matrix.columns,
                 matrix.values,
-            ),
+            )
+            + (() if self._cable_preconditioner is None else self._cable_preconditioner.buffers()),
             lambda: self._factor_actor_device(pivot_tolerance),
         )
     status = self._read_status()
@@ -295,6 +298,8 @@ def factor_actor_preconditioner(
 def _factor_actor_device(self, pivot_tolerance):
     self._status.zero_()
     matrix = self.k_global_scalar_bsr
+    if self._cable_preconditioner is not None:
+        self._cable_preconditioner.factor(self, pivot_tolerance)
     wp.launch(
         _assemble_rigid_preconditioner,
         (len(self.layout.rigid_ranges), 6, 6),

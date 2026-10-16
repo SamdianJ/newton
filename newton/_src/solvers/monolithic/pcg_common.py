@@ -20,7 +20,7 @@ def group_data(layout):
     return membership, np.asarray(aliases, dtype=np.int32)
 
 
-def group_policy(layout, config):
+def group_policy(layout, config, *, require_limits=True):
     """Preserve existing q/x floors and caps while ordering by layout groups."""
     names = {"global": 0, "articulation": 1, "tet": 2}
     floors = (config.residual_floor_global, config.residual_floor_q, config.residual_floor_x)
@@ -28,7 +28,7 @@ def group_policy(layout, config):
     keys = [names.get(kind, 2 if kind.endswith(("_t", "_x")) else 1) for kind, _, _ in layout.groups]
     complete_limits = getattr(config, "group_norm_limits", None)
     complete_floors = getattr(config, "group_residual_floors", None)
-    if layout.material_ranges and (complete_floors is None or complete_limits is None):
+    if layout.material_ranges and (complete_floors is None or (require_limits and complete_limits is None)):
         raise ValueError("Material xyz/theta groups require explicit per-group residual floors and limits")
     if complete_limits is not None and len(complete_limits) != len(keys):
         raise ValueError("Residual limits must match all layout groups")

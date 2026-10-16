@@ -1,0 +1,311 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 The Newton Developers
+# SPDX-License-Identifier: Apache-2.0
+
+"""Exercise cable physics through the public coupled solver's real step transaction."""
+
+import tempfile
+import unittest
+from pathlib import Path
+
+import numpy as np
+import warp as wp
+
+import newton
+from newton.solvers.experimental.monolithic import SolverMonolithic
+from newton.tests.test_monolithic_material_state import scene, snapshot
+from scripts.monolithic_reference.cable_benchmarks import CableBenchmark
+
+
+class TestMonolithicCableSolver(unittest.TestCase):
+    device = "cpu"
+    pcg_mode = SolverMonolithic.PCGMode.DIAGNOSTIC
+    use_cuda_graph = False
+
+    def scene(self, **options):
+        return scene(**options, device=self.device, pcg_mode=self.pcg_mode, use_cuda_graph=self.use_cuda_graph)
+
+    def test_single_edge_and_prescribed_cable_blocks(self):
+        """Advance a single edge beside empty or fully prescribed material blocks."""
+        for fixed_count in (0, 2, 3):
+            with self.subTest(fixed_count=fixed_count):
+                builder = newton.ModelBuilder(gravity=(0, 0, 0))
+                for i in range(fixed_count):
+                    builder.add_particle((float(i), 0, 0), (0, 0, 0), mass=0)
+                builder.add_particle((0, 2, 0), (0, 0, 0), mass=0)
+                builder.add_particle((1, 2, 0), (0, 0, 0), mass=0.5)
+                model = builder.finalize(device=self.device)
+                chains = [tuple(range(fixed_count))] if fixed_count else []
+                chains.append((fixed_count, fixed_count + 1))
+                cables = [
+                    SolverMonolithic.CableInput(
+                        particle_ids=ids,
+                        EA=10,
+                        bending=np.eye(2),
+                        GJ=1,
+                        radius=0.01,
+                        linear_density=1,
+                        rest_theta=np.zeros(len(ids) - 1),
+                        rest_director=np.tile([0.0, 1.0, 0.0], (len(ids) - 1, 1)),
+                        fixed_theta=np.ones(len(ids) - 1, dtype=bool),
+                    )
+                    for ids in chains
+                ]
+                solver = SolverMonolithic(
+                    model,
+                    cable_inputs=cables,
+                    contact_model="C-EE",
+                    globalization="ResNorm",
+                    friction_velocity_scale=0.1,
+                    mass_mode="lumped",
+                    pcg_mode=self.pcg_mode,
+                    use_cuda_graph=self.use_cuda_graph,
+                )
+                state, control = solver.create_state(dt=0.1), solver.create_control()
+                target = state.particle_q.numpy().copy()
+                if fixed_count:
+                    target[fixed_count - 1, 1] = 0.02
+                    control._monolithic_cable.target_position.assign(target)
+                force = np.zeros((fixed_count + 2, 3), dtype=np.float32)
+                force[-1, 0] = 0.001
+                state.particle_f.assign(force)
+                solver.step(state, state, control, dt=0.1)
+                self.assertTrue(solver.last_stats.converged, solver.last_stats.status)
+                np.testing.assert_array_equal(state.particle_q.numpy()[:-1], target[:-1])
+                self.assertAlmostEqual(state.particle_q.numpy()[-1, 0] - 1, float(force[-1, 0]) / 60, delta=1e-10)
+
+    def test_physical_residual_tolerances(self):
+        """Honor tighter physical force caps and bind them to checkpoint identity."""
+        for name in ("cable_position_tolerance", "cable_theta_tolerance"):
+            for value in (0, -1, float("nan"), float("inf"), True):
+                with self.subTest(name=name, value=value), self.assertRaises(ValueError):
+                    self.scene(cloth=False, cables=1, **{name: value})
+        for value in (1e-300, 1e300):
+            with self.assertRaises(ValueError):
+                self.scene(
+                    cloth=False, cables=1, precision=SolverMonolithic.Precision.FP32, cable_position_tolerance=value
+                )
+        _, solver = self.scene(
+            cloth=False,
+            cables=1,
+            fixed_theta=(True, False),
+            cable_position_tolerance=1e-11,
+            cable_theta_tolerance=1e-13,
+        )
+        state = solver.create_state(dt=0.1)
+        force = state.particle_f.numpy().copy()
+        force[-1, 2] = 2e-10
+        state.particle_f.assign(force)
+        control = solver.create_control()
+        control._monolithic_cable.torque.assign([0.0, 2e-12])
+        solver.step(state, state, control, dt=0.1)
+        self.assertTrue(solver.last_stats.converged, solver.last_stats.status)
+        self.assertGreater(state.particle_q.numpy()[-1, 2], 0.0)
+        self.assertGreater(state._monolithic_coupled.cable_theta.numpy()[1], 7.2)
+        groups = solver.last_stats.variational["material_blocks"]
+        self.assertLessEqual(groups["cable_0_x"]["raw_residual_cable_0_x_norm"], 1e-11)
+        self.assertLessEqual(groups["cable_0_theta"]["raw_residual_cable_0_theta_norm"], 1e-13)
+        _, other = self.scene(cloth=False, cables=1, fixed_theta=(True, False))
+        target = other.create_state(dt=0.1)
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "state.npz"
+            solver.save_checkpoint(state, path)
+            with self.assertRaises(ValueError):
+                other.load_checkpoint(target, path)
+
+    def test_fp32_scaled_goal_keeps_independent_cable_caps(self):
+        """Apply the explicit FP32 global goal without overriding physical cable caps."""
+        for tolerance, moves in ((1e-5, False), (1e-8, True)):
+            _, solver = self.scene(
+                cloth=False,
+                cables=1,
+                fixed_theta=(True, True),
+                precision=SolverMonolithic.Precision.FP32,
+                fp32_absolute_tolerance=2e-5,
+                cable_position_tolerance=tolerance,
+            )
+            state = solver.create_state(dt=0.1)
+            force = state.particle_f.numpy().copy()
+            force[-1, 2] = 5e-6
+            state.particle_f.assign(force)
+            solver.step(state, state, solver.create_control(), dt=0.1)
+            self.assertTrue(solver.last_stats.converged, solver.last_stats.status)
+            self.assertEqual(bool(state.particle_q.numpy()[-1, 2] > 0), moves)
+
+    def test_transverse_force_and_theta_boundary(self):
+        """Advance positions and massless theta together through ordinary step()."""
+        _, solver = self.scene(cloth=False, cables=1, fixed_theta=(True, False))
+        state = solver.create_state(dt=0.01)
+        control = solver.create_control()
+        force = state.particle_f.numpy()
+        force[-1, 2] = -0.01
+        state.particle_f.assign(force)
+        target = control._monolithic_cable.target_theta.numpy()
+        target[0] += 0.05
+        control._monolithic_cable.target_theta.assign(target)
+        initial = snapshot(state)
+        solver.step(state, state, control, dt=0.01)
+        self.assertTrue(solver.last_stats.converged, solver.last_stats)
+        self.assertLess(state.particle_q.numpy()[-1, 2], 0)
+        self.assertEqual(state._monolithic_coupled.cable_theta.numpy()[0], target[0])
+        self.assertNotEqual(state._monolithic_coupled.cable_theta.numpy()[1], initial["history.cable_theta"][1])
+        self.assertIn("cable_0_theta", solver.last_stats.variational["material_blocks"])
+
+    def test_free_common_angle_and_incompatible_torque(self):
+        """Select a temporary common-angle representative and reject unbalanced torque."""
+        _, solver = self.scene(cloth=False, cables=1, fixed_theta=(False, False))
+        state = solver.create_state(dt=0.01)
+        control = solver.create_control()
+        solver.step(state, state, control, dt=0.01)
+        self.assertTrue(solver.last_stats.converged, solver.last_stats)
+        before = snapshot(state)
+        control._monolithic_cable.torque.assign(np.array([0.01, 0.0]))
+        solver.step(state, state, control, dt=0.01)
+        self.assertTrue(solver.last_stats.rolled_back)
+        self.assertFalse(solver.last_stats.converged)
+        for name, values in snapshot(state).items():
+            np.testing.assert_array_equal(values, before[name], err_msg=name)
+
+    def test_moving_boundary_checkpoint_and_mixed_actors(self):
+        """Continue moving cable clamps through a fresh solver alongside A/R/T actors."""
+        _, solver = self.scene(cloth=False, cables=2, mechanical=True, rigid=True, tet=True)
+        state = solver.create_state(dt=0.01)
+        control = solver.create_control()
+        target = control._monolithic_cable.target_position.numpy().copy()
+        target[0, 1] += 1e-4
+        control._monolithic_cable.target_position.assign(target)
+        solver.step(state, state, control, dt=0.01)
+        self.assertTrue(solver.last_stats.converged, solver.last_stats)
+        np.testing.assert_array_equal(state.particle_q.numpy()[0], target[0])
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "cable.npz"
+            solver.save_checkpoint(state, path)
+            _, restored_solver = self.scene(cloth=False, cables=2, mechanical=True, rigid=True, tet=True)
+            restored = restored_solver.create_state(dt=0.01)
+            restored_solver.load_checkpoint(restored, path)
+        restored_control = restored_solver.create_control()
+        restored_control._monolithic_cable.target_position.assign(target)
+        solver.step(state, state, control, dt=0.01)
+        restored_solver.step(restored, restored, restored_control, dt=0.01)
+        self.assertTrue(solver.last_stats.converged, solver.last_stats)
+        self.assertTrue(restored_solver.last_stats.converged, restored_solver.last_stats)
+        for name, values in snapshot(state).items():
+            np.testing.assert_array_equal(snapshot(restored)[name], values, err_msg=name)
+
+    def test_collapsed_boundary_rolls_back(self):
+        """Reject a prescribed collapsed edge and preserve every published array."""
+        _, solver = self.scene(cloth=False, cables=1, fixed_particles=(1,))
+        state = solver.create_state(dt=0.01)
+        control = solver.create_control()
+        target = control._monolithic_cable.target_position.numpy().copy()
+        target[1] = target[0]
+        control._monolithic_cable.target_position.assign(target)
+        before = snapshot(state)
+        solver.step(state, state, control, dt=0.01)
+        self.assertTrue(solver.last_stats.rolled_back)
+        for name, values in snapshot(state).items():
+            np.testing.assert_array_equal(values, before[name], err_msg=name)
+
+    def test_trial_path_cannot_cross_edge_collapse(self):
+        """Reject collapse between valid endpoints inside the same temporal frame chart."""
+        _, solver = self.scene(cloth=False, cables=1)
+        state = solver.create_state(dt=0.01)
+        solver.step(state, state, solver.create_control(), dt=0.01)
+        accepted, trial = solver._accepted, solver._trial
+        x = state.particle_q.numpy().copy()
+        x[1] = x[0] + [0, 1, 0]
+        x[2] = x[1] + [1, 0, 0]
+        accepted.particle_q.assign(x)
+        x[1] = x[0] + [0, -1, 0]
+        x[2] = x[1] + [1, 0, 0]
+        trial.particle_q.assign(x)
+        self.assertFalse(solver._domain(trial))
+
+    def test_permanent_gauge_checks_omitted_torque(self):
+        """Reject a small incompatible torque applied only to the omitted gauge row."""
+        _, solver = self.scene(cloth=False, cables=1, fixed_theta=(False, False), bending=((1, 0), (0, 1)))
+        state = solver.create_state(dt=0.01)
+        control = solver.create_control()
+        control._monolithic_cable.torque.assign(np.array([5e-10, 0.0]))
+        before = snapshot(state)
+        solver.step(state, state, control, dt=0.01)
+        self.assertTrue(solver.last_stats.rolled_back)
+        for name, values in snapshot(state).items():
+            np.testing.assert_array_equal(values, before[name], err_msg=name)
+
+    def test_slender_cantilever_direction(self):
+        """Qualify corrected native directions despite FP32 slender-beam conditioning."""
+        case = CableBenchmark(
+            "cantilever",
+            segments=128,
+            device=self.device,
+            pcg_mode=self.pcg_mode.value,
+            use_cuda_graph=self.use_cuda_graph,
+        )
+        for _ in range(10):
+            case.step()
+            checks = case.solver.last_stats.variational["linear_postchecks"]
+            qualified = [row for row in checks if all(b["residual"] <= b["limit"] for b in row["blocks"].values())]
+            self.assertTrue(qualified)
+
+    def test_anisotropic_bending_releases_common_angle(self):
+        """Let a formerly straight anisotropic cable choose its physical bend orientation."""
+        _, solver = self.scene(
+            cloth=False,
+            cables=1,
+            fixed_theta=(False, False),
+            globalization="Armijo",
+            contact_model="C-EE",
+            newton_max_iterations=200,
+            linear_tolerance=0.5,
+        )
+        state = solver.create_state(dt=0.1)
+        control = solver.create_control()
+        theta = state._monolithic_coupled.cable_theta.numpy().copy()
+        f = state.particle_f.numpy().copy()
+        f[-1, 1:] = [0.01, 0.02]
+        state.particle_f.assign(f)
+        solver.step(state, state, control, dt=0.1)
+        self.assertTrue(solver.last_stats.converged, solver.last_stats)
+        self.assertFalse(solver._temporary_gauges)
+        self.assertGreater(abs(np.mean(state._monolithic_coupled.cable_theta.numpy() - theta)), 1e-3)
+
+    def test_stopped_publication_remains_distinct(self):
+        """Report optional stopped cable publication without claiming convergence."""
+        _, solver = self.scene(cloth=False, cables=1, newton_max_iterations=1, publish_policy="last_accepted")
+        state = solver.create_state(dt=0.1)
+        force = state.particle_f.numpy().copy()
+        force[-1, 2] = -0.1
+        state.particle_f.assign(force)
+        solver.step(state, state, solver.create_control(), dt=0.1)
+        self.assertFalse(solver.last_stats.converged)
+        self.assertFalse(solver.last_stats.rolled_back)
+        detail = solver.last_stats.variational
+        self.assertEqual(detail["publication_status"], "STOPPED_ACCEPTED")
+        self.assertIn("cable_0_theta", detail["stopped_candidate"]["final_ratios"])
+
+    def test_consistent_tet_mass_excludes_cable_particles(self):
+        """Assemble a consistent-mass tet and a line-density cable in one solve."""
+        _, solver = self.scene(cloth=False, cables=1, tet=True, mass_mode="consistent")
+        state = solver.create_state(dt=0.01)
+        force = state.particle_f.numpy().copy()
+        force[2, 2] = -0.01
+        force[-1, 1] = 0.001
+        state.particle_f.assign(force)
+        solver.step(state, state, solver.create_control(), dt=0.01)
+        self.assertTrue(solver.last_stats.converged, solver.last_stats.status)
+        self.assertLess(state.particle_q.numpy()[2, 2], 0)
+        self.assertGreater(state.particle_q.numpy()[-1, 1], 0)
+
+
+class TestMonolithicCableSolverProduction(TestMonolithicCableSolver):
+    pcg_mode = SolverMonolithic.PCGMode.PRODUCTION
+
+
+@unittest.skipUnless(wp.is_cuda_available(), "CUDA unavailable")
+class TestMonolithicCableSolverCUDA(TestMonolithicCableSolverProduction):
+    device = "cuda:0"
+    use_cuda_graph = True
+
+
+if __name__ == "__main__":
+    unittest.main()

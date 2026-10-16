@@ -60,10 +60,10 @@ Material input and continuation (experimental)
 ``SolverMonolithic.ClothInput`` and ``SolverMonolithic.CableInput`` describe
 independently owned shell meshes and open, anisotropic DER chains. Pass tuples
 through the keyword-only ``cloth_inputs`` and ``cable_inputs`` arguments.
-This interface is under development: material scenes provide construction,
-layout, control and continuation storage only. Their ``step()`` explicitly
-raises ``NotImplementedError`` until material assembly is connected. The
-existing articulation/rigid/tet stepping path is unchanged.
+Cable-only and contact-free mixed articulation/rigid/tet/cable scenes use the
+shared nonlinear solve and transactional publication path. Cloth energy and
+material-scene contacts are not yet connected; those scenes explicitly raise
+``NotImplementedError`` when stepped. Existing nonmaterial stepping is unchanged.
 
 Cloth inputs select Model triangle rows, bending coefficients ``(alpha, beta)``,
 thickness [m] and surface density [kg/m²]. Cable inputs select ordered particle
@@ -85,11 +85,19 @@ history preserves the frozen natural shape. Older checkpoints cannot supply
 missing material history.
 
 ``create_control()`` retains ordinary joint controls and owns a
-``_monolithic_cable`` namespace with ``target_theta`` [rad] and ``torque`` [N m]
-arrays. Targets apply only to physically fixed theta; torques apply only to
-physically free theta. This control namespace is experimental. No theta inertia
+``_monolithic_cable`` namespace with ``target_theta`` [rad], ``torque`` [N m]
+and ``target_position`` [m] arrays. The first two arrays concatenate cable edges
+in input order; positions have shape ``[model.particle_count, 3]`` and apply
+only to prescribed cable vertices. Fixed-vertex flags come from Model mass and
+activity at construction; they are independent of ``fixed_theta``. Targets are
+snapshotted at step entry. Set them again when continuing a checkpoint with a
+new control. Theta targets apply only to physically fixed theta; torques apply
+only to physically free theta. This control namespace is experimental. No theta inertia
 or angular velocity is allocated. USD authoring/import support is separate and
 is not provided by these Python inputs.
+
+See :doc:`../guide/monolithic_cable` for the cable energy, numerical policy and
+analytical examples.
 
 .. rubric:: Other classes
 

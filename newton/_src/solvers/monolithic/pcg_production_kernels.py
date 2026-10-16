@@ -7,6 +7,7 @@ import functools
 
 import warp as wp
 
+from .bsr import _cable_csr_product
 from .pcg_common import block_drift, max_block_drift, residual_converged
 
 wp.set_module_options({"enable_backward": False})
@@ -142,12 +143,19 @@ def _masked_scaled_csr_mv(
     state: wp.array[_DeviceResult],
     error: wp.array[int],
     checkpoint: bool,
+    cable: bool,
 ):
     # Scalar BSR(1x1) has the same row storage as CSR. Do not read matrix
     # entries at all when disabled; merely masking y updates would waste SpMV.
     if not _phase_enabled(state[0], checkpoint):
         return
     i = wp.tid()
+    if cable:
+        value = _cable_csr_product(offsets, columns, values, scale, x, i, regularization[0])
+        out[i] = value
+        if not wp.isfinite(value):
+            wp.atomic_max(error, 0, _NONFINITE)
+        return
     total = float(0.0)
     for k in range(offsets[i], offsets[i + 1]):
         j = columns[k]

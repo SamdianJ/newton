@@ -100,7 +100,7 @@ def _trial(
     com: wp.array[Any],
     rotation: wp.array[Any],
     rows: wp.array2d[int],
-    direction: wp.array[float],
+    direction: wp.array[Any],
     alpha: Any,
     out_com: wp.array[Any],
     out_rotation: wp.array[Any],

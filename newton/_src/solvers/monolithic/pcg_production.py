@@ -93,8 +93,20 @@ class MaskedPcgConfig:
     residual_floor_x: float = 1.0e-12
     residual_replacement_threshold: float = 0.1
     linear_absolute_tolerance: float = 1.0e-6
+    group_residual_floors: tuple[float, ...] | None = None
 
     def __post_init__(self):
+        if self.group_residual_floors is not None:
+            if not isinstance(self.group_residual_floors, tuple) or not self.group_residual_floors:
+                raise ValueError("Group residual floors must be a nonempty tuple")
+            for value in self.group_residual_floors:
+                if (
+                    isinstance(value, (bool, np.bool_))
+                    or not isinstance(value, (int, float, np.integer, np.floating))
+                    or not np.isfinite(value)
+                    or not np.finfo(np.float32).smallest_subnormal <= value <= np.finfo(np.float32).max
+                ):
+                    raise ValueError("Group residual floors must be positive finite float32 values")
         for name in ("maximum_iterations", "true_residual_interval"):
             value = getattr(self, name)
             if isinstance(value, (bool, np.bool_)) or not isinstance(value, (int, np.integer)) or value <= 0:
@@ -182,6 +194,7 @@ class MaskedPcgPlan:
         layout=None,
         rigid_cholesky=None,
         rigid_rows=None,
+        cable_preconditioner=None,
     ):
         self.config = MaskedPcgConfig() if config is None else config
         if not isinstance(self.config, MaskedPcgConfig):
@@ -190,6 +203,9 @@ class MaskedPcgPlan:
         if self.device.is_capturing:
             raise RuntimeError("Construct/bind the plan outside graph capture")
         self._study_soft = _study_soft
+        self._cable_preconditioner = cable_preconditioner
+        self._cable_signature = None if cable_preconditioner is None else cable_preconditioner.signature()
+        self._cable_active = None if cable_preconditioner is None else wp.zeros(1, dtype=int, device=self.device)
         self._study_signature = None if _study_soft is None else _study_soft.signature()
         self._study_active = None if _study_soft is None else wp.zeros(1, dtype=int, device=self.device)
         self.n = y.size
@@ -207,7 +223,7 @@ class MaskedPcgPlan:
         self.group_count = len(self.layout.groups)
         self.row_groups = wp.array(membership, dtype=int, device=self.device)
         self.compat_groups = wp.array(aliases, dtype=int, device=self.device)
-        floors, _ = group_policy(self.layout, self.config)
+        floors, _ = group_policy(self.layout, self.config, require_limits=False)
         self.group_floors = wp.array(floors, dtype=float, device=self.device)
         if self.n <= 0 or self.n != self.layout.scalar_dof_count:
             raise ValueError("Expected n = q_dof_count + 3 * dynamic_particle_count > 0")
@@ -324,6 +340,7 @@ class MaskedPcgPlan:
             layout=workspace.layout,
             rigid_cholesky=workspace._rigid_cholesky,
             rigid_rows=workspace.rigid_rows,
+            cable_preconditioner=workspace._cable_preconditioner,
         )
         plan._workspace = workspace
         plan._generation = workspace._generation
@@ -343,6 +360,8 @@ class MaskedPcgPlan:
         return hashlib.sha256(offsets.tobytes() + columns.tobytes()).digest()
 
     def _validate_storage(self):
+        if self._cable_preconditioner is not None and self._cable_signature != self._cable_preconditioner.signature():
+            raise ValueError("Cable factor storage changed; construct a new PCG plan")
         if self._study_soft is not None:
             self._study_soft.validate()
         arrays = tuple(value for value in vars(self).values() if isinstance(value, wp.array))
@@ -384,6 +403,8 @@ class MaskedPcgPlan:
         )
         bindings_match = (
             self._workspace is workspace
+            and self._cable_preconditioner is workspace._cable_preconditioner
+            and (self._cable_preconditioner is None or self._cable_signature == self._cable_preconditioner.signature())
             and self._study_soft is workspace._study_soft
             and (self._study_soft is None or self._study_signature == self._study_soft.signature())
             and self._stream == self._stream_id()
@@ -436,6 +457,7 @@ class MaskedPcgPlan:
                 self.state,
                 self.error,
                 checkpoint,
+                bool(self.layout.material_ranges),
             ],
         )
 
@@ -453,6 +475,9 @@ class MaskedPcgPlan:
             self._launch(_masked_products, self.n, [a, b, self.products, self.state, self.error])
 
     def _emit_direction(self, slot):
+        if self._cable_preconditioner is not None:
+            self._launch(_study_mask, 1, [self.state, self._cable_active])
+            self._cable_preconditioner.apply(self.r, self.z, active=self._cable_active)
         if len(self.layout.rigid_ranges):
             self._launch(
                 _masked_rigid_solve,

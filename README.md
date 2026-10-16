@@ -892,6 +892,22 @@ If you run the examples from a source checkout with uv, use
     </td>
   </tr>
   <tr>
+    <td align="center" width="33%">
+      <a href="newton/examples/cable/example_monolithic_cable_cantilever.py">
+        <img width="320" src="docs/images/examples/example_monolithic_cable_cantilever.jpg" alt="Monolithic cable cantilever and analytical reference">
+      </a>
+      <br><code>python -m newton.examples monolithic_cable_cantilever</code>
+      <br><a href="docs/guide/monolithic_cable.rst">Anisotropic bend accuracy</a>
+    </td>
+    <td align="center" width="33%">
+      <a href="newton/examples/cable/example_monolithic_cable_helix.py">
+        <img width="320" src="docs/images/examples/example_monolithic_cable_helix.jpg" alt="Monolithic localized helical buckling and analytical reference">
+      </a>
+      <br><code>python -m newton.examples monolithic_cable_helix --segments 720</code>
+      <br><a href="docs/guide/monolithic_cable.rst">Bending and twist transfer (qualification limits)</a>
+    </td>
+  </tr>
+  <tr>
     <td colspan="3"><h3>Kamino Examples</h3></td>
   </tr>
   <tr>

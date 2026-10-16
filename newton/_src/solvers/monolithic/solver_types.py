@@ -35,7 +35,8 @@ class CableInput:
     EA is in N; bending is an SPD 2x2 material tensor and GJ is in N m^2.
     Radius is a circular contact envelope in m, density is in kg/m, and
     rest_theta is unwrapped radians. Each rest_director is a unit vector
-    perpendicular to its edge. Material stepping is not yet available.
+    perpendicular to its edge. Contact-free cables share the global nonlinear
+    solve; material contacts, closed loops and branching are not available.
     """
 
     particle_ids: tuple[int, ...]
@@ -279,6 +280,8 @@ class _SolverMonolithicInternalConfig:
     merit_absolute_global: float = 6.763034882944481e-6
     merit_absolute_q: float = 2.5e-7
     merit_absolute_x: float = 7.3049125684417234e-6
+    merit_absolute_cable_x: float = 1e-9
+    merit_absolute_cable_theta: float = 1e-11
     merit_relative_global: float = 1.0e-4
     merit_relative_q: float = 1.0e-4
     merit_relative_x: float = 1.0e-4

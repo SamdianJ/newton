@@ -30,7 +30,7 @@ class TetEvaluationStatus(enum.IntEnum):
 class TetPhysicsWorkspace:
     """Construction snapshots for P1 material/mass; no candidate host readback."""
 
-    def __init__(self, model, *, material_model, mass_mode, density=None):
+    def __init__(self, model, *, material_model, mass_mode, density=None, particle_ids=None):
         if material_model not in ("kim_stable_no_log", "smith_log_stabilized") or mass_mode not in (
             "lumped",
             "consistent",
@@ -80,6 +80,8 @@ class TetPhysicsWorkspace:
                 np.add.at(diagonal, ids, 2 * float(coefficient))
             dynamic = host["particle_inv_mass"] > 0
             check = dynamic | (host["particle_mass"] > 0)
+            if particle_ids is not None:
+                check &= np.isin(np.arange(model.particle_count), particle_ids)
             if not np.allclose(host["particle_mass"][check], row_mass[check], rtol=2e-5, atol=0):
                 raise ValueError("Builder mass disagrees with explicit density row sums")
             if not np.isfinite(row_mass).all() or np.any(row_mass > np.finfo(np.float32).max):

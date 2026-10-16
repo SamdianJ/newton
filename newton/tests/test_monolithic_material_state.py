@@ -31,6 +31,18 @@ def scene(
     precision=SolverMonolithic.Precision.FP64,
     fixed_particles=(),
     shape_radius=None,
+    device="cpu",
+    pcg_mode=SolverMonolithic.PCGMode.DIAGNOSTIC,
+    use_cuda_graph=False,
+    globalization="ResNorm",
+    contact_model="C-IE",
+    newton_max_iterations=10,
+    linear_tolerance=1e-4,
+    publish_policy="strict",
+    mass_mode="lumped",
+    cable_position_tolerance=1e-9,
+    cable_theta_tolerance=1e-11,
+    fp32_absolute_tolerance=None,
 ):
     builder = newton.ModelBuilder(gravity=(0, 0, 0))
     if mechanical:
@@ -71,25 +83,36 @@ def scene(
         add_contact_free_tet(builder)
     for particle in fixed_particles:
         builder.particle_mass[particle] = 0
-    model = builder.finalize(device="cpu")
+    model = builder.finalize(device=device)
     solver = SolverMonolithic(
         model,
         cloth_inputs=shells,
         cable_inputs=rods,
-        contact_model="C-IE",
-        globalization="ResNorm",
+        contact_model=contact_model,
+        globalization=globalization,
+        newton_max_iterations=newton_max_iterations,
+        linear_tolerance=linear_tolerance,
+        publish_policy=publish_policy,
         friction_velocity_scale=0.1,
-        mass_mode="lumped",
+        mass_mode=mass_mode,
+        cable_position_tolerance=cable_position_tolerance,
+        cable_theta_tolerance=cable_theta_tolerance,
+        tet_rest_density=wp.full(model.tet_count, 1000.0, dtype=float, device=device)
+        if mass_mode == "consistent"
+        else None,
         precision=precision,
+        fp32_absolute_tolerance=fp32_absolute_tolerance,
+        pcg_mode=pcg_mode,
+        use_cuda_graph=use_cuda_graph,
     )
     return model, solver
 
 
 def snapshot(state):
-    values = {name: value.numpy() for name, value in vars(state).items() if isinstance(value, wp.array)}
+    values = {name: value.numpy().copy() for name, value in vars(state).items() if isinstance(value, wp.array)}
     values.update(
         {
-            "history." + name: value.numpy()
+            "history." + name: value.numpy().copy()
             for name, value in vars(state._monolithic_coupled).items()
             if isinstance(value, wp.array)
         }
