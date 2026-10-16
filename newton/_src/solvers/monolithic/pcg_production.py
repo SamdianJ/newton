@@ -195,6 +195,7 @@ class MaskedPcgPlan:
         rigid_cholesky=None,
         rigid_rows=None,
         cable_preconditioner=None,
+        cloth_preconditioner=None,
     ):
         self.config = MaskedPcgConfig() if config is None else config
         if not isinstance(self.config, MaskedPcgConfig):
@@ -203,6 +204,9 @@ class MaskedPcgPlan:
         if self.device.is_capturing:
             raise RuntimeError("Construct/bind the plan outside graph capture")
         self._study_soft = _study_soft
+        self._cloth_preconditioner = cloth_preconditioner
+        self._cloth_signature = None if cloth_preconditioner is None else cloth_preconditioner.signature()
+        self._cloth_active = None if cloth_preconditioner is None else wp.zeros(1, dtype=int, device=self.device)
         self._cable_preconditioner = cable_preconditioner
         self._cable_signature = None if cable_preconditioner is None else cable_preconditioner.signature()
         self._cable_active = None if cable_preconditioner is None else wp.zeros(1, dtype=int, device=self.device)
@@ -341,6 +345,7 @@ class MaskedPcgPlan:
             rigid_cholesky=workspace._rigid_cholesky,
             rigid_rows=workspace.rigid_rows,
             cable_preconditioner=workspace._cable_preconditioner,
+            cloth_preconditioner=workspace._cloth_preconditioner,
         )
         plan._workspace = workspace
         plan._generation = workspace._generation
@@ -360,6 +365,8 @@ class MaskedPcgPlan:
         return hashlib.sha256(offsets.tobytes() + columns.tobytes()).digest()
 
     def _validate_storage(self):
+        if self._cloth_preconditioner is not None and self._cloth_signature != self._cloth_preconditioner.signature():
+            raise ValueError("Cloth preconditioner storage changed")
         if self._cable_preconditioner is not None and self._cable_signature != self._cable_preconditioner.signature():
             raise ValueError("Cable factor storage changed; construct a new PCG plan")
         if self._study_soft is not None:
@@ -403,6 +410,8 @@ class MaskedPcgPlan:
         )
         bindings_match = (
             self._workspace is workspace
+            and self._cloth_preconditioner is workspace._cloth_preconditioner
+            and (self._cloth_preconditioner is None or self._cloth_signature == self._cloth_preconditioner.signature())
             and self._cable_preconditioner is workspace._cable_preconditioner
             and (self._cable_preconditioner is None or self._cable_signature == self._cable_preconditioner.signature())
             and self._study_soft is workspace._study_soft
@@ -475,6 +484,9 @@ class MaskedPcgPlan:
             self._launch(_masked_products, self.n, [a, b, self.products, self.state, self.error])
 
     def _emit_direction(self, slot):
+        if self._cloth_preconditioner is not None:
+            self._launch(_study_mask, 1, [self.state, self._cloth_active])
+            self._cloth_preconditioner.apply(self.r, self.z, active=self._cloth_active)
         if self._cable_preconditioner is not None:
             self._launch(_study_mask, 1, [self.state, self._cable_active])
             self._cable_preconditioner.apply(self.r, self.z, active=self._cable_active)

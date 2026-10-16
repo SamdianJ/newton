@@ -93,7 +93,7 @@ class CablePreconditioner:
         count = 0
         for kind, _, start, xyz, theta in layout.material_ranges:
             if kind != "cable":
-                raise NotImplementedError("Cloth preconditioning is not yet connected")
+                continue
             spans.append((count, count + xyz + theta))
             expected.extend(range(start, start + xyz + theta))
             count += xyz + theta

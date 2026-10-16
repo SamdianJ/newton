@@ -1,0 +1,1 @@
+Add experimental contact-free monolithic cloth dynamics with stable Neo-Hookean membranes, natural-curvature bending, complete cross-node tangents, independent and mixed material scenes, checkpoint continuation, and loading/unloading examples.

@@ -51,6 +51,8 @@ def blocks(solver):
 
 
 def _block_policy(config, prefix, name):
+    if name.startswith("cloth_"):
+        return getattr(config, prefix + "_x")
     if name.startswith("cable_"):
         if prefix == "merit_absolute":
             return config.merit_absolute_cable_theta if name.endswith("_theta") else config.merit_absolute_cable_x
@@ -73,7 +75,7 @@ def _block_policy(config, prefix, name):
 
 
 def _record_block(solver, name, key, value):
-    if name.startswith(("rigid_", "cable_")):
+    if name.startswith(("rigid_", "cable_", "cloth_")):
         category = "rigid_blocks" if name.startswith("rigid_") else "material_blocks"
         solver._variational.setdefault(category, {}).setdefault(name, {})[key] = value
     else:

@@ -1028,6 +1028,12 @@ class SolverMonolithic(SolverBase):
                 ],
                 device=self.model.device,
             )
+            for cloth in self._cloths:
+                cloth.begin_step(self._original, self._frozen_force)
+                cloth.candidate(self._original, self._original, self._accepted, self._delta, 0.0, dt, predict=True)
+                if not cloth.path_valid(self._original, self._accepted):
+                    # An inertial guess is optional; retain the valid input chart.
+                    cloth.candidate(self._original, self._original, self._accepted, self._delta, 0.0, dt)
             for cable in self._cables:
                 cable.begin_step(self._original, self._frozen_force)
                 cable.candidate(
@@ -1270,6 +1276,8 @@ class SolverMonolithic(SolverBase):
         )
 
         if self._materials is not None:
+            for cloth in self._cloths:
+                cloth.candidate(self._accepted, self._original, self._trial, direction, alpha, dt)
             for cable in self._cables:
                 cable.candidate(
                     self._accepted,
@@ -1313,6 +1321,10 @@ class SolverMonolithic(SolverBase):
                 self._accepted._monolithic_coupled.cable_theta.numpy(),
                 self._trial._monolithic_coupled.cable_theta.numpy(),
             )
+            for cloth in self._cloths:
+                local = (bx[cloth.actor.particle_indices, :] - ax[cloth.actor.particle_indices, :]).ravel()
+                free = cloth.rows_host >= 0
+                displacement[cloth.rows_host[free]] = local[free]
             for cable in self._cables:
                 local = np.r_[
                     (bx[cable.actor.particle_indices, :] - ax[cable.actor.particle_indices, :]).ravel(),
@@ -1508,6 +1520,7 @@ class SolverMonolithic(SolverBase):
             history.force_generation.fill_(self._step_generation)
             history.force_valid.fill_(1)
             self._variational["contact_force_generation"] = self._step_generation
+            self._variational["cloth_reactions"] = tuple(c.raw.numpy().tolist() for c in self._cloths)
             self._variational["cable_reactions"] = tuple(c.raw.numpy().tolist() for c in self._cables)
             return
         contact, k = self._contact, self._kinematics
@@ -1558,7 +1571,9 @@ class SolverMonolithic(SolverBase):
         state.assign(self._out_backup)
 
     def _domain(self, state):
-        if self._materials is not None and not all(c.path_valid(self._accepted, state) for c in self._cables):
+        if self._materials is not None and not all(
+            c.path_valid(self._accepted, state) for c in self._cloths + self._cables
+        ):
             return False
         return iteration_device.domain(self, state, int(JointType.REVOLUTE)) and self._rigid.domain(state)
 

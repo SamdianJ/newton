@@ -21,6 +21,7 @@ Newton Physics
    guide/tutorials
    guide/monolithic
    guide/monolithic_cable
+   guide/monolithic_cloth
    guide/monolithic_p1_contract
    guide/monolithic_sharpa_assets
    guide/monolithic_franka_grasp

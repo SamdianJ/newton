@@ -241,8 +241,8 @@ class TestMonolithicMaterialState(unittest.TestCase):
             with self.assertRaises(ValueError):
                 solver.load_checkpoint(state, path)
 
-    def test_reset_and_unavailable_step_preserve_state(self):
-        """Preserve published history and forces after failed reset or unsupported step."""
+    def test_invalid_reset_and_step_preserve_state(self):
+        """Preserve published history and forces after invalid reset or step input."""
         _, solver = scene()
         state = solver.create_state(dt=0.001)
         history = state._monolithic_coupled
@@ -251,8 +251,8 @@ class TestMonolithicMaterialState(unittest.TestCase):
         expected = snapshot(state)
         with self.assertRaises(ValueError):
             solver.reset_state(state, dt=-1)
-        with self.assertRaises(NotImplementedError):
-            solver.step(state, state, solver.create_control(), dt=0.001)
+        with self.assertRaises(ValueError):
+            solver.step(state, state, solver.create_control(), dt=-1)
         for name, value in snapshot(state).items():
             np.testing.assert_array_equal(value, expected[name], err_msg=name)
         with self.assertRaises(ValueError):

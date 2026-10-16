@@ -1,0 +1,37 @@
+{
+  "version": 2,
+  "common": {
+    "cells": 4,
+    "width": 0.2,
+    "dt": 0.1,
+    "ramp_steps": 40,
+    "hold_steps": 40,
+    "unload_steps": 40,
+    "recovery_steps": 240,
+    "checkpoint_step": 65,
+    "poisson_ratio": 0.3,
+    "maximum_residual": 1e-06,
+    "area_ratio_min": 0.2,
+    "area_ratio_max": 2.0,
+    "final_displacement_ratio": 0.1,
+    "final_energy_ratio": 0.01,
+    "fold_error_radians": 0.01,
+    "checkpoint_tolerance": 1e-10
+  },
+  "patch": {
+    "young_modulus": 200000.0,
+    "thickness": 0.0002,
+    "surface_density": 0.05,
+    "fold_angle": 0.0,
+    "force": -0.002,
+    "minimum_peak_displacement": 0.001
+  },
+  "prefold": {
+    "young_modulus": 20000000.0,
+    "thickness": 0.0005,
+    "surface_density": 0.1,
+    "fold_angle": 1.0471975511965976,
+    "force": -1.0,
+    "minimum_peak_displacement": 0.0001
+  }
+}

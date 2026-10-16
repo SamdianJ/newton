@@ -60,10 +60,11 @@ Material input and continuation (experimental)
 ``SolverMonolithic.ClothInput`` and ``SolverMonolithic.CableInput`` describe
 independently owned shell meshes and open, anisotropic DER chains. Pass tuples
 through the keyword-only ``cloth_inputs`` and ``cable_inputs`` arguments.
-Cable-only and contact-free mixed articulation/rigid/tet/cable scenes use the
-shared nonlinear solve and transactional publication path. Cloth energy and
-material-scene contacts are not yet connected; those scenes explicitly raise
-``NotImplementedError`` when stepped. Existing nonmaterial stepping is unchanged.
+Independent cloth/cable and contact-free mixed articulation/rigid/tet/material
+scenes use the shared nonlinear solve and transactional publication path.
+Material-scene contacts are not yet connected; collision-enabled material
+scenes raise ``NotImplementedError`` when stepped. Existing nonmaterial
+stepping is unchanged.
 
 Cloth inputs select Model triangle rows, bending coefficients ``(alpha, beta)``,
 thickness [m] and surface density [kg/m²]. Cable inputs select ordered particle
@@ -97,7 +98,8 @@ or angular velocity is allocated. USD authoring/import support is separate and
 is not provided by these Python inputs.
 
 See :doc:`../guide/monolithic_cable` for the cable energy, numerical policy and
-analytical examples.
+analytical examples, and :doc:`../guide/monolithic_cloth` for shell inputs,
+curvature bending and no-contact loading/recovery.
 
 .. rubric:: Other classes
 

@@ -13,6 +13,7 @@ from ...geometry import ShapeFlags
 from . import coupled_kernels as kernels
 from .articulation import ArticulationObjective
 from .cable_system import CableBlock
+from .cloth_system import ClothBlock
 from .linear import MonolithicLinearWorkspace
 from .linear_types import MonolithicLinearCapacities, MonolithicLinearGeneration
 from .rigid import _scatter_residual, _scatter_tangent
@@ -36,14 +37,16 @@ def _scatter(values: wp.array[Any], start: int, output: wp.array[Any]):
 
 def initialize(self):
     """Allocate material producers once; retain the existing Newton/PCG driver."""
-    if self._materials.cloth:
-        raise NotImplementedError("Cloth energy assembly is not yet connected")
     config, model, layout = self._material_config, self.model, self._layout
     if np.any(model.shape_flags.numpy() & (int(ShapeFlags.COLLIDE_PARTICLES) | int(ShapeFlags.COLLIDE_SHAPES))):
         raise NotImplementedError("Material-scene contact assembly belongs to the contact integration")
     device, dtype = model.device, self._dtype
+    self._cloths = []
     self._cables = []
     for actor in self._actors.actors:
+        if actor.kind == "cloth":
+            obj = self._materials.cloth[actor.source_index]
+            self._cloths.append(ClothBlock(obj, actor, dtype=dtype, device=device))
         if actor.kind == "cable":
             obj = self._materials.cable[actor.source_index]
             phi_offset = sum(len(c["ref_twist"]) for c in self._materials.cable[: actor.source_index])
@@ -104,6 +107,7 @@ def initialize(self):
             density=None if isinstance(density, str) else wp.array(density, dtype=float, device=device),
             dtype=dtype,
             actor=tet_actor,
+            allow_cloth=bool(self._materials.cloth),
         )
         mapping = self._tet.mapping.numpy()
         self._dynamic_ids_host = self._tet.ids.numpy()
@@ -119,10 +123,10 @@ def initialize(self):
     self._rigid_triplet_offset = len(global_rows)
     global_rows.extend(np.repeat(self._rigid.rows_numpy, 6, axis=1).ravel())
     global_columns.extend(np.tile(self._rigid.rows_numpy, (1, 6)).ravel())
-    for cable in self._cables:
-        cable.triplet_offset = len(global_rows)
-        global_rows.extend(cable.triplet_rows)
-        global_columns.extend(cable.triplet_columns)
+    for block in self._cloths + self._cables:
+        block.triplet_offset = len(global_rows)
+        global_rows.extend(block.triplet_rows)
+        global_columns.extend(block.triplet_columns)
     self._linear = MonolithicLinearWorkspace(
         layout,
         MonolithicLinearCapacities(
@@ -132,7 +136,9 @@ def initialize(self):
         device=device,
         pcg_mode=self.pcg_mode.value,
         use_cuda_graph=self._use_cuda_graph,
-        cable_row_order=np.concatenate([c.order for c in self._cables]),
+        cable_row_order=np.concatenate([c.order for c in self._cables])
+        if self._cables
+        else np.empty(0, dtype=np.int32),
     )
     self._linear._set_fixed_triplet_pattern(
         global_rows=np.asarray(global_rows, dtype=np.int32),
@@ -159,7 +165,7 @@ def initialize(self):
 
 
 def evaluate(self, state, dt, *, build_tangent=True):
-    """Combine A/R/T and cable E/r without splitting any material angle solve."""
+    """Combine A/R/T and cloth/cable E/r without splitting any material angle solve."""
     k, obj = self._kinematics, self._objective
     self._complete_r.zero_()
     obj.evaluate(k.gather_q(state), dt, build_tangent=build_tangent)
@@ -199,6 +205,19 @@ def evaluate(self, state, dt, *, build_tangent=True):
     self._temporary_gauges = []
     self._cable_raw_theta_norms = {}
     gravity = self._frozen_gravity.numpy()
+    for cloth in self._cloths:
+        try:
+            e, a = cloth.evaluate(
+                state,
+                wp.vec3(gravity[int(cloth.reference["world"])]),
+                dt,
+                self._complete_r,
+                build_tangent=build_tangent,
+            )
+        except ValueError as error:
+            raise _StepFailure(self.Status.NONFINITE, str(error)) from error
+        total += e
+        absolute += a
     for cable in self._cables:
         try:
             e, a = cable.evaluate(
@@ -287,8 +306,8 @@ def assemble(self, iteration):
         ],
         device=self.model.device,
     )
-    for cable in self._cables:
-        cable.assemble(assembly, self._dt)
+    for block in self._cloths + self._cables:
+        block.assemble(assembly, self._dt)
     self._require_linear(self._linear.finalize_assembly(generation=self._generation).status)
     self._require_linear(self._linear.build_coordinate_scaling(self._material_scale, generation=self._generation))
     self._assembly_gauges = tuple(self._temporary_gauges)
@@ -296,7 +315,8 @@ def assemble(self, iteration):
     for i, cable in enumerate(self._cables):
         if cable in self._temporary_gauges:
             pins[i] = cable.rows_host[3 * cable.ids.size]
-    self._linear._cable_preconditioner.gauge_rows.assign(pins)
+    if self._linear._cable_preconditioner is not None:
+        self._linear._cable_preconditioner.gauge_rows.assign(pins)
     self._metrics["matrix_assembly_count"] += 1
     return None, self._material_scale.astype(self._numpy_dtype)
 

@@ -32,6 +32,7 @@ from .bsr_reduction import (
     _ScalarBsrReduction,
 )
 from .cable_preconditioner import CablePreconditioner
+from .cloth_preconditioner import ClothPreconditioner
 from .linear_types import (
     MonolithicDenseLinearOracle,
     MonolithicLinearBuildResult,
@@ -68,7 +69,7 @@ class MonolithicLinearWorkspace:
         contact_support=None,
         cable_row_order=None,
     ):
-        if layout.material_ranges and cable_row_order is None:
+        if any(k == "cable" for k, *_ in layout.material_ranges) and cable_row_order is None:
             raise ValueError("Material layouts require an explicit cable preconditioner ordering")
         if pcg_mode not in ("diagnostic", "production"):
             raise ValueError("pcg_mode must be diagnostic or production")
@@ -95,7 +96,14 @@ class MonolithicLinearWorkspace:
         self.capacities = capacities
         self.device = wp.get_device(device)
         self._cable_preconditioner = (
-            CablePreconditioner(layout, cable_row_order, device=self.device) if layout.material_ranges else None
+            CablePreconditioner(layout, cable_row_order, device=self.device)
+            if any(k == "cable" for k, *_ in layout.material_ranges)
+            else None
+        )
+        self._cloth_preconditioner = (
+            ClothPreconditioner(layout, device=self.device)
+            if any(k == "cloth" for k, *_ in layout.material_ranges)
+            else None
         )
         if (
             particle_to_dynamic.device != self.device
@@ -551,6 +559,8 @@ class MonolithicLinearWorkspace:
         )
         if self._cable_preconditioner is not None:
             arrays += self._cable_preconditioner.buffers()
+        if self._cloth_preconditioner is not None:
+            arrays += self._cloth_preconditioner.buffers()
         return (
             self._generation,
             y.ptr,
@@ -565,6 +575,8 @@ class MonolithicLinearWorkspace:
         arrays = (self.scale, self._q_cholesky, self._x_cholesky, self._rigid_cholesky, self.rigid_rows)
         if self._cable_preconditioner is not None:
             arrays += self._cable_preconditioner.buffers()
+        if self._cloth_preconditioner is not None:
+            arrays += self._cloth_preconditioner.buffers()
         return self._generation, self.layout, tuple((a.ptr, a.shape, a.strides, a.dtype, a.device) for a in arrays)
 
     def _vector_valid(self, vector) -> bool:

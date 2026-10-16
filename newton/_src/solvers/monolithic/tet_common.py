@@ -118,7 +118,9 @@ def _validate_mapping(tet_indices: np.ndarray, particle_to_dynamic: np.ndarray) 
     return len(dynamic)
 
 
-def validate_tet_scope(model: Model, *, dynamic_particle_ids: np.ndarray, particle_to_dynamic: np.ndarray) -> None:
+def validate_tet_scope(
+    model: Model, *, dynamic_particle_ids: np.ndarray, particle_to_dynamic: np.ndarray, allow_cloth: bool = False
+) -> None:
     """Validate material, rest data and lumped mass; collision owns the boundary."""
     indices = model.tet_indices.numpy()
     count = _validate_mapping(indices, particle_to_dynamic)
@@ -168,7 +170,7 @@ def validate_tet_scope(model: Model, *, dynamic_particle_ids: np.ndarray, partic
         raise ValueError("stable Neo-Hookean requires mu >= 0 and lambda + mu > 0")
     if np.any(materials[:, 2] != 0) or np.any(model.tet_activations.numpy() != 0):
         raise ValueError("tet damping and activation are unsupported")
-    for name in ("tri_materials", "edge_bending_properties"):
+    for name in ("edge_bending_properties",) if allow_cloth else ("tri_materials", "edge_bending_properties"):
         values = getattr(model, name)
         if values is not None and np.any(values.numpy() != 0):
             raise ValueError(f"{name} must be zero for the tet-only constitutive scope")

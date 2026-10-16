@@ -128,7 +128,9 @@ def _finite(residual: wp.array[Any], flags: wp.array[int]):
 class TetObjective:
     """Own native E/r scratch; input coordinates and step history remain read-only."""
 
-    def __init__(self, model, *, material_model, mass_mode, density=None, dtype=wp.float64, actor=None):
+    def __init__(
+        self, model, *, material_model, mass_mode, density=None, dtype=wp.float64, actor=None, allow_cloth=False
+    ):
         if dtype not in (wp.float64, wp.float32):
             raise ValueError("Tet E/r requires float64 or float32")
         self.dtype = dtype
@@ -140,7 +142,7 @@ class TetObjective:
         ).astype(np.int32)
         mapping = np.full(model.particle_count, -1, dtype=np.int32)
         mapping[ids] = np.arange(len(ids))
-        validate_tet_scope(model, dynamic_particle_ids=ids, particle_to_dynamic=mapping)
+        validate_tet_scope(model, dynamic_particle_ids=ids, particle_to_dynamic=mapping, allow_cloth=allow_cloth)
         if 4 * model.tet_count >= 2**31:
             raise ValueError("Tet residual contribution capacity exceeds int32")
         self.model = model

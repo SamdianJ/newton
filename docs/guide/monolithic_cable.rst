@@ -10,7 +10,8 @@ Experimental monolithic cables
    experimental. Open, independent chains support finite axial stiffness,
    anisotropic bending and natural curvature/twist. Closed loops, branches,
    connectors, self-collision and material contacts are outside this interface.
-   Material scenes with collision-enabled shapes or cloth energy are rejected.
+   Material scenes with collision-enabled shapes are rejected. Contact-free
+   cloth can share the solve; see :doc:`monolithic_cloth`.
 
 Supply ordered Model particle IDs, reference directors and material angles
 through ``cable_inputs``. A director is perpendicular to its edge and specifies
