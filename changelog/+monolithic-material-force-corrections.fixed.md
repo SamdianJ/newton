@@ -1,0 +1,1 @@
+Allow representable small Newton corrections to satisfy explicit monolithic joint and cloth residual goals instead of failing prematurely on the default step tolerance. Zero-step stagnation and strict residual convergence checks remain enforced.

@@ -51,6 +51,12 @@ def blocks(solver):
 
 
 def _block_policy(config, prefix, name):
+    if prefix == "step_tolerance" and (
+        (name == "q" and config.joint_residual_tolerance is not None)
+        or (name.startswith("cloth_") and config.cloth_position_tolerance is not None)
+    ):
+        # Explicit force goals can require nonzero corrections below the default step tolerance.
+        return 0.0
     if name.startswith("cloth_"):
         return getattr(config, prefix + "_x")
     if name.startswith("cable_"):

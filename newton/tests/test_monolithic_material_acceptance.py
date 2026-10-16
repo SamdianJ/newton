@@ -18,6 +18,24 @@ from scripts.monolithic_reference.material_scene import MaterialScene, load_frac
 
 
 class TestMaterialAcceptance(unittest.TestCase):
+    def test_stiff_shell_force_corrections(self):
+        """Reach explicit force goals using representable corrections below the default step tolerance."""
+        recipe = json.loads(RECIPE_PATH.with_name("material_acceptance_v3.json").read_text())
+        recipe["common"]["linear_tolerance"] = 1e-3
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "recipe.json"
+            path.write_text(json.dumps(recipe))
+            case = MaterialScene("precreased-box", recipe=path)
+            case.state.joint_q.assign([0.00652])
+            case.state.joint_qd.assign([0.012])
+            case.solver.reset_state(case.state, dt=case.dt)
+            case.steps = 1172
+            for _ in range(2):
+                case.step()
+                self.assertLessEqual(case.solver.last_stats.raw_residual_q_norm, 1e-9)
+                blocks = case.solver.last_stats.variational["material_blocks"]
+                self.assertLessEqual(blocks["cloth_0_x"]["raw_residual_cloth_0_x_norm"], 1e-9)
+
     def test_physical_cap_inputs_and_checkpoint(self):
         """Reject invalid raw caps and checkpoint continuation under different solve goals."""
         recipe = json.loads(RECIPE_PATH.with_name("material_acceptance_v3.json").read_text())
