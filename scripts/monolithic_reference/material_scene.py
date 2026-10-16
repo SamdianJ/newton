@@ -117,6 +117,7 @@ class MaterialScene:
             allow_nonconservative_energy=True,
             joint_residual_tolerance=c.get("joint_residual_tolerance"),
             cloth_position_tolerance=c.get("cloth_position_tolerance"),
+            contact_stiffness=r.get("contact_stiffness", c["contact_stiffness"]),
             **{
                 key: c[key]
                 for key in (
@@ -125,7 +126,6 @@ class MaterialScene:
                     "publish_policy",
                     "friction_coefficient",
                     "friction_velocity_scale",
-                    "contact_stiffness",
                     "normal_smoothing",
                     "newton_max_iterations",
                     "line_search_max_iterations",
