@@ -121,6 +121,7 @@ class _MonolithicPcgPacket:
     status: int
     check: int
     ratios: wp.vec3
+    merit: wp.float64
 
 
 @wp.kernel
@@ -141,6 +142,12 @@ def _pack_monolithic_pcg_residual(
     for k in range(3):
         if aliases[k] >= 0:
             value.ratios[k] = ratios[aliases[k]]
+    # Progress must include every actor and the same absolute/relative caps as acceptance.
+    value.merit = wp.float64(0.0)
+    for k in range(floors.shape[0]):
+        target = wp.max(wp.float64(rtol) * wp.float64(wp.max(norms[floors.shape[0] + k], floors[k])), wp.float64(atol))
+        target = wp.min(target, wp.float64(limits[k]))
+        value.merit = wp.max(value.merit, wp.float64(norms[k]) / target)
     value.check = int(residual_converged(norms, floors.shape[0], floors, rtol, atol, limits))
     packet[0] = value
 
@@ -466,6 +473,7 @@ def _true_residual(self, rhs, y, config):
     packet = self._pcg_packet.numpy()[0]
     self._pcg_boundary_status = MonolithicLinearStatus(int(packet["status"]))
     self._pcg_converged = bool(packet["check"])
+    self._pcg_merit = float(packet["merit"])
     return tuple(float(value) for value in packet["ratios"])
 
 
@@ -584,7 +592,8 @@ def _solve_pcg_diagnostic(self, rhs_hat, y, *, generation, warm_start, config):
     if status != MonolithicLinearStatus.SUCCESS:
         return result(status)
     wp.copy(self._p, self._z)
-    history = [max(ratios)]
+    best_merit = self._pcg_merit
+    history = [best_merit]
     # A check can occur on every iteration when a recursive residual is tiny.
     # The configured check capacity therefore bounds that worst case.
     for iteration in range(1, config.maximum_iterations + 1):
@@ -645,13 +654,17 @@ def _solve_pcg_diagnostic(self, rhs_hat, y, *, generation, warm_start, config):
             if self._pcg_converged:
                 self._warm_start_key = self._solve_binding(y)
                 return result(MonolithicLinearStatus.SUCCESS)
-            history.append(max(ratios))
-            if (
-                len(history) > config.stagnation_window
-                and history[-1] >= (1.0 - config.stagnation_minimum_reduction) * history[-1 - config.stagnation_window]
-            ):
-                status = MonolithicLinearStatus.STAGNATION
-                break
+            # CG can oscillate; extra convergence checks must not shorten its progress window.
+            best_merit = min(best_merit, self._pcg_merit)
+            if iteration % config.true_residual_interval == 0:
+                history.append(best_merit)
+                if (
+                    len(history) > config.stagnation_window
+                    and history[-1]
+                    >= (1.0 - config.stagnation_minimum_reduction) * history[-1 - config.stagnation_window]
+                ):
+                    status = MonolithicLinearStatus.STAGNATION
+                    break
 
             decision = self._should_restart(config)
             if decision < 0:

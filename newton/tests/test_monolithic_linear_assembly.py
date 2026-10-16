@@ -754,6 +754,29 @@ def test_pcg_true_block_gate_and_replacement(test, device):
     test.assertLessEqual(result.rho_q, 1e-4)
 
 
+def test_pcg_progress_with_absolute_block_goals(test, device):
+    """Continue CG when an already-qualified block grows but the unresolved residual halves."""
+    workspace, generation = _two_block_system(device, 0.5)
+    rhs = wp.array([1e-5, 1.0, 0.0, 0.0], dtype=float, device=device)
+    y = wp.zeros(4, dtype=float, device=device)
+    result = workspace.solve_pcg(
+        rhs,
+        y,
+        generation=generation,
+        warm_start=MonolithicPcgWarmStart.ZERO,
+        config=_pcg_config(
+            true_residual_interval=1,
+            stagnation_window=1,
+            linear_absolute_tolerance=1.0,
+            residual_norm_limits=(1e-5, 1.0, 1e-5),
+        ),
+    )
+    test.assertEqual(result.status, MonolithicLinearStatus.SUCCESS, result)
+    residual = rhs.numpy() - _dense_bsr(workspace.k_global_scalar_bsr) @ y.numpy()
+    test.assertLessEqual(np.linalg.norm(residual), 1e-5)
+    test.assertEqual(result.iterations, 2)
+
+
 def test_pcg_stagnation_and_bad_preconditioner(test, device):
     """Report stagnation and invalid preconditioned products without accepting them."""
     workspace, generation = _two_block_system(device, 0.9)
@@ -1095,6 +1118,7 @@ for device in get_test_devices():
         test_pcg_curvature_guards,
         test_pcg_true_block_gate_and_replacement,
         test_pcg_stagnation_and_bad_preconditioner,
+        test_pcg_progress_with_absolute_block_goals,
         test_pcg_nonfinite_and_zero,
         test_preconditioner_pivots_and_repeated_factor,
         test_scaling_operator_preconditioner,

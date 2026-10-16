@@ -56,6 +56,7 @@ class MonolithicPcgConfig:
     curvature_relative_tolerance: float
     preconditioner_positive_tolerance: float
     stagnation_window: int
+    """Number of scheduled true-residual checks without sufficient best-merit reduction."""
     stagnation_minimum_reduction: float
     residual_replacement_threshold: float = 0.1
     """Relative gap threshold for replacing recursive residual with true residual.
@@ -348,7 +349,7 @@ class MonolithicLinearSolveResult:
     recursive_true_residual_gap: tuple[float, float, float] = (float("nan"),) * 3
     """Maximum scaled L2 recursive-minus-true gap in global/q/x slices before replacement."""
     stagnation_window: int | None = None
-    """Configured stagnation window in true-residual checks; None before a solve starts."""
+    """Configured stagnation window in scheduled true-residual checks; None before a solve starts."""
 
     pcg_policy: str = "dynamic_smart_restart_v2"
     scheduled_slots: int = 0
