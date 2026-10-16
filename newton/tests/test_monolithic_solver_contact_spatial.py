@@ -31,6 +31,32 @@ def spatial_solver(model, *, capacity=4096, margin=0.0, **options):
         return contact_solver(model, **options)
 
 
+def test_spatial_default(test, device):
+    """Match ordinary construction to an explicit spatial recipe and restore its checkpoint."""
+    model = contact_scene(device, "chain")
+    options = {"mode": "production", "graph": device.is_cuda}
+    run = contact_solver(model, **options)
+    test.assertTrue(run._contact_spatial)
+    test.assertEqual(run._contact.candidate_capacity, run._contact.count)
+    test.assertEqual(run._contact.law_margin, 0.0)
+    explicit = spatial_solver(model, capacity=run._contact.count, **options)
+    test.assertEqual(run._kinematics.digest, explicit._kinematics.digest)
+    states = [contact_state(owner, "chain") for owner in (run, explicit)]
+    for _ in range(2):
+        for owner, state in zip((run, explicit), states, strict=True):
+            owner.step(state, state, model.control(), dt=0.001)
+            test.assertTrue(owner.last_stats.converged, owner.last_stats)
+            test.assertFalse(owner.last_stats.variational["contact_spatial"]["tainted"])
+        assert_snapshot(test, states[1], snapshot(states[0]))
+    with tempfile.TemporaryDirectory() as directory:
+        path = Path(directory) / "state.npz"
+        run.save_checkpoint(states[0], path)
+        restored = contact_solver(model, **options)
+        target = restored.create_state(dt=0.001)
+        restored.load_checkpoint(target, path)
+        assert_snapshot(test, target, snapshot(states[0]))
+
+
 def test_spatial_rounds(test, device):
     """Refresh once per Newton check, freeze trials/final, and preserve step-start authority."""
     modes = [("diagnostic", False), ("production", False)]
@@ -361,6 +387,7 @@ class TestSolverContactSpatial(unittest.TestCase):
 
 for _device in get_test_devices():
     for _test in (
+        test_spatial_default,
         test_spatial_rounds,
         test_spatial_retry_freeze,
         test_spatial_miss_and_reference,

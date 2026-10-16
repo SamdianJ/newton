@@ -14,6 +14,7 @@ import numpy as np
 import warp as wp
 
 import newton
+from newton._src.solvers.monolithic.contact import ContactObjective
 from newton.tests.unittest_utils import add_function_test, get_test_devices
 from scripts.monolithic_reference.record_workload import record
 from scripts.monolithic_reference.workload_io import digest, write_json
@@ -277,7 +278,8 @@ def test_owned_sdf_contract(test, device):
     for factory in (contact_solver, pooled_solver):
         model = contact_scene(device, "A-R", mesh=True)
         sdf = build_smooth_sdf(model, representation="c2-bspline")
-        runs.append(factory(model, mode="production", graph=False, smooth_sdf=sdf))
+        with patch("newton._src.solvers.monolithic.solver_monolithic.ContactObjective", ContactObjective):
+            runs.append(factory(model, mode="production", graph=False, smooth_sdf=sdf))
     left, right = runs
     verify_contract(left, right)
     for name in ("_texture_sdf_coarse_textures", "_texture_sdf_subgrid_textures", "_texture_sdf_subgrid_start_slots"):
@@ -330,7 +332,8 @@ def test_prepared_mesh_audit_pair(test, device):
         for factory in (contact_solver, pooled_solver):
             model = contact_scene(device, "A-R", mesh=True)
             sdf = build_smooth_sdf(model, representation="c2-bspline")
-            runs.append(factory(model, law=law, mode="production", graph=device.is_cuda, smooth_sdf=sdf))
+            with patch("newton._src.solvers.monolithic.solver_monolithic.ContactObjective", ContactObjective):
+                runs.append(factory(model, law=law, mode="production", graph=device.is_cuda, smooth_sdf=sdf))
         frame = _physical(contact_state(runs[0], "A-R"))
         fields = export_mesh_fields(runs[0].model, runs[0]._contact.smooth_sdf)
         result = _audit_pair(runs, frame, frame, 0.001, {"state_origin": "legacy"}, mesh_fields=fields)

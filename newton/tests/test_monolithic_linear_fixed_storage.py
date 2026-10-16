@@ -84,7 +84,7 @@ def test_fixed_topology_reuse(test, device):
                 array.fill_(seed)
             owner.build(inputs, layout_identity="fixed")
             _assert_matrix(test, owner, rows[:n], columns[:n], values[:n])
-            for name in ("keys", "key_scratch", "indices", "index_scratch", "starts", "work", "live"):
+            for name in ("starts", "work"):
                 np.testing.assert_array_equal(
                     getattr(owner, name).numpy()[n:], seed, err_msg="Build touched unused scratch capacity"
                 )
@@ -103,6 +103,22 @@ def test_fixed_topology_reuse(test, device):
     _assert_matrix(test, owner, rows, columns, values)
     actual = sum(a.capacity for a in owner.buffers() if a.device == device)
     test.assertEqual(owner.payload_bytes, actual)
+
+
+def test_active_count_reuse(test, device):
+    """Preserve the value tree across empty, full and changing bounded sort spans."""
+    owner = _FixedScalarBsrReduction(3, 65, device, use_cuda_graph=device.is_cuda)
+    inputs = _inputs(65, device)
+    values = np.resize(np.array([2**24, 1, -(2**24), -0.0, 1, -1], np.float32), 65)
+    for count in (65, 0, 1, 33, 7, 0, 65):
+        rows = np.zeros(count, np.int32)
+        _fill(inputs, rows, rows, values[:count])
+        with patch.object(wp.array, "numpy", side_effect=AssertionError("Builder added a host read")):
+            owner.build(inputs, active_count=count)
+        _assert_matrix(test, owner, rows, rows, values[:count])
+    for count in (-1, 66, True, 1.5):
+        with test.assertRaises(ValueError):
+            owner.build(inputs, active_count=count)
 
 
 def test_fixed_topology_long_tree(test, device):
@@ -145,7 +161,7 @@ def test_fixed_topology_errors(test, device):
         _fill(inputs, [2], [2], [3])
         owner.build(inputs)
         _assert_matrix(test, owner, [2], [2], [3])
-    for count in (-1, 9):
+    for count in (-1, 9, 16, 17):
         inputs.status.zero_()
         inputs.count.fill_(count)
         owner.build(inputs)
@@ -273,6 +289,7 @@ class TestMonolithicLinearFixedStorage(unittest.TestCase):
 
 for device in get_test_devices():
     for function in (
+        test_active_count_reuse,
         test_fixed_topology_reuse,
         test_fixed_topology_long_tree,
         test_fixed_topology_errors,

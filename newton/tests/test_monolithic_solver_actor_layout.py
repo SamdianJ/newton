@@ -175,7 +175,8 @@ def test_sparse_support(test, device):
     builder.particle_mass[0] = 0
     model = builder.finalize(device=device)
     for order in ((0, 1), (1, 0)):
-        run = permuted_solver(model, order)
+        with patch("newton._src.solvers.monolithic.solver_monolithic.ContactObjective", ContactObjective):
+            run = permuted_solver(model, order)
         offsets, columns, local = run._contact.factor_support
         test.assertEqual(len(offsets), 3 * run._contact.count + 1)
         test.assertEqual(run._layout.dynamic_particle_count, 3)

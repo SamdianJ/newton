@@ -87,9 +87,17 @@ def targets(case, step):
     return case["pusher_travel_m"] * (base + sign * blend), sign * case["pusher_travel_m"] * rate, phase
 
 
-def build_model(*, device="cuda:0", before=False):
-    """Construct the frozen scene without altering Model collision filtering."""
+def build_model(*, device="cuda:0", before=False, rigid_count=2):
+    """Construct the frozen scene or extend its rigid chain for scaling experiments."""
+    if type(rigid_count) is not int or rigid_count < 2:
+        raise ValueError("Rigid chain requires at least two bodies")
     case = load_case()
+    if rigid_count != 2:
+        pitch = case["centers_m"]["rigid_2"][0] - case["centers_m"]["rigid_1"][0]
+        end = case["centers_m"]["rigid_2"][0]
+        for i in range(1, rigid_count + 1):
+            case["centers_m"][f"rigid_{i}"] = [end - (rigid_count - i) * pitch, 0, 0]
+        case["centers_m"]["pusher"] = [end - rigid_count * pitch, 0, 0]
     builder = newton.ModelBuilder(gravity=case["gravity"])
     dimensions = np.asarray(case["box_dimensions_m"])
     shapes = {}
@@ -132,14 +140,16 @@ def build_model(*, device="cuda:0", before=False):
             cfg=builder.ShapeConfig(
                 density=0,
                 margin=case["shape_margin_m"],
-                has_particle_collision=name == "rigid_2",
+                has_particle_collision=name == f"rigid_{rigid_count}",
             ),
         )
 
-    names = ("rigid_1", "rigid_2", "pusher") if before else ("pusher", "rigid_1", "rigid_2")
+    rigid_names = tuple(f"rigid_{i}" for i in range(1, rigid_count + 1))
+    names = (*rigid_names, "pusher") if before else ("pusher", *rigid_names)
     for name in names:
         body(name, case["pusher_mass_kg"] if name == "pusher" else case["rigid_mass_kg"], rigid=name != "pusher")
-    builder.shape_collision_filter_pairs.append((shapes["pusher"], shapes["rigid_2"]))
+    for name in rigid_names[1:]:
+        builder.shape_collision_filter_pairs.append((shapes["pusher"], shapes[name]))
     builder.add_soft_mesh(
         pos=case["centers_m"]["tet"],
         rot=wp.quat_identity(),
@@ -158,14 +168,18 @@ def build_model(*, device="cuda:0", before=False):
     return model
 
 
-def make_solver(model, *, mode=None, graph=None, contact_dataflow="legacy", spatial=None, contact_factor_capacity=None):
-    """Select an execution route without modifying physical solver options."""
-    if contact_dataflow not in ("legacy", "pooled", "spatial"):
+def make_solver(model, *, mode=None, graph=None, contact_dataflow=None, spatial=None, contact_factor_capacity=None):
+    """Use the solver default unless an offline comparison route is explicitly requested."""
+    if contact_dataflow not in (None, "legacy", "pooled", "spatial"):
         raise ValueError("Unsupported actor contact dataflow")
     if (contact_dataflow == "spatial") != (spatial is not None):
         raise ValueError("Spatial actor experiments require explicit capacity and law margin")
     context = nullcontext()
-    if contact_dataflow != "legacy":
+    if contact_dataflow == "legacy":
+        from newton._src.solvers.monolithic.contact import ContactObjective  # noqa: PLC0415
+
+        context = patch("newton._src.solvers.monolithic.solver_monolithic.ContactObjective", ContactObjective)
+    elif contact_dataflow is not None:
         from newton._src.solvers.monolithic.contact_pipeline import (  # noqa: PLC0415
             _PooledContactObjective,
             _SpatialContactObjective,

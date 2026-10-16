@@ -12,6 +12,7 @@ import numpy as np
 import warp as wp
 
 from newton._src.solvers.monolithic import solver_monolithic
+from newton._src.solvers.monolithic.contact import ContactObjective
 from newton._src.solvers.monolithic.contact_pipeline import _PooledContactObjective
 from newton._src.solvers.monolithic.linear_types import MonolithicLinearGeneration, MonolithicLinearStatus
 from newton.tests.test_monolithic_contact_actor_pairs import physical
@@ -98,11 +99,13 @@ def test_sphere_steps(test, device):
         for law in ("C-EE", "C-IE", "C-II"):
             with test.subTest(graph=graph, law=law):
                 options = {"law": law, "mode": "production", "graph": graph}
-                legacy = contact_solver(sphere_static_scene(device), **options)
+                with patch.object(solver_monolithic, "ContactObjective", ContactObjective):
+                    legacy = contact_solver(sphere_static_scene(device), **options)
                 run = pooled_solver(sphere_static_scene(device), **options)
                 verify_contract(legacy, run)
                 states = [contact_state(owner, "R-static") for owner in (legacy, run)]
-                audit = contact_solver(sphere_static_scene(device), **options)
+                with patch.object(solver_monolithic, "ContactObjective", ContactObjective):
+                    audit = contact_solver(sphere_static_scene(device), **options)
                 for _ in range(2):
                     starts = [physical(state) for state in states]
                     for owner, state in zip((legacy, run), states, strict=True):
@@ -280,7 +283,8 @@ def test_pooled_checkpoint(test, device):
         restored = resumed.create_state(dt=0.001)
         resumed.load_checkpoint(restored, path)
         assert_snapshot(test, restored, snapshot(s))
-        legacy = contact_solver(model)
+        with patch.object(solver_monolithic, "ContactObjective", ContactObjective):
+            legacy = contact_solver(model)
         target = legacy.create_state(dt=0.001)
         before = snapshot(target)
         with test.assertRaises(ValueError):

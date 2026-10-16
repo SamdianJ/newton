@@ -86,6 +86,7 @@ def test_batch_legacy(test, device):
             test.assertEqual(batch.pool.candidates.factors.shape[0], 2)
 
 
+@patch("newton._src.solvers.monolithic.solver_monolithic.ContactObjective", ContactObjective)
 def test_batch_actor_pairs(test, device):
     """Generate A-R/R-R/R-T/static contacts without reading full support tables, including COM and layout shifts."""
     for kind in ("A-R", "R-R", "R-T", "R-static", "chain"):
@@ -177,7 +178,7 @@ def test_batch_trial_and_failure(test, device):
     batch.evaluate(*inputs, dt=0.001, **options)
     test.assertEqual(int(batch.flags.numpy()[0]), 0)
     if device.is_cuda:
-        # One binding per law mode, independent of the chunk's first/contact count.
+        # Reuse the complete evaluation graph, including all fixed producer chunks.
         test.assertLessEqual(batch.graphs.captures["contact_batch_eval"], 3)
         captures = batch.graphs.captures["contact_batch_eval"]
         run._contact.margins = wp.clone(run._contact.margins)
@@ -215,6 +216,7 @@ def test_batch_precision(test, device):
                 test.assertLess(np.linalg.norm(batch_matrix(batch) - expected) / max(1, np.linalg.norm(expected)), 1e-5)
 
 
+@patch("newton._src.solvers.monolithic.solver_monolithic.ContactObjective", ContactObjective)
 def test_batch_new_activation(test, device):
     """Activate initially zero contacts and retain C-EE's old load after release; reject trial by recomputing baseline."""
     for law in ("C-EE", "C-IE", "C-II"):
@@ -256,6 +258,7 @@ def test_batch_new_activation(test, device):
         np.testing.assert_array_equal(batch.start.y.numpy(), frozen)
 
 
+@patch("newton._src.solvers.monolithic.solver_monolithic.ContactObjective", ContactObjective)
 def test_batch_mesh(test, device):
     """Preserve CUDA texture legacy queries and C2 actor mesh geometry without new spatial clipping."""
     if not device.is_cuda:
@@ -329,12 +332,102 @@ def test_batch_storage_contract(test, device):
     test.assertFalse(batch.pool.energy.result.numpy().any())
 
 
+def test_batch_storage_rebinding(test, device):
+    """Reject aliases introduced by workspace rebinding after successful state validation."""
+    model, xn = fixture(device, "plane")
+    obj = contact(model, "C-EE")
+    batch = _ContactBatch(obj, batch_capacity=2, capacity=obj.count * 11, use_cuda_graph=device.is_cuda)
+    inputs = list(state(model, xn, np.zeros(2)))
+    external = wp.zeros(model.particle_count + 2, dtype=wp.vec3d, device=device)
+    inputs[0] = external[2:]
+    inputs[0].assign(xn)
+    size = wp.types.type_size_in_bytes(wp.vec3d)
+    for changed in (
+        external[2:4],
+        wp.array(ptr=external.ptr, dtype=wp.vec3d, shape=(3,), capacity=external.capacity, device=device),
+        wp.array(
+            ptr=external.ptr,
+            dtype=wp.vec3d,
+            shape=(2,),
+            strides=(2 * size,),
+            capacity=external.capacity,
+            device=device,
+        ),
+        wp.array(ptr=external.ptr, dtype=wp.spatial_vectord, shape=(2,), capacity=external.capacity, device=device),
+    ):
+        batch.points = external[:2]
+        batch.begin_step(*inputs)
+        batch.points = changed
+        with patch.object(wp, "launch", side_effect=AssertionError("Launch before validating rebound alias")):
+            with test.assertRaisesRegex(ValueError, "aliases producer storage"):
+                batch.begin_step(*inputs)
+        batch.points = external[:2]
+        batch.begin_step(*inputs)
+
+    batch.initialize_reference()
+    backing = batch.reference_residual
+    inputs[0] = wp.array(
+        ptr=backing.ptr, dtype=wp.vec3d, shape=(model.particle_count,), capacity=backing.capacity, device=device
+    )
+    with patch.object(wp, "launch", side_effect=AssertionError("Launch before validating new reference storage")):
+        with test.assertRaisesRegex(ValueError, "aliases producer storage"):
+            batch.begin_step(*inputs)
+
+
+def test_reference_graph_submission(test, device):
+    """Replay complete references with one submission and no accumulated prior output."""
+    run = contact_solver(contact_scene(device, "R-static"))
+    current = contact_state(run, "R-static")
+    inputs, options = native_inputs(run, current)
+    expected = None
+    for graph in (False, True) if device.is_cuda else (False,):
+        batch = _ContactBatch(run._contact, batch_capacity=5, capacity=0, use_cuda_graph=graph)
+        batch.initialize_reference()
+        batch.begin_step(*inputs, **options)
+        batch.evaluate_reference(*inputs, dt=0.001, **options)
+        if expected is None:
+            expected = batch.reference_residual.numpy().copy()
+        for _ in range(2):
+            batch.reference_residual.fill_(float("nan"))
+            with patch.object(wp, "capture_launch", wraps=wp.capture_launch) as launch:
+                batch.evaluate_reference(*inputs, dt=0.001, **options)
+            if graph:
+                test.assertEqual(launch.call_count, 1)
+            np.testing.assert_array_equal(batch.reference_residual.numpy(), expected)
+            test.assertEqual(int(batch.flags.numpy()[0]), 0)
+
+
+def test_batch_graph_submission(test, device):
+    """Use bounded submissions while preserving whole-contact admission across chunks."""
+    if not device.is_cuda:
+        test.skipTest("CUDA graph submission check")
+    run = contact_solver(contact_scene(device, "R-static"))
+    current = contact_state(run, "R-static")
+    inputs, options = native_inputs(run, current)
+    expected = None
+    for graph in (False, True):
+        batch = _ContactBatch(run._contact, batch_capacity=5, capacity=run._contact.count * 12, use_cuda_graph=graph)
+        batch.begin_step(*inputs, **options)
+        batch.evaluate(*inputs, dt=0.001, **options)
+        if expected is None:
+            expected = batch.pool.residual.result.numpy().copy()
+        for _ in range(2):
+            with patch.object(wp, "capture_launch", wraps=wp.capture_launch) as launch:
+                batch.evaluate(*inputs, dt=0.001, **options)
+            if graph:
+                test.assertEqual(launch.call_count, 2)
+            np.testing.assert_array_equal(batch.pool.residual.result.numpy(), expected)
+            test.assertEqual(int(batch.flags.numpy()[0]), 0)
+
+
 class TestContactBatch(unittest.TestCase):
     pass
 
 
 for _device in get_test_devices():
     for _test in (
+        test_batch_graph_submission,
+        test_reference_graph_submission,
         test_batch_legacy,
         test_batch_actor_pairs,
         test_batch_trial_and_failure,
@@ -342,6 +435,7 @@ for _device in get_test_devices():
         test_batch_new_activation,
         test_batch_mesh,
         test_batch_storage_contract,
+        test_batch_storage_rebinding,
     ):
         add_function_test(TestContactBatch, _test.__name__, _test, devices=[_device])
 

@@ -277,8 +277,8 @@ class _ContactQuery:
             device=self.device,
         )
 
-    def update(self, face_lo, face_hi, target_lo, target_hi):
-        """Refit, enumerate and sort on device, without host reads or capacity changes."""
+    def update(self, face_lo, face_hi, target_lo, target_hi, *, sort=True):
+        """Refit and enumerate on device, optionally sorting the fixed result storage."""
         self.validate_storage()
         for a, size in (
             (face_lo, len(self.faces)),
@@ -298,6 +298,7 @@ class _ContactQuery:
                 b.size and a.ptr < b.ptr + b.capacity and b.ptr < a.ptr + a.capacity for b in self.buffers()
             ):
                 raise ValueError("Contact query bounds alias owned storage")
+        output_keys = self._keys if sort else self._result_keys
         self.count.zero_()
         self.dropped.zero_()
         self.status.zero_()
@@ -329,7 +330,7 @@ class _ContactQuery:
                     self.samples_per_patch,
                     self.offsets,
                     self.sources,
-                    self._keys,
+                    output_keys,
                     self._indices,
                     self.count,
                     self.dropped,
@@ -348,7 +349,7 @@ class _ContactQuery:
                     self.samples_per_patch,
                     self.offsets,
                     self.sources,
-                    self._keys,
+                    output_keys,
                     self._indices,
                     self.count,
                     self.dropped,
@@ -356,6 +357,8 @@ class _ContactQuery:
                 ],
                 device=self.device,
             )
+        if not sort:
+            return
         keys, scratch = self._keys, self._scratch_keys
         indices, scratch_indices = self._indices, self._scratch_indices
         run = 1

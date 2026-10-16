@@ -16,6 +16,20 @@ Monolithic Coupled Solver
    without the normal deprecation period. The old BE, q-only and tet-only solver entry points and
    their examples have been retired.
 
+Spatial contact is the default. Candidates refresh at each Newton boundary and
+remain frozen during its trials, using zero additional law margin [m]. This
+approximation can omit contacts reached by a trial outside the frozen bounds;
+it does not provide continuous collision detection or automatic correction.
+The step-start convergence reference still uses complete contact enumeration.
+
+Candidate capacity defaults to the model's complete static sample upper bound;
+``contact_factor_capacity=None`` reserves three times that bound. These are
+fixed capacities, not active contact counts. Explicitly reducing the factor
+budget can discard whole contacts; overflow is reported and taints the result.
+Existing checkpoints from the previous complete-contact default have a different
+configuration identity and cannot be loaded into the new default. Use the offline
+legacy recording tools to inspect those records, or start a new spatial run.
+
 Use the public API
 ------------------
 

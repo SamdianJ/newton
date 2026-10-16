@@ -217,10 +217,12 @@ class _PooledContactObjective(ContactObjective):
         return self.pair_diagnostics()
 
     def pair_diagnostics(self):
+        if not self.actor_samples.pair_kinds:
+            return []
         records = self.pool.records
         count = int(records.count.numpy()[0])
-        identities = records.identities.numpy()[:count]
-        values = records.pairs.numpy()[:count]
+        identities = records.identities[:count].numpy() if count else np.empty(0, dtype=np.int64)
+        values = records.pairs[:count].numpy() if count else np.empty((0, 2, 6), dtype=self.numpy_dtype)
         samples = self._batch.all_samples
         sources, targets = samples.sources.numpy(), samples.targets.numpy()
         grouped = {pair: [] for pair in self.actor_samples.pair_kinds}
@@ -253,10 +255,12 @@ class _PooledContactObjective(ContactObjective):
 
 
 class _SpatialContactObjective(_PooledContactObjective):
-    """Private B3 experiment: refresh at Newton boundaries, freeze all trials and final checks."""
+    """Refresh at Newton boundaries and freeze candidates through trials and final checks."""
 
-    def __init__(self, *args, candidate_capacity, law_margin, **kwargs):
-        if type(candidate_capacity) is not int or not 0 <= candidate_capacity < 2**31:
+    def __init__(self, *args, candidate_capacity=None, law_margin=0.0, **kwargs):
+        if candidate_capacity is not None and (
+            type(candidate_capacity) is not int or not 0 <= candidate_capacity < 2**31
+        ):
             raise ValueError("Invalid spatial candidate capacity")
         if isinstance(law_margin, (bool, np.bool_)) or not np.isfinite(law_margin) or law_margin < 0:
             raise ValueError("Invalid experimental law margin")
@@ -264,6 +268,10 @@ class _SpatialContactObjective(_PooledContactObjective):
         self._spatial = None
         self._selection_ready = self._reference_mode = False
         super().__init__(*args, **kwargs)
+        if self.candidate_capacity is None:
+            self.candidate_capacity = self.count
+        if not 0 <= self.candidate_capacity < 2**31:
+            raise ValueError("Invalid spatial candidate capacity")
 
     def initialize_pool(self, factor_capacity, *, use_cuda_graph):
         super().initialize_pool(factor_capacity, use_cuda_graph=use_cuda_graph)
@@ -332,8 +340,13 @@ class _SpatialContactObjective(_PooledContactObjective):
             "contact_candidates",
             (),
             (q, x, rigid_com, *selection.buffers()),
-            lambda: selection.update(q, x, rigid_com=rigid_com),
+            lambda: selection._query(q, x, rigid_com=rigid_com),
         )
+        count = int(selection.query.count.numpy()[0])
+        if not 0 <= count <= selection.capacity:
+            raise ValueError("Invalid spatial candidate count")
+        span = min(selection.capacity, 1 << (max(1, count) - 1).bit_length())
+        self.query_graphs.run("contact_candidate_order", (span,), selection.buffers(), lambda: selection._order(span))
         dropped = selection.check(warn=False)
         self._query_dropped += dropped
         if dropped and not self._query_warned:

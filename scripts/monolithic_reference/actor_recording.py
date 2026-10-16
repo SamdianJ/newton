@@ -127,7 +127,7 @@ def _context(directory, expected_run=None):
             scene.build_model(device=device, before=metadata["before"]),
             graph=execution["graph"] if pooled else False,
             mode=execution["mode"] if pooled else None,
-            **algorithm,
+            **(algorithm if pooled else {"contact_dataflow": "legacy"}),
         )
     if pooled != run._contact_pool or (pooled and algorithm != scene.contact_algorithm(run)):
         raise ValueError("Recorded contact algorithm or resources differ")

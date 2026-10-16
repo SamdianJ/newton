@@ -11,7 +11,7 @@ import warp as wp
 
 from newton._src.solvers.monolithic.solver_types import _StepFailure
 from newton.tests.test_monolithic_rigid_dynamics import rigid_scene, rigid_solver
-from newton.tests.test_monolithic_solver_coupled import scene, solver
+from newton.tests.test_monolithic_solver_coupled import assert_snapshot, scene, snapshot, solver
 from newton.tests.unittest_utils import add_function_test, get_test_devices
 
 
@@ -58,6 +58,34 @@ def test_device_validation(test, device):
             run._states.validate(state)
         state.particle_q.assign(x)
         history.bound_x.assign(x)
+
+
+def test_step_state_validation(test, device):
+    """Reject edited input and output states after valid in-place or two-buffer steps."""
+    for precision in ("fp64", "fp32"):
+        model = scene(device)
+        for alias, invalid_output in ((True, False), (False, False), (False, True)):
+            with test.subTest(precision=precision, alias=alias, invalid_output=invalid_output):
+                run = solver(model, precision=precision, mode="production", graph=device.is_cuda)
+                state = run.create_state(dt=0.001)
+                out = state if alias else run.create_state(dt=0.001)
+                control = model.control()
+                run.step(state, out, control, dt=0.001)
+                test.assertTrue(run.last_stats.converged, run.last_stats)
+                target = out if invalid_output else state
+                bound = target._monolithic_coupled.bound_qd
+                original = bound.numpy().copy()
+                changed = original.copy()
+                changed[-1] += 0.01
+                bound.assign(changed)
+                before, after = snapshot(state), snapshot(out)
+                with test.assertRaisesRegex(ValueError, "Coordinates/rates changed"):
+                    run.step(state, out, control, dt=0.001)
+                assert_snapshot(test, state, before)
+                assert_snapshot(test, out, after)
+                bound.assign(original)
+                run.step(state, out, control, dt=0.001)
+                test.assertTrue(run.last_stats.converged, run.last_stats)
 
 
 def test_device_iteration(test, device):
@@ -142,6 +170,10 @@ class TestDeviceChecks(unittest.TestCase):
 
 
 add_function_test(TestDeviceChecks, "test_device_validation", test_device_validation, devices=get_test_devices())
+
+add_function_test(
+    TestDeviceChecks, "test_step_state_validation", test_step_state_validation, devices=get_test_devices()
+)
 
 add_function_test(TestDeviceChecks, "test_device_iteration", test_device_iteration, devices=get_test_devices())
 

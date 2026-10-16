@@ -9,7 +9,7 @@ from typing import Any
 
 import numpy as np
 import warp as wp
-from warp.utils import array_scan
+from warp.utils import array_scan, radix_sort_pairs
 
 from .segment_graph import _SegmentGraphCache
 
@@ -33,8 +33,6 @@ def _contact_keys(
     local_count: int,
     keys: wp.array[wp.uint64],
     indices: wp.array[int],
-    scratch_keys: wp.array[wp.uint64],
-    scratch_indices: wp.array[int],
     flags: wp.array[int],
 ):
     i = wp.tid()
@@ -56,9 +54,6 @@ def _contact_keys(
             key += wp.uint64(local_ids[i])
     keys[i] = key
     indices[i] = i
-    # Prefix merge leaves the tails untouched, including recorded scratch.
-    scratch_keys[i] = wp.uint64(0) - wp.uint64(1)
-    scratch_indices[i] = i
 
 
 @wp.kernel
@@ -108,11 +103,11 @@ def _merge_contact_keys(
 
 
 @wp.kernel
-def _contact_offsets(keys: wp.array[wp.uint64], stride: wp.uint64, offsets: wp.array[int]):
+def _contact_offsets(keys: wp.array[wp.uint64], capacity: int, stride: wp.uint64, offsets: wp.array[int]):
     row = wp.tid()
     key = wp.uint64(row) * stride
     lo = int(0)
-    hi = keys.shape[0]
+    hi = capacity
     while lo < hi:
         mid = lo + (hi - lo) // 2
         if keys[mid] < key:
@@ -200,7 +195,7 @@ class _ContactRows:
     def __init__(self, row_count, capacity, identity_count, local_count, dtype, device, *, use_cuda_graph=False):
         for name, value, minimum, upper in (
             ("row_count", row_count, 0, 2**31 - 2),
-            ("capacity", capacity, 0, 2**31 - 1),
+            ("capacity", capacity, 0, 2**30 - 1),
             ("identity_count", identity_count, 1, 2**64 - 1),
             ("local_count", local_count, 1, 2**31 - 1),
         ):
@@ -226,10 +221,9 @@ class _ContactRows:
         self.stride = wp.uint64(stride)
         self.dtype = dtype
         self.device = wp.get_device(device)
-        self.keys = wp.empty(capacity, dtype=wp.uint64, device=self.device)
-        self.key_scratch = wp.empty_like(self.keys)
-        self.indices = wp.empty(capacity, dtype=int, device=self.device)
-        self.index_scratch = wp.empty_like(self.indices)
+        # Warp radix sort uses the second half as explicit key/value scratch.
+        self.keys = wp.empty(2 * capacity, dtype=wp.uint64, device=self.device)
+        self.indices = wp.empty(2 * capacity, dtype=int, device=self.device)
         self.work = wp.empty(capacity, dtype=dtype, device=self.device)
         self.offsets = wp.empty(row_count + 1, dtype=int, device=self.device)
         self.result = wp.empty(row_count, dtype=dtype, device=self.device)
@@ -239,9 +233,7 @@ class _ContactRows:
     def buffers(self):
         return (
             self.keys,
-            self.key_scratch,
             self.indices,
-            self.index_scratch,
             self.work,
             self.offsets,
             self.result,
@@ -253,7 +245,7 @@ class _ContactRows:
         """Report current arrays, excluding inputs and graph-retained previous bindings."""
         return sum(a.capacity for a in self.buffers())
 
-    def reduce(self, rows, identities, local_ids, values, count):
+    def _validate_inputs(self, rows, identities, local_ids, values, count):
         self._validate_storage()
         for array, dtype, size in (
             (rows, wp.int32, self.capacity),
@@ -269,6 +261,9 @@ class _ContactRows:
                 for owned in self.buffers():
                     if owned.size and array.ptr < owned.ptr + owned.capacity and owned.ptr < end:
                         raise ValueError("Contact row inputs alias owned scratch")
+
+    def reduce(self, rows, identities, local_ids, values, count):
+        self._validate_inputs(rows, identities, local_ids, values, count)
         inputs = (rows, identities, local_ids, values, count)
         self.graphs.run(
             "contact_rows",
@@ -278,20 +273,20 @@ class _ContactRows:
         )
 
     def _validate_storage(self):
-        types = (wp.uint64, wp.uint64, wp.int32, wp.int32, self.dtype, wp.int32, self.dtype, wp.int32)
-        sizes = (self.capacity,) * 5 + (self.row_count + 1, self.row_count, 1)
+        types = (wp.uint64, wp.int32, self.dtype, wp.int32, self.dtype, wp.int32)
+        sizes = (2 * self.capacity, 2 * self.capacity, self.capacity, self.row_count + 1, self.row_count, 1)
         for array, dtype, size in zip(self.buffers(), types, sizes, strict=True):
             if array.shape != (size,) or array.dtype != dtype or array.device != self.device or not array.is_contiguous:
                 raise ValueError("Invalid contact row scratch storage")
 
-    def _reduce(self, rows, identities, local_ids, values, count):
+    def _reduce(self, rows, identities, local_ids, values, count, span=None):
+        span = self.capacity if span is None else span
         wp.launch(_reset_rows, 1, [count, self.capacity, self.flags], device=self.device)
-        keys, temp_keys = self.keys, self.key_scratch
-        indices, temp_indices = self.indices, self.index_scratch
-        if self.capacity:
+        keys, indices = self.keys, self.indices
+        if span:
             wp.launch(
                 _contact_keys,
-                self.capacity,
+                span,
                 [
                     rows,
                     identities,
@@ -303,42 +298,31 @@ class _ContactRows:
                     self.local_count,
                     keys,
                     indices,
-                    temp_keys,
-                    temp_indices,
                     self.flags,
                 ],
                 device=self.device,
             )
-            run = 1
-            workers = min(self.capacity, _CONTACT_WORKERS)
-            while run < self.capacity:
-                wp.launch(
-                    _merge_contact_keys,
-                    workers,
-                    [keys, indices, temp_keys, temp_indices, count, run, workers],
-                    device=self.device,
-                )
-                keys, temp_keys = temp_keys, keys
-                indices, temp_indices = temp_indices, indices
-                run *= 2
-        wp.launch(_contact_offsets, self.row_count + 1, [keys, self.stride, self.offsets], device=self.device)
-        if self.capacity:
-            wp.launch(_contact_work, self.capacity, [keys, indices, values, self.work, self.flags], device=self.device)
+            # Inactive entries sort last within the chosen work span.
+            end_bit = max(1, (self.row_count * self.identity_count * self.local_count).bit_length())
+            radix_sort_pairs(keys, indices, span, end_bit=end_bit)
+        wp.launch(_contact_offsets, self.row_count + 1, [keys, span, self.stride, self.offsets], device=self.device)
+        if span:
+            wp.launch(_contact_work, span, [keys, indices, values, self.work, self.flags], device=self.device)
             # First reduce fixed 256-entry blocks relative to each row start,
             # then combine their roots using the same specified binary tree.
             distance = 1
-            while distance < min(self.capacity, self.BLOCK_SIZE):
+            while distance < min(span, self.BLOCK_SIZE):
                 wp.launch(
                     _contact_tree,
-                    self.capacity,
+                    span,
                     [keys, self.stride, self.offsets, self.work, distance, self.flags],
                     device=self.device,
                 )
                 distance *= 2
-            while distance < self.capacity:
+            while distance < span:
                 wp.launch(
                     _contact_tree,
-                    self.capacity,
+                    span,
                     [keys, self.stride, self.offsets, self.work, distance, self.flags],
                     device=self.device,
                 )
@@ -703,6 +687,24 @@ def _publish_contact_stream(records: Any):
         records.accepted[records.source_slots[i]] = 1
 
 
+@wp.kernel
+def _clear_published_contacts(records: Any, workers: int):
+    i = wp.tid()
+    while i < records.count[0]:
+        records.accepted[records.source_slots[i]] = 0
+        i += workers
+
+
+@wp.kernel
+def _contact_finish_counts(records: Any, count: wp.array[int], packet: wp.array[int]):
+    packet[0] = count[0]
+    packet[1] = records.energy_count[0]
+    packet[2] = records.support_count[0]
+    packet[3] = records.force_count[0]
+    packet[4] = records.count[0]
+    packet[5] = records.triplet_count[0]
+
+
 class _ContactPool:
     """Stage and commit complete local contact records within one bounded budget.
 
@@ -844,7 +846,7 @@ class _ContactPool:
         native_bytes = wp.types.type_size_in_bytes(dtype)
         # One schema defines validation, arithmetic checks, allocation and ledger.
         sizes = [int(np.prod(shape, dtype=object)) for shape, _ in (*candidate_spec.values(), *record_spec.values())]
-        if any(size >= 2**31 for size in sizes):
+        if any(size >= 2**31 for size in sizes) or max(m, 4 * n, r, f * n) >= 2**30:
             raise ValueError("Contact pool array capacity exceeds int32")
         byte_count = sum(
             size * wp.types.type_size_in_bytes(scalar)
@@ -852,7 +854,7 @@ class _ContactPool:
         )
         byte_count += 24 * b + 16 * p + (4 + native_bytes) * m
         if batch_capacity is not None:
-            byte_count += 8 * m + 4 * b + 8
+            byte_count += 8 * m + 4 * b + 32
         for rows, size in ((1, m), (4, 4 * n), (row_count, r), (force_row_count, f * n)):
             byte_count += size * (24 + native_bytes) + 4 * (int(rows) + 1) + int(rows) * native_bytes + 4
         if byte_count >= 2**63:
@@ -879,8 +881,10 @@ class _ContactPool:
         self.force = _ContactRows(force_row_count, f * n, identity_count, f, dtype, self.device)
         self.graphs = _SegmentGraphCache(self.device, enabled=use_cuda_graph and self.device.is_cuda)
         self.payload_bytes = byte_count
+        self._finish_counts = wp.zeros(6, dtype=int, device=self.device) if batch_capacity is not None else None
         self._stream = None
         self._stream_started = False
+        self._storage_bindings = None
         if batch_capacity is not None:
             self._stream = (
                 wp.zeros(m, dtype=wp.uint64, device=self.device),
@@ -899,7 +903,7 @@ class _ContactPool:
         for owner in (self._identity, self.energy, self.residual, self.force):
             buffers.extend(owner.buffers())
         if self._stream is not None:
-            buffers.extend(self._stream)
+            buffers.extend((*self._stream, self._finish_counts))
         return tuple(buffers)
 
     def _validate_storage(self):
@@ -921,8 +925,14 @@ class _ContactPool:
             owner._validate_storage()
         if self._stream is not None:
             for array, (size, dtype) in zip(
-                self._stream,
-                ((self.candidate_capacity, wp.uint64), (1, wp.int32), (1, wp.int32), (self.batch_capacity, wp.int32)),
+                (*self._stream, self._finish_counts),
+                (
+                    (self.candidate_capacity, wp.uint64),
+                    (1, wp.int32),
+                    (1, wp.int32),
+                    (self.batch_capacity, wp.int32),
+                    (6, wp.int32),
+                ),
                 strict=True,
             ):
                 if (
@@ -933,9 +943,12 @@ class _ContactPool:
                 ):
                     raise ValueError("Invalid contact stream storage")
         buffers = self.buffers()
-        intervals = sorted((a.ptr, a.ptr + a.size * wp.types.type_size_in_bytes(a.dtype)) for a in buffers if a.size)
-        if any(right[0] < left[1] for left, right in pairwise(intervals)):
-            raise ValueError("Contact pool arrays alias")
+        bindings = tuple((a.ptr, a.size, a.dtype) for a in buffers if a.size)
+        if bindings != self._storage_bindings:
+            intervals = sorted((ptr, ptr + size * wp.types.type_size_in_bytes(dtype)) for ptr, size, dtype in bindings)
+            if any(right[0] < left[1] for left, right in pairwise(intervals)):
+                raise ValueError("Contact pool arrays alias")
+            self._storage_bindings = bindings
         return buffers
 
     def evaluate(self):
@@ -982,23 +995,34 @@ class _ContactPool:
             wp.launch(_write_contacts, m, [a, out, indices, self._selected, self._prefix], device=self.device)
         self._finish_records(indices)
 
-    def _finish_records(self, indices=None):
+    def _finish_records(self, indices=None, spans=None):
         out = self.records
         if self.triplet_capacity:
-            workers = min(self.triplet_capacity, _CONTACT_WORKERS)
+            workers = min(self.triplet_capacity if spans is None else spans[5], _CONTACT_WORKERS)
             wp.launch(_write_contact_triplets, workers, [out, workers], device=self.device)
-        for owner, prefix, count in (
-            (self.energy, "e", out.energy_count),
-            (self.residual, "r", out.support_count),
-            (self.force, "f", out.force_count),
+        for index, (owner, prefix, count) in enumerate(
+            (
+                (self.energy, "e", out.energy_count),
+                (self.residual, "r", out.support_count),
+                (self.force, "f", out.force_count),
+            )
         ):
-            owner._reduce(*(getattr(out, f"{prefix}_{name}") for name in ("rows", "ids", "local", "values")), count)
+            owner._reduce(
+                *(getattr(out, f"{prefix}_{name}") for name in ("rows", "ids", "local", "values")),
+                count,
+                span=None if spans is None else spans[index + 1],
+            )
         wp.launch(
             _pool_row_flags, 1, [out, self.energy.flags, self.residual.flags, self.force.flags], device=self.device
         )
         if indices is None:
             if self.contact_capacity:
-                wp.launch(_publish_contact_stream, self.contact_capacity, [out], device=self.device)
+                wp.launch(
+                    _publish_contact_stream,
+                    self.contact_capacity if spans is None else spans[4],
+                    [out],
+                    device=self.device,
+                )
         elif self.candidate_capacity:
             wp.launch(_publish_contacts, self.candidate_capacity, [out, indices, self._selected], device=self.device)
         # A row-sum overflow is a hard error for the complete evaluation, not a
@@ -1008,7 +1032,7 @@ class _ContactPool:
             outputs.extend((owner.result, owner.offsets))
         for values in outputs:
             if values.size:
-                workers = min(values.size, _CONTACT_WORKERS)
+                workers = min(values.size, self.energy.BLOCK_SIZE)
                 wp.launch(_clear_failed_pool, workers, [values.flatten(), out.flags, workers], device=self.device)
 
     def begin(self):
@@ -1020,15 +1044,29 @@ class _ContactPool:
         self._stream_started = True
 
     def _begin_stream(self):
+        # Clear only previously published mask entries. Payload prefixes are
+        # overwritten by append; their unused tails are never consumed.
+        if self.contact_capacity:
+            workers = min(self.contact_capacity, self.energy.BLOCK_SIZE)
+            wp.launch(_clear_published_contacts, workers, [self.records, workers], device=self.device)
         for name in self._specs[1]:
-            # COO consumers use triplet_count; generation overwrites that prefix.
-            if name not in ("triplet_rows", "triplet_columns", "triplet_values"):
+            if name in (
+                "flags",
+                "count",
+                "used",
+                "requested",
+                "dropped",
+                "support_count",
+                "energy_count",
+                "force_count",
+                "factor_count",
+                "triplet_count",
+            ):
                 getattr(self.records, name).zero_()
-        for array in self._stream[:3]:
+        for name in ("support_offsets", "factor_offsets", "triplet_offsets"):
+            getattr(self.records, name)[:1].zero_()
+        for array in self._stream[1:3]:
             array.zero_()
-        for owner in (self.energy, self.residual, self.force):
-            owner.result.zero_()
-            owner.offsets.zero_()
 
     def append(self):
         """Validate a whole batch and append once against the shared CAS budget."""
@@ -1084,16 +1122,30 @@ class _ContactPool:
         if not self._stream_started:
             raise ValueError("Begin a contact evaluation before finishing")
         buffers = self._validate_storage()
+        wp.launch(_contact_finish_counts, 1, [self.records, self._stream[1], self._finish_counts], device=self.device)
+        counts = self._finish_counts.numpy()
+        capacities = (
+            self.candidate_capacity,
+            self.energy.capacity,
+            self.residual.capacity,
+            self.force.capacity,
+            self.contact_capacity,
+            self.triplet_capacity,
+        )
+        spans = tuple(
+            min(capacity, 1 << (max(1, min(capacity, int(count))) - 1).bit_length())
+            for count, capacity in zip(counts, capacities, strict=True)
+        )
         self.graphs.run(
             "contact_stream_finish",
-            (self.candidate_capacity, self.capacity, self.max_support, self.identity_count, self.dtype),
+            (self.candidate_capacity, self.capacity, self.max_support, self.identity_count, self.dtype, spans),
             buffers,
-            self._finish_stream,
+            lambda: self._finish_stream(spans),
         )
         self._stream_started = False
 
-    def _finish_stream(self):
+    def _finish_stream(self, spans):
         identities, count, _, _ = self._stream
-        self._identity._reduce(self._zero_rows, identities, self._zero_rows, self._zero_values, count)
+        self._identity._reduce(self._zero_rows, identities, self._zero_rows, self._zero_values, count, span=spans[0])
         wp.launch(_contact_stream_flags, 1, [self.records, self._identity.flags], device=self.device)
-        self._finish_records()
+        self._finish_records(spans=spans)

@@ -33,7 +33,8 @@ def spatial_fixture(device, kind, *, law="C-II", capacity=None, margin=0.0, prec
         flags = model.shape_flags.numpy()
         flags[model.shape_body.numpy() == model.body_label.index("pusher")] |= int(ShapeFlags.COLLIDE_PARTICLES)
         model.shape_flags.assign(flags)
-    run = contact_solver(model, law=law, permuted=True, precision=precision)
+    with patch("newton._src.solvers.monolithic.solver_monolithic.ContactObjective", ContactObjective):
+        run = contact_solver(model, law=law, permuted=True, precision=precision)
     state = contact_state(run, kind)
     c, k = run._contact, run._kinematics
     inputs, options = native_inputs(run, state)
@@ -414,7 +415,8 @@ def test_spatial_known_miss(test, device):
 
 def test_spatial_chunk_counts(test, device):
     """Schedule only occupied chunks across zero, batch and legacy/actor boundaries."""
-    run, _state, batch, spatial = spatial_fixture(device, "chain")
+    run, state, batch, spatial = spatial_fixture(device, "chain")
+    inputs, options = native_inputs(run, state)
     legacy, total = run._contact.legacy_count, run._contact.count
     test.assertGreater(legacy, 8)
     test.assertGreater(total - legacy, 8)
@@ -429,6 +431,36 @@ def test_spatial_chunk_counts(test, device):
             actual.append((mode, int(batch.pool.candidates.count.numpy()[0])))
         expected = [(mode, min(7, n - offset)) for mode, n in ((2, left), (3, right)) for offset in range(0, n, 7)]
         test.assertEqual(actual, expected)
+        batch.graphs.enabled = False
+        batch.evaluate(*inputs, dt=0.001, selection=spatial, **options)
+        outputs = [owner.result.numpy().copy() for owner in (batch.pool.energy, batch.pool.residual, batch.pool.force)]
+        batch.graphs.enabled = device.is_cuda
+        batch.evaluate(*inputs, dt=0.001, selection=spatial, **options)
+        for owner, expected_output in zip(
+            (batch.pool.energy, batch.pool.residual, batch.pool.force), outputs, strict=True
+        ):
+            np.testing.assert_array_equal(owner.result.numpy(), expected_output)
+        test.assertEqual(int(batch.flags.numpy()[0]), 0)
+
+
+def test_spatial_active_order(test, device):
+    """Keep canonical identities correct across both merge parities and empty prefixes."""
+    run, state, _, spatial = spatial_fixture(device, "chain")
+    inputs, options = native_inputs(run, state)
+    spatial._query(run._kinematics.gather_q(state), inputs[0], rigid_com=options["rigid_com"])
+    total = int(spatial.query.count.numpy()[0])
+    test.assertGreater(total, 3)
+    dictionary, original = spatial.dictionary.numpy(), spatial.original.numpy()
+    keys = spatial.query.keys.numpy()
+    for count in (0, 1, 2, 3, min(7, total), total, 1):
+        spatial.query.count.fill_(count)
+        span = min(spatial.capacity, 1 << (max(1, count) - 1).bit_length())
+        spatial.identities.fill_(2**64 - 1)
+        spatial._order(span)
+        spatial.check()
+        expected = np.sort(original[np.searchsorted(dictionary, keys[:count])])
+        np.testing.assert_array_equal(spatial.identities.numpy()[:count], expected)
+        test.assertEqual(sum(spatial.mode_counts), count)
 
 
 class TestContactSpatial(unittest.TestCase):
@@ -437,6 +469,7 @@ class TestContactSpatial(unittest.TestCase):
 
 for _device in get_test_devices():
     for _test in (
+        test_spatial_active_order,
         test_spatial_pairs,
         test_spatial_sweep,
         test_spatial_failure_graph,

@@ -22,9 +22,10 @@ from .actors import Actor, ActorTable
 from .articulation import ArticulationObjective, _TreeKinematics
 from .articulation_state import _predict, _recover_history
 from .collision import _validate_and_collect_boundary_faces
-from .contact import ContactObjective, ContactStatus
+from .contact import ContactStatus
 from .contact_forces import MonolithicContactForces
 from .contact_pipeline import _PooledContactObjective, _SpatialContactObjective
+from .contact_pipeline import _SpatialContactObjective as ContactObjective
 from .coupled_state import CoupledState
 from .iteration import iterate, measure
 from .joint_parameters import JointParameters
@@ -67,6 +68,13 @@ class SolverMonolithic(SolverBase):
     changes; runtime mutation of these inputs is unsupported and not checked.
     Control targets/forces, state external forces, gravity and dt are step inputs.
     Edit coordinates through reset_state or load_checkpoint to keep history valid.
+
+    Spatial contact candidates refresh at Newton boundaries and remain frozen
+    through trials, with zero additional law margin. Unbounded trials can miss
+    contacts; the complete step-start residual remains the convergence reference.
+    Candidate capacity defaults to the model's static sample upper bound, and
+    factor capacity defaults to three times that bound. Capacity is fixed for
+    the solver lifetime; overflow discards complete contacts and reports taint.
 
     Nonconservative energy acceptance is heuristic, not a variational guarantee.
     ``fp32_absolute_tolerance`` optionally overrides the global/q/x absolute
@@ -761,7 +769,8 @@ class SolverMonolithic(SolverBase):
             raise ValueError("Articulation step requires no contacts and finite positive dt")
         dt = self._kinematics.timestep(dt)
         self._states.validate(state_in)
-        self._states.validate(state_out)
+        if state_out is not state_in:
+            self._states.validate(state_out)
         for name in ("joint_f", "joint_target_q", "joint_target_qd"):
             array = getattr(control, name, None)
             if not isinstance(array, wp.array) or (array.shape, array.dtype, array.device) != (
@@ -1120,17 +1129,17 @@ class SolverMonolithic(SolverBase):
         ]
         if device_result:
             buffers.extend((self._energy_terms, self._energy_sums, self._evaluation_status, self._evaluation_packet))
+        else:
+            buffers.append(self._host_evaluation_packet)
         rigid_history = state._monolithic_coupled
         buffers.extend([rigid_history.rigid_com, rigid_history.rigid_rotation])
-        owners = (self._objective, k, tet, contact, self._rigid)
+        owners = (self._objective, k, tet, self._rigid)
         if not self._contact_pool:
-            owners += (contact.start, contact.current)
+            owners += (contact, contact.start, contact.current)
         for owner in owners:
             buffers.extend(value for value in vars(owner).values() if isinstance(value, wp.array))
         if contact.actor_contact is not None:
             buffers.extend(contact.actor_contact.buffers())
-        if self._contact_pool:
-            buffers.extend(contact.buffers())
 
         def evaluate_owners():
             self._objective.evaluate(local_q, dt, build_tangent=build_tangent)
@@ -1179,6 +1188,25 @@ class SolverMonolithic(SolverBase):
             )
             if device_result:
                 iteration_device.evaluate(self)
+            else:
+                wp.launch(
+                    iteration_device.host_evaluation_packet,
+                    self._host_evaluation_packet.size,
+                    [
+                        self._rigid.energy,
+                        self._objective.link_energy,
+                        self._objective.joint_energy,
+                        tet.parts,
+                        contact.energy.flatten(),
+                        contact.absolute_energy if self._contact_pool else contact.energy.flatten(),
+                        tet.flags,
+                        contact.flags,
+                        tet.min_det_f,
+                        self._contact_pool,
+                        self._host_evaluation_packet,
+                    ],
+                    device=self.model.device,
+                )
 
         reference_mode = self._contact_spatial and contact._reference_mode
         key = (self._layout.identity, self.precision.value, dt, build_tangent, device_result, reference_mode)
@@ -1187,7 +1215,29 @@ class SolverMonolithic(SolverBase):
             # Pool begin/append have side effects; they must run once, never
             # inside the owner's warmup/capture/replay overwrite chain.
             evaluate_contact()
-            self._graphs.run("coupled_objective_result", key, buffers, evaluate_result)
+            result_buffers = (
+                self._objective.residual,
+                tet.residual,
+                contact.residual,
+                self._complete_r,
+                self._rigid.rows,
+                self._rigid.residual,
+                self._rigid.energy,
+                self._objective.link_energy,
+                self._objective.joint_energy,
+                tet.parts,
+                contact.energy,
+                contact.absolute_energy,
+                tet.flags,
+                contact.flags,
+                tet.min_det_f,
+                self._energy_terms,
+                self._energy_sums,
+                self._evaluation_status,
+                self._evaluation_packet,
+                self._host_evaluation_packet,
+            )
+            self._graphs.run("coupled_objective_result", key, result_buffers, evaluate_result)
             if not reference_mode:
                 self._variational["contact_pool"] = contact.evaluation_diagnostics()
         else:
@@ -1211,27 +1261,23 @@ class SolverMonolithic(SolverBase):
                 raise _StepFailure(self.Status.NONFINITE, "Nonfinite coupled E/r")
             self._metrics["min_det_f"] = float(packet[5])
             return packet[3], self._complete_r, packet[4]
-        if tet.flags.numpy()[0]:
-            status = self.Status.TET_INVERSION if tet.flags.numpy()[0] == 1 else self.Status.NONFINITE
+        packet = self._host_evaluation_packet.numpy()
+        if packet[0]:
+            status = self.Status.TET_INVERSION if packet[0] == 1 else self.Status.NONFINITE
             raise _StepFailure(status, "Invalid tet candidate")
-        if contact.flags.numpy()[0]:
+        if packet[1]:
+            # The offending contact identity is int32 and may not fit FP32 exactly.
             raise _StepFailure(self.Status.NONFINITE, f"Invalid contact geometry: {contact.flags.numpy().tolist()}")
         # Graph replay executes device work, not evaluate()'s host-side marker.
         contact._evaluated = True
         residual = self._complete_r.numpy().copy()
-        parts = np.r_[
-            self._rigid.energy.numpy(),
-            self._objective.link_energy.numpy(),
-            self._objective.joint_energy.numpy(),
-            tet.parts.numpy(),
-            contact.energy.numpy().ravel(),
-        ]
+        parts = packet[5:]
         if not np.isfinite(residual).all() or not np.isfinite(parts).all() or not np.isfinite(parts.sum()):
             raise _StepFailure(self.Status.NONFINITE, "Nonfinite coupled E/r")
-        self._metrics["min_det_f"] = float(tet.min_det_f.numpy()[0])
+        self._metrics["min_det_f"] = float(packet[2])
         absolute = abs(parts).sum()
         if self._contact_pool:
-            absolute = abs(parts[: -contact.energy.size]).sum() + contact.absolute_energy.numpy().sum()
+            absolute = abs(parts[: -contact.energy.size]).sum() + packet[3:5].sum()
         return parts.sum(), residual, absolute
 
     def _initial_reference(self, dt, *, device_result=False):

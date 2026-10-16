@@ -52,15 +52,17 @@ def _select_contact_chunk(first: int, end: int, capacity: int, begin: wp.array[i
 
 @wp.kernel(enable_backward=False)
 def _validate_selection(
-    ids: wp.array[wp.uint64], count: wp.array[int], status: wp.array[int], limit: int, records: Any
+    ids: wp.array[wp.uint64], count: wp.array[int], status: wp.array[int], limit: int, records: Any, workers: int
 ):
     i = wp.tid()
     n = count[0]
     if status[0] != 0 or n < 0 or n > ids.shape[0]:
         wp.atomic_or(records.flags, 0, 2)
-    elif i < n:
+        return
+    while i < n:
         if ids[i] >= wp.uint64(limit) or (i > 0 and ids[i] <= ids[i - 1]):
             wp.atomic_or(records.flags, 0, 2)
+        i += workers
 
 
 @wp.kernel(enable_backward=False)
@@ -575,6 +577,8 @@ class _ContactBatch:
             from .contact_material import _MaterialSurface  # noqa: PLC0415
 
             self.material_surface = _MaterialSurface(self)
+        self._storage_bindings = None
+        self._storage_intervals = ()
 
     def _geometry(self, count, *, rotation):
         geometry = _geometry_type(self.dtype)()
@@ -633,17 +637,21 @@ class _ContactBatch:
         ):
             raise ValueError("Invalid native contact displacement scale")
         state = self._state(x, poses, com, jt, jw, rigid_com, rigid_rotation)
+        self.reference_rows._validate_inputs(*self.reference_inputs)
+        self.graphs.run(
+            "contact_reference",
+            (float(dt),),
+            (*self.buffers(), *state),
+            partial(self._evaluate_reference, state, dt),
+        )
+
+    def _evaluate_reference(self, state, dt):
         wp.copy(self.flags, self.start_flags)
         self.pool.records.flags.zero_()
         self.reference_residual.zero_()
         self.reference_energy.zero_()
         for mode in self._chunks():
-            self.graphs.run(
-                "contact_reference_geometry",
-                (mode, float(dt)),
-                (*self.buffers(), *state),
-                partial(self._stage, state, mode, dt, begin=False),
-            )
+            self._stage(state, mode, dt, begin=False)
             wp.launch(
                 _merge_contact_chunk_flags,
                 1,
@@ -657,8 +665,8 @@ class _ContactBatch:
                 [self.pool.candidates, *self.reference_inputs, self.flags, self.pool.row_count],
                 device=self.device,
             )
-            self.reference_rows.reduce(*self.reference_inputs)
-            # Accumulation runs exactly once outside overwrite-only capture.
+            self.reference_rows._reduce(*self.reference_inputs)
+            # The full graph clears the accumulator before processing any chunk.
             wp.launch(
                 _add_reference,
                 self.reference_residual.size,
@@ -695,7 +703,11 @@ class _ContactBatch:
                 raise ValueError("Invalid native contact batch state")
         state = x, poses, com, jt, jw, rigid_com, rigid_rotation
         owned = self.buffers()[: -len(self.METADATA_ARRAYS)]
-        intervals = [_storage_interval(a) for a in owned if a.size]
+        bindings = tuple((a.ptr, a.shape, a.strides, a.dtype) for a in owned if a.size)
+        if bindings != self._storage_bindings:
+            self._storage_intervals = tuple(_storage_interval(a) for a in owned if a.size)
+            self._storage_bindings = bindings
+        intervals = self._storage_intervals
         for a in state:
             if a.size:
                 begin, end = _storage_interval(a)
@@ -914,23 +926,19 @@ class _ContactBatch:
 
     def begin_step(self, x, poses, com, jt, jw, *, rigid_com=None, rigid_rotation=None):
         state = self._state(x, poses, com, jt, jw, rigid_com, rigid_rotation)
+        self.graphs.run("contact_start", (), (*self.buffers(), *state), partial(self._begin_step, state))
+        self._started = True
+
+    def _begin_step(self, state):
         wp.launch(_reset_flags, 1, [self.start_flags], device=self.device)
         for mode in self._chunks():
-            # This overwrite stage freezes every complete step-start sample,
-            # independently of pool capacity or currently nonzero forces.
-            self.graphs.run(
-                "contact_batch_start",
-                (mode,),
-                (*self.buffers(), *state),
-                partial(self._stage, state, mode, 0, begin=True),
-            )
+            self._stage(state, mode, 0, begin=True)
             wp.launch(
                 _merge_contact_chunk_flags,
                 1,
                 [self.start_flags, self._flags, self.pool.candidates.identities, self.pool.records],
                 device=self.device,
             )
-        self._started = True
 
     def evaluate(self, x, poses, com, jt, jw, *, dt, rigid_com=None, rigid_rotation=None, selection=None):
         if not self._started or not math.isfinite(dt) or dt <= 0:
@@ -950,29 +958,53 @@ class _ContactBatch:
                 raise ValueError("Spatial selection belongs to another contact batch")
             selection.validate_storage()
             bindings = selection.buffers()
-        self.pool.begin()
+        chunks = None
+        if selection is not None:
+            if selection.mode_counts is None:
+                raise ValueError("Check spatial selection before scheduling batches")
+            chunks = tuple(
+                (count + max(1, self.batch_capacity) - 1) // max(1, self.batch_capacity)
+                for count in selection.mode_counts
+            )
+        self.pool._validate_storage()
+        self.graphs.run(
+            "contact_batch_eval",
+            (float(dt), chunks),
+            (*self.buffers(), *state, *bindings),
+            partial(self._evaluate_batches, state, dt, selection),
+        )
+        self.pool._stream_started = True
+        self.pool.finish()
+        wp.launch(_contact_pool_failure, 1, [self.flags, self.pool.records], device=self.device)
+
+    def _evaluate_batches(self, state, dt, selection):
+        # Reset the entire stream inside the graph before any additive append.
+        self.pool._begin_stream()
         wp.copy(self.flags, self.start_flags)
         wp.launch(_contact_pool_start_flags, 1, [self.pool.records, self.start_flags], device=self.device)
         if selection is not None:
+            if selection.mode_counts is None:
+                raise ValueError("Check spatial selection before scheduling batches")
+            workers = max(1, min(selection.capacity, 256))
             wp.launch(
                 _validate_selection,
-                max(1, selection.capacity),
-                [selection.identities, selection.count, selection.status, self.contact.count, self.pool.records],
+                workers,
+                [
+                    selection.identities,
+                    selection.count,
+                    selection.status,
+                    self.contact.count,
+                    self.pool.records,
+                    workers,
+                ],
                 device=self.device,
             )
         for mode in self._chunks(selection):
-            self.graphs.run(
-                "contact_batch_eval",
-                (mode, float(dt), selection is not None),
-                (*self.buffers(), *state, *bindings),
-                partial(self._stage, state, mode, dt, begin=False, selection=selection),
-            )
+            self._stage(state, mode, dt, begin=False, selection=selection)
             wp.launch(
                 _merge_contact_chunk_flags,
                 1,
                 [self.flags, self._flags, self.pool.candidates.identities, self.pool.records],
                 device=self.device,
             )
-            self.pool.append()
-        self.pool.finish()
-        wp.launch(_contact_pool_failure, 1, [self.flags, self.pool.records], device=self.device)
+            self.pool._append_stream()

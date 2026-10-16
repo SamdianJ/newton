@@ -164,12 +164,49 @@ def test_count_bounded_initialization(test, device):
             np.testing.assert_array_equal(_dense_bsr(ws.ax_internal_bsr3), 0)
 
 
+def test_fixed_active_sort_span(test, device):
+    """Reuse fixed storage while bounding sort work and ignoring stale capacity tails."""
+    from newton._src.solvers.monolithic import bsr_reduction  # noqa: PLC0415
+
+    ws = _workspace(device, global_capacity=4096, internal_capacity=1)
+    ws._set_fixed_triplet_pattern(**_fixed_pattern())
+    ws._enable_fixed_bsr_storage()
+    ws.use_cuda_graph = device.is_cuda
+    ws._fixed_bsr[0].graphs.enabled = device.is_cuda
+    original = bsr_reduction.radix_sort_pairs
+    for sequence, contact in enumerate((True, False, True), 1):
+        generation = MonolithicLinearGeneration(1, 0, 1, sequence)
+        assembly = ws.begin_assembly(generation)
+        if contact:
+            wp.launch(_contact, 1, [assembly.contact_factors, assembly.global_scalar_triplets], device=device)
+        count = 10 + (121 if contact else 0)
+        ws._global.rows[count:].fill_(-123)
+        ws._global.values[count:].fill_(float("nan"))
+        calls = []
+
+        def sort(keys, values, length, calls=calls, count=count, **kwargs):
+            calls.append(length)
+            test.assertGreaterEqual(length, count)
+            test.assertLess(length, 2 * count)
+            return original(keys, values, length, **kwargs)
+
+        with patch.object(bsr_reduction, "radix_sort_pairs", sort):
+            result = ws.finalize_assembly(generation=generation)
+        test.assertEqual(result.status, MonolithicLinearStatus.SUCCESS)
+        if sequence < 3 or not device.is_cuda:
+            test.assertTrue(calls)
+        g = np.r_[2.0, -1.0, np.arange(1, 10) * 0.1]
+        expected = 3 * np.outer(g, g) if contact else np.zeros((11, 11))
+        np.testing.assert_allclose(_dense_bsr(ws.k_global_scalar_bsr), expected, atol=8e-7)
+
+
 class TestMonolithicBsrPrefix(unittest.TestCase):
     pass
 
 
 for device in get_test_devices():
     for function in (
+        test_fixed_active_sort_span,
         test_prefix_views_and_parity,
         test_empty_and_full_prefix,
         test_count_guards_before_builder,

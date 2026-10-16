@@ -478,7 +478,10 @@ class MonolithicLinearWorkspace:
                 ):
                     if self._fixed_bsr is not None:
                         reduction = self._fixed_bsr[0] if matrix is self.k_global_scalar_bsr else self._fixed_bsr[1]
-                        reduction.build(triplets, layout_identity=self.layout.identity)
+                        if matrix is self.k_global_scalar_bsr:
+                            reduction.build(triplets, layout_identity=self.layout.identity, active_count=count)
+                        else:
+                            reduction.build(triplets, layout_identity=self.layout.identity)
                         if matrix is self.ax_internal_bsr3:
                             wp.launch(
                                 _fixed_bsr_publish_status, 1, [triplets.status, self._global.status], device=self.device

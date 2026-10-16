@@ -9,10 +9,12 @@ import json
 import platform
 import time
 from pathlib import Path
+from unittest.mock import patch
 
 import numpy as np
 import warp as wp
 
+from newton._src.solvers.monolithic.contact import ContactObjective
 from newton.examples.softbody.monolithic_recording import measure, save, serial, state_arrays
 from scripts.monolithic_reference.coupled_fixtures import (
     DIRECTORY,
@@ -114,7 +116,8 @@ def run_case(
     else:
         model = make_tiny(case, device)
         duration = PROTOCOL["tiny_fixtures"][case]["duration"]
-    solver = make_solver(model, case, law, mode=mode, graph=graph, globalization=globalization)
+    with patch("newton._src.solvers.monolithic.solver_monolithic.ContactObjective", ContactObjective):
+        solver = make_solver(model, case, law, mode=mode, graph=graph, globalization=globalization)
     state = solver.create_state(dt=dt)
     control = model.control()
     expected = round(duration / dt)

@@ -20,6 +20,21 @@ from scripts.monolithic_reference.check_recording import check_actor, compare_ac
 from scripts.monolithic_reference.workload_scene import build_scene
 
 
+def test_legacy_recording_reconstruction(test, device):
+    """Rebuild legacy recordings explicitly after the ordinary solver default changes."""
+    model, run, state, _ = build_scene("actor-coupling", device=device, graph=False)
+    test.assertFalse(run._contact_pool)
+    direct = coupling.make_solver(model, mode="production", graph=False, contact_dataflow="legacy")
+    test.assertEqual(run._kinematics.digest, direct._kinematics.digest)
+    default = coupling.make_solver(model, mode="production", graph=False)
+    test.assertTrue(default._contact_spatial)
+    with tempfile.TemporaryDirectory() as directory:
+        folder = Path(directory) / "legacy"
+        result = coupling.record_run(run, state, folder, end_step=2)
+        test.assertEqual(result["status"], "PASS_PREFIX")
+        test.assertEqual(check_actor(folder, require_complete=False)["frames"], 3)
+
+
 def test_actor_dataflow_recording(test, device):
     """Audit a bounded recording, checkpoint continuation and creation order for each route."""
     graphs = (False, True) if device.is_cuda else (False,)
@@ -111,6 +126,12 @@ class TestActorDataflow(unittest.TestCase):
 
 
 for device in get_test_devices():
+    add_function_test(
+        TestActorDataflow,
+        "test_legacy_recording_reconstruction",
+        test_legacy_recording_reconstruction,
+        devices=[device],
+    )
     add_function_test(
         TestActorDataflow, "test_actor_dataflow_recording", test_actor_dataflow_recording, devices=[device]
     )

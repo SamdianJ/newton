@@ -3,13 +3,13 @@
 
 """Allowlisted scene recipes shared by profiling and computational replay."""
 
-from contextlib import nullcontext
 from functools import partial
 from unittest.mock import patch
 
 import numpy as np
 import warp as wp
 
+from newton._src.solvers.monolithic.contact import ContactObjective
 from scripts.monolithic_reference.coupled_fixtures import make_solver, make_tiny
 from scripts.monolithic_reference.retained_assets import validate_inputs
 from scripts.monolithic_reference.run_precision import build, cases
@@ -21,7 +21,7 @@ def build_scene(name, *, device="cuda:0", graph=True, contact_dataflow="legacy",
         raise ValueError("Unsupported contact dataflow")
     if (contact_dataflow == "spatial") != (spatial is not None):
         raise ValueError("Spatial experiments require explicit capacity and law margin")
-    context = nullcontext()
+    context = patch("newton._src.solvers.monolithic.solver_monolithic.ContactObjective", ContactObjective)
     if contact_dataflow == "pooled":
         from newton._src.solvers.monolithic.contact_pipeline import _PooledContactObjective  # noqa: PLC0415
 
