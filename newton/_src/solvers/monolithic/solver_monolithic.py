@@ -85,6 +85,11 @@ class SolverMonolithic(SolverBase):
     set per-cable original-unit L2 residual goals (defaults 1e-9 and 1e-11).
     Both are experimental numerical policies included in checkpoint identity.
 
+    Material scenes optionally accept ``cloth_position_tolerance`` [N] and
+    ``joint_residual_tolerance`` [N or N m per joint coordinate]. These cap each
+    cloth/joint block's raw L2 residual in addition to the scaled relative goals.
+    They are experimental numerical policies included in checkpoint identity.
+
     Stopped publication retains all physical/state gates except the residual goal.
     ``last_accepted`` requires an accepted Newton update; ``current_iterate``
     also permits the initialized predictor when no update was accepted. Neither
@@ -140,6 +145,8 @@ class SolverMonolithic(SolverBase):
         cable_inputs=(),
         cable_position_tolerance=1e-9,
         cable_theta_tolerance=1e-11,
+        joint_residual_tolerance=None,
+        cloth_position_tolerance=None,
     ):
         cloth_inputs, cable_inputs = tuple(cloth_inputs), tuple(cable_inputs)
         self._materials = _MaterialInputs(model, cloth_inputs, cable_inputs) if cloth_inputs or cable_inputs else None
@@ -150,9 +157,20 @@ class SolverMonolithic(SolverBase):
         self._precision = self.Precision(precision)
         self._dtype = wp.float64 if self._precision == self.Precision.FP64 else wp.float32
         self._numpy_dtype = np.float64 if self._precision == self.Precision.FP64 else np.float32
+        residual_caps = {
+            name: value
+            for name, value in (
+                ("joint_residual_tolerance", joint_residual_tolerance),
+                ("cloth_position_tolerance", cloth_position_tolerance),
+            )
+            if value is not None
+        }
+        if residual_caps and self._materials is None:
+            raise ValueError("Joint/cloth physical residual caps require a material scene")
         for name, value in (
             ("cable_position_tolerance", cable_position_tolerance),
             ("cable_theta_tolerance", cable_theta_tolerance),
+            *residual_caps.items(),
         ):
             if (
                 isinstance(value, (bool, np.bool_))
@@ -241,6 +259,7 @@ class SolverMonolithic(SolverBase):
                     "linear_absolute_tolerance": linear_absolute_tolerance,
                     "cable_position_tolerance": cable_position_tolerance,
                     "cable_theta_tolerance": cable_theta_tolerance,
+                    **residual_caps,
                     "pcg_mode": self.PCGMode(pcg_mode).value,
                     "tet_rest_density": density,
                     "contact_factor_capacity": "automatic"

@@ -1,0 +1,1 @@
+Allow infinite moving plane targets for monolithic material contact and retain their coupled force/tangent contributions. Handle empty pooled contact diagnostics without taking an invalid Warp array slice.

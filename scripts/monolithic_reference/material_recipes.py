@@ -13,9 +13,9 @@ import numpy as np
 RECIPE_PATH = Path(__file__).parent / "fixtures/material_acceptance_v1.json"
 
 
-def build_case(name):
+def build_case(name, *, recipe=RECIPE_PATH):
     """Return the frozen recipe plus rest geometry, masses and constrained node IDs."""
-    specification = json.loads(RECIPE_PATH.read_text())
+    specification = json.loads(Path(recipe).read_text())
     recipe = specification["cases"][name]
     if recipe["material"] == "cable":
         count = recipe["vertices"]

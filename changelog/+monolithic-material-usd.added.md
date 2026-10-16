@@ -1,0 +1,2 @@
+Add experimental monolithic material USD rest import/export with anisotropic cable tensors, natural reference geometry, constraints and SI unit handling. Add coupled cable, cloth and precreased-box acceptance runners with complete checkpoint continuation and cross-device frame comparisons.
+Material scenes can additionally set explicit raw cloth and joint residual caps for physical acceptance independently of the default relative convergence criteria; these settings are included in checkpoint identity.

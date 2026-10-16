@@ -282,6 +282,8 @@ class _SolverMonolithicInternalConfig:
     merit_absolute_x: float = 7.3049125684417234e-6
     merit_absolute_cable_x: float = 1e-9
     merit_absolute_cable_theta: float = 1e-11
+    joint_residual_tolerance: float | None = None
+    cloth_position_tolerance: float | None = None
     merit_relative_global: float = 1.0e-4
     merit_relative_q: float = 1.0e-4
     merit_relative_x: float = 1.0e-4

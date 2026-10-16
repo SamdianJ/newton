@@ -107,6 +107,16 @@ def measure(solver, residual, reference, scale):
                 * scale[part.start]
                 / np.sqrt(native(size))
             )
+        cap = (
+            solver._config.joint_residual_tolerance
+            if name == "q"
+            else solver._config.cloth_position_tolerance
+            if name.startswith("cloth_")
+            else None
+        )
+        if cap is not None:
+            # min(scale) bounds the unscaled L2 norm even for unequal row scales.
+            goal = native(min(goal, native(cap) * np.min(scale[part]) / np.sqrt(native(size))))
         raw_norm = float(norms[index, 2] if norms is not None else np.linalg.norm(residual[part]))
         if name in getattr(solver, "_cable_raw_theta_norms", {}):
             raw_norm = solver._cable_raw_theta_norms[name]

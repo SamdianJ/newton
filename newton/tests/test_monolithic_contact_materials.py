@@ -31,7 +31,7 @@ from newton.tests.test_monolithic_material_state import snapshot
 from newton.tests.unittest_utils import add_function_test, get_test_devices
 
 
-def scene(*, cable=False, body=False, device="cpu", mixed=False, fixed=False, mesh=False):
+def scene(*, cable=False, body=False, device="cpu", mixed=False, fixed=False, mesh=False, plane=False):
     builder = newton.ModelBuilder(gravity=(0, 0, 0))
     target = -1
     if body == "articulation":
@@ -41,7 +41,9 @@ def scene(*, cable=False, body=False, device="cpu", mixed=False, fixed=False, me
         )
     elif body:
         target = builder.add_body(mass=1.0, inertia=wp.diag(wp.vec3(0.1)))
-    if mesh:
+    if plane:
+        builder.add_shape_plane(body=target, width=0.0, length=0.0, cfg=builder.ShapeConfig(density=0.0))
+    elif mesh:
         source = newton.Mesh.create_box(2.1, 1.1, 0.1, compute_inertia=False)
         if wp.get_device(device).is_cuda:
             source.build_sdf(
@@ -112,12 +114,15 @@ def contact_solver(
     law="C-EE",
     smoothing=1e-5,
     mesh=False,
+    plane=False,
     mixed=False,
     fixed=False,
     globalization="ResNorm",
     **options,
 ):
-    model, _, _, cloth, cables = scene(cable=cable, body=body, device=device, mixed=mixed, fixed=fixed, mesh=mesh)
+    model, _, _, cloth, cables = scene(
+        cable=cable, body=body, device=device, mixed=mixed, fixed=fixed, mesh=mesh, plane=plane
+    )
     options.setdefault("mass_mode", "lumped")
     if mesh and wp.get_device(device).is_cuda:
         options["smooth_sdf"] = build_smooth_sdf(model)
@@ -709,6 +714,82 @@ def test_material_contact_mesh(test, device):
         np.testing.assert_allclose(forces[:9].reshape(3, 3).sum(axis=0) + forces[9:12], 0, atol=1e-12)
 
 
+def test_material_moving_plane(test, device):
+    """Differentiate the moving target and retain both contact endpoints in r and B."""
+    for cable in (False, True):
+        solver = contact_solver(cable=cable, body="articulation", plane=True, device=device, smoothing=1e-8)
+        state = solver.create_state(dt=0.001)
+        query(solver, state, begin=True)
+        query(solver, state)
+        contact = solver._contact
+        row = solver._layout.indices("articulation")[0]
+        residual = contact.residual.numpy().copy()
+        matrix = batch_matrix(contact._batch)
+        test.assertGreater(abs(residual[row]), 1e-8)
+        test.assertGreater(np.linalg.norm(np.delete(matrix[row], row)), 1e-8)
+        energy, gradients = [], []
+        epsilon = 1e-7
+        for sign in (-1, 1):
+            state.joint_q.assign([sign * epsilon])
+            query(solver, state)
+            energy.append(contact.energy.numpy().sum())
+            gradients.append(contact.residual.numpy().copy())
+        test.assertAlmostEqual((energy[1] - energy[0]) / (2 * epsilon), residual[row], delta=1e-9)
+        np.testing.assert_allclose((gradients[1] - gradients[0]) / (2 * epsilon), matrix[:, row], atol=1e-7)
+        for pair in contact.pair_diagnostics():
+            np.testing.assert_allclose(np.sum(pair["world_wrench"], axis=0), 0, atol=1e-12)
+
+
+def test_material_plane_spatial_steps(test, device):
+    """Match complete and spatial moving-plane steps with production PCG and graph."""
+    for cable in (False, True):
+        results = []
+        for spatial in (False, True):
+            factory = _SpatialContactObjective if spatial else material_runtime._PooledContactObjective
+            with patch.object(material_runtime, "_PooledContactObjective", factory):
+                solver = contact_solver(
+                    cable=cable,
+                    body="articulation",
+                    plane=True,
+                    device=device,
+                    pcg_mode=SolverMonolithic.PCGMode.PRODUCTION,
+                    use_cuda_graph=device.is_cuda,
+                    joint_residual_tolerance=1e-10,
+                    cloth_position_tolerance=1e-10,
+                )
+            state = solver.create_state(dt=0.001)
+            for _ in range(3):
+                solver.step(state, state, solver.create_control(), dt=0.001)
+                test.assertTrue(solver.last_stats.converged)
+                test.assertLessEqual(solver.last_stats.raw_residual_q_norm, 1e-10)
+            results.append(snapshot(state))
+        for name in results[0]:
+            if name == "history.config_digest":
+                # Complete and spatial policies intentionally have different identities.
+                continue
+            np.testing.assert_allclose(results[0][name], results[1][name], atol=1e-10, rtol=1e-9, err_msg=name)
+
+
+def test_material_plane_rotation(test, device):
+    """Differentiate a free plane's angular work around every world rotation axis."""
+    solver = contact_solver(body=True, plane=True, device=device, smoothing=1e-8)
+    state = solver.create_state(dt=0.001)
+    query(solver, state, begin=True)
+    query(solver, state)
+    rows = solver._rigid.rows_numpy[0]
+    torque = solver._contact.residual.numpy()[rows[3:]].copy()
+    epsilon = 1e-7
+    for axis in range(3):
+        energy = []
+        for sign in (-1, 1):
+            quaternion = np.array([[0.0, 0.0, 0.0, np.cos(epsilon / 2)]])
+            quaternion[0, axis] = sign * np.sin(epsilon / 2)
+            state._monolithic_coupled.rigid_rotation.assign(quaternion)
+            query(solver, state)
+            energy.append(solver._contact.energy.numpy().sum())
+        test.assertAlmostEqual((energy[1] - energy[0]) / (2 * epsilon), torque[axis], delta=1e-9)
+
+
 class TestMaterialContactDevices(unittest.TestCase):
     pass
 
@@ -722,6 +803,20 @@ add_function_test(
 )
 
 add_function_test(TestMaterialContactDevices, "test_mesh", test_material_contact_mesh, devices=get_test_devices())
+add_function_test(
+    TestMaterialContactDevices, "test_moving_plane", test_material_moving_plane, devices=get_test_devices()
+)
+add_function_test(
+    TestMaterialContactDevices,
+    "test_plane_spatial_steps",
+    test_material_plane_spatial_steps,
+    devices=get_test_devices(),
+)
+
+
+add_function_test(
+    TestMaterialContactDevices, "test_plane_rotation", test_material_plane_rotation, devices=get_test_devices()
+)
 
 
 if __name__ == "__main__":

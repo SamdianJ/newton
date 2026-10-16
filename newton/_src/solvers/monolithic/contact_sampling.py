@@ -258,9 +258,11 @@ class ContactSamples:
             if not np.isfinite(scale).all() or not np.isfinite(margins[s]) or margins[s] < 0:
                 raise ValueError("Invalid target shape scale or margin")
             if geo == GeoType.PLANE and (
-                s not in targets_used or np.any(scale[:2] != 0) or support.get(int(bodies[s]), ())
+                s not in targets_used
+                or np.any(scale[:2] != 0)
+                or (_materials is None and support.get(int(bodies[s]), ()))
             ):
-                raise ValueError("New plane target must be infinite and static")
+                raise ValueError("New plane target must be infinite and static outside material contact")
             if (geo == GeoType.SPHERE and scale[0] <= 0) or (geo == GeoType.BOX and np.any(scale <= 0)):
                 raise ValueError("Invalid analytic target scale")
             if geo == GeoType.MESH:

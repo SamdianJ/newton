@@ -60,11 +60,11 @@ Material input and continuation (experimental)
 ``SolverMonolithic.ClothInput`` and ``SolverMonolithic.CableInput`` describe
 independently owned shell meshes and open, anisotropic DER chains. Pass tuples
 through the keyword-only ``cloth_inputs`` and ``cable_inputs`` arguments.
-Independent cloth/cable and contact-free mixed articulation/rigid/tet/material
+Independent cloth/cable and supported mixed articulation/rigid/tet/material
 scenes use the shared nonlinear solve and transactional publication path.
-Material-scene contacts are not yet connected; collision-enabled material
-scenes raise ``NotImplementedError`` when stepped. Existing nonmaterial
-stepping is unchanged.
+Material surfaces contact supported articulation, rigid and static targets
+through the complete deterministic contact pool. Self-collision and soft-soft
+contact remain unsupported. Existing nonmaterial stepping is unchanged.
 
 Cloth inputs select Model triangle rows, bending coefficients ``(alpha, beta)``,
 thickness [m] and surface density [kg/m²]. Cable inputs select ordered particle
@@ -76,8 +76,9 @@ objects are supported; each input must describe one connected object. Shared
 particles, invalid topology and conflicting native forces are rejected.
 Inputs are copied at construction; later caller edits do not alter the solver.
 
-Material scenes may omit both the mechanical tree and tet. They use version-five
-checkpoint history containing theta, directors and the unwrapped reference twist.
+Material scenes may omit both the mechanical tree and tet. They use version-six
+checkpoint history containing theta, directors, the unwrapped reference twist
+and contact torque. Earlier material checkpoint schemas are rejected.
 ``create_state(dt=...)`` initializes the reference configuration. Explicit
 ``source`` initialization with cables requires compatible material history; an
 ordinary ``model.state()`` can initialize cloth-only scenes but is insufficient
@@ -145,3 +146,10 @@ replace them. Sharpa completion does not certify grasp success.
 Use ``scripts.monolithic_reference.replay_franka_grasp`` or
 ``scripts.monolithic_reference.replay_sharpa_grasp`` with a recording directory
 and ``--check-only`` to verify display frames without simulating again.
+
+Material USD authoring (experimental)
+------------------------------------
+
+.. autofunction:: import_materials_usd
+
+.. autofunction:: export_materials_usd

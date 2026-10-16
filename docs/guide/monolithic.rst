@@ -16,7 +16,7 @@ Monolithic Coupled Solver
    without the normal deprecation period. The old BE, q-only and tet-only solver entry points and
    their examples have been retired.
 
-Spatial contact is the default. Candidates refresh at each Newton boundary and
+For scenes without cloth/cable, spatial contact is the default. Candidates refresh at each Newton boundary and
 remain frozen during its trials, using zero additional law margin [m]. This
 approximation can omit contacts reached by a trial outside the frozen bounds;
 it does not provide continuous collision detection or automatic correction.
@@ -29,6 +29,10 @@ budget can discard whole contacts; overflow is reported and taints the result.
 Existing checkpoints from the previous complete-contact default have a different
 configuration identity and cannot be loaded into the new default. Use the offline
 legacy recording tools to inspect those records, or start a new spatial run.
+
+Material scenes use complete contact enumeration in the deterministic pool.
+Their capacity overflow rolls back the step without publishing partial forces.
+This separate material policy is described in :doc:`monolithic_cloth`.
 
 Use the public API
 ------------------

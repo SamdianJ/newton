@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from .collision import MonolithicCollisionPipeline
     from .contact_forces import MonolithicContactForces
+    from .material_usd import export_materials_usd, import_materials_usd
     from .smooth_sdf import SmoothSDFSet
     from .smooth_sdf_builder import build_smooth_sdf
     from .solver_monolithic import SolverMonolithic
@@ -26,6 +27,8 @@ __all__ = [
     "SmoothSDFSet",
     "SolverMonolithic",
     "build_smooth_sdf",
+    "export_materials_usd",
+    "import_materials_usd",
 ]
 
 _LAZY_IMPORTS = {
@@ -34,6 +37,8 @@ _LAZY_IMPORTS = {
     "SolverMonolithic": ".solver_monolithic",
     "SmoothSDFSet": ".smooth_sdf",
     "build_smooth_sdf": ".smooth_sdf_builder",
+    "export_materials_usd": ".material_usd",
+    "import_materials_usd": ".material_usd",
 }
 
 

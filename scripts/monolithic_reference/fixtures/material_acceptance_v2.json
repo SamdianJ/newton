@@ -1,0 +1,187 @@
+{
+  "version": 2,
+  "purpose": "Coupled material acceptance; user-approved sampled-gap gate, continuous penetration retained as an open item",
+  "common": {
+    "dt": 0.001,
+    "steps": 6000,
+    "gravity": [
+      0.0,
+      0.0,
+      0.0
+    ],
+    "phases": [
+      [
+        0,
+        500,
+        "rest"
+      ],
+      [
+        500,
+        1500,
+        "load"
+      ],
+      [
+        1500,
+        2500,
+        "hold"
+      ],
+      [
+        2500,
+        3500,
+        "unload"
+      ],
+      [
+        3500,
+        6000,
+        "recover"
+      ]
+    ],
+    "checkpoint_step": 2000,
+    "ramp": "3*s*s-2*s*s*s",
+    "precision": "FP64",
+    "pcg_storage": "FP32",
+    "contact_model": "C-IE",
+    "globalization": "ArmijoOrResNorm",
+    "publish_policy": "strict",
+    "friction_coefficient": 0.0,
+    "friction_velocity_scale": 0.01,
+    "contact_stiffness": 100000000.0,
+    "normal_smoothing": 1e-05,
+    "newton_max_iterations": 80,
+    "line_search_max_iterations": 24,
+    "linear_max_iterations": 1000,
+    "linear_tolerance": 1e-05,
+    "linear_absolute_tolerance": 1e-08,
+    "drive_stiffness": 1000.0,
+    "drive_damping": 14.142135623730951,
+    "driver_mass": 0.05,
+    "driver_inertia_diagonal": [
+      0.0001,
+      0.0001,
+      0.0001
+    ],
+    "material_damping": 0.0,
+    "gates": {
+      "converged_fraction": 1.0,
+      "stopped_steps": 0,
+      "rollback_steps": 0,
+      "force_residual_inf_N": 1e-06,
+      "theta_residual_inf_Nm": 1e-09,
+      "contact_balance_relative": 1e-06,
+      "contact_force_balance_absolute_N": 1e-08,
+      "contact_torque_balance_absolute_Nm": 1e-10,
+      "active_contact_steps_min": 10,
+      "resume_position_error_m": 1e-09,
+      "resume_theta_error_rad": 1e-08,
+      "cpu_cuda_position_error_m": 5e-07,
+      "cpu_cuda_theta_error_rad": 5e-06,
+      "recover_min_displacement_over_peak_max": 0.9,
+      "rest_force_inf_N": 1e-08,
+      "rest_theta_torque_inf_Nm": 1e-10
+    },
+    "penetration_measure": "sampled_gap"
+  },
+  "cases": {
+    "cable-bend-twist": {
+      "material": "cable",
+      "vertices": 21,
+      "length_m": 0.2,
+      "radius_m": 0.001,
+      "linear_density_kg_m": 0.003,
+      "EA_N": 30.0,
+      "bending_Nm2": [
+        [
+          4e-06,
+          1e-06
+        ],
+        [
+          1e-06,
+          1.2e-05
+        ]
+      ],
+      "GJ_Nm2": 6e-06,
+      "fixed_vertices": [
+        0,
+        1
+      ],
+      "fixed_theta_edges": [
+        0,
+        19
+      ],
+      "end_theta_load_rad": 0.1,
+      "driver_shape": "sphere",
+      "driver_radius_m": 0.02,
+      "driver_center_rest_m": [
+        0.1,
+        -0.025,
+        0.0
+      ],
+      "driver_axis": [
+        0.0,
+        1.0,
+        0.0
+      ],
+      "driver_travel_m": 0.007,
+      "penetration_max_m": 5e-05,
+      "peak_displacement_min_m": 0.0005,
+      "edge_stretch_min": 0.8,
+      "edge_stretch_max": 1.2
+    },
+    "cloth-press": {
+      "material": "cloth",
+      "cells_per_side": 8,
+      "width_m": 0.2,
+      "depth_m": 0.2,
+      "thickness_m": 0.0002,
+      "surface_density_kg_m2": 0.15,
+      "young_modulus_Pa": 200000.0,
+      "poisson_ratio": 0.3,
+      "fixed_vertices": "outer_boundary",
+      "driver_shape": "sphere",
+      "driver_radius_m": 0.03,
+      "driver_center_rest_m": [
+        0.0,
+        0.0,
+        0.035
+      ],
+      "driver_axis": [
+        0.0,
+        0.0,
+        -1.0
+      ],
+      "driver_travel_m": 0.015,
+      "penetration_max_m": 5e-05,
+      "peak_displacement_min_m": 0.001,
+      "area_ratio_min": 0.2,
+      "area_ratio_max": 2.0
+    },
+    "precreased-box": {
+      "material": "cloth",
+      "cells_per_side": 4,
+      "width_m": 0.1,
+      "depth_m": 0.08,
+      "height_m": 0.04,
+      "thickness_m": 0.0003,
+      "surface_density_kg_m2": 0.35,
+      "young_modulus_Pa": 100000000.0,
+      "poisson_ratio": 0.3,
+      "fixed_vertices": "bottom",
+      "driver_shape": "downward_plane",
+      "driver_center_rest_m": [
+        0.0,
+        0.0,
+        0.045
+      ],
+      "driver_axis": [
+        0.0,
+        0.0,
+        -1.0
+      ],
+      "driver_travel_m": 0.009,
+      "penetration_max_m": 5e-05,
+      "peak_displacement_min_m": 0.0005,
+      "area_ratio_min": 0.2,
+      "area_ratio_max": 2.0
+    }
+  }
+}

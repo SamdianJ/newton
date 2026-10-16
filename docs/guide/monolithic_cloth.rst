@@ -44,7 +44,8 @@ carry the forces; this model adds no through-thickness rotational coordinates.
 Both endpoints contribute to the global residual and full cross blocks.
 
 Targets support analytic planes, spheres and boxes, and CUDA mesh targets with
-an existing bound C2 SDF. Planes must be infinite and static. Material samples
+an existing bound C2 SDF. Planes must be infinite; material targets may be static
+or attached to supported moving actors. Material samples
 respect Model world membership; solver actors still share one world.
 Reference areas stay fixed during deformation.
 C-EE, C-IE and C-II share the existing smoothed penalty/friction law. Use
@@ -108,3 +109,58 @@ residuals, final fold angle and fresh-solver checkpoint continuation. It is a
 no-contact functional benchmark; absolute constitutive accuracy is qualified
 separately by element and assembly tests. A partial run or stopped solve cannot
 pass. The runner retains source hashes, per-step measurements and failures.
+
+Static USD material authoring
+----------------------------
+
+.. experimental::
+
+   ``import_materials_usd`` and ``export_materials_usd`` in
+   ``newton.solvers.experimental.monolithic`` implement project-specific version 1
+   attributes. These are not registered USD schemas. They describe rest materials;
+   dynamic continuation still requires a solver checkpoint.
+
+Each object is a triangular ``Mesh`` or a single nonperiodic linear
+``BasisCurves``. Custom attributes use the ``newton:monolithic:`` prefix:
+``kind`` (token, ``cloth`` or ``cable``), ``version`` (int, 1) and
+``fixedVertices`` (int array of local vertex IDs). Every point must participate
+in the object's topology. Cloth faces must be consistently right-handed,
+connected and manifold, without holes. Cable vertex order defines edge direction.
+
+Cloth uses ``membrane`` (double2, mu and lambda [N/m]), ``bending`` (double2,
+alpha and beta [N m]), ``thickness`` (double [m]) and ``surfaceDensity``
+(double [kg/m²]). Each object's membrane and bending are uniform. Cable uses
+``EA`` (double [N]), ``bending`` (double4, row-major SPD tensor [N m²]),
+``GJ`` (double [N m²]), ``radius`` (double [m]), ``linearDensity``
+(double [kg/m]), ``restTheta`` (double array [rad]), ``restDirector``
+(vector3d array of unit perpendicular directions) and ``fixedTheta``
+(bool array). The last three cable attributes have one entry per edge.
+
+Import bakes world transforms and converts points using ``metersPerUnit``;
+other physical values remain SI. Directors rotate, and angles remain unwrapped.
+Only positive uniform scale and rigid transforms are supported; reflection,
+shear, nonuniform scale and animation are rejected. World axes are retained;
+no implicit up-axis conversion occurs. Export writes meters and world points.
+Multiple prims become independently owned objects in the builder's current world.
+Invalid input is validated before the destination builder is changed.
+
+.. code-block:: python
+
+   from newton.solvers.experimental.monolithic import (
+       SolverMonolithic, import_materials_usd, export_materials_usd,
+   )
+
+   materials = import_materials_usd(builder, "materials.usda")
+   model = builder.finalize()
+   solver = SolverMonolithic(
+       model, **materials, contact_model="C-IE",
+       friction_velocity_scale=0.01, globalization="ResNorm",
+   )
+   export_materials_usd("rest.usda", model, **materials)
+
+For strict absolute-force validation in material scenes,
+``cloth_position_tolerance`` [N] and ``joint_residual_tolerance``
+[N or N m per generalized coordinate] optionally cap each cloth/joint block's
+raw L2 residual in addition to the default relative criterion. Defaults retain
+the existing solver policy. These experimental numerical settings enter the
+checkpoint identity; changing them requires a fresh solve configuration.

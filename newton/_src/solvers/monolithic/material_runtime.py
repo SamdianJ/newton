@@ -97,6 +97,8 @@ def initialize(self):
         regularization_values=(0.0, 1e-6, 1e-5, 1e-4, 1e-3, 1e-2, 0.1, 1.0),
         merit_absolute_cable_x=config["cable_position_tolerance"],
         merit_absolute_cable_theta=config["cable_theta_tolerance"],
+        joint_residual_tolerance=config.get("joint_residual_tolerance"),
+        cloth_position_tolerance=config.get("cloth_position_tolerance"),
         merit_absolute_global=1e-7,
         merit_absolute_q=2.5e-8,
         merit_absolute_x=1e-7,

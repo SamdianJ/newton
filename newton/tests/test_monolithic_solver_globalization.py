@@ -4,6 +4,7 @@
 """Check globalization acceptance and native convergence goals."""
 
 import unittest
+from dataclasses import replace
 from itertools import product
 from types import SimpleNamespace
 
@@ -16,6 +17,28 @@ from newton._src.solvers.monolithic.solver_types import _SolverMonolithicInterna
 
 class TestGlobalization(unittest.TestCase):
     """Guard the shared Armijo/ResNorm acceptance predicate."""
+
+    def test_absolute_material_force_caps(self):
+        """Prevent a large frozen reference from accepting excessive raw joint or cloth force."""
+        solver = SimpleNamespace(
+            _numpy_dtype=np.float64,
+            _metrics={},
+            _variational={},
+            _config=replace(
+                _SolverMonolithicInternalConfig(), joint_residual_tolerance=1e-6, cloth_position_tolerance=1e-6
+            ),
+            _linear=SimpleNamespace(
+                layout=SimpleNamespace(groups=(("global", 0, 4), ("articulation", 0, 2), ("cloth_0_x", 2, 2)))
+            ),
+        )
+        scale = np.array([0.1, 10.0, 0.2, 20.0])
+        residual = np.array([2e-6, 0, 2e-6, 0])
+        values = measure(solver, residual, np.ones(4), scale)
+        for name in ("q", "cloth_0_x"):
+            self.assertGreater(values[name][0], values[name][2])
+        reduced = measure(solver, residual / 4, np.ones(4), scale)
+        for name in ("q", "cloth_0_x"):
+            self.assertLess(reduced[name][0], reduced[name][2])
 
     def test_predicates(self):
         """Exercise A/R truth tables, nonnegative slopes, equality and nonfinite rejection."""
