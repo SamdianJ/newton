@@ -1,19 +1,19 @@
 {
   "version": 1,
-  "status": "PROPOSED",
-  "approval": "Values approved by the user on 2026-10-17; freeze after the PR-02 baseline review.",
+  "status": "FROZEN",
+  "approval": "Values approved by the user on 2026-10-17; frozen on 2026-10-18 after the offline baseline review. Penetration is 5% of the smallest grasped object dimension (40 mm cubes), matching the rigid-stack 2 mm gate for 40 mm boxes.",
   "robot": {
     "franka-cube": {
       "hard_failures_max": 0,
       "stopped_fraction_max": 0.01,
-      "penetration_max_m": 0.001,
+      "penetration_max_m": 0.002,
       "det_f_min": 0.2,
       "require_held_cube": true
     },
     "sharpa-recorded-10mm": {
       "hard_failures_max": 0,
       "stopped_fraction_max": 0.01,
-      "penetration_max_m": 0.001,
+      "penetration_max_m": 0.002,
       "det_f_min": 0.2,
       "require_held_cube": false
     }

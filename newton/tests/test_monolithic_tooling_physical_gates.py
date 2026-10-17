@@ -70,8 +70,8 @@ class TestPhysicalGates(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "version"):
                 load_gates(path, allow_proposed=True)
 
-    def test_repository_recipe_covers_both_robot_scenes(self):
-        gates = load_gates(allow_proposed=True)
+    def test_repository_recipe_is_frozen_for_both_robot_scenes(self):
+        gates = load_gates()
         self.assertEqual(sorted(gates["robot"]), ["franka-cube", "sharpa-recorded-10mm"])
         for scene in gates["robot"].values():
             self.assertEqual(sorted(scene), sorted(GATES))

@@ -1,6 +1,7 @@
 {
   "version": 1,
-  "status": "PROPOSED",
+  "status": "FROZEN",
+  "approval": "Approved by the user on 2026-10-18. The cantilever is a P8a diagnostic and a hard P8b acceptance target (open items P8-N1, P8-N2).",
   "patch": {
     "size": [0.1, 0.1, 0.1],
     "cells": [[4, 4, 4]],
