@@ -185,7 +185,10 @@ def summarize_matrix(kind, receipts):
     g = RECIPES[kind]["gates"]
     if not receipts:
         return {"status": "FAIL", "failures": ["empty_matrix"]}
-    failures = ["case_failed"] if any(r["status"] != "PASS" for r in receipts) else []
+    if any(r["status"] != "PASS" for r in receipts):
+        # Aborted cases carry no metrics; cross-case gates need every case.
+        return {"status": "FAIL", "failures": ["case_failed"]}
+    failures = []
     if kind == "cantilever":
         rows = sorted(receipts, key=lambda r: r["cells"][1])
         d = np.array([r["metrics"]["deflection"] for r in rows])

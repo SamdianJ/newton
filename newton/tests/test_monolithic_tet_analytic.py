@@ -133,6 +133,11 @@ class TestTetMatrix(unittest.TestCase):
         self.assertEqual(summarize_matrix("axial_vibration", rows)["failures"], ["consistent_period_bias"])
 
     def test_any_failed_case_fails_the_matrix(self):
+        aborted = [
+            self.receipt("cantilever", [10, 1, 1], deflection=0.6, reference=1.0),
+            {"kind": "cantilever", "cells": [40, 4, 4], "status": "FAIL"},
+        ]
+        self.assertEqual(summarize_matrix("cantilever", aborted), {"status": "FAIL", "failures": ["case_failed"]})
         rows = [self.receipt("patch", [4, 4, 4], status="FAIL")]
         self.assertEqual(summarize_matrix("patch", rows), {"status": "FAIL", "failures": ["case_failed"]})
         self.assertEqual(summarize_matrix("patch", []), {"status": "FAIL", "failures": ["empty_matrix"]})
