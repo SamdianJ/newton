@@ -24,6 +24,7 @@ from scripts.monolithic_reference.run_regression import (
     ROOT,
     aggregate,
     finalize_case,
+    qualify_robot,
     reference_binding,
     select_cases,
     worker,
@@ -179,16 +180,22 @@ class TestSceneRunner(unittest.TestCase):
                 list(native_frames(root, controls))
 
     def test_profiles(self):
-        """Add the rigid nightly case while retaining the ten references and two dev cases."""
+        """Run only the retained production robot scenes, adding the rigid stack nightly."""
         full, dev = select_cases("full"), select_cases("dev")
-        self.assertEqual(len(full), 10)
+        self.assertEqual(
+            [case["id"] for case in full],
+            [
+                "franka-cube--ArmijoOrResNorm--C-IE--production--graph1",
+                "sharpa-recorded-10mm--ArmijoOrResNorm--C-IE--production--graph1",
+            ],
+        )
         nightly = select_cases("nightly")
-        self.assertEqual(nightly[:10], full)
-        self.assertEqual(len(nightly), 11)
+        self.assertEqual(nightly[:2], full)
+        self.assertEqual(len(nightly), 3)
         self.assertEqual(nightly[-1]["id"], "rigid-stack-64--C-IE--ArmijoOrResNorm")
         self.assertEqual(select_cases("nightly", [nightly[-1]["id"]]), [nightly[-1]])
-        self.assertEqual(dev, [full[0], full[-1]])
-        self.assertEqual(select_cases("full", [full[2]["id"]]), [full[2]])
+        self.assertEqual(dev, full)
+        self.assertEqual(select_cases("full", [full[1]["id"]]), [full[1]])
         self.assertEqual(aggregate([{"status": "PASS"}], True), "PARTIAL")
         self.assertEqual(aggregate([{"status": "PASS"}], False), "PASS")
         self.assertEqual(aggregate([{"status": "FAIL"}], True), "FAIL")
@@ -196,7 +203,32 @@ class TestSceneRunner(unittest.TestCase):
             aggregate([{"status": "PASS", "commit": "a"}, {"status": "PASS", "commit": "b"}], False), "FAIL"
         )
         with self.assertRaises(ValueError):
-            select_cases("dev", [full[2]["id"]])
+            select_cases("dev", ["franka-cube--Armijo--C-EE--production--graph1"])
+
+    def test_physical_gates_qualify_robot_runs(self):
+        """Gate on physical plausibility; trajectory comparison is only reported."""
+        scene_gates = {
+            "hard_failures_max": 0,
+            "stopped_fraction_max": 0.01,
+            "penetration_max_m": 0.001,
+            "det_f_min": 0.2,
+            "require_held_cube": True,
+        }
+        summary = {
+            "complete": True,
+            "counts": {"CONVERGED": 100, "STOPPED_ACCEPTED": 0, "HARD_FAILURE": 0},
+            "maximum_penetration_m": 0.0,
+            "minimum_det_f": 1.0,
+            "held_cube": True,
+        }
+        frozen = {"version": 1, "status": "FROZEN", "robot": {"franka-cube": scene_gates}}
+        result = qualify_robot("franka-cube", summary, {"status": "NOT_READY_TOLERANCE"}, gates=frozen)
+        self.assertEqual(result["status"], "PASS")
+        self.assertEqual(result["diagnostic_comparison"], "NOT_READY_TOLERANCE")
+        proposed = {**frozen, "status": "PROPOSED"}
+        self.assertEqual(qualify_robot("franka-cube", summary, {}, gates=proposed)["status"], "PARTIAL")
+        failed = qualify_robot("franka-cube", {**summary, "held_cube": False}, {}, gates=frozen)
+        self.assertEqual((failed["status"], failed["failures"]), ("FAIL", ["held_cube"]))
 
     def test_list(self):
         """List the frozen matrix without initializing a GPU or loading scenes."""

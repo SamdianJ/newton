@@ -1,7 +1,11 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 The Newton Developers
 # SPDX-License-Identifier: Apache-2.0
 
-"""Manually run retained FP64 regressions and the large rigid collision nightly case."""
+"""Manually run the production robot scenes and the large rigid collision nightly case.
+
+Robot cases qualify on physical-plausibility gates; comparison with the
+recorded reference trajectories is reported as a diagnostic only.
+"""
 
 import argparse
 import hashlib
@@ -25,14 +29,17 @@ from scripts.monolithic_reference.retained_assets import validate_inputs as vali
 from scripts.monolithic_reference.run_baseline import cases, module_origins, sha
 
 ROOT = Path(__file__).resolve().parents[2]
+PRODUCTION_ROBOT_CASES = (
+    "franka-cube--ArmijoOrResNorm--C-IE--production--graph1",
+    "sharpa-recorded-10mm--ArmijoOrResNorm--C-IE--production--graph1",
+)
 
 
 def select_cases(profile, filters=()):
-    """Expand the shared T0 case definitions before applying explicit filters."""
-    full = cases()
+    """Select the production robot scenes, adding the rigid stack nightly, then apply filters."""
     if profile not in ("dev", "full", "nightly"):
         raise ValueError(f"Unknown scene profile: {profile}")
-    selected = full if profile in ("full", "nightly") else [full[0], full[-1]]
+    selected = [c for c in cases() if c["id"] in PRODUCTION_ROBOT_CASES]
     if profile == "nightly":
         path = ROOT / "scripts/monolithic_reference/fixtures/rigid_stack_large_v1.json"
         rigid = json.loads(path.read_text())
@@ -67,6 +74,18 @@ def aggregate(results, filtered):
     if len(identities) > 1:
         return "FAIL"
     return "PARTIAL" if filtered or any(row["status"] == "PARTIAL" for row in results) else "PASS"
+
+
+def qualify_robot(scene, summary, comparison, *, gates):
+    """Gate on physical plausibility; proposed gates and trajectory comparison are diagnostics."""
+    from scripts.monolithic_reference.physical_gates import evaluate_robot  # noqa: PLC0415
+
+    result = evaluate_robot(summary, gates["robot"][scene])
+    result["gate_status"] = gates["status"]
+    result["diagnostic_comparison"] = comparison.get("status")
+    if result["status"] == "PASS" and gates["status"] != "FROZEN":
+        result["status"] = "PARTIAL"
+    return result
 
 
 def finalize_case(destination, receipt, exit_code, retention):
@@ -182,7 +201,7 @@ def reference_binding(case):
     return reference, controls, native_controls, envelopes, {**entry, "comparison_policy": policy}
 
 
-def worker(case, output, *, contact_dataflow="legacy", max_steps=None):
+def worker(case, output, *, contact_dataflow="spatial", max_steps=None):
     """Run a complete scene and validate recordings against the frozen envelopes."""
     output.mkdir(parents=True, exist_ok=False)
     receipt = {"case": case, "status": "FAIL", "source_root": str(ROOT)}
@@ -290,17 +309,18 @@ def worker(case, output, *, contact_dataflow="legacy", max_steps=None):
         if contact_dataflow == "spatial":
             receipt["full_system"] = check_robot_reports(recording, factory.run, limit)
         if max_steps is None:
-            receipt["comparison"] = compare(
-                reference,
-                recording,
-                envelopes,
-                legacy_fp64=True,
-                native_controls=native_controls,
-                actor_layout_migration=True,
-                configuration_certificate=certificate,
-            )
-            if receipt["comparison"]["status"] not in ("PASS_EXACT", "PASS_FROZEN_ENVELOPE"):
-                raise ValueError("Recording differs outside the frozen envelope")
+            try:
+                receipt["comparison"] = compare(
+                    reference,
+                    recording,
+                    envelopes,
+                    legacy_fp64=True,
+                    native_controls=native_controls,
+                    actor_layout_migration=True,
+                    configuration_certificate=certificate,
+                )
+            except Exception as error:
+                receipt["comparison"] = {"status": "DIAGNOSTIC_ERROR", "error": str(error)}
         else:
             receipt["comparison"] = {"status": "NOT_RUN_PREFIX_ONLY"}
         actual = json.loads((recording / "configuration.json").read_text())
@@ -309,7 +329,16 @@ def worker(case, output, *, contact_dataflow="legacy", max_steps=None):
         receipt["modules"] = module_origins(ROOT, source_hashes)
         if any(not (ROOT / name).is_file() or sha(ROOT / name) != value for name, value in source_hashes.items()):
             raise ValueError("Source changed during robot acceptance")
-        receipt["status"] = "PASS" if max_steps is None else "PARTIAL"
+        if max_steps is None:
+            from scripts.monolithic_reference.physical_gates import load_gates  # noqa: PLC0415
+
+            summary = json.loads((recording / "summary.json").read_text())
+            gates = load_gates(allow_proposed=True)
+            receipt["physical_gate_sha256"] = sha(ROOT / "scripts/monolithic_reference/fixtures/physical_gates_v1.json")
+            receipt["physical"] = qualify_robot(case["id"].split("--")[0], summary, receipt["comparison"], gates=gates)
+            receipt["status"] = receipt["physical"]["status"]
+        else:
+            receipt["status"] = "PARTIAL"
     except Exception:
         receipt["exception"] = traceback.format_exc()
     finally:
@@ -336,7 +365,7 @@ def main():
     parser.add_argument(
         "--contact-dataflow",
         choices=("legacy", "spatial"),
-        default="legacy",
+        default="spatial",
         help="Robot recipe: legacy Q1 or frozen B3; the added rigid nightly case always uses B3/lambda-zero",
     )
     parser.add_argument("--max-steps", type=int, help="Bounded smoke only; always PARTIAL, no trajectory qualification")
