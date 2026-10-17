@@ -14,6 +14,7 @@ from scripts.monolithic_reference.tet_analytic import (
     timoshenko_tip_deflection,
     young_poisson,
 )
+from scripts.monolithic_reference.tet_benchmarks import TetBenchmark
 
 
 class TestTetAnalytic(unittest.TestCase):
@@ -61,6 +62,36 @@ class TestTetAnalytic(unittest.TestCase):
         self.assertLess(abs(ratio - decay), 2e-3)
         with self.assertRaises(ValueError):
             oscillation_period_and_decay(np.ones(10), dt)
+
+
+class TestTetBenchmarkSmoke(unittest.TestCase):
+    """Advance each closed-form tet experiment a few public solver steps on the CPU."""
+
+    def test_nodal_mass_matches_body_mass(self):
+        case = TetBenchmark("axial_vibration", cells=(10, 1, 1), mass_mode="lumped")
+        expected = case.recipe["density"] * np.prod(case.size)
+        self.assertAlmostEqual(case.nodal_mass.sum() / expected, 1.0, delta=1e-6)
+        dynamic = ~case.fixed
+        np.testing.assert_allclose(case.model.particle_mass.numpy()[dynamic], case.nodal_mass[dynamic], rtol=1e-6)
+
+    def test_patch_returns_toward_homogeneous_state(self):
+        case = TetBenchmark("patch", case="tension", cells=(2, 2, 2), material_model="kim_stable_no_log")
+        before = case.interior_error()
+        for _ in range(3):
+            case.step()
+        self.assertLess(case.interior_error(), 0.1 * before)
+
+    def test_cantilever_bends_downward(self):
+        case = TetBenchmark("cantilever", cells=(10, 1, 1))
+        for _ in range(3):
+            case.step()
+        self.assertLess(case.history[-1][2], 0.0)
+
+    def test_vibration_starts_outward(self):
+        case = TetBenchmark("axial_vibration", cells=(10, 1, 1), mass_mode="lumped")
+        for _ in range(5):
+            case.step()
+        self.assertGreater(case.history[-1][0], 0.0)
 
 
 if __name__ == "__main__":
