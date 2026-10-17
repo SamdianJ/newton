@@ -42,7 +42,6 @@ def scene(
     mass_mode="lumped",
     cable_position_tolerance=1e-9,
     cable_theta_tolerance=1e-11,
-    fp32_absolute_tolerance=None,
 ):
     builder = newton.ModelBuilder(gravity=(0, 0, 0))
     if mechanical:
@@ -101,7 +100,6 @@ def scene(
         if mass_mode == "consistent"
         else None,
         precision=precision,
-        fp32_absolute_tolerance=fp32_absolute_tolerance,
         pcg_mode=pcg_mode,
         use_cuda_graph=use_cuda_graph,
     )

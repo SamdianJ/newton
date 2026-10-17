@@ -55,8 +55,6 @@ def performance_case(scene, precision):
         and c["law"] == "C-IE"
         and c["precision"] == precision
     )
-    if precision == "fp32":
-        case["fp32_absolute_tolerance"] = 1e-6
     return case
 
 

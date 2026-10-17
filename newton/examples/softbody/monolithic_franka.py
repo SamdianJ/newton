@@ -193,7 +193,6 @@ class FrankaGrasp:
         law="C-IE",
         globalization="ArmijoOrResNorm",
         precision="fp64",
-        fp32_absolute_tolerance=None,
         solver_factory=SolverMonolithic,
     ):
         cache = Path(cache)
@@ -232,7 +231,6 @@ class FrankaGrasp:
             use_cuda_graph=True,
             smooth_sdf=smooth,
             precision=precision,
-            fp32_absolute_tolerance=fp32_absolute_tolerance,
         )
         source = self.model.state()
         source.joint_q.assign(self.high.astype(np.float32))

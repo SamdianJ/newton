@@ -100,28 +100,6 @@ class TestClothSolver(unittest.TestCase):
         solver._cloths[0].candidate(solver._original, solver._original, solver._trial, solver._delta, 0.0, 0.01)
         np.testing.assert_array_equal(solver._trial.particle_q.numpy(), solver._original.particle_q.numpy())
 
-    def test_native_fp32_force_step(self):
-        """Apply the existing FP32 xyz tolerance override to independent cloth groups."""
-        for device in ["cpu"] + ([wp.get_cuda_device()] if wp.is_cuda_available() else []):
-            with self.subTest(device=str(device)):
-                _, solver = scene(
-                    cloth=1,
-                    cables=0,
-                    device=device,
-                    precision=SolverMonolithic.Precision.FP32,
-                    fp32_absolute_tolerance=1e-4,
-                    newton_max_iterations=40,
-                    pcg_mode=SolverMonolithic.PCGMode.PRODUCTION,
-                    use_cuda_graph=str(device) != "cpu",
-                )
-                state = solver.create_state(dt=0.01)
-                state.particle_f.assign(np.array([[0, 0, 0], [0.01, 0.02, 0.03], [0, 0, 0]], dtype=np.float32))
-                solver.step(state, state, solver.create_control(), dt=0.01)
-                self.assertTrue(solver.last_stats.converged, solver.last_stats)
-                self.assertGreater(state.particle_q.numpy()[1, 2], 1e-6)
-                block = solver.last_stats.variational["material_blocks"]["cloth_0_x"]
-                self.assertLessEqual(block["convergence_ratio_cloth_0_x"], 1)
-
     def test_prescribed_object_and_gravity(self):
         """A fully prescribed shell has no fake rows while another object accelerates."""
         model, solver = scene(cloth=2, cables=0, fixed_particles=(1, 2))

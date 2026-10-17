@@ -112,25 +112,6 @@ class TestMonolithicCableSolver(unittest.TestCase):
             with self.assertRaises(ValueError):
                 other.load_checkpoint(target, path)
 
-    def test_fp32_scaled_goal_keeps_independent_cable_caps(self):
-        """Apply the explicit FP32 global goal without overriding physical cable caps."""
-        for tolerance, moves in ((1e-5, False), (1e-8, True)):
-            _, solver = self.scene(
-                cloth=False,
-                cables=1,
-                fixed_theta=(True, True),
-                precision=SolverMonolithic.Precision.FP32,
-                fp32_absolute_tolerance=2e-5,
-                cable_position_tolerance=tolerance,
-            )
-            state = solver.create_state(dt=0.1)
-            force = state.particle_f.numpy().copy()
-            force[-1, 2] = 5e-6
-            state.particle_f.assign(force)
-            solver.step(state, state, solver.create_control(), dt=0.1)
-            self.assertTrue(solver.last_stats.converged, solver.last_stats.status)
-            self.assertEqual(bool(state.particle_q.numpy()[-1, 2] > 0), moves)
-
     def test_transverse_force_and_theta_boundary(self):
         """Advance positions and massless theta together through ordinary step()."""
         _, solver = self.scene(cloth=False, cables=1, fixed_theta=(True, False))

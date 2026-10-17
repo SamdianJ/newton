@@ -108,14 +108,6 @@ def initialize(self):
         step_tolerance_global=1e-10,
         step_tolerance_x=1e-10,
     )
-    if config["fp32_absolute_tolerance"] != "default":
-        tolerance = config["fp32_absolute_tolerance"]
-        self._config = replace(
-            self._config,
-            merit_absolute_global=tolerance,
-            merit_absolute_q=tolerance,
-            merit_absolute_x=tolerance,
-        )
     self._graphs = _SegmentGraphCache(device, enabled=self._use_cuda_graph)
     self._states._graphs = self._graphs
     self._contact_pool = self._contact.count > 0

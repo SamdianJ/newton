@@ -79,17 +79,6 @@ class TestPrecisionRunner(unittest.TestCase):
                 self.assertEqual(main(), 0)
             self.assertEqual(worker.call_args.kwargs["input_manifest"], root / "inputs.json")
 
-    def test_fp32_tolerance_profile(self):
-        output = io.StringIO()
-        with patch("sys.argv", ["runner", "--list", "--fp32-absolute-tolerance", "1e-6"]), redirect_stdout(output):
-            self.assertEqual(main(), 0)
-        rows = json.loads(output.getvalue())
-        self.assertEqual(len(rows), 10)
-        self.assertTrue(all(r["fp32_absolute_tolerance"] == 1e-6 for r in rows))
-        with patch("sys.argv", ["runner", "--list", "--precision", "fp64", "--fp32-absolute-tolerance", "1e-6"]):
-            with self.assertRaises(SystemExit):
-                main()
-
 
 if __name__ == "__main__":
     unittest.main()

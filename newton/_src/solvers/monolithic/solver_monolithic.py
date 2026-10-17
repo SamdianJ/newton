@@ -77,9 +77,6 @@ class SolverMonolithic(SolverBase):
     the solver lifetime; overflow discards complete contacts and reports taint.
 
     Nonconservative energy acceptance is heuristic, not a variational guarantee.
-    ``fp32_absolute_tolerance`` optionally overrides the global/q/x absolute
-    scaled RMS residual goals for an FP32 experiment. Relative goals and trial
-    acceptance are unchanged; the option is included in checkpoint identity.
 
     ``cable_position_tolerance`` [N] and ``cable_theta_tolerance`` [N m]
     set per-cable original-unit L2 residual goals (defaults 1e-9 and 1e-11).
@@ -141,7 +138,6 @@ class SolverMonolithic(SolverBase):
         pcg_mode=PCGMode.DIAGNOSTIC,
         use_cuda_graph=False,
         precision=Precision.FP64,
-        fp32_absolute_tolerance=None,
         cloth_inputs=(),
         cable_inputs=(),
         cable_position_tolerance=1e-9,
@@ -185,15 +181,6 @@ class SolverMonolithic(SolverBase):
             if not np.isfinite(representable) or representable <= 0:
                 raise ValueError(f"{name} must be representable in the selected precision")
         self._rigid = RigidObjective(model, self._actors, dtype=self._dtype)
-        if fp32_absolute_tolerance is not None:
-            if self._dtype != wp.float32 or isinstance(fp32_absolute_tolerance, (bool, np.bool_)):
-                raise ValueError("fp32_absolute_tolerance requires FP32 and a positive finite scalar")
-            if not isinstance(fp32_absolute_tolerance, (int, float, np.integer, np.floating)):
-                raise ValueError("Invalid FP32 absolute tolerance")
-            with np.errstate(over="ignore", under="ignore"):
-                native_tolerance = np.float32(fp32_absolute_tolerance)
-            if not np.isfinite(native_tolerance) or native_tolerance <= 0:
-                raise ValueError("FP32 absolute tolerance must be positive and representable")
         if smooth_sdf is not None:
             smooth_sdf = smooth_sdf.for_precision(self._dtype)
         if publish_policy not in ("strict", "last_accepted", "current_iterate"):
@@ -269,9 +256,6 @@ class SolverMonolithic(SolverBase):
                     "contact_candidate_capacity": "automatic"
                     if contact_candidate_capacity is None
                     else contact_candidate_capacity,
-                    "fp32_absolute_tolerance": "default"
-                    if fp32_absolute_tolerance is None
-                    else fp32_absolute_tolerance,
                     "smooth_sdf": "none" if smooth_sdf is None else smooth_sdf.digest,
                 },
             )
@@ -356,8 +340,6 @@ class SolverMonolithic(SolverBase):
             )
         if self._dtype == wp.float32:
             self._coupled_config["quaternion_norm_tolerance"] = np.array([self._contact.quaternion_norm_tolerance])
-        if fp32_absolute_tolerance is not None:
-            self._coupled_config["fp32_absolute_tolerance"] = np.array([fp32_absolute_tolerance], dtype=float)
         if smooth_sdf is not None:
             self._coupled_config["smooth_sdf_digest"] = np.frombuffer(bytes.fromhex(smooth_sdf.digest), dtype=np.uint8)
         # Include effective numeric policy in checkpoint identity; device execution
@@ -444,13 +426,6 @@ class SolverMonolithic(SolverBase):
             step_tolerance_global=1e-10,
             step_tolerance_x=1e-10,
         )
-        if fp32_absolute_tolerance is not None:
-            self._config = replace(
-                self._config,
-                merit_absolute_global=fp32_absolute_tolerance,
-                merit_absolute_q=fp32_absolute_tolerance,
-                merit_absolute_x=fp32_absolute_tolerance,
-            )
         n, nq, device = layout.dynamic_particle_count, layout.q_dof_count, model.device
         pattern = build_tet_triplet_pattern(
             model.tet_indices.numpy(), self._tet.mapping.numpy(), x_dof_start=layout.x_scalar_offset
