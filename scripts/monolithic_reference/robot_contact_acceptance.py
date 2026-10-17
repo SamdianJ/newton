@@ -5,9 +5,7 @@
 
 import hashlib
 import json
-from contextlib import nullcontext
 from dataclasses import asdict
-from functools import partial
 from unittest.mock import patch
 
 import numpy as np
@@ -16,7 +14,7 @@ import newton
 from newton._src.solvers.monolithic import solver_monolithic
 from newton._src.solvers.monolithic.articulation import _configuration_digest, _TreeKinematics
 from newton._src.solvers.monolithic.contact import ContactObjective
-from newton._src.solvers.monolithic.contact_pipeline import _PooledContactObjective, _SpatialContactObjective
+from newton._src.solvers.monolithic.contact_pipeline import _PooledContactObjective
 from scripts.monolithic_reference.contact_system_audit import ContactSystemAudit
 from scripts.monolithic_reference.coupled_fixtures import NORMAL
 
@@ -181,15 +179,15 @@ class FrozenRobotFactory:
             # Derive the exact supported enumeration from compact metadata, not a shape-count guess.
             with patch.object(solver_monolithic, "ContactObjective", _PooledContactObjective):
                 complete = solver_monolithic.SolverMonolithic(model, contact_factor_capacity=0, **options)
-            context, resources = nullcontext(), {}
+            resources = {}
             if self.dataflow == "spatial":
-                query = 8192 if self.scene == "franka-cube" else complete._contact.count
-                factory = partial(_SpatialContactObjective, candidate_capacity=query, law_margin=0.0)
+                resources["contact_candidate_capacity"] = (
+                    8192 if self.scene == "franka-cube" else complete._contact.count
+                )
                 resources["contact_factor_capacity"] = (
                     24576 if self.scene == "franka-cube" else 3 * complete._contact.count
                 )
-                context = patch.object(solver_monolithic, "ContactObjective", factory)
-            with context, patch.object(_TreeKinematics, "__init__", capture):
+            with patch.object(_TreeKinematics, "__init__", capture):
                 run = solver_monolithic.SolverMonolithic(model, **resources, **options)
             self.recorder = RobotContactRecorder(run, complete)
         else:

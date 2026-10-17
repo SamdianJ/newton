@@ -57,6 +57,18 @@ def test_spatial_default(test, device):
         assert_snapshot(test, target, snapshot(states[0]))
 
 
+def test_spatial_capacity_option(test, device):
+    """Select the spatial candidate capacity through the public constructor."""
+    model = contact_scene(device, "chain")
+    run = contact_solver(model, contact_candidate_capacity=7)
+    test.assertEqual(run._contact.candidate_capacity, 7)
+    state = contact_state(run, "chain")
+    run.step(state, state, model.control(), dt=0.001)
+    test.assertFalse(run.last_stats.rolled_back, run.last_stats)
+    with test.assertRaisesRegex(ValueError, "candidate capacity"):
+        contact_solver(model, contact_candidate_capacity=-1)
+
+
 def test_spatial_rounds(test, device):
     """Refresh once per Newton check, freeze trials/final, and preserve step-start authority."""
     modes = [("diagnostic", False), ("production", False)]
@@ -388,6 +400,7 @@ class TestSolverContactSpatial(unittest.TestCase):
 for _device in get_test_devices():
     for _test in (
         test_spatial_default,
+        test_spatial_capacity_option,
         test_spatial_rounds,
         test_spatial_retry_freeze,
         test_spatial_miss_and_reference,

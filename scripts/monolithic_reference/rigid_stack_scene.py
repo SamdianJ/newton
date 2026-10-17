@@ -3,8 +3,8 @@
 
 """Build the small and nightly rigid-stack recipes without robot assets."""
 
+from contextlib import nullcontext
 from dataclasses import replace
-from functools import partial
 from unittest.mock import patch
 
 import warp as wp
@@ -12,7 +12,7 @@ from newton.solvers.experimental.monolithic import SolverMonolithic
 
 import newton
 from newton._src.solvers.monolithic import solver_monolithic
-from newton._src.solvers.monolithic.contact_pipeline import _PooledContactObjective, _SpatialContactObjective
+from newton._src.solvers.monolithic.contact_pipeline import _PooledContactObjective
 
 DT = 0.001
 STEPS = 120
@@ -68,13 +68,13 @@ def stack_scene(device, *, columns=((-0.03, 0), (0.03, 0)), layers=3):
 
 def stack_solver(model, *, spatial, graph=False, query_capacity=4096, support_capacity=None):
     """Select an explicit experimental route and fixed budgets without changing defaults."""
-    factory = (
-        partial(_SpatialContactObjective, candidate_capacity=query_capacity, law_margin=0.0)
-        if spatial
-        else _PooledContactObjective
-    )
     options = {} if support_capacity is None else {"contact_factor_capacity": 3 * support_capacity}
-    with patch.object(solver_monolithic, "ContactObjective", factory):
+    context = nullcontext()
+    if spatial:
+        options["contact_candidate_capacity"] = query_capacity
+    else:
+        context = patch.object(solver_monolithic, "ContactObjective", _PooledContactObjective)
+    with context:
         run = SolverMonolithic(
             model,
             contact_model="C-IE",

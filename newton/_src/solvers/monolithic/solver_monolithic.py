@@ -72,7 +72,7 @@ class SolverMonolithic(SolverBase):
     Spatial contact candidates refresh at Newton boundaries and remain frozen
     through trials, with zero additional law margin. Unbounded trials can miss
     contacts; the complete step-start residual remains the convergence reference.
-    Candidate capacity defaults to the model's static sample upper bound, and
+    ``contact_candidate_capacity`` defaults to the model's static sample upper bound, and
     factor capacity defaults to three times that bound. Capacity is fixed for
     the solver lifetime; overflow discards complete contacts and reports taint.
 
@@ -127,6 +127,7 @@ class SolverMonolithic(SolverBase):
         tet_rest_density=None,
         min_det_f_guard=0.2,
         contact_factor_capacity=None,
+        contact_candidate_capacity=None,
         publish_policy="strict",
         smooth_sdf=None,
         alignment_policy="guard",
@@ -265,6 +266,9 @@ class SolverMonolithic(SolverBase):
                     "contact_factor_capacity": "automatic"
                     if contact_factor_capacity is None
                     else contact_factor_capacity,
+                    "contact_candidate_capacity": "automatic"
+                    if contact_candidate_capacity is None
+                    else contact_candidate_capacity,
                     "fp32_absolute_tolerance": "default"
                     if fp32_absolute_tolerance is None
                     else fp32_absolute_tolerance,
@@ -306,6 +310,7 @@ class SolverMonolithic(SolverBase):
             smooth_sdf=smooth_sdf,
             alignment_policy=alignment_policy,
             dtype=self._dtype,
+            **({} if contact_candidate_capacity is None else {"candidate_capacity": contact_candidate_capacity}),
         )
         capacity = 3 * self._contact.count if contact_factor_capacity is None else contact_factor_capacity
         if type(capacity) is not int or capacity < 0:

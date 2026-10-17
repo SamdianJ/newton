@@ -1,0 +1,1 @@
+Add an experimental `contact_candidate_capacity` option to `SolverMonolithic` that bounds the spatial contact candidate query. It defaults to the static sample upper bound and is part of the checkpoint identity.
