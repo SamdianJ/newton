@@ -185,6 +185,7 @@ def _recording_layout(reference, actual, *, native=False):
     )
     model.articulation_count = model.articulation_end.size
     model.body_count, model.particle_count = model.body_mass.size, model.particle_inv_mass.size
+    model.tet_count = model.tet_indices.shape[0]
     model.shape_count = model.shape_body.size
     model.world_count = max(0, int(model.body_world.array.max()) + 1)
     model.device = wp.get_device("cpu")

@@ -341,6 +341,8 @@ class _SpatialContactObjective(_PooledContactObjective):
             (),
             (q, x, rigid_com, *selection.buffers()),
             lambda: selection._query(q, x, rigid_com=rigid_com),
+            # BVH refit/query must not have an in-flight warmup at capture.
+            warmup=False,
         )
         count = int(selection.query.count.numpy()[0])
         if not 0 <= count <= selection.capacity:

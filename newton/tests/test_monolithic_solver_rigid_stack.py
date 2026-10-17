@@ -148,11 +148,47 @@ def test_rigid_stack_e2e(test, device):
                 )
 
 
+def test_rigid_stack_query_capture(test, device):
+    """Preserve unique spatial candidates and free fall across capture and replay."""
+    columns = [((i % 4) * (2 * HALF_EXTENT + GAP), (i // 4) * (2 * HALF_EXTENT + GAP)) for i in range(8)]
+    for graph in (False, True) if device.is_cuda else (False,):
+        with test.subTest(graph=graph):
+            model = stack_scene(device, columns=columns, layers=4)
+            run = stack_solver(model, spatial=True, graph=graph, query_capacity=36864, support_capacity=32768)
+            state, control = run.create_state(dt=DT), model.control()
+            initial = state._monolithic_coupled.rigid_com.numpy().copy()
+            for step in range(1, 4):
+                run.step(state, state, control, dt=DT)
+                test.assertTrue(run.last_stats.converged, run.last_stats.failure_reason)
+                test.assertFalse(run.last_stats.rolled_back)
+                selection = run._contact._spatial
+                count = int(selection.count.numpy()[0])
+                identities = selection.identities.numpy()[:count]
+                test.assertGreater(count, run._contact._batch.batch_capacity)
+                test.assertTrue(np.all(identities[1:] > identities[:-1]))
+                test.assertEqual(int(selection.query.dropped.numpy()[0]), 0)
+                np.testing.assert_allclose(
+                    state._monolithic_coupled.rigid_v_com.numpy()[:, 2], -9.81 * DT * step, atol=1e-7, rtol=0
+                )
+                np.testing.assert_allclose(
+                    state._monolithic_coupled.rigid_com.numpy()[:, 2],
+                    initial[:, 2] - 9.81 * DT**2 * step * (step + 1) / 2,
+                    atol=1e-9,
+                    rtol=0,
+                )
+
+
 class TestMonolithicRigidStack(unittest.TestCase):
     pass
 
 
 add_function_test(TestMonolithicRigidStack, "test_rigid_stack_e2e", test_rigid_stack_e2e, devices=get_test_devices())
+add_function_test(
+    TestMonolithicRigidStack,
+    "test_rigid_stack_query_capture",
+    test_rigid_stack_query_capture,
+    devices=get_test_devices(),
+)
 
 
 if __name__ == "__main__":
