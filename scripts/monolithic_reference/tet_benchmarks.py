@@ -74,7 +74,8 @@ class TetBenchmark:
         for ids, pose in zip(builder.tet_indices, builder.tet_poses, strict=True):
             volume = 1 / (6 * np.linalg.det(np.asarray(pose, dtype=float).reshape(3, 3)))
             np.add.at(mass, list(ids), r["density"] * volume / 4)
-        tol = 1e-9 * self.size.max()
+        # Model coordinates are float32; compare against a tolerance far above its rounding.
+        tol = 1e-6 * self.size.max()
         self.cell = float(np.min(self.size / np.asarray(self.cells)))
         if kind == "patch":
             self.f = np.asarray(r["cases"][case], dtype=float)

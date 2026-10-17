@@ -79,6 +79,12 @@ class TestTetBenchmarkSmoke(unittest.TestCase):
         dynamic = ~case.fixed
         np.testing.assert_allclose(case.model.particle_mass.numpy()[dynamic], case.nodal_mass[dynamic], rtol=1e-6)
 
+    def test_boundary_and_tip_nodes_survive_float32_storage(self):
+        patch = TetBenchmark("patch", case="shear", cells=(2, 2, 2), material_model="kim_stable_no_log")
+        self.assertEqual((int(patch.fixed.sum()), int(patch.tip.sum())), (26, 9))
+        bar = TetBenchmark("axial_vibration", cells=(10, 1, 1), mass_mode="lumped")
+        self.assertEqual((int(bar.fixed.sum()), int(bar.tip.sum())), (4, 4))
+
     def test_patch_returns_toward_homogeneous_state(self):
         case = TetBenchmark("patch", case="tension", cells=(2, 2, 2), material_model="kim_stable_no_log")
         before = case.interior_error()
