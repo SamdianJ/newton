@@ -37,7 +37,7 @@ def test_initialization_history_boundary(test, device):
 
 class TestContactBoundary(unittest.TestCase):
     def test_component_imports(self):
-        """Resolve contact, history and collision without loading the solver implementation."""
+        """Resolve contact and history without loading the solver implementation."""
         subprocess.run(
             [
                 sys.executable,
@@ -45,7 +45,6 @@ class TestContactBoundary(unittest.TestCase):
                 "import sys; "
                 "from newton._src.solvers.monolithic.contact import ContactObjective; "
                 "from newton._src.solvers.monolithic.coupled_state import CoupledState; "
-                "from newton.solvers.experimental.monolithic import MonolithicCollisionPipeline; "
                 "assert not any('newton._src.solvers.monolithic.' + name in sys.modules "
                 "for name in ('solver_monolithic',))",
             ],

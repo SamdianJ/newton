@@ -8,6 +8,7 @@ import unittest
 import numpy as np
 import warp as wp
 
+import newton
 from newton._src.solvers.monolithic.contact import ContactObjective, ContactStatus
 from newton._src.solvers.monolithic.linear import MonolithicLinearWorkspace
 from newton._src.solvers.monolithic.linear_types import (
@@ -22,12 +23,62 @@ from newton._src.solvers.monolithic.tet_assembly import (
     create_tet_assembly_workspace,
 )
 from newton._src.solvers.monolithic.tet_precision import TetObjective
-from newton.tests.test_monolithic_collision_stream import _scene
 from newton.tests.test_monolithic_tet_derivatives import _dense
 from newton.tests.unittest_utils import add_function_test, get_test_devices
 from scripts.monolithic_reference.contact_oracle import evaluate, penalty, rotation
 from scripts.monolithic_reference.tet_fixtures import build_model
 from scripts.monolithic_reference.tet_oracle import TetOracle
+
+
+def _scene(device, *, shape="plane", margin=0.0):
+    builder = newton.ModelBuilder()
+    body = builder.add_link(mass=1.0, inertia=wp.mat33(0.01, 0, 0, 0, 0.01, 0, 0, 0, 0.01))
+    joint = builder.add_joint_revolute(-1, body)
+    builder.add_articulation([joint])
+    cfg = builder.ShapeConfig(margin=margin)
+    if shape == "plane":
+        builder.add_shape_plane(body=body, width=0.0, length=0.0, cfg=cfg)
+    elif shape == "mixed":
+        builder.add_shape_plane(body=body, width=0.0, length=0.0, cfg=cfg)
+        builder.add_shape_box(
+            body=body, xform=wp.transform((10.0, 10.0, 10.0), wp.quat_identity()), hx=0.02, hy=0.03, hz=0.01, cfg=cfg
+        )
+    elif shape == "sphere":
+        builder.add_shape_sphere(body=body, radius=0.03, cfg=cfg)
+    elif shape == "box":
+        builder.add_shape_box(body=body, hx=0.02, hy=0.03, hz=0.01, cfg=cfg)
+    elif shape == "mesh":
+        mesh = newton.Mesh.create_box(0.02, 0.03, 0.01)
+        mesh.build_sdf(max_resolution=32)
+        builder.add_shape_mesh(body=body, mesh=mesh, cfg=cfg)
+    elif shape == "ellipsoid":
+        builder.add_shape_ellipsoid(body=body, rx=0.02, ry=0.03, rz=0.01, cfg=cfg)
+    elif shape == "finite_plane":
+        builder.add_shape_plane(body=body, width=1.0, length=1.0, cfg=cfg)
+    else:
+        getattr(builder, "add_shape_" + shape)(body=body, radius=0.02, half_height=0.03, cfg=cfg)
+    builder.add_soft_mesh(
+        pos=(0.0, 0.0, 0.002),
+        rot=wp.quat_identity(),
+        scale=1.0,
+        vel=(0.0, 0.0, 0.0),
+        vertices=[(0.0, 0.0, 0.0), (0.04, 0.0, 0.0), (0.0, 0.03, 0.0), (0.0, 0.0, 0.02)],
+        indices=[0, 1, 2, 3],
+        density=1000.0,
+        k_mu=1000.0,
+        k_lambda=1000.0,
+        k_damp=0.0,
+        particle_radius=0.001,
+        tri_ke=0.0,
+        tri_ka=0.0,
+        tri_kd=0.0,
+        tri_drag=0.0,
+        tri_lift=0.0,
+        edge_ke=0.0,
+        edge_kd=0.0,
+    )
+    model = builder.finalize(device=device)
+    return model, model.state()
 
 
 def contact(model, law, *, fixed=False, mu=0.5):

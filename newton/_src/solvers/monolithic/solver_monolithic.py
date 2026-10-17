@@ -18,10 +18,9 @@ from ...sim import JointType, Model
 from ..solver import SolverBase
 from . import coupled_kernels as kernels
 from . import iteration_device, material_runtime, state_checks
-from .actors import Actor, ActorTable
+from .actors import Actor, ActorTable, _validate_and_collect_boundary_faces
 from .articulation import ArticulationObjective, _TreeKinematics
 from .articulation_state import _predict, _recover_history
-from .collision import _validate_and_collect_boundary_faces
 from .contact import ContactStatus
 from .contact_forces import MonolithicContactForces
 from .contact_pipeline import _PooledContactObjective, _SpatialContactObjective

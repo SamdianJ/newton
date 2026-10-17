@@ -31,11 +31,6 @@ def _sdf_boundary_lower(
         wp.atomic_min(lower, 0, v - 32.0 * 1.1920928955078125e-7 * wp.max(1.0, wp.abs(v)))
 
 
-@wp.func
-def _overlap(a: wp.vec3, b: wp.vec3, c: wp.vec3, d: wp.vec3):
-    return a[0] <= d[0] and c[0] <= b[0] and a[1] <= d[1] and c[1] <= b[1] and a[2] <= d[2] and c[2] <= b[2]
-
-
 @wp.kernel(enable_backward=False)
 def _update_particles(
     particles: wp.array[int], x: wp.array[wp.vec3], aggregate: wp.array2d[float], status: wp.array[int]
@@ -120,16 +115,6 @@ def _reset_aggregate(aggregate: wp.array2d[float]):
     if i == 1 or i == 3:
         value = -value
     aggregate[i, j] = value
-
-
-@wp.func
-def aggregate_overlap(aggregate: wp.array2d[float]):
-    return _overlap(
-        wp.vec3(aggregate[0, 0], aggregate[0, 1], aggregate[0, 2]),
-        wp.vec3(aggregate[1, 0], aggregate[1, 1], aggregate[1, 2]),
-        wp.vec3(aggregate[2, 0], aggregate[2, 1], aggregate[2, 2]),
-        wp.vec3(aggregate[3, 0], aggregate[3, 1], aggregate[3, 2]),
-    )
 
 
 class _CandidateBounds:

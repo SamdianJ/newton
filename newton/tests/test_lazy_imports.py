@@ -72,14 +72,13 @@ class TestLazySolverImports(unittest.TestCase):
         self.assertEqual(result.stdout.strip(), "ok")
 
     def test_experimental_monolithic_import(self):
-        """Resolve monolithic solver and collision through their canonical experimental import."""
+        """Resolve the monolithic solver through its canonical experimental import."""
         code = (
-            "from newton.solvers.experimental.monolithic import MonolithicCollisionPipeline, SolverMonolithic; "
+            "from newton.solvers.experimental.monolithic import SolverMonolithic; "
             "import newton.solvers.experimental.monolithic as monolithic; "
             "from newton.solvers import SolverBase; "
             "assert monolithic.SolverMonolithic is SolverMonolithic; "
-            "assert monolithic.MonolithicCollisionPipeline is MonolithicCollisionPipeline; "
-            "assert monolithic.__all__ == ['MonolithicCollisionPipeline', 'MonolithicContactForces', 'SmoothSDFSet', 'SolverMonolithic', 'build_smooth_sdf']; "
+            "assert monolithic.__all__ == ['MonolithicContactForces', 'SmoothSDFSet', 'SolverMonolithic', 'build_smooth_sdf', 'export_materials_usd', 'import_materials_usd']; "
             "assert issubclass(SolverMonolithic, SolverBase); "
             "assert not SolverMonolithic.supports_collision_pipeline; "
             "assert 'SolverMonolithic' in dir(monolithic); "

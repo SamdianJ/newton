@@ -5,16 +5,14 @@
 
 .. experimental::
 
-The solver advances supported single-articulation/tet models with three explicit
-contact laws, scaled PCG and transactional state/force publication.
-The collision pipeline can also detect tet-face contacts independently.
+The solver advances supported articulation, rigid, tet, cloth and cable models
+with smooth-SDF contact, scaled PCG and transactional state/force publication.
 """
 
 import importlib
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from .collision import MonolithicCollisionPipeline
     from .contact_forces import MonolithicContactForces
     from .material_usd import export_materials_usd, import_materials_usd
     from .smooth_sdf import SmoothSDFSet
@@ -22,7 +20,6 @@ if TYPE_CHECKING:
     from .solver_monolithic import SolverMonolithic
 
 __all__ = [
-    "MonolithicCollisionPipeline",
     "MonolithicContactForces",
     "SmoothSDFSet",
     "SolverMonolithic",
@@ -32,7 +29,6 @@ __all__ = [
 ]
 
 _LAZY_IMPORTS = {
-    "MonolithicCollisionPipeline": ".collision",
     "MonolithicContactForces": ".contact_forces",
     "SolverMonolithic": ".solver_monolithic",
     "SmoothSDFSet": ".smooth_sdf",

@@ -42,15 +42,12 @@ valid forces without satisfying equilibrium. Hard failures retain the original
 state and its force generation. See :class:`MonolithicContactForces` for units.
 
 ``supports_collision_pipeline`` is False and ``contacts`` returns None. External
-Contacts, contact updates and collision scheduling are rejected. Use
-:class:`MonolithicCollisionPipeline` separately when independent queries are needed.
+Contacts, contact updates and collision scheduling are rejected.
 
 .. py:module:: newton.solvers.experimental.monolithic
 .. currentmodule:: newton.solvers.experimental.monolithic
 
 .. rubric:: Classes
-
-.. autoclass:: MonolithicCollisionPipeline
 
 .. autoclass:: SolverMonolithic
 

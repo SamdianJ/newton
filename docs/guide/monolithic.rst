@@ -140,8 +140,8 @@ For mesh contact, attach the official mesh SDF before model finalization and use
 source can instead be supplied through ``qualified_directory``; failed
 qualification is rejected without falling back to resampling.
 
-``MonolithicCollisionPipeline`` remains independently available, but the coupled
-solver does not accept external Contacts or collision scheduling configuration.
+The coupled solver evaluates contact internally and does not accept external
+Contacts or collision scheduling configuration.
 
 Examples and validation
 -----------------------
