@@ -177,3 +177,61 @@ class TetBenchmark:
         values = [v for v in metrics.values() if isinstance(v, float)]
         passed &= metrics["complete"] and bool(np.isfinite(values).all())
         return {"status": "PASS" if passed else "FAIL", "metrics": metrics}
+
+
+def summarize_matrix(kind, receipts):
+    """Apply cross-case mesh-convergence and mass-bias gates to complete single-case receipts."""
+    g = RECIPES[kind]["gates"]
+    if not receipts:
+        return {"status": "FAIL", "failures": ["empty_matrix"]}
+    failures = ["case_failed"] if any(r["status"] != "PASS" for r in receipts) else []
+    if kind == "cantilever":
+        rows = sorted(receipts, key=lambda r: r["cells"][1])
+        d = np.array([r["metrics"]["deflection"] for r in rows])
+        reference = rows[-1]["metrics"]["reference"]
+        errors = abs(d - reference) / reference
+        if len(d) != 3 or min(np.log2(errors[:-1] / errors[1:])) < g["minimum_observed_order"]:
+            failures.append("observed_order")
+        # Richardson extrapolation from three meshes halving the cell size.
+        steps = np.diff(d)
+        p = np.log2(steps[0] / steps[1]) if len(d) == 3 and steps[0] * steps[1] > 0 else 0.0
+        extrapolated = d[-1] + steps[-1] / (2**p - 1) if p > 0 else np.inf
+        if not abs(extrapolated - reference) / reference <= g["extrapolated_relative_error"]:
+            failures.append("extrapolated_relative_error")
+    if kind == "axial_vibration":
+        finest = max(r["cells"][0] for r in receipts)
+        for r in (r for r in receipts if r["cells"][0] == finest):
+            error, mode = r["metrics"]["period_error"], r["metrics"]["mass_mode"]
+            if abs(error) > g["finest_period_error"]:
+                failures.append(f"{mode}_period_error")
+            if (mode == "consistent" and error >= 0) or (mode == "lumped" and error <= 0):
+                failures.append(f"{mode}_period_bias")
+    return {"status": "FAIL" if failures else "PASS", "failures": sorted(failures)}
+
+
+def expected_cases(kind):
+    """Enumerate every single-case argument set of a recipe matrix."""
+    r = RECIPES[kind]
+    names = sorted(r["cases"]) if kind == "patch" else [None]
+    return [
+        {"case": name, "cells": list(cells), "material_model": model, "mass_mode": mode}
+        for name in names
+        for cells in r["cells"]
+        for model in r["models"]
+        for mode in r.get("mass_modes", ["consistent"])
+    ]
+
+
+def qualify_matrix(kind, receipts, *, recipe_status):
+    """Require one same-source receipt per expected case; proposed recipes never PASS."""
+    keys = ("case", "cells", "material_model", "mass_mode")
+    found = [{k: r[k] for k in keys} for r in receipts if r["kind"] == kind]
+    expected = expected_cases(kind)
+    if sorted(map(str, found)) != sorted(map(str, expected)):
+        return {"status": "INCOMPLETE", "failures": ["case_set"]}
+    if len({json.dumps(r["sha256"], sort_keys=True) for r in receipts}) != 1:
+        return {"status": "FAIL", "failures": ["mixed_source"]}
+    result = summarize_matrix(kind, receipts)
+    if result["status"] == "PASS" and recipe_status != "FROZEN":
+        result["status"] = "PARTIAL"
+    return result

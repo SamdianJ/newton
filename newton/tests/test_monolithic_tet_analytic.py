@@ -1,8 +1,13 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 The Newton Developers
 # SPDX-License-Identifier: Apache-2.0
 
+import json
 import math
+import subprocess
+import sys
+import tempfile
 import unittest
+from pathlib import Path
 
 import numpy as np
 
@@ -14,7 +19,7 @@ from scripts.monolithic_reference.tet_analytic import (
     timoshenko_tip_deflection,
     young_poisson,
 )
-from scripts.monolithic_reference.tet_benchmarks import TetBenchmark
+from scripts.monolithic_reference.tet_benchmarks import TetBenchmark, expected_cases, qualify_matrix, summarize_matrix
 
 
 class TestTetAnalytic(unittest.TestCase):
@@ -92,6 +97,77 @@ class TestTetBenchmarkSmoke(unittest.TestCase):
         for _ in range(5):
             case.step()
         self.assertGreater(case.history[-1][0], 0.0)
+
+
+class TestTetMatrix(unittest.TestCase):
+    """Apply cross-case gates to synthetic single-case receipts."""
+
+    def receipt(self, kind, cells, status="PASS", **metrics):
+        return {"kind": kind, "cells": cells, "status": status, "metrics": metrics}
+
+    def test_cantilever_convergence(self):
+        rows = [
+            self.receipt("cantilever", [10, 1, 1], deflection=0.6, reference=1.0),
+            self.receipt("cantilever", [20, 2, 2], deflection=0.85, reference=1.0),
+            self.receipt("cantilever", [40, 4, 4], deflection=0.95, reference=1.0),
+        ]
+        self.assertEqual(summarize_matrix("cantilever", rows), {"status": "PASS", "failures": []})
+        rows[-1]["metrics"]["deflection"] = 0.86
+        result = summarize_matrix("cantilever", rows)
+        self.assertEqual(result["failures"], ["extrapolated_relative_error", "observed_order"])
+
+    def test_vibration_mass_bias(self):
+        rows = [
+            self.receipt("axial_vibration", [40, 1, 1], mass_mode="consistent", period_error=-0.004),
+            self.receipt("axial_vibration", [40, 1, 1], mass_mode="lumped", period_error=0.004),
+            self.receipt("axial_vibration", [20, 1, 1], mass_mode="lumped", period_error=0.02),
+        ]
+        self.assertEqual(summarize_matrix("axial_vibration", rows)["status"], "PASS")
+        rows[0]["metrics"]["period_error"] = 0.002
+        self.assertEqual(summarize_matrix("axial_vibration", rows)["failures"], ["consistent_period_bias"])
+
+    def test_any_failed_case_fails_the_matrix(self):
+        rows = [self.receipt("patch", [4, 4, 4], status="FAIL")]
+        self.assertEqual(summarize_matrix("patch", rows), {"status": "FAIL", "failures": ["case_failed"]})
+        self.assertEqual(summarize_matrix("patch", []), {"status": "FAIL", "failures": ["empty_matrix"]})
+
+    def test_expected_matrix(self):
+        self.assertEqual([len(expected_cases(k)) for k in ("patch", "cantilever", "axial_vibration")], [6, 3, 6])
+        self.assertIn(
+            {"case": "shear", "cells": [4, 4, 4], "material_model": "kim_stable_no_log", "mass_mode": "consistent"},
+            expected_cases("patch"),
+        )
+
+    def test_matrix_requires_every_case_from_one_source(self):
+        rows = [
+            {**spec, "kind": "patch", "status": "PASS", "metrics": {}, "sha256": {"a": "1"}}
+            for spec in expected_cases("patch")
+        ]
+        self.assertEqual(qualify_matrix("patch", rows, recipe_status="FROZEN")["status"], "PASS")
+        self.assertEqual(qualify_matrix("patch", rows, recipe_status="PROPOSED")["status"], "PARTIAL")
+        self.assertEqual(qualify_matrix("patch", rows[1:], recipe_status="FROZEN")["status"], "INCOMPLETE")
+        rows[0] = {**rows[0], "sha256": {"a": "2"}}
+        self.assertEqual(qualify_matrix("patch", rows, recipe_status="FROZEN")["status"], "FAIL")
+
+
+class TestTetRunner(unittest.TestCase):
+    def test_truncated_case_is_partial_and_matrix_incomplete(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            command = [sys.executable, "-m", "scripts.monolithic_reference.run_tet_benchmark"]
+            arguments = ["case", "patch", "--case", "shear", "--cells", "2", "2", "2", "--max-steps", "1"]
+            subprocess.run(
+                [*command, *arguments, "--output", str(root / "shear")],
+                check=True,
+                capture_output=True,
+            )
+            receipt = json.loads((root / "shear/receipt.json").read_text())
+            self.assertEqual((receipt["status"], receipt["cells"]), ("PARTIAL", [2, 2, 2]))
+            result = subprocess.run(
+                [*command, "summarize", "patch", "--input", str(root)], capture_output=True, check=False
+            )
+            self.assertEqual(result.returncode, 1)
+            self.assertEqual(json.loads((root / "patch-matrix.json").read_text())["status"], "INCOMPLETE")
 
 
 if __name__ == "__main__":
