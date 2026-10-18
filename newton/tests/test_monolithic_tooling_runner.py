@@ -289,9 +289,7 @@ class TestManualAcceptance(unittest.TestCase):
     def test_collection_and_failures(self):
         """Preserve failure receipts and launch nightly only after complete actor qualification."""
         identity = {"commit": "tested", "dirty": False}
-        expected_count = (
-            11 if (ROOT / "scripts/monolithic_reference/fixtures/rigid_stack_large_v1.json").is_file() else 10
-        )
+        nightly = [case["id"] for case in select_cases("nightly")]
         for failure in (
             None,
             "actor_exit",
@@ -321,7 +319,7 @@ class TestManualAcceptance(unittest.TestCase):
                     if destination.name == "actor_coupling":
                         summary = {
                             "status": "FAIL" if failure == "actor_summary" else "PASS",
-                            "cases": {n: {"status": "PASS"} for n in ("primary", "restored", "reordered")},
+                            "cases": {n: {"status": "PASS"} for n in ("primary", "restored", "reordered", "complete")},
                         }
                     else:
                         self.assertIn("nightly", command)
@@ -332,10 +330,8 @@ class TestManualAcceptance(unittest.TestCase):
                             "filtered": failure == "nightly_filtered",
                             "complete": True,
                             "cases": [
-                                {"status": "PASS"}
-                                for _ in range(
-                                    expected_count - 1 if failure == "nightly_incomplete" else expected_count
-                                )
+                                {"case": name, "status": "PASS"}
+                                for name in (nightly[:-1] if failure == "nightly_incomplete" else nightly)
                             ],
                         }
                     if failure != "missing":
