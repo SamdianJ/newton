@@ -71,6 +71,56 @@ def _append(triplets: _MonolithicScalarTriplets, row: int, value: float):
     _append_monolithic_scalar_triplet(triplets, row, 0, value)
 
 
+def test_mixed_scaling_matches_single_policies(test, device):
+    """Reproduce diagonal and coordinate scaling bitwise and select either one per row."""
+    workspace = _workspace(device)
+    generation = MonolithicLinearGeneration(1, 0, 1, 1)
+    assembly = workspace.begin_assembly(generation)
+    wp.launch(
+        _owners,
+        1,
+        [assembly.aq_actor_dense, assembly.ax_internal_triplets, assembly.global_scalar_triplets],
+        device=device,
+    )
+    wp.launch(_contact, 1, [assembly.contact_factors, assembly.global_scalar_triplets], device=device)
+    test.assertEqual(workspace.finalize_assembly(generation=generation).status, MonolithicLinearStatus.SUCCESS)
+    dynamic = wp.array(np.linspace(1, 100, 11).astype(np.float32), device=device)
+    coordinate = np.linspace(0.5, 2.0, 11).astype(np.float32)
+    scale = wp.array(coordinate, device=device)
+
+    def outputs():
+        return tuple(a.numpy().copy() for a in (workspace.scale, workspace.diagonal, workspace.dynamic_diagonal))
+
+    def mixed(mask):
+        status = workspace.build_mixed_scaling(
+            dynamic, scale, wp.array(mask, dtype=wp.int32, device=device), epsilon_d=0.25, generation=generation
+        )
+        test.assertEqual(status, MonolithicLinearStatus.SUCCESS)
+        return outputs()
+
+    test.assertEqual(
+        workspace.build_scaling(dynamic, epsilon_d=0.25, generation=generation), MonolithicLinearStatus.SUCCESS
+    )
+    diagonal = outputs()
+    for got, want in zip(mixed(np.zeros(11, np.int32)), diagonal, strict=True):
+        np.testing.assert_array_equal(got, want)
+    test.assertEqual(
+        workspace.build_coordinate_scaling(coordinate, generation=generation), MonolithicLinearStatus.SUCCESS
+    )
+    unit = outputs()
+    for got, want in zip(mixed(np.ones(11, np.int32)), unit, strict=True):
+        np.testing.assert_array_equal(got, want)
+    mask = np.arange(11, dtype=np.int32) % 2
+    for got, a, b in zip(mixed(mask), diagonal, unit, strict=True):
+        np.testing.assert_array_equal(got, np.where(mask == 1, b, a))
+    bad = coordinate.copy()
+    bad[1] = 0
+    status = workspace.build_mixed_scaling(
+        dynamic, wp.array(bad, device=device), wp.array(mask, device=device), epsilon_d=0.25, generation=generation
+    )
+    test.assertNotEqual(status, MonolithicLinearStatus.SUCCESS)
+
+
 def _workspace(device, *, global_capacity=256, internal_capacity=8, contact_capacity=2):
     layout = MonolithicLinearLayout(2, 3)
     capacities = MonolithicLinearCapacities(global_capacity, internal_capacity, contact_capacity, 10, 3)
@@ -1122,6 +1172,7 @@ for device in get_test_devices():
         test_pcg_nonfinite_and_zero,
         test_preconditioner_pivots_and_repeated_factor,
         test_scaling_operator_preconditioner,
+        test_mixed_scaling_matches_single_policies,
         test_owner_contact_oracle,
         test_generation_freeze,
         test_capacity_and_invalid_contributions,

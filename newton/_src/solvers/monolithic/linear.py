@@ -602,6 +602,20 @@ class MonolithicLinearWorkspace:
     def _build_scaling_device(self, dynamic_diagonal, epsilon_d):
         return bsr._build_scaling_device(self, dynamic_diagonal, epsilon_d)
 
+    def build_mixed_scaling(
+        self,
+        dynamic_diagonal: wp.array[float],
+        coordinate_scale: wp.array[float],
+        coordinate_mask: wp.array[wp.int32],
+        *,
+        epsilon_d: float,
+        generation: MonolithicLinearGeneration,
+    ) -> MonolithicLinearStatus:
+        """Scale diagonal-policy rows from D and masked rows by fixed coordinate units."""
+        return bsr.build_mixed_scaling(
+            self, dynamic_diagonal, coordinate_scale, coordinate_mask, epsilon_d=epsilon_d, generation=generation
+        )
+
     def build_coordinate_scaling(self, scale, *, generation):
         """Bind an explicit positive change of units for massless material angles."""
         if not self._current(generation):

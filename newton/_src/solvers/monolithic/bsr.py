@@ -301,6 +301,48 @@ def _build_monolithic_symmetric_scaling(
 
 
 @wp.kernel
+def _build_mixed_scaling(
+    matrix_diagonal: wp.array[float],
+    dynamic_input: wp.array[float],
+    coordinate_scale: wp.array[float],
+    coordinate_mask: wp.array[wp.int32],
+    epsilon_d: float,
+    dynamic_diagonal: wp.array[float],
+    diagonal: wp.array[float],
+    scale: wp.array[float],
+    floor_count: wp.array[int],
+    status: wp.array[int],
+):
+    i = wp.tid()
+    if coordinate_mask[i] != 0:
+        # The same explicit change of units as build_coordinate_scaling.
+        s = coordinate_scale[i]
+        d = 1.0 / (s * s)
+        if not wp.isfinite(s) or s <= 0.0 or not wp.isfinite(d) or d <= 0.0:
+            wp.atomic_max(status, 0, 10)
+            return
+        dynamic_diagonal[i] = d
+        diagonal[i] = d
+        scale[i] = s
+        return
+    raw, dynamic = matrix_diagonal[i], dynamic_input[i]
+    dynamic_diagonal[i] = dynamic
+    floor = epsilon_d * dynamic
+    if not wp.isfinite(raw) or not wp.isfinite(dynamic) or not wp.isfinite(floor) or raw <= 0.0 or dynamic <= 0.0:
+        wp.atomic_max(status, 0, 10)
+        return
+    d = wp.max(raw, floor)
+    s = 1.0 / wp.sqrt(d)
+    if not wp.isfinite(s):
+        wp.atomic_max(status, 0, 10)
+        return
+    diagonal[i] = d
+    scale[i] = s
+    if floor > raw:
+        wp.atomic_add(floor_count, 0, 1)
+
+
+@wp.kernel
 def _scale_vector(scale: wp.array[float], x: wp.array[float], result: wp.array[float]):
     i = wp.tid()
     result[i] = scale[i] * x[i]
@@ -421,6 +463,89 @@ def build_scaling(
     self._scaling_valid = status == MonolithicLinearStatus.SUCCESS
     self._lambda = 0.0
     return status
+
+
+def build_mixed_scaling(
+    self,
+    dynamic_diagonal: wp.array[float],
+    coordinate_scale: wp.array[float],
+    coordinate_mask: wp.array[wp.int32],
+    *,
+    epsilon_d: float,
+    generation: MonolithicLinearGeneration,
+) -> MonolithicLinearStatus:
+    """Freeze D and S with diagonal rows from the assembly and fixed coordinate rows."""
+    if not self._current(generation):
+        return MonolithicLinearStatus.STALE_GENERATION
+    self._scaling_valid = False
+    self._factor_valid = False
+    self._warm_start_key = None
+    if (
+        not self._vector_valid(dynamic_diagonal)
+        or not self._vector_valid(coordinate_scale)
+        or not isinstance(coordinate_mask, wp.array)
+        or coordinate_mask.dtype != wp.int32
+        or coordinate_mask.device != self.device
+        or coordinate_mask.shape != (self.layout.scalar_dof_count,)
+        or not np.isfinite(epsilon_d)
+        or epsilon_d <= 0
+    ):
+        return MonolithicLinearStatus.INVALID_ARGUMENT
+    inputs = (dynamic_diagonal, coordinate_scale, coordinate_mask)
+    if self._segment_graphs is None:
+        _build_mixed_scaling_device(self, *inputs, epsilon_d)
+    else:
+        matrix = self.k_global_scalar_bsr
+        self._segment_graphs.run(
+            "mixed_scaling",
+            (self.layout.identity, matrix.nrow, epsilon_d),
+            (
+                *inputs,
+                self.dynamic_diagonal,
+                self._status,
+                self.floor_count,
+                matrix.offsets,
+                matrix.columns,
+                matrix.values,
+                self._matrix_diagonal,
+                self.diagonal,
+                self.scale,
+            ),
+            lambda: _build_mixed_scaling_device(self, *inputs, epsilon_d),
+        )
+    status = self._read_status()
+    self._scaling_valid = status == MonolithicLinearStatus.SUCCESS
+    self._lambda = 0.0
+    return status
+
+
+def _build_mixed_scaling_device(self, dynamic_diagonal, coordinate_scale, coordinate_mask, epsilon_d):
+    self._status.zero_()
+    self.floor_count.zero_()
+    matrix = self.k_global_scalar_bsr
+    wp.launch(
+        _extract_scalar_diagonal,
+        matrix.nrow,
+        [matrix.offsets, matrix.columns, matrix.values, self._matrix_diagonal],
+        device=self.device,
+    )
+    wp.launch(
+        _build_mixed_scaling,
+        matrix.nrow,
+        [
+            self._matrix_diagonal,
+            dynamic_diagonal,
+            coordinate_scale,
+            coordinate_mask,
+            epsilon_d,
+            self.dynamic_diagonal,
+            self.diagonal,
+            self.scale,
+            self.floor_count,
+            self._status,
+        ],
+        device=self.device,
+    )
 
 
 def _build_scaling_device(self, dynamic_diagonal, epsilon_d):
