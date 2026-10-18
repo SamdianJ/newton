@@ -16,7 +16,7 @@ import numpy as np
 import warp as wp
 
 from newton.examples.softbody.monolithic_recording import serial, state_arrays
-from scripts.monolithic_reference.compare_contact_dataflows import verify_contract
+from scripts.monolithic_reference.contact_audit import verify_contract
 from scripts.monolithic_reference.profiling import capture_count, contact_pair_diagnostics, provenance
 from scripts.monolithic_reference.replay_direction import recorded_frame, restore
 from scripts.monolithic_reference.retained_assets import validate_inputs

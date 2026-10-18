@@ -53,8 +53,6 @@ class TestMonolithicCableSolver(unittest.TestCase):
                 solver = SolverMonolithic(
                     model,
                     cable_inputs=cables,
-                    contact_model="C-EE",
-                    globalization="ResNorm",
                     friction_velocity_scale=0.1,
                     mass_mode="lumped",
                     pcg_mode=self.pcg_mode,
@@ -234,8 +232,6 @@ class TestMonolithicCableSolver(unittest.TestCase):
             cloth=False,
             cables=1,
             fixed_theta=(False, False),
-            globalization="Armijo",
-            contact_model="C-EE",
             newton_max_iterations=200,
             linear_tolerance=0.5,
         )

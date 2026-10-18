@@ -65,8 +65,6 @@ class CableBenchmark:
         )
         self.solver_options = {
             "cable_inputs": (cable,),
-            "contact_model": "C-EE",
-            "globalization": r["globalization"],
             "friction_velocity_scale": 0.1,
             "mass_mode": "lumped",
             "newton_max_iterations": r["newton_max_iterations"],

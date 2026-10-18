@@ -62,17 +62,17 @@ def test_actor_snapshots(test, device):
                             replay_pcg(damaged, metadata, expected, metadata["result"], device=device, repeat=1)
                         continue
                     test.assertIn("_rigid.tn", arrays)
-                    test.assertIn("actor_contact.start.y", arrays)
+                    test.assertIn("contact.batch.start.y", arrays)
                     test.assertEqual(arrays["_original.history.rigid_com"].dtype, np.float64)
                     test.assertEqual(arrays["_accepted.history.rigid_rotation"].shape, (2, 4))
-                    for key in ("_rigid.tn", "actor_contact.start.y", "_accepted.history.rigid_rotation"):
+                    for key in ("_rigid.tn", "contact.batch.start.y", "_accepted.history.rigid_rotation"):
                         damaged = {k: v.copy() for k, v in arrays.items() if k != key}
                         with test.assertRaises(ValueError):
                             replay_objective(
                                 damaged, metadata, expected, scene=scene, device=device, graph=graph, repeat=1
                             )
                     damaged = {k: v.copy() for k, v in arrays.items()}
-                    damaged["actor_contact.selectors"][0, 0] = 99
+                    damaged["contact.batch.support.columns"][0] += 1
                     with test.assertRaises(ValueError):
                         replay_objective(damaged, metadata, expected, scene=scene, device=device, graph=graph, repeat=1)
                     damaged_meta = copy.deepcopy(metadata)
@@ -122,11 +122,13 @@ class TestActorWorkload(unittest.TestCase):
         """Include rigid predictors and both contact frames without serializing handles."""
         run = make_solver(build_model(device="cpu"), mode="production", graph=False)
         state = run.create_state(dt=0.001)
+        # One step begins the spatial lifecycle whose owners are snapshotted.
+        run.step(state, state, run.model.control(), dt=0.001)
         for name in ("_original", "_accepted", "_trial"):
             setattr(run, name, run._states.copy(state))
         arrays = arrays_for(run)
         self.assertIn("_rigid.predicted_r", arrays)
-        self.assertIn("actor_contact.current.rotation", arrays)
+        self.assertIn("contact.batch.current.rotation", arrays)
         self.assertIn("_trial.history.rigid_vsym", arrays)
         self.assertFalse(any(name.endswith(".table") for name in arrays))
 

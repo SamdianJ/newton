@@ -30,10 +30,8 @@ def model_and_solver(device, **options):
     model = builder.finalize(device=device)
     solver = SolverMonolithic(
         model,
-        contact_model="C-EE",
         friction_velocity_scale=0.01,
         mass_mode="lumped",
-        globalization="ArmijoOrResNorm",
         **options,
     )
     return model, solver
@@ -85,7 +83,9 @@ def test_muscle_scope(test, device):
     model.muscle_count = 1
     with test.assertRaisesRegex(ValueError, "muscle"):
         SolverMonolithic(
-            model, contact_model="C-EE", friction_velocity_scale=0.01, mass_mode="lumped", globalization="Armijo"
+            model,
+            friction_velocity_scale=0.01,
+            mass_mode="lumped",
         )
 
 
@@ -100,10 +100,8 @@ def test_zero_effective_inertia(test, device):
     with test.assertRaisesRegex(ValueError, "inertia"):
         SolverMonolithic(
             model,
-            contact_model="C-EE",
             friction_velocity_scale=0.01,
             mass_mode="lumped",
-            globalization="Armijo",
             joint_terms=terms,
         )
 
@@ -128,18 +126,14 @@ def test_body_flags_scope(test, device):
             with test.assertRaisesRegex(ValueError, "[Kk]inematic"):
                 SolverMonolithic(
                     model,
-                    contact_model="C-EE",
                     friction_velocity_scale=0.01,
                     mass_mode="lumped",
-                    globalization="ArmijoOrResNorm",
                 )
             continue
         solver = SolverMonolithic(
             model,
-            contact_model="C-EE",
             friction_velocity_scale=0.01,
             mass_mode="lumped",
-            globalization="ArmijoOrResNorm",
         )
         state = solver.create_state(dt=0.001)
         state.body_f.assign([[0, 0, 0, 0, 0, 0], [1, 0, 0, 0, 0, 0]])
@@ -153,10 +147,8 @@ def test_body_flags_scope(test, device):
         with test.assertRaisesRegex(ValueError, "flags"):
             SolverMonolithic(
                 model,
-                contact_model="C-EE",
                 friction_velocity_scale=0.01,
                 mass_mode="lumped",
-                globalization="ArmijoOrResNorm",
             )
 
 
@@ -176,10 +168,8 @@ def pose_dependent_inertia_solver(device):
     model.joint_target_mode.assign([int(newton.JointTargetMode.POSITION_VELOCITY), int(newton.JointTargetMode.NONE)])
     solver = SolverMonolithic(
         model,
-        contact_model="C-EE",
         friction_velocity_scale=0.01,
         mass_mode="lumped",
-        globalization="ArmijoOrResNorm",
         joint_terms=SolverMonolithic.JointTerms(implicit_pd=True),
     )
     return model, solver
@@ -366,10 +356,8 @@ def test_budget_and_last_accepted(test, device):
     for policy in ("strict", "last_accepted"):
         solver = SolverMonolithic(
             model,
-            contact_model="C-EE",
             friction_velocity_scale=0.01,
             mass_mode="lumped",
-            globalization="Armijo",
             publish_policy=policy,
             newton_max_iterations=1,
         )
@@ -406,12 +394,9 @@ def test_checkpoint_cross_device(test, device):
 
 class TestArticulationContracts(unittest.TestCase):
     def test_acceptance_branches(self):
-        """Preserve non-descent residual acceptance and the A/R/OR truth table."""
-        for mode, wanted in (("Armijo", False), ("ResNorm", True), ("ArmijoOrResNorm", True)):
-            passed, a, r, _ = acceptance(
-                mode, 0.0, 1.0, 1.0, 1.0, 1.0, 0.5, energy_noise=0, residual_noise=0, slope_noise=0
-            )
-            self.assertEqual((passed, a, r), (wanted, False, True))
+        """Preserve non-descent residual acceptance under the OR predicate."""
+        passed, a, r, _ = acceptance(0.0, 1.0, 1.0, 1.0, 1.0, 0.5, energy_noise=0, residual_noise=0, slope_noise=0)
+        self.assertEqual((passed, a, r), (True, False, True))
 
     def test_digest_encoding(self):
         """Match a fixed little-endian, length-prefixed configuration digest."""

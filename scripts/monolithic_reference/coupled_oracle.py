@@ -13,7 +13,7 @@ from scripts.monolithic_reference.tet_oracle import TetOracle
 class CoupledOracle:
     """Combine NumPy references; no production residual, tangent, FK or solve calls."""
 
-    def __init__(self, model, physics, parameters, *, law, mu, width, goal_scale):
+    def __init__(self, model, physics, parameters, *, mu, width, goal_scale):
         self.k = Kinematics(model)
         self.tet = TetOracle(model, physics)
         self.params = np.asarray(parameters).copy()
@@ -39,7 +39,7 @@ class CoupledOracle:
         self.areas = np.linalg.norm(np.cross(points[:, 1] - points[:, 0], points[:, 2] - points[:, 0]), axis=1) / 2
         self.mapping = np.full(len(self.x), -1, dtype=int)
         self.mapping[self.tet.free] = np.arange(len(self.tet.free))
-        self.law, self.mu, self.width, self.goal_scale = law, mu, width, goal_scale
+        self.mu, self.width, self.goal_scale = mu, width, goal_scale
         self.nq = len(self.q)
         self.n = self.nq + 3 * len(self.tet.free)
         self.gravity = model.gravity.numpy()[0].astype(float)
@@ -175,23 +175,14 @@ class CoupledOracle:
             yn = old[0]
             phi, g, _ = geometry(y, self.kinds[shape], self.scales[shape])
             gap = phi - self.offset[shape]
-            oldphi, oldg, _ = geometry(yn, self.kinds[shape], self.scales[shape])
-            oldgap = oldphi - self.offset[shape]
             en, nload, _ = penalty(gap, 1e7 * area, self.width)
-            oldload = penalty(oldgap, 1e7 * area, self.width)[1]
-            if en > 0 or nload > 0 or (self.mu and self.law == "C-EE" and oldload > 0):
-                if (
-                    np.linalg.norm(g) == 0
-                    or (self.law == "C-EE" and np.linalg.norm(oldg) == 0)
-                    or (gap < 0 and soft @ g > 0)
-                ):
-                    raise ValueError("Contact outside alignment/normal domain")
+            if (en > 0 or nload > 0) and (np.linalg.norm(g) == 0 or (gap < 0 and soft @ g > 0)):
+                raise ValueError("Contact outside alignment/normal domain")
             ce, cr, dr, fit = local(
                 y,
                 yn,
                 self.kinds[shape],
                 self.scales[shape],
-                self.law,
                 offset=self.offset[shape],
                 stiffness=1e7 * area,
                 width=self.width,
@@ -214,7 +205,7 @@ class CoupledOracle:
             res += j.T @ cr
             h += j.T @ dr @ j + np.einsum("a,aij->ij", cr, hy)
             b += j.T @ fit @ j
-            n = oldg / np.linalg.norm(oldg) if self.law == "C-EE" else g / np.linalg.norm(g)
+            n = g / np.linalg.norm(g)
             loads.append(nload)
             gaps.append(gap)
             slips.append(np.linalg.norm((np.eye(3) - np.outer(n, n)) @ (y - yn)))

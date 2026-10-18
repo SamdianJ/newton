@@ -197,8 +197,6 @@ def test_modes_integration(test, device):
             density = wp.full(model.tet_count, 1000, dtype=float, device=device) if mass == "consistent" else None
             solver = SolverMonolithic(
                 model,
-                contact_model="C-EE",
-                globalization="ArmijoOrResNorm",
                 friction_velocity_scale=0.01,
                 contact_stiffness=1e5,
                 material_model=material,
@@ -255,8 +253,6 @@ def test_density_and_lifecycle(test, device):
     def create(density):
         return SolverMonolithic(
             model,
-            contact_model="C-EE",
-            globalization="ArmijoOrResNorm",
             friction_velocity_scale=0.01,
             contact_stiffness=1e5,
             material_model="smith_log_stabilized",

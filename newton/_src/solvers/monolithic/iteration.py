@@ -15,7 +15,6 @@ from .solver_types import _StepFailure
 
 
 def acceptance(
-    mode,
     current,
     trial,
     slope,
@@ -28,20 +27,18 @@ def acceptance(
     slope_noise,
     dtype=np.float64,
 ):
-    """Apply independent A/R predicates after the caller's geometry/context checks."""
-    if mode not in ("Armijo", "ResNorm", "ArmijoOrResNorm"):
-        raise ValueError("Unknown variational acceptance mode")
+    """Accept a trial when either the Armijo or the residual-norm predicate holds.
+
+    Both predicates are returned so callers can report which one accepted.
+    """
     if not all(math.isfinite(v) for v in (current, trial, slope, merit, trial_merit)):
         raise ValueError("Nonfinite variational trial")
     if not 0 < alpha <= 1 or not all(math.isfinite(v) and v >= 0 for v in (energy_noise, residual_noise, slope_noise)):
         raise ValueError("Invalid variational acceptance parameters")
     a = slope < -slope_noise and trial <= current + dtype(1.0e-4) * alpha * slope + energy_noise
     r = trial_merit <= merit + residual_noise
-    accepted = a if mode == "Armijo" else r if mode == "ResNorm" else a or r
-    improved = accepted and (
-        (mode != "ResNorm" and a and trial < current - energy_noise)
-        or (mode != "Armijo" and r and trial_merit < merit - residual_noise)
-    )
+    accepted = a or r
+    improved = accepted and ((a and trial < current - energy_noise) or (r and trial_merit < merit - residual_noise))
     return bool(accepted), bool(a), bool(r), bool(improved)
 
 
@@ -453,7 +450,6 @@ def iterate(solver, dt):
                     rn = eps * max(native(1e-30), merit, trial_merit)
                     sn = eps * max(native(1e-30), terms[5])
                 passes, a, r, improved = acceptance(
-                    self._globalization,
                     e,
                     te,
                     slope,

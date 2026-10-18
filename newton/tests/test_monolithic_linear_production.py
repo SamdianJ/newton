@@ -458,8 +458,6 @@ def test_binding_rejections(test, device):
         with test.assertRaises(ValueError):
             SolverMonolithic(
                 model,
-                contact_model="C-EE",
-                globalization="Armijo",
                 friction_velocity_scale=0.01,
                 mass_mode="lumped",
                 use_cuda_graph=value,
@@ -467,8 +465,6 @@ def test_binding_rejections(test, device):
     with test.assertRaises(ValueError):
         SolverMonolithic(
             model,
-            contact_model="C-EE",
-            globalization="Armijo",
             friction_velocity_scale=0.01,
             mass_mode="lumped",
             use_cuda_graph=True,

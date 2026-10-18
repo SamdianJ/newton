@@ -118,8 +118,6 @@ def build_contact_free_coupled_fixture(device, *, gravity=(0.0, 0.0, 0.0), **opt
     fixture.state.particle_qd.zero_()
     solver = SolverMonolithic(
         fixture.model,
-        contact_model="C-EE",
-        globalization="ArmijoOrResNorm",
         friction_velocity_scale=0.01,
         mass_mode="lumped",
         **options,

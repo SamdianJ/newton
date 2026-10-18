@@ -58,6 +58,10 @@ from .tet_assembly import (
 )
 from .tet_precision import TetObjective
 
+# The single supported contact law and trial acceptance (P8 production combination).
+CONTACT_MODEL = "C-IE"
+GLOBALIZATION = "ArmijoOrResNorm"
+
 
 class SolverMonolithic(SolverBase):
     """Keep strict defaults; opt in to masked contact and stopped publication.
@@ -75,7 +79,9 @@ class SolverMonolithic(SolverBase):
     factor capacity defaults to three times that bound. Capacity is fixed for
     the solver lifetime; overflow discards complete contacts and reports taint.
 
-    Nonconservative energy acceptance is heuristic, not a variational guarantee.
+    Contact uses the C-IE law and trials use ArmijoOrResNorm acceptance. C-IE
+    energy is not a potential, so Armijo acceptance is heuristic, not a
+    variational guarantee.
 
     ``cable_position_tolerance`` [N] and ``cable_theta_tolerance`` [N m]
     set per-cable original-unit L2 residual goals (defaults 1e-9 and 1e-11).
@@ -112,8 +118,6 @@ class SolverMonolithic(SolverBase):
         self,
         model,
         *,
-        contact_model,
-        globalization,
         friction_velocity_scale,
         contact_stiffness=1e7,
         friction_coefficient=0.5,
@@ -127,7 +131,6 @@ class SolverMonolithic(SolverBase):
         publish_policy="strict",
         smooth_sdf=None,
         alignment_policy="guard",
-        allow_nonconservative_energy=False,
         joint_terms=None,
         newton_max_iterations=10,
         line_search_max_iterations=8,
@@ -184,18 +187,7 @@ class SolverMonolithic(SolverBase):
             smooth_sdf = smooth_sdf.for_precision(self._dtype)
         if publish_policy not in ("strict", "last_accepted", "current_iterate"):
             raise ValueError("Unknown coupled publication policy")
-        if contact_model not in ("C-EE", "C-IE", "C-II"):
-            raise ValueError("An explicit supported contact law is required")
-        if type(allow_nonconservative_energy) is not bool:
-            raise ValueError("Nonconservative energy opt-in must be boolean")
-        if (
-            (contact_model != "C-EE" or alignment_policy == "mask")
-            and globalization != "ResNorm"
-            and not allow_nonconservative_energy
-        ):
-            raise ValueError("Nonconservative energy acceptance requires explicit opt-in")
         self._coupled_publish_policy = publish_policy
-        self._allow_nonconservative_energy = allow_nonconservative_energy
         self._stopped_failure = None
         if not np.isfinite(min_det_f_guard) or min_det_f_guard <= 0:
             raise ValueError("Invalid detF guard")
@@ -227,8 +219,8 @@ class SolverMonolithic(SolverBase):
                 model,
                 joint_terms=joint_terms,
                 config={
-                    "contact_model": contact_model,
-                    "globalization": globalization,
+                    "contact_model": CONTACT_MODEL,
+                    "globalization": GLOBALIZATION,
                     "contact_stiffness": contact_stiffness,
                     "friction_coefficient": friction_coefficient,
                     "friction_velocity_scale": friction_velocity_scale,
@@ -238,7 +230,7 @@ class SolverMonolithic(SolverBase):
                     "min_det_f_guard": min_det_f_guard,
                     "publish_policy": publish_policy,
                     "alignment_policy": alignment_policy,
-                    "allow_nonconservative_energy": allow_nonconservative_energy,
+                    "allow_nonconservative_energy": True,
                     "newton_max_iterations": newton_max_iterations,
                     "line_search_max_iterations": line_search_max_iterations,
                     "linear_max_iterations": linear_max_iterations,
@@ -284,7 +276,6 @@ class SolverMonolithic(SolverBase):
             articulation_actor=self._articulation_actor,
             actors=self._actors,
             base_triplet_count=base_triplets,
-            contact_model=contact_model,
             normal_stiffness=contact_stiffness,
             friction_coefficient=friction_coefficient,
             friction_velocity_scale=friction_velocity_scale,
@@ -298,10 +289,11 @@ class SolverMonolithic(SolverBase):
         capacity = 3 * self._contact.count if contact_factor_capacity is None else contact_factor_capacity
         if type(capacity) is not int or capacity < 0:
             raise ValueError("Contact factor capacity must be a nonnegative integer")
-        self._contact_pool = isinstance(self._contact, _PooledContactObjective)
+        if not isinstance(self._contact, _PooledContactObjective):
+            raise ValueError("Monolithic contact requires the pooled contact objective")
+        self._contact_pool = True
         self._contact_spatial = isinstance(self._contact, _SpatialContactObjective)
-        if self._contact_pool:
-            self._contact.initialize_pool(capacity, use_cuda_graph=use_cuda_graph)
+        self._contact.initialize_pool(capacity, use_cuda_graph=use_cuda_graph)
         self._guard = min_det_f_guard
         physics_sources = dict(self._tet.physics.sources)
         for name in (
@@ -317,19 +309,18 @@ class SolverMonolithic(SolverBase):
         self._sdf_fields = self._freeze_sdf(model)
         self._coupled_config = {
             "contact_parameters": np.asarray(self._contact.parameters, dtype=float),
-            "contact_model": np.frombuffer(contact_model.encode(), dtype=np.uint8),
-            "globalization": np.frombuffer(globalization.encode(), dtype=np.uint8),
+            "contact_model": np.frombuffer(CONTACT_MODEL.encode(), dtype=np.uint8),
+            "globalization": np.frombuffer(GLOBALIZATION.encode(), dtype=np.uint8),
             "material": np.frombuffer(material_model.encode(), dtype=np.uint8),
             "mass": np.frombuffer(mass_mode.encode(), dtype=np.uint8),
             "guard_capacity": np.array([min_det_f_guard, capacity]),
             "physics_digest": np.frombuffer(bytes.fromhex(self._tet.physics.identity), dtype=np.uint8),
             "publication_policy": np.frombuffer(publish_policy.encode(), dtype=np.uint8),
             "alignment_policy": np.frombuffer(alignment_policy.encode(), dtype=np.uint8),
-            "heuristic_energy": np.array([allow_nonconservative_energy], dtype=np.uint8),
+            "heuristic_energy": np.array([True], dtype=np.uint8),
         }
-        if self._contact_pool:
-            self._coupled_config["contact_dataflow"] = self._contact.dataflow_identity
-            self._coupled_config["contact_resources"] = self._contact.resource_identity
+        self._coupled_config["contact_dataflow"] = self._contact.dataflow_identity
+        self._coupled_config["contact_resources"] = self._contact.resource_identity
         if self._contact_spatial:
             self._coupled_config["contact_spatial"] = self._contact.spatial_identity
         if self._rigid.count:
@@ -353,8 +344,6 @@ class SolverMonolithic(SolverBase):
             ]
         )
         self._coupled_config["direction_policy"] = np.array([1], dtype=np.int32)
-        if globalization not in ("Armijo", "ResNorm", "ArmijoOrResNorm"):
-            raise ValueError("Unknown articulation globalization/publication policy")
         for value in (newton_max_iterations, line_search_max_iterations, linear_max_iterations):
             if type(value) is not int or value <= 0:
                 raise ValueError("Iteration budgets must be positive integers")
@@ -397,7 +386,7 @@ class SolverMonolithic(SolverBase):
             merit_relative_global=self._config.merit_relative_global * 0.1,
             merit_relative_q=self._config.merit_relative_q * 0.1,
         )
-        self._globalization = globalization
+        self._globalization = GLOBALIZATION
         self.newton_max_iterations, self.line_search_max_iterations = newton_max_iterations, line_search_max_iterations
         self.linear_max_iterations = linear_max_iterations
         self.linear_tolerance, self.linear_absolute_tolerance = linear_tolerance, linear_absolute_tolerance
@@ -437,7 +426,7 @@ class SolverMonolithic(SolverBase):
             MonolithicLinearCapacities(
                 nq * nq + len(pattern.global_rows) + 36 * self._rigid.count + self._contact.triplet_capacity,
                 len(pattern.ax_rows),
-                0 if self._contact_pool else capacity,
+                0,
                 self.linear_max_iterations,
                 self.linear_max_iterations + 2,
             ),
@@ -445,7 +434,7 @@ class SolverMonolithic(SolverBase):
             device=device,
             pcg_mode=self.pcg_mode.value,
             use_cuda_graph=self._use_cuda_graph,
-            contact_support=None if self._contact_pool else self._contact.factor_support,
+            contact_support=None,
         )
         rigid_rows = np.repeat(self._rigid.rows_numpy, 6, axis=1).ravel()
         rigid_columns = np.tile(self._rigid.rows_numpy, (1, 6)).ravel()
@@ -456,8 +445,7 @@ class SolverMonolithic(SolverBase):
             internal_rows=pattern.ax_rows,
             internal_columns=pattern.ax_columns,
         )
-        if self._contact_pool:
-            self._linear._enable_fixed_bsr_storage()
+        self._linear._enable_fixed_bsr_storage()
         for name in ("_rhs", "_y", "_delta", "_diagonal"):
             setattr(self, name, wp.zeros(layout.scalar_dof_count, dtype=float, device=device))
         self._complete_r = wp.zeros(layout.scalar_dof_count, dtype=self._dtype, device=device)
@@ -486,9 +474,7 @@ class SolverMonolithic(SolverBase):
     def _initialize_material_lifecycle(self, model, *, joint_terms, config):
         """Allocate shared material layout and continuation before lazy operator setup."""
         self._material_config = config
-        if config["globalization"] not in ("Armijo", "ResNorm", "ArmijoOrResNorm") or config[
-            "alignment_policy"
-        ] not in ("guard", "mask"):
+        if config["alignment_policy"] not in ("guard", "mask"):
             raise ValueError("Unknown material solver policy")
         for name in ("newton_max_iterations", "line_search_max_iterations", "linear_max_iterations"):
             if type(config[name]) is not int or config[name] <= 0:
@@ -543,17 +529,10 @@ class SolverMonolithic(SolverBase):
             if value is not None:
                 fields[name] = value.numpy()
         self._contact = material_runtime.create_contact(self, model, config, self._material_smooth_sdf)
-        if (
-            self._contact.count
-            and not self._contact.conservative_energy
-            and config["globalization"] != "ResNorm"
-            and not self._allow_nonconservative_energy
-        ):
-            raise ValueError("Material surface selection requires explicit nonconservative energy opt-in")
         fields.update(self._contact.actor_samples.fields)
         fields["material_contact.backend"] = np.frombuffer(type(self._contact).__name__.encode(), dtype=np.uint8)
         if isinstance(self._contact, _SpatialContactObjective):
-            fields["material_contact.spatial"] = np.array([self._contact.candidate_capacity, self._contact.law_margin])
+            fields["material_contact.spatial"] = np.array([self._contact.candidate_capacity, 0.0])
         fields.update(self._freeze_sdf(model))
         self._kinematics = _TreeKinematics(model, actor=view, extra_config=fields, dtype=self._dtype)
         SolverBase.__init__(self, model)
@@ -810,8 +789,6 @@ class SolverMonolithic(SolverBase):
         if input_status[3]:
             raise ValueError("Articulation requires finite forces and zero spatial torque")
         self._rigid.prepare(state_in, control, dt)
-        if self._rigid.has_torque and self._globalization != "ResNorm" and not self._allow_nonconservative_energy:
-            raise ValueError("Rigid torque energy requires allow_nonconservative_energy=True")
         if self._original is None:
             self._original = self._states.copy(state_in)
             self._accepted = self._states.copy(state_in)
@@ -965,11 +942,7 @@ class SolverMonolithic(SolverBase):
             alignment_policy=self._material_config["alignment_policy"]
             if self._materials is not None
             else self._contact.alignment_policy,
-            energy_acceptance="variational"
-            if self._conservative_energy()
-            else "heuristic"
-            if self._globalization != "ResNorm"
-            else "unused",
+            energy_acceptance="variational" if self._conservative_energy() else "heuristic",
             accepted_count=sum(bool(t.get("accepted")) for t in detail["trials"]),
         )
         detail["zero_accepted_publication"] = stopped and detail["accepted_count"] == 0
@@ -1131,13 +1104,8 @@ class SolverMonolithic(SolverBase):
             buffers.append(self._host_evaluation_packet)
         rigid_history = state._monolithic_coupled
         buffers.extend([rigid_history.rigid_com, rigid_history.rigid_rotation])
-        owners = (self._objective, k, tet, self._rigid)
-        if not self._contact_pool:
-            owners += (contact, contact.start, contact.current)
-        for owner in owners:
+        for owner in (self._objective, k, tet, self._rigid):
             buffers.extend(value for value in vars(owner).values() if isinstance(value, wp.array))
-        if contact.actor_contact is not None:
-            buffers.extend(contact.actor_contact.buffers())
 
         def evaluate_owners():
             self._objective.evaluate(local_q, dt, build_tangent=build_tangent)
@@ -1196,7 +1164,7 @@ class SolverMonolithic(SolverBase):
                         self._objective.joint_energy,
                         tet.parts,
                         contact.energy.flatten(),
-                        contact.absolute_energy if self._contact_pool else contact.energy.flatten(),
+                        contact.absolute_energy,
                         tet.flags,
                         contact.flags,
                         tet.min_det_f,
@@ -1208,44 +1176,35 @@ class SolverMonolithic(SolverBase):
 
         reference_mode = self._contact_spatial and contact._reference_mode
         key = (self._layout.identity, self.precision.value, dt, build_tangent, device_result, reference_mode)
-        if self._contact_pool:
-            self._graphs.run("coupled_objective_owners", key, buffers, evaluate_owners)
-            # Pool begin/append have side effects; they must run once, never
-            # inside the owner's warmup/capture/replay overwrite chain.
-            evaluate_contact()
-            result_buffers = (
-                self._objective.residual,
-                tet.residual,
-                contact.residual,
-                self._complete_r,
-                self._rigid.rows,
-                self._rigid.residual,
-                self._rigid.energy,
-                self._objective.link_energy,
-                self._objective.joint_energy,
-                tet.parts,
-                contact.energy,
-                contact.absolute_energy,
-                tet.flags,
-                contact.flags,
-                tet.min_det_f,
-                self._energy_terms,
-                self._energy_sums,
-                self._evaluation_status,
-                self._evaluation_packet,
-                self._host_evaluation_packet,
-            )
-            self._graphs.run("coupled_objective_result", key, result_buffers, evaluate_result)
-            if not reference_mode:
-                self._variational["contact_pool"] = contact.evaluation_diagnostics()
-        else:
-
-            def evaluate():
-                evaluate_owners()
-                evaluate_contact()
-                evaluate_result()
-
-            self._graphs.run("coupled_objective", key, buffers, evaluate)
+        self._graphs.run("coupled_objective_owners", key, buffers, evaluate_owners)
+        # Pool begin/append have side effects; they must run once, never
+        # inside the owner's warmup/capture/replay overwrite chain.
+        evaluate_contact()
+        result_buffers = (
+            self._objective.residual,
+            tet.residual,
+            contact.residual,
+            self._complete_r,
+            self._rigid.rows,
+            self._rigid.residual,
+            self._rigid.energy,
+            self._objective.link_energy,
+            self._objective.joint_energy,
+            tet.parts,
+            contact.energy,
+            contact.absolute_energy,
+            tet.flags,
+            contact.flags,
+            tet.min_det_f,
+            self._energy_terms,
+            self._energy_sums,
+            self._evaluation_status,
+            self._evaluation_packet,
+            self._host_evaluation_packet,
+        )
+        self._graphs.run("coupled_objective_result", key, result_buffers, evaluate_result)
+        if not reference_mode:
+            self._variational["contact_pool"] = contact.evaluation_diagnostics()
         self._current_state = state
         if device_result:
             packet = self._evaluation_packet.numpy()
@@ -1590,33 +1549,13 @@ class SolverMonolithic(SolverBase):
             self._variational["cloth_reactions"] = tuple(c.raw.numpy().tolist() for c in self._cloths)
             self._variational["cable_reactions"] = tuple(c.raw.numpy().tolist() for c in self._cables)
             state._monolithic_coupled.contact_cable_torque.zero_()
-        contact, k = self._contact, self._kinematics
+        contact = self._contact
         history = getattr(state, self._states.namespace)
         arrays = [history.contact_joint_force, history.contact_particle_force, history.contact_body_force]
         for array in arrays:
             array.zero_()
         if self._contact_pool:
             self._variational["actor_contact_pairs"] = contact.publish(state)
-        elif self._materials is None and contact.legacy_count:
-            wp.launch(
-                kernels.contact_forces,
-                contact.legacy_count,
-                [
-                    contact.current,
-                    contact.local_residual,
-                    contact.shapes,
-                    contact.bodies,
-                    contact.body_local,
-                    contact.triangles,
-                    state.particle_q,
-                    k.com,
-                    k.dof_map,
-                    *arrays,
-                ],
-                device=self.model.device,
-            )
-        if contact.actor_contact is not None:
-            self._variational["actor_contact_pairs"] = contact.actor_contact.publish(state, k)
         for pair in self._variational.get("actor_contact_pairs", ()):
             pair["force_generation"] = self._step_generation
         self._force_status.zero_()

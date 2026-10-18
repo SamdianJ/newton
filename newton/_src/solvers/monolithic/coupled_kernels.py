@@ -185,43 +185,6 @@ def combine_direction(
 
 
 @wp.kernel
-def contact_forces(
-    geometry: Any,
-    local_residual: wp.array[Any],
-    shapes: wp.array[int],
-    bodies: wp.array[int],
-    body_local: wp.array[int],
-    triangles: wp.array2d[int],
-    x: wp.array[Any],
-    com: wp.array[Any],
-    dof_map: wp.array[int],
-    qforce: wp.array[Any],
-    pforce: wp.array[Any],
-    bforce: wp.array[Any],
-):
-    key = wp.tid()
-    shape = shapes[key % shapes.shape[0]]
-    face = key / (3 * shapes.shape[0])
-    slot = (key / shapes.shape[0]) % 3
-    local = local_residual[key]
-    world = geometry.rotation[key] * local
-    point = type(x[0])(0.0)
-    for a in range(3):
-        weight = type(x[0][0])(1.0) / type(x[0][0])(6.0)
-        if a == slot:
-            weight = type(x[0][0])(2.0) / type(x[0][0])(3.0)
-        particle = triangles[face, a]
-        point += weight * x[particle]
-        wp.atomic_add(pforce, particle, -weight * world)
-    for j in range(dof_map.shape[0]):
-        wp.atomic_add(qforce, dof_map[j], -wp.dot(geometry.jacobian_q[key, j], local))
-    body = bodies[shape]
-    if body >= 0:
-        torque = wp.cross(point - com[body_local[body]], world)
-        wp.atomic_add(bforce, body, type(bforce[0])(world[0], world[1], world[2], torque[0], torque[1], torque[2]))
-
-
-@wp.kernel
 def _scatter(matrix: wp.array2d[float], actor: wp.array2d[float], values: wp.array[float], diagonal: wp.array[float]):
     i, j = wp.tid()
     actor[i, j] = matrix[i, j]

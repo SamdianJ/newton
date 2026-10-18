@@ -24,45 +24,42 @@ class TestSolverPrecision(unittest.TestCase):
         for device in ("cpu", "cuda:0"):
             model = scene(device)
             for graph in (False, True) if device != "cpu" else (False,):
-                for law in ("C-EE", "C-IE", "C-II"):
-                    runs = [
-                        solver(
-                            model, law, precision=p, graph=graph, mode="production", publish_policy="current_iterate"
-                        )
-                        for p in ("fp64", "fp32")
-                    ]
-                    states = [run.create_state(dt=0.001) for run in runs]
-                    for _ in range(2):
-                        for run, state in zip(runs, states, strict=True):
-                            with self.subTest(device=device, graph=graph, law=law, precision=run.precision):
-                                output = run._states.copy(state)
-                                run.step(state, output, model.control(), dt=0.001)
-                                self.assertFalse(run.last_stats.rolled_back, run.last_stats)
-                                state.assign(output)
-                                native = np.float64 if run.precision == run.Precision.FP64 else np.float32
-                                for field in (
-                                    state.joint_q,
-                                    state.particle_q,
-                                    run._complete_r,
-                                    run._objective.residual,
-                                    run._tet.residual,
-                                    run._contact.residual,
-                                    state._monolithic_coupled.link_vsym,
-                                ):
-                                    self.assertEqual(field.numpy().dtype, native)
-                                forces = run.get_contact_forces(state)
-                                self.assertEqual(forces.particle_force.dtype, native)
-                                with self.assertRaises(ValueError):
-                                    forces.particle_force.flat[0] = 0
-                                saved = forces.particle_force.copy()
-                                run.reset_state(output, dt=0.001)
-                                np.testing.assert_array_equal(saved, forces.particle_force)
-                                self.assertEqual(run._linear.scale.dtype, wp.float32)
-                    if graph:
-                        for run in runs:
-                            segment = run._graphs.summary()["segments"]["coupled_objective_owners"]
-                            self.assertGreater(segment["captures"], 0)
-                            self.assertGreater(segment["replays"], segment["captures"])
+                runs = [
+                    solver(model, precision=p, graph=graph, mode="production", publish_policy="current_iterate")
+                    for p in ("fp64", "fp32")
+                ]
+                states = [run.create_state(dt=0.001) for run in runs]
+                for _ in range(2):
+                    for run, state in zip(runs, states, strict=True):
+                        with self.subTest(device=device, graph=graph, precision=run.precision):
+                            output = run._states.copy(state)
+                            run.step(state, output, model.control(), dt=0.001)
+                            self.assertFalse(run.last_stats.rolled_back, run.last_stats)
+                            state.assign(output)
+                            native = np.float64 if run.precision == run.Precision.FP64 else np.float32
+                            for field in (
+                                state.joint_q,
+                                state.particle_q,
+                                run._complete_r,
+                                run._objective.residual,
+                                run._tet.residual,
+                                run._contact.residual,
+                                state._monolithic_coupled.link_vsym,
+                            ):
+                                self.assertEqual(field.numpy().dtype, native)
+                            forces = run.get_contact_forces(state)
+                            self.assertEqual(forces.particle_force.dtype, native)
+                            with self.assertRaises(ValueError):
+                                forces.particle_force.flat[0] = 0
+                            saved = forces.particle_force.copy()
+                            run.reset_state(output, dt=0.001)
+                            np.testing.assert_array_equal(saved, forces.particle_force)
+                            self.assertEqual(run._linear.scale.dtype, wp.float32)
+                if graph:
+                    for run in runs:
+                        segment = run._graphs.summary()["segments"]["coupled_objective_owners"]
+                        self.assertGreater(segment["captures"], 0)
+                        self.assertGreater(segment["replays"], segment["captures"])
 
     def test_checkpoint_and_cross_precision(self):
         model = scene("cpu")

@@ -38,8 +38,6 @@ class Example:
         self.case = FrankaGrasp(
             args.asset_cache,
             device=args.device,
-            law=args.law,
-            globalization=args.globalization,
             solver_factory=solver_factory,
         )
         self.step_limit = min(getattr(args, "max_steps", None) or round(TIMES[-1] / DT), round(TIMES[-1] / DT))
@@ -90,10 +88,6 @@ class Example:
             default=REPO / "asset/monolithic/data/inputs/franka/sdf-cache",
         )
         parser.add_argument("--output", type=Path, help="New directory for complete trajectory and diagnostics")
-        parser.add_argument("--law", choices=("C-IE", "C-EE", "C-II"), default="C-IE")
-        parser.add_argument(
-            "--globalization", choices=("ArmijoOrResNorm", "Armijo", "ResNorm"), default="ArmijoOrResNorm"
-        )
         parser.set_defaults(device="cuda:0", num_frames=525)
         return parser
 

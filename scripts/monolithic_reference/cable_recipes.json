@@ -1,6 +1,7 @@
 {
-  "version": 9,
+  "version": 10,
   "status": "FROZEN_BEFORE_FINAL_MATRIX",
+  "change": "v10 (P8a): the solver fixes ArmijoOrResNorm acceptance; the per-recipe globalization (ResNorm) is removed. Physical parameters, loads and gates are unchanged.",
   "cantilever": {
     "length": 1.0,
     "bending": [
@@ -37,7 +38,6 @@
     },
     "solve_position_tolerance": 1e-10,
     "solve_theta_tolerance": 1e-11,
-    "globalization": "ResNorm",
     "newton_max_iterations": 1000
   },
   "localized_helix": {
@@ -85,7 +85,6 @@
     "solve_position_tolerance": 1e-10,
     "solve_theta_tolerance": 1e-13,
     "loading": "Rotate one end; shorten both ends equally towards the fixed center. No axial localization fit.",
-    "globalization": "ResNorm",
     "newton_max_iterations": 5000
   }
 }

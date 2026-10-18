@@ -316,29 +316,26 @@ def test_force_step(test, device):
     builder.add_articulation([joint])
     add_contact_free_tet(builder)
     model = builder.finalize(device=device)
-    for mode in ("Armijo", "ResNorm", "ArmijoOrResNorm"):
-        solver = SolverMonolithic(
-            model,
-            contact_model="C-EE",
-            friction_velocity_scale=0.01,
-            mass_mode="lumped",
-            globalization=mode,
-            pcg_mode="production" if device.is_cuda else "diagnostic",
-            use_cuda_graph=device.is_cuda,
-        )
-        source = solver.create_state(dt=0.001)
-        target = solver.create_state(dt=0.001)
-        source.body_f.assign([[1.0, 0.0, 0.0, 0.0, 0.0, 0.0]])
-        with patch.object(solver._states, "create", side_effect=AssertionError("continuation must not reinitialize")):
-            solver.step(source, target, model.control(), dt=0.001)
-        test.assertTrue(solver.last_stats.converged)
-        trial = solver.last_stats.variational["trials"][0]
-        test.assertTrue(trial["Armijo"])
-        test.assertAlmostEqual(trial["slope"], -1e-6, delta=1e-12)
-        np.testing.assert_allclose(target.joint_q.numpy(), [1e-6], rtol=1e-7)
-        np.testing.assert_allclose(target.joint_qd.numpy(), [0.001], rtol=1e-7)
-        solver._states.validate(target)
-        np.testing.assert_array_equal(source.joint_q.numpy(), [0.0])
+    solver = SolverMonolithic(
+        model,
+        friction_velocity_scale=0.01,
+        mass_mode="lumped",
+        pcg_mode="production" if device.is_cuda else "diagnostic",
+        use_cuda_graph=device.is_cuda,
+    )
+    source = solver.create_state(dt=0.001)
+    target = solver.create_state(dt=0.001)
+    source.body_f.assign([[1.0, 0.0, 0.0, 0.0, 0.0, 0.0]])
+    with patch.object(solver._states, "create", side_effect=AssertionError("continuation must not reinitialize")):
+        solver.step(source, target, model.control(), dt=0.001)
+    test.assertTrue(solver.last_stats.converged)
+    trial = solver.last_stats.variational["trials"][0]
+    test.assertTrue(trial["Armijo"])
+    test.assertAlmostEqual(trial["slope"], -1e-6, delta=1e-12)
+    np.testing.assert_allclose(target.joint_q.numpy(), [1e-6], rtol=1e-7)
+    np.testing.assert_allclose(target.joint_qd.numpy(), [0.001], rtol=1e-7)
+    solver._states.validate(target)
+    np.testing.assert_array_equal(source.joint_q.numpy(), [0.0])
 
 
 def test_schema_and_publication(test, device):
@@ -348,7 +345,9 @@ def test_schema_and_publication(test, device):
         getattr(model, name).zero_()
     model.gravity.zero_()
     solver = SolverMonolithic(
-        model, contact_model="C-EE", friction_velocity_scale=0.01, mass_mode="lumped", globalization="ArmijoOrResNorm"
+        model,
+        friction_velocity_scale=0.01,
+        mass_mode="lumped",
     )
     source = solver.create_state(dt=0.001)
     target = solver.create_state(dt=0.001)
@@ -394,12 +393,11 @@ def test_fork_alias_and_variable_dt(test, device):
         getattr(model, name).zero_()
     model.gravity.zero_()
     options = {
-        "globalization": "ArmijoOrResNorm",
         "pcg_mode": "production" if device.is_cuda else "diagnostic",
         "use_cuda_graph": device.is_cuda,
     }
-    solver = SolverMonolithic(model, contact_model="C-EE", friction_velocity_scale=0.01, mass_mode="lumped", **options)
-    other = SolverMonolithic(model, contact_model="C-EE", friction_velocity_scale=0.01, mass_mode="lumped", **options)
+    solver = SolverMonolithic(model, friction_velocity_scale=0.01, mass_mode="lumped", **options)
+    other = SolverMonolithic(model, friction_velocity_scale=0.01, mass_mode="lumped", **options)
     state = solver.create_state(dt=0.001)
     alias = other.create_state(dt=0.001)
     alias.assign(state)

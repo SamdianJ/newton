@@ -30,7 +30,7 @@ def test_spatial_workload(test, device):
             device=device,
             graph=device.is_cuda,
             contact_dataflow="spatial",
-            spatial={"candidate_capacity": 4096, "law_margin": 0.0},
+            spatial={"candidate_capacity": 4096},
             steps=2,
             windows=[(1, 1)],
             boundaries=("objective", "assembly"),
@@ -84,7 +84,7 @@ def test_spatial_workload(test, device):
             device=device,
             graph=device.is_cuda,
             contact_dataflow="spatial",
-            spatial={"candidate_capacity": 256, "law_margin": 0.0},
+            spatial={"candidate_capacity": 256},
         )
         before = capture_count(run)
         run._contact.query_graphs.captures["probe"] = 3

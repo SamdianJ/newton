@@ -12,7 +12,7 @@ import warp as wp
 from newton._src.solvers.monolithic.coupled_kernels import combine
 from newton._src.solvers.monolithic.iteration import _block_policy, blocks, measure
 from newton._src.solvers.monolithic.rigid import _scatter_residual
-from scripts.monolithic_reference.compare_contact_dataflows import verify_contract
+from scripts.monolithic_reference.contact_audit import verify_contract
 
 
 def check_system_report(directory, run, summary):

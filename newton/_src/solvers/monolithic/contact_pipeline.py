@@ -78,7 +78,7 @@ class _PooledContactObjective(ContactObjective):
     """
 
     def __init__(self, *args, **kwargs):
-        super().__init__(*args, _metadata_only=True, **kwargs)
+        super().__init__(*args, **kwargs)
         self._evaluated = False
         self.evaluation_generation = 0
         self.candidate_generation = 0
@@ -257,14 +257,12 @@ class _PooledContactObjective(ContactObjective):
 class _SpatialContactObjective(_PooledContactObjective):
     """Refresh at Newton boundaries and freeze candidates through trials and final checks."""
 
-    def __init__(self, *args, candidate_capacity=None, law_margin=0.0, **kwargs):
+    def __init__(self, *args, candidate_capacity=None, **kwargs):
         if candidate_capacity is not None and (
             type(candidate_capacity) is not int or not 0 <= candidate_capacity < 2**31
         ):
             raise ValueError("Invalid spatial candidate capacity")
-        if isinstance(law_margin, (bool, np.bool_)) or not np.isfinite(law_margin) or law_margin < 0:
-            raise ValueError("Invalid experimental law margin")
-        self.candidate_capacity, self.law_margin = candidate_capacity, float(law_margin)
+        self.candidate_capacity = candidate_capacity
         self._spatial = None
         self._selection_ready = self._reference_mode = False
         super().__init__(*args, **kwargs)
@@ -290,7 +288,8 @@ class _SpatialContactObjective(_PooledContactObjective):
         self.query_graphs = _SegmentGraphCache(self.model.device, enabled=use_cuda_graph and self.model.device.is_cuda)
         self.dataflow_identity = np.frombuffer(b"spatial-pool/newton-frozen/v1", dtype=np.uint8)
         self.resource_identity = np.append(self.resource_identity, self.candidate_capacity)
-        self.spatial_identity = np.array([self.law_margin], dtype=np.float64)
+        # The former experimental law margin is fixed at zero; keep its identity slot.
+        self.spatial_identity = np.zeros(1, dtype=np.float64)
 
     @property
     def residual(self):
@@ -320,7 +319,6 @@ class _SpatialContactObjective(_PooledContactObjective):
                 state[1],
                 rigid_com=options.get("rigid_com"),
                 capacity=self.candidate_capacity,
-                law_margin=self.law_margin,
             )
         else:
             if kinematics is not self._spatial.kinematics:

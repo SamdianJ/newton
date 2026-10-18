@@ -85,11 +85,8 @@ def run(args):
         contact_recorder = solver_factory.measure
     solver = solver_factory(
         model,
-        contact_model="C-IE",
-        globalization="ArmijoOrResNorm",
         alignment_policy="mask",
         publish_policy="current_iterate",
-        allow_nonconservative_energy=True,
         friction_velocity_scale=0.01,
         contact_stiffness=1e7,
         friction_coefficient=0.5,

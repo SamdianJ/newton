@@ -19,22 +19,20 @@ from newton._src.solvers.monolithic.contact_spatial import _ContactSpatial
 from newton._src.solvers.monolithic.smooth_sdf import SmoothSDF, SmoothSDFSet
 from newton._src.solvers.monolithic.smooth_sdf_builder import build_coefficients
 from newton.solvers.experimental.monolithic import build_smooth_sdf
-from newton.tests.test_monolithic_contact_actor_pairs import perturb, physical, query
-from newton.tests.test_monolithic_contact_batch import batch_matrix, native_inputs
-from newton.tests.test_monolithic_contact_components import fixture
+from newton.tests.test_monolithic_contact_actor_pairs import native_inputs, perturb, physical
+from newton.tests.test_monolithic_contact_components import batch_matrix, fixture
 from newton.tests.test_monolithic_contact_mesh import synthetic
 from newton.tests.test_monolithic_solver_actor_contacts import contact_scene, contact_solver, contact_state
 from newton.tests.unittest_utils import add_function_test, get_test_devices
 
 
-def spatial_fixture(device, kind, *, law="C-II", capacity=None, margin=0.0, precision="fp64"):
+def spatial_fixture(device, kind, *, capacity=None, precision="fp64"):
     model = contact_scene(device, kind, before=True)
     if kind == "chain":
         flags = model.shape_flags.numpy()
         flags[model.shape_body.numpy() == model.body_label.index("pusher")] |= int(ShapeFlags.COLLIDE_PARTICLES)
         model.shape_flags.assign(flags)
-    with patch("newton._src.solvers.monolithic.solver_monolithic.ContactObjective", ContactObjective):
-        run = contact_solver(model, law=law, permuted=True, precision=precision)
+    run = contact_solver(model, permuted=True, precision=precision)
     state = contact_state(run, kind)
     c, k = run._contact, run._kinematics
     inputs, options = native_inputs(run, state)
@@ -48,7 +46,6 @@ def spatial_fixture(device, kind, *, law="C-II", capacity=None, margin=0.0, prec
         inputs[1],
         **options,
         capacity=c.count if capacity is None else capacity,
-        law_margin=margin,
     )
     return run, state, batch, spatial
 
@@ -56,60 +53,55 @@ def spatial_fixture(device, kind, *, law="C-II", capacity=None, margin=0.0, prec
 def test_spatial_pairs(test, device):
     """Preserve allowed directed identities, half weights and selected E/r/B/both forces for all supported pairs."""
     for kind in ("A-R", "R-R", "R-T", "R-static", "chain"):
-        for law in ("C-EE", "C-IE", "C-II"):
-            run, state, batch, spatial = spatial_fixture(device, kind, law=law)
-            start = physical(state)
-            if kind == "chain":
-                query(run, state, start=True)
-            perturb(run, state, start, np.linspace(-0.2, 0.3, run._layout.scalar_dof_count), 1e-6)
-            inputs, options = native_inputs(run, state)
-            spatial.update(run._kinematics.gather_q(state), inputs[0], rigid_com=options["rigid_com"])
-            spatial.check()
-            count = int(spatial.count.numpy()[0])
-            ids = spatial.identities.numpy()[:count]
-            test.assertEqual(len(ids), len(np.unique(ids)))
-            test.assertTrue(np.all(ids < run._contact.count))
-            # Decode keys independently through the unchanged sampling metadata.
-            expected = {}
-            samples = batch.all_samples
-            fields = [getattr(samples, n).numpy() for n in ("sources", "targets", "faces", "slots")]
-            face_index = {tuple(v): i for i, v in enumerate(spatial.query.faces)}
-            target_index = {int(v): i for i, v in enumerate(spatial.query.targets)}
-            for i, (source, target, face, slot) in enumerate(zip(*fields, strict=True)):
-                key = (face_index[source, face] * len(target_index) + target_index[int(target)]) * 3 + slot
-                test.assertNotIn(int(key), expected)
-                expected[int(key)] = i
-            keys = spatial.query.keys.numpy()[:count]
-            np.testing.assert_array_equal(ids, sorted(expected[int(key)] for key in keys))
-            batch.evaluate(*inputs, dt=0.001, **options)
-            full = [p.result.numpy().copy() for p in (batch.pool.energy, batch.pool.residual, batch.pool.force)]
-            b = batch_matrix(batch)
-            reference = batch.start.y.numpy().copy()
-            batch.evaluate(*inputs, dt=0.001, selection=spatial, **options)
-            test.assertEqual(int(batch.flags.numpy()[0]), 0)
-            for actual, wanted in zip((batch.pool.energy, batch.pool.residual, batch.pool.force), full, strict=True):
-                np.testing.assert_allclose(actual.result.numpy(), wanted, rtol=1e-9, atol=1e-10)
-            np.testing.assert_allclose(batch_matrix(batch), b, rtol=2e-5, atol=2e-4)
-            np.testing.assert_array_equal(batch.start.y.numpy(), reference)
-            if kind == "chain":
-                # Noncontiguous IDs exercise the legacy/actor boundary and
-                # gather old references by original identity, not chunk offset.
-                query(run, state)
-                keep = ids[::5]
+        run, state, batch, spatial = spatial_fixture(device, kind)
+        start = physical(state)
+        perturb(run, state, start, np.linspace(-0.2, 0.3, run._layout.scalar_dof_count), 1e-6)
+        inputs, options = native_inputs(run, state)
+        spatial.update(run._kinematics.gather_q(state), inputs[0], rigid_com=options["rigid_com"])
+        spatial.check()
+        count = int(spatial.count.numpy()[0])
+        ids = spatial.identities.numpy()[:count]
+        test.assertEqual(len(ids), len(np.unique(ids)))
+        test.assertTrue(np.all(ids < run._contact.count))
+        # Decode keys independently through the unchanged sampling metadata.
+        expected = {}
+        samples = batch.all_samples
+        fields = [getattr(samples, n).numpy() for n in ("sources", "targets", "faces", "slots")]
+        face_index = {tuple(v): i for i, v in enumerate(spatial.query.faces)}
+        target_index = {int(v): i for i, v in enumerate(spatial.query.targets)}
+        for i, (source, target, face, slot) in enumerate(zip(*fields, strict=True)):
+            key = (face_index[source, face] * len(target_index) + target_index[int(target)]) * 3 + slot
+            test.assertNotIn(int(key), expected)
+            expected[int(key)] = i
+        keys = spatial.query.keys.numpy()[:count]
+        np.testing.assert_array_equal(ids, sorted(expected[int(key)] for key in keys))
+        batch.evaluate(*inputs, dt=0.001, **options)
+        full = [p.result.numpy().copy() for p in (batch.pool.energy, batch.pool.residual, batch.pool.force)]
+        b = batch_matrix(batch)
+        reference = batch.start.y.numpy().copy()
+        batch.evaluate(*inputs, dt=0.001, selection=spatial, **options)
+        test.assertEqual(int(batch.flags.numpy()[0]), 0)
+        for actual, wanted in zip((batch.pool.energy, batch.pool.residual, batch.pool.force), full, strict=True):
+            np.testing.assert_allclose(actual.result.numpy(), wanted, rtol=1e-9, atol=1e-10)
+        np.testing.assert_allclose(batch_matrix(batch), b, rtol=2e-5, atol=2e-4)
+        np.testing.assert_array_equal(batch.start.y.numpy(), reference)
+        if kind == "chain":
+            # Noncontiguous IDs exercise the legacy/actor boundary and gather old
+            # references by original identity: complementary selections add up.
+            keep = ids[::5]
+            totals = []
+            for subset in (keep, np.setdiff1d(ids, keep)):
                 sparse = spatial.identities.numpy().copy()
-                sparse[: len(keep)] = keep
+                sparse[: len(subset)] = subset
                 spatial.identities.assign(sparse)
-                spatial.count.fill_(len(keep))
+                spatial.count.fill_(len(subset))
                 spatial.check()
                 batch.evaluate(*inputs, dt=0.001, selection=spatial, **options)
                 test.assertEqual(int(batch.flags.numpy()[0]), 0)
-                np.testing.assert_allclose(
-                    batch.pool.energy.result.numpy()[:2],
-                    run._contact.energy.numpy()[keep.astype(int)].sum(axis=0),
-                    rtol=1e-9,
-                    atol=1e-12,
-                )
+                totals.append(batch.pool.energy.result.numpy()[:2].copy())
                 np.testing.assert_array_equal(batch.start.y.numpy(), reference)
+            test.assertGreater(min(abs(totals[0]).sum(), abs(totals[1]).sum()), 0)
+            np.testing.assert_allclose(totals[0] + totals[1], full[0][:2], rtol=1e-9, atol=1e-12)
 
 
 def test_spatial_sweep(test, device):
@@ -157,7 +149,6 @@ def test_spatial_failure_graph(test, device):
                 inputs[1],
                 **options,
                 capacity=run._contact.count,
-                law_margin=0.0,
             )
     q, x, com = k.gather_q(state), state.particle_q, state._monolithic_coupled.rigid_com
     spatial.update(q, x, rigid_com=com)
@@ -236,7 +227,6 @@ def test_spatial_failure_graph(test, device):
         inputs[1],
         **options,
         capacity=0,
-        law_margin=0.0,
     )
     empty.update(empty.q0, inputs[0], rigid_com=options["rigid_com"])
     empty.check()
@@ -266,7 +256,6 @@ def test_spatial_projected_surface(test, device):
         inputs[1],
         **options,
         capacity=run._contact.count,
-        law_margin=0.0,
     )
     p, _, _, tri = _surface_samples(GeoType.SPHERE, scales[shape].astype(float), _return_triangles=True)
     points = p.reshape(-1, 3, 3)
@@ -327,7 +316,6 @@ def test_spatial_mesh_domain(test, device):
             model,
             np.arange(model.particle_count, dtype=np.int32),
             q_dof_count=k.count,
-            contact_model="C-II",
             normal_stiffness=1e7,
             friction_coefficient=0.5,
             friction_velocity_scale=0.01,
@@ -337,7 +325,7 @@ def test_spatial_mesh_domain(test, device):
         )
         batch = _ContactBatch(c, batch_capacity=7, capacity=None, use_cuda_graph=True)
         batch.begin_step(*inputs)
-        spatial = _ContactSpatial(batch, k, q, inputs[0], inputs[1], capacity=c.count, law_margin=0.0)
+        spatial = _ContactSpatial(batch, k, q, inputs[0], inputs[1], capacity=c.count)
         # The synthetic texture's boundary is negative; exterior support must
         # extend beyond the texture domain, regardless of absent mesh vertices.
         test.assertTrue(np.all(spatial.target_local_lo.numpy()[0] < descriptor.sdf_box_lower))
@@ -366,7 +354,6 @@ def test_spatial_mesh_domain(test, device):
         inputs[1],
         **options,
         capacity=run._contact.count,
-        law_margin=0.0,
     )
     spatial.update(run._kinematics.gather_q(state), inputs[0], rigid_com=options["rigid_com"])
     spatial.check()
@@ -379,7 +366,7 @@ def test_spatial_mesh_domain(test, device):
 
 def test_spatial_known_miss(test, device):
     """Expose a frozen distant list missing a later contact, without querying or resetting the start reference."""
-    run = contact_solver(contact_scene(device, "A-R"), law="C-II")
+    run = contact_solver(contact_scene(device, "A-R"))
     state = contact_state(run, "A-R")
     original = state._monolithic_coupled.rigid_com.numpy().copy()
     state._monolithic_coupled.rigid_com.assign(original + np.array([0.3, 0, 0]))
@@ -394,7 +381,6 @@ def test_spatial_known_miss(test, device):
         inputs[1],
         **options,
         capacity=run._contact.count,
-        law_margin=0.0,
     )
     spatial.update(run._kinematics.gather_q(state), inputs[0], rigid_com=options["rigid_com"])
     test.assertEqual(int(spatial.count.numpy()[0]), 0)

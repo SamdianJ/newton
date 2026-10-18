@@ -29,17 +29,13 @@ from scripts.monolithic_reference.retained_assets import validate_inputs as vali
 from scripts.monolithic_reference.run_baseline import cases, module_origins, sha
 
 ROOT = Path(__file__).resolve().parents[2]
-PRODUCTION_ROBOT_CASES = (
-    "franka-cube--ArmijoOrResNorm--C-IE--production--graph1",
-    "sharpa-recorded-10mm--ArmijoOrResNorm--C-IE--production--graph1",
-)
 
 
 def select_cases(profile, filters=()):
     """Select the production robot scenes, adding the rigid stack nightly, then apply filters."""
     if profile not in ("dev", "full", "nightly"):
         raise ValueError(f"Unknown scene profile: {profile}")
-    selected = [c for c in cases() if c["id"] in PRODUCTION_ROBOT_CASES]
+    selected = cases()
     if profile == "nightly":
         path = ROOT / "scripts/monolithic_reference/fixtures/rigid_stack_large_v1.json"
         rigid = json.loads(path.read_text())
@@ -201,7 +197,7 @@ def reference_binding(case):
     return reference, controls, native_controls, envelopes, {**entry, "comparison_policy": policy}
 
 
-def worker(case, output, *, contact_dataflow="spatial", max_steps=None):
+def worker(case, output, *, max_steps=None):
     """Run a complete scene and validate recordings against the frozen envelopes."""
     output.mkdir(parents=True, exist_ok=False)
     receipt = {"case": case, "status": "FAIL", "source_root": str(ROOT)}
@@ -238,7 +234,7 @@ def worker(case, output, *, contact_dataflow="spatial", max_steps=None):
             check_robot_reports,
         )
 
-        factory = FrozenRobotFactory(case["id"].split("--")[0], dataflow=contact_dataflow)
+        factory = FrozenRobotFactory(case["id"].split("--")[0], dataflow="spatial")
         certificate = None
         limit = min(max_steps, case["steps"]) if max_steps is not None else case["steps"]
 
@@ -260,10 +256,8 @@ def worker(case, output, *, contact_dataflow="spatial", max_steps=None):
                 device="cuda:0",
                 output=recording,
                 asset_cache=INPUTS / "franka/sdf-cache",
-                law=case["law"],
-                globalization=case["globalization"],
                 solver_factory=factory,
-                contact_recorder=factory.measure if contact_dataflow == "spatial" else None,
+                contact_recorder=factory.measure,
                 max_steps=max_steps,
             )
             example = Example(ViewerNull(), args)
@@ -289,7 +283,7 @@ def worker(case, output, *, contact_dataflow="spatial", max_steps=None):
                 trajectory=INPUTS / "sharpa/recorded-control.json",
                 expected_controls=controls,
                 solver_factory=factory,
-                contact_recorder=factory.measure if contact_dataflow == "spatial" else None,
+                contact_recorder=factory.measure,
                 max_steps=max_steps,
             )
 
@@ -306,8 +300,7 @@ def worker(case, output, *, contact_dataflow="spatial", max_steps=None):
             if not complete and max_steps is None:
                 raise ValueError("Sharpa did not publish its complete trajectory")
         receipt["recording"] = check(recording, limit, require_complete=max_steps is None)
-        if contact_dataflow == "spatial":
-            receipt["full_system"] = check_robot_reports(recording, factory.run, limit)
+        receipt["full_system"] = check_robot_reports(recording, factory.run, limit)
         if max_steps is None:
             try:
                 receipt["comparison"] = compare(
@@ -362,14 +355,9 @@ def main():
         help="Keep compact success receipts and full failure recordings by default",
     )
     parser.add_argument("--worker", action="store_true", help=argparse.SUPPRESS)
-    parser.add_argument(
-        "--contact-dataflow",
-        choices=("legacy", "spatial"),
-        default="spatial",
-        help="Robot recipe: legacy Q1 or frozen B3; the added rigid nightly case always uses B3/lambda-zero",
-    )
     parser.add_argument("--max-steps", type=int, help="Bounded smoke only; always PARTIAL, no trajectory qualification")
     args = parser.parse_args()
+    args.contact_dataflow = "spatial"
     if args.max_steps is not None and args.max_steps <= 0:
         parser.error("--max-steps must be positive")
     try:
@@ -384,9 +372,7 @@ def main():
     if args.worker:
         if len(selected) != 1:
             parser.error("Worker requires exactly one case")
-        return worker(
-            selected[0], args.output.resolve(), contact_dataflow=args.contact_dataflow, max_steps=args.max_steps
-        )
+        return worker(selected[0], args.output.resolve(), max_steps=args.max_steps)
     args.output.mkdir(parents=True, exist_ok=False)
     results = []
     for case in selected:
@@ -403,8 +389,6 @@ def main():
             "--worker",
             "--output",
             str(destination),
-            "--contact-dataflow",
-            args.contact_dataflow,
         ]
         if args.max_steps is not None:
             command += ["--max-steps", str(args.max_steps)]

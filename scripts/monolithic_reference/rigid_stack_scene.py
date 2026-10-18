@@ -5,14 +5,12 @@
 
 from contextlib import nullcontext
 from dataclasses import replace
-from unittest.mock import patch
 
 import warp as wp
 from newton.solvers.experimental.monolithic import SolverMonolithic
 
 import newton
-from newton._src.solvers.monolithic import solver_monolithic
-from newton._src.solvers.monolithic.contact_pipeline import _PooledContactObjective
+from scripts.monolithic_reference.contact_routes import pooled_audit_route
 
 DT = 0.001
 STEPS = 120
@@ -67,19 +65,16 @@ def stack_scene(device, *, columns=((-0.03, 0), (0.03, 0)), layers=3):
 
 
 def stack_solver(model, *, spatial, graph=False, query_capacity=4096, support_capacity=None):
-    """Select an explicit experimental route and fixed budgets without changing defaults."""
+    """Use the spatial route, or the complete-candidate pooled audit route, with fixed budgets."""
     options = {} if support_capacity is None else {"contact_factor_capacity": 3 * support_capacity}
     context = nullcontext()
     if spatial:
         options["contact_candidate_capacity"] = query_capacity
     else:
-        context = patch.object(solver_monolithic, "ContactObjective", _PooledContactObjective)
+        context = pooled_audit_route()
     with context:
         run = SolverMonolithic(
             model,
-            contact_model="C-IE",
-            globalization="ArmijoOrResNorm",
-            allow_nonconservative_energy=True,
             friction_velocity_scale=0.01,
             pcg_mode="production",
             use_cuda_graph=graph,

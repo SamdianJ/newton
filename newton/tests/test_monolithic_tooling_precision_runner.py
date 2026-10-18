@@ -17,13 +17,13 @@ from scripts.monolithic_reference.run_precision import cases, main, sha, validat
 
 class TestPrecisionRunner(unittest.TestCase):
     def test_matrix(self):
-        """Match the ten existing P4 configurations in each precision, excluding Close."""
+        """Match the frozen FP64 baseline configurations in each precision, excluding Close."""
         rows = cases()
-        self.assertEqual(len(rows), 20)
-        self.assertEqual(len({r["id"] for r in rows}), 20)
+        self.assertEqual(len(rows), 2 * len(baseline_cases()))
+        self.assertEqual(len({r["id"] for r in rows}), len(rows))
         for precision in ("fp32", "fp64"):
             selected = [r for r in rows if r["precision"] == precision]
-            self.assertEqual(sum(r["steps"] for r in selected), 55917)
+            self.assertEqual(sum(r["steps"] for r in selected), sum(c["steps"] for c in baseline_cases()))
             self.assertEqual(sum(r["scene"].startswith("close-") for r in selected), 0)
             self.assertEqual(
                 {(r["reference_case"], r["law"], r["globalization"]) for r in selected},
@@ -33,12 +33,12 @@ class TestPrecisionRunner(unittest.TestCase):
             self.assertTrue(all(r["publish_policy"] == "current_iterate" for r in selected))
 
     def test_default_fp32_list(self):
-        """List only ten FP32 cases by default so baseline trajectories are not rerun."""
+        """List only FP32 cases by default so baseline trajectories are not rerun."""
         output = io.StringIO()
         with patch("sys.argv", ["run_precision", "--list"]), redirect_stdout(output):
             self.assertEqual(main(), 0)
         rows = json.loads(output.getvalue())
-        self.assertEqual(len(rows), 10)
+        self.assertEqual(len(rows), len(baseline_cases()))
         self.assertTrue(all(r["precision"] == "fp32" for r in rows))
 
     def test_explicit_input_manifest(self):

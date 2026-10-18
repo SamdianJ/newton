@@ -254,15 +254,11 @@ class TestSceneRunner(unittest.TestCase):
         )
 
     def test_matrix(self):
-        """Keep exactly nine Franka variants and one reuse-only Sharpa case."""
+        """List the production Franka case and the reuse-only Sharpa case."""
         cases = baseline.cases()
-        self.assertEqual(len({c["id"] for c in cases}), 10)
-        franka = [c for c in cases if not c.get("reuse_only")]
-        self.assertEqual(
-            {(c["law"], c["globalization"]) for c in franka},
-            {(law, g) for law in baseline.LAWS for g in baseline.GLOBALIZATIONS},
-        )
-        self.assertEqual(sum(c["steps"] for c in cases), 55917)
+        self.assertEqual([(c["law"], c["globalization"]) for c in cases], [("C-IE", "ArmijoOrResNorm")] * 2)
+        self.assertEqual([bool(c.get("reuse_only")) for c in cases], [False, True])
+        self.assertEqual(sum(c["steps"] for c in cases), 13917)
 
     def test_wrong_import_origin_rejected(self):
         """Reject an imported solver from a different checkout."""

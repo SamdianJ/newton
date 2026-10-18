@@ -66,7 +66,6 @@ class ClothBenchmark:
         self.rest_area = area
         self.solver = SolverMonolithic(
             self.model,
-            contact_model="C-IE",
             friction_velocity_scale=0.1,
             cloth_inputs=[
                 SolverMonolithic.ClothInput(
@@ -79,7 +78,6 @@ class ClothBenchmark:
             precision=SolverMonolithic.Precision.FP64,
             pcg_mode=SolverMonolithic.PCGMode(pcg_mode),
             use_cuda_graph=use_cuda_graph,
-            globalization="ResNorm",
             newton_max_iterations=60,
             linear_max_iterations=300,
             linear_tolerance=1e-4,

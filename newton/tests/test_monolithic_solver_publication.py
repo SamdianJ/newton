@@ -13,90 +13,80 @@ import warp as wp
 
 from newton._src.solvers.monolithic import solver_monolithic
 from newton._src.solvers.monolithic.contact import ContactObjective, ContactStatus
+from newton._src.solvers.monolithic.contact_batch import _ContactBatch
 from newton._src.solvers.monolithic.solver_monolithic import _StepFailure
-from newton.tests.test_monolithic_contact_components import fixture, state, tangent
+from newton.tests.test_monolithic_contact_components import fixture, native, state
 from newton.tests.test_monolithic_solver_coupled import assert_snapshot, scene, snapshot, solver
 from newton.tests.unittest_utils import add_function_test, get_test_devices
 
 
-def candidate(model, law="C-EE", *, publish_policy="last_accepted", **options):
-    return solver(
-        model,
-        law,
-        globalization="ArmijoOrResNorm",
-        alignment_policy="mask",
-        publish_policy=publish_policy,
-        allow_nonconservative_energy=True,
-        **options,
-    )
+def candidate(model, *, publish_policy="last_accepted", **options):
+    return solver(model, alignment_policy="mask", publish_policy=publish_policy, **options)
 
 
 def test_policy_binding(test, device):
-    """Require explicit heuristic energy and bind all policies into state identity."""
+    """Report heuristic energy under masking and bind all policies into state identity."""
     model = scene(device)
     strict = solver(model)
     original = strict.create_state(dt=0.001)
-    for law in ("C-EE", "C-IE", "C-II"):
-        run = candidate(model, law)
-        with test.assertRaises(ValueError):
-            run._states.validate(original)
-        before = run.create_state(dt=0.001)
-        with test.assertRaises(ValueError):
-            strict._states.validate(before)
-        run.step(before, before, model.control(), dt=0.001)
-        test.assertFalse(run.last_stats.rolled_back, run.last_stats)
-        test.assertFalse(run._conservative_energy())
-        test.assertEqual(run.last_stats.variational["energy_acceptance"], "heuristic")
-    for options in (
-        {"alignment_policy": "invalid"},
-        {"publish_policy": "legacy"},
-        {"alignment_policy": "mask", "globalization": "ArmijoOrResNorm"},
-    ):
+    run = candidate(model)
+    with test.assertRaises(ValueError):
+        run._states.validate(original)
+    before = run.create_state(dt=0.001)
+    with test.assertRaises(ValueError):
+        strict._states.validate(before)
+    run.step(before, before, model.control(), dt=0.001)
+    test.assertFalse(run.last_stats.rolled_back, run.last_stats)
+    test.assertFalse(run._conservative_energy())
+    test.assertEqual(run.last_stats.variational["energy_acceptance"], "heuristic")
+    for options in ({"alignment_policy": "invalid"}, {"publish_policy": "legacy"}):
         with test.assertRaises(ValueError):
             solver(model, **options)
 
 
 def test_mask_contact(test, device):
     """Mask whole contact terms while retaining invalid-geometry and capacity gates."""
-    for law in ("C-EE", "C-IE", "C-II"):
-        model, xn = fixture(device, "plane")
-        obj = ContactObjective(
-            model,
-            np.arange(model.particle_count, dtype=np.int32),
-            q_dof_count=2,
-            contact_model=law,
-            normal_stiffness=1e7,
-            friction_coefficient=0.5,
-            friction_velocity_scale=0.01,
-            smoothing_width=1e-4,
-            particle_radius=0.001,
-            alignment_policy="mask",
-        )
-        inverted = xn.copy()
-        inverted[[1, 2]] = inverted[[2, 1]]
-        obj.begin_step(*state(model, inverted, np.zeros(2)))
-        obj.evaluate(*state(model, inverted, np.zeros(2)), dt=0.001)
-        test.assertEqual(obj.flags.numpy()[0], ContactStatus.SUCCESS)
-        test.assertGreater(obj.omitted.numpy()[:, 2].sum(), 0)
-        test.assertEqual(np.count_nonzero(obj.energy.numpy()), 0)
-        test.assertEqual(np.count_nonzero(obj.residual.numpy()), 0)
-        test.assertEqual(np.count_nonzero(obj.weights.numpy()), 0)
-        workspace, generation, assembly = tangent(obj)
-        test.assertEqual(assembly.contact_factors.count.numpy()[0], 0)
-        test.assertEqual(int(workspace.finalize_assembly(generation=generation).status), 0)
-        for invalid in ("nan", "degenerate"):
-            x = inverted.copy()
-            if invalid == "nan":
-                x[0, 0] = np.nan
-            else:
-                x[1] = x[0]
-            obj.evaluate(*state(model, x, np.zeros(2)), dt=0.001)
-            test.assertNotEqual(obj.flags.numpy()[0], ContactStatus.SUCCESS)
-        obj.begin_step(*state(model, xn, np.zeros(2)))
-        obj.evaluate(*state(model, xn, np.zeros(2)), dt=0.001)
-        test.assertEqual(np.count_nonzero(obj.omitted.numpy()), 0)
-        tangent(obj, capacity=0)
-        test.assertEqual(obj.flags.numpy()[0], ContactStatus.CAPACITY)
+    model, xn = fixture(device, "plane")
+    obj = ContactObjective(
+        model,
+        np.arange(model.particle_count, dtype=np.int32),
+        q_dof_count=2,
+        normal_stiffness=1e7,
+        friction_coefficient=0.5,
+        friction_velocity_scale=0.01,
+        smoothing_width=1e-4,
+        particle_radius=0.001,
+        alignment_policy="mask",
+    )
+    batch = native(obj)
+    inverted = xn.copy()
+    inverted[[1, 2]] = inverted[[2, 1]]
+    batch.begin_step(*state(model, inverted, np.zeros(2)))
+    batch.evaluate(*state(model, inverted, np.zeros(2)), dt=0.001)
+    test.assertEqual(int(batch.flags.numpy()[0]), ContactStatus.SUCCESS)
+    test.assertGreater(batch.omitted.numpy()[:, 2].sum(), 0)
+    test.assertEqual(np.count_nonzero(batch.pool.energy.result.numpy()), 0)
+    test.assertEqual(np.count_nonzero(batch.pool.residual.result.numpy()), 0)
+    test.assertEqual(np.count_nonzero(batch.weights.numpy()), 0)
+    test.assertEqual(int(batch.pool.records.count.numpy()[0]), 0)
+    for invalid in ("nan", "degenerate"):
+        x = inverted.copy()
+        if invalid == "nan":
+            x[0, 0] = np.nan
+        else:
+            x[1] = x[0]
+        batch.evaluate(*state(model, x, np.zeros(2)), dt=0.001)
+        test.assertNotEqual(int(batch.flags.numpy()[0]), ContactStatus.SUCCESS)
+    batch.begin_step(*state(model, xn, np.zeros(2)))
+    batch.evaluate(*state(model, xn, np.zeros(2)), dt=0.001)
+    test.assertEqual(np.count_nonzero(batch.omitted.numpy()), 0)
+    test.assertGreater(int(batch.pool.records.count.numpy()[0]), 0)
+    # A zero pool admits no partial contact; the drop is reported, not published.
+    empty = _ContactBatch(obj, batch_capacity=obj.count, capacity=0)
+    empty.begin_step(*state(model, xn, np.zeros(2)))
+    empty.evaluate(*state(model, xn, np.zeros(2)), dt=0.001)
+    test.assertEqual(int(empty.pool.records.count.numpy()[0]), 0)
+    test.assertGreater(int(empty.pool.records.dropped.numpy()[0]), 0)
 
 
 def test_last_accepted_publication(test, device):

@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 The Newton Developers
 # SPDX-License-Identifier: Apache-2.0
 
-"""Exercise complete-candidate pooled contacts through the real solver lifecycle."""
+"""Exercise the contact pool ledger through the real solver lifecycle."""
 
 import tempfile
 import unittest
@@ -12,23 +12,22 @@ import numpy as np
 import warp as wp
 
 from newton._src.solvers.monolithic import solver_monolithic
-from newton._src.solvers.monolithic.contact import ContactObjective
-from newton._src.solvers.monolithic.contact_pipeline import _PooledContactObjective
 from newton._src.solvers.monolithic.linear_types import MonolithicLinearGeneration, MonolithicLinearStatus
 from newton.tests.test_monolithic_contact_actor_pairs import physical
-from newton.tests.test_monolithic_contact_batch import batch_matrix
+from newton.tests.test_monolithic_contact_components import batch_matrix
 from newton.tests.test_monolithic_solver_actor_contacts import contact_scene, contact_solver, contact_state, frame
 from newton.tests.test_monolithic_solver_coupled import assert_snapshot, independent_objective, scene, snapshot, solver
 from newton.tests.test_monolithic_solver_rigid import assert_physical
 from newton.tests.unittest_utils import add_function_test, get_test_devices
 from scripts.monolithic_reference.actor_contact_oracle import fixture_terms
-from scripts.monolithic_reference.compare_contact_dataflows import _check_contact, audit_contact_state, verify_contract
+from scripts.monolithic_reference.contact_audit import _check_contact, audit_contact_state, verify_contract
 from scripts.monolithic_reference.contact_full_oracle import evaluate_stream
+from scripts.monolithic_reference.contact_routes import pooled_audit_route
 
 
 def pooled_solver(model, **options):
-    """Select B2 at the existing private constructor seam, before any full contact allocation."""
-    with patch.object(solver_monolithic, "ContactObjective", _PooledContactObjective):
+    """Construct the complete-candidate pooled audit objective, the reference for spatial selection."""
+    with pooled_audit_route():
         return contact_solver(model, **options)
 
 
@@ -52,7 +51,6 @@ def check_sphere_publication(test, run, state, start):
         run._actors,
         physical(state),
         start,
-        c.contact_model,
         radius=radius,
         stiffness=stiffness,
         mu=mu,
@@ -94,54 +92,50 @@ def check_sphere_publication(test, run, state, start):
 
 
 def test_sphere_steps(test, device):
-    """Advance sphere-source legacy/pool trajectories independently under original gates and all laws."""
+    """Advance sphere-source complete-candidate and spatial trajectories independently under original gates."""
     for graph in (False, True) if device.is_cuda else (False,):
-        for law in ("C-EE", "C-IE", "C-II"):
-            with test.subTest(graph=graph, law=law):
-                options = {"law": law, "mode": "production", "graph": graph}
-                with patch.object(solver_monolithic, "ContactObjective", ContactObjective):
-                    legacy = contact_solver(sphere_static_scene(device), **options)
-                run = pooled_solver(sphere_static_scene(device), **options)
-                verify_contract(legacy, run)
-                states = [contact_state(owner, "R-static") for owner in (legacy, run)]
-                with patch.object(solver_monolithic, "ContactObjective", ContactObjective):
-                    audit = contact_solver(sphere_static_scene(device), **options)
-                for _ in range(2):
-                    starts = [physical(state) for state in states]
-                    for owner, state in zip((legacy, run), states, strict=True):
-                        owner.step(state, state, owner.model.control(), dt=0.001)
-                        test.assertTrue(owner.last_stats.converged, owner.last_stats)
-                        test.assertFalse(owner.last_stats.rolled_back)
-                        owner._states.validate(state)
-                    assert_physical(test, frame(legacy, states[0]), frame(run, states[1]))
-                    check_sphere_publication(test, run, states[1], starts[1])
-                    result = audit_contact_state(audit, physical(states[0]), starts[0], 0.001)
-                    test.assertEqual(result["full_count"], 5952)
+        with test.subTest(graph=graph):
+            options = {"mode": "production", "graph": graph}
+            complete = pooled_solver(sphere_static_scene(device), **options)
+            audit = pooled_solver(sphere_static_scene(device), **options)
+            run = contact_solver(sphere_static_scene(device), **options)
+            verify_contract(complete, run)
+            states = [contact_state(owner, "R-static") for owner in (complete, run)]
+            for _ in range(2):
+                starts = [physical(state) for state in states]
+                for owner, state in zip((complete, run), states, strict=True):
+                    owner.step(state, state, owner.model.control(), dt=0.001)
+                    test.assertTrue(owner.last_stats.converged, owner.last_stats)
+                    test.assertFalse(owner.last_stats.rolled_back)
+                    owner._states.validate(state)
+                assert_physical(test, frame(complete, states[0]), frame(run, states[1]))
+                check_sphere_publication(test, run, states[1], starts[1])
+                result = audit_contact_state(audit, physical(states[0]), starts[0], 0.001)
+                test.assertEqual(result["full_count"], 5952)
 
 
 def test_sphere_checkpoint(test, device):
     """Resume active sphere contacts into a distinct output and retain exact physical authority and forces."""
-    for law in ("C-EE", "C-IE", "C-II"):
-        options = {"law": law, "mode": "production", "graph": device.is_cuda}
-        run = pooled_solver(sphere_static_scene(device), **options)
-        state = contact_state(run, "R-static")
+    options = {"mode": "production", "graph": device.is_cuda}
+    run = contact_solver(sphere_static_scene(device), **options)
+    state = contact_state(run, "R-static")
+    run.step(state, state, run.model.control(), dt=0.001)
+    test.assertTrue(run.last_stats.converged, run.last_stats)
+    with tempfile.TemporaryDirectory() as directory:
+        path = Path(directory) / "sphere.npz"
+        run.save_checkpoint(state, path)
+        resumed = contact_solver(sphere_static_scene(device), **options)
+        restored = resumed.create_state(dt=0.001)
+        resumed.load_checkpoint(restored, path)
+        assert_snapshot(test, restored, snapshot(state))
+        start = physical(state)
         run.step(state, state, run.model.control(), dt=0.001)
+        output = resumed.create_state(dt=0.001)
+        resumed.step(restored, output, resumed.model.control(), dt=0.001)
         test.assertTrue(run.last_stats.converged, run.last_stats)
-        with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / "sphere.npz"
-            run.save_checkpoint(state, path)
-            resumed = pooled_solver(sphere_static_scene(device), **options)
-            restored = resumed.create_state(dt=0.001)
-            resumed.load_checkpoint(restored, path)
-            assert_snapshot(test, restored, snapshot(state))
-            start = physical(state)
-            run.step(state, state, run.model.control(), dt=0.001)
-            output = resumed.create_state(dt=0.001)
-            resumed.step(restored, output, resumed.model.control(), dt=0.001)
-            test.assertTrue(run.last_stats.converged, run.last_stats)
-            test.assertTrue(resumed.last_stats.converged, resumed.last_stats)
-            assert_snapshot(test, output, snapshot(state))
-            check_sphere_publication(test, resumed, output, start)
+        test.assertTrue(resumed.last_stats.converged, resumed.last_stats)
+        assert_snapshot(test, output, snapshot(state))
+        check_sphere_publication(test, resumed, output, start)
 
 
 def test_pooled_steps(test, device):
@@ -150,73 +144,66 @@ def test_pooled_steps(test, device):
     if device.is_cuda:
         modes.append(("production", True))
     for mode, graph in modes:
-        for law in ("C-EE", "C-IE", "C-II"):
-            run = pooled_solver(contact_scene(device, "chain"), permuted=True, law=law, mode=mode, graph=graph)
-            c = run._contact
-            test.assertFalse(hasattr(c, "factor_support"))
-            test.assertIsNotNone(run._linear._fixed_bsr)
-            s = contact_state(run, "chain")
-            for _ in range(2):
-                run.step(s, s, run.model.control(), dt=0.001)
-                test.assertTrue(run.last_stats.converged, run.last_stats)
-                test.assertFalse(run.last_stats.rolled_back)
-                test.assertEqual(c.pool.records.dropped.numpy()[0], 0)
-                force = run.get_contact_forces(s)
-                expected = c.pool.force.result.numpy()
-                n = 3 * run.model.particle_count
-                np.testing.assert_array_equal(force.particle_force.ravel(), expected[:n])
-                np.testing.assert_array_equal(force.body_wrench.ravel(), expected[n:])
-                rows = np.asarray(run._actors.maps["joint_dof_to_global"])
-                residual = c.pool.residual.result.numpy()
-                valid = rows >= 0
-                np.testing.assert_array_equal(force.joint_force[valid], -residual[rows[valid]])
-                test.assertTrue(force.force_valid)
-                test.assertEqual(force.force_generation, run.last_stats.step_generation)
-                test.assertEqual(run._generation.contact_generation, c.evaluation_generation)
-                test.assertEqual(
-                    run.last_stats.variational["contact_pool"]["evaluation_generation"], c.evaluation_generation
-                )
-                test.assertFalse(run.last_stats.variational["contact_pool"]["tainted"])
+        run = contact_solver(contact_scene(device, "chain"), permuted=True, mode=mode, graph=graph)
+        c = run._contact
+        test.assertIsNotNone(run._linear._fixed_bsr)
+        s = contact_state(run, "chain")
+        for _ in range(2):
+            run.step(s, s, run.model.control(), dt=0.001)
+            test.assertTrue(run.last_stats.converged, run.last_stats)
+            test.assertFalse(run.last_stats.rolled_back)
+            test.assertEqual(c.pool.records.dropped.numpy()[0], 0)
+            force = run.get_contact_forces(s)
+            expected = c.pool.force.result.numpy()
+            n = 3 * run.model.particle_count
+            np.testing.assert_array_equal(force.particle_force.ravel(), expected[:n])
+            np.testing.assert_array_equal(force.body_wrench.ravel(), expected[n:])
+            rows = np.asarray(run._actors.maps["joint_dof_to_global"])
+            residual = c.pool.residual.result.numpy()
+            valid = rows >= 0
+            np.testing.assert_array_equal(force.joint_force[valid], -residual[rows[valid]])
+            test.assertTrue(force.force_valid)
+            test.assertEqual(force.force_generation, run.last_stats.step_generation)
+            test.assertEqual(run._generation.contact_generation, c.evaluation_generation)
+            test.assertEqual(
+                run.last_stats.variational["contact_pool"]["evaluation_generation"], c.evaluation_generation
+            )
+            test.assertFalse(run.last_stats.variational["contact_pool"]["tainted"])
 
 
 def test_pooled_same_state(test, device):
     """Compare actual post-step complete contact E/r/B with an independently enumerated mathematical oracle."""
     for kind in ("A-R", "R-R", "R-T", "R-static", "chain"):
-        for law in ("C-EE", "C-IE", "C-II"):
-            run = pooled_solver(contact_scene(device, kind, before=True), permuted=True, law=law, mode="production")
-            s = contact_state(run, kind)
-            run.step(s, s, run.model.control(), dt=0.001)
-            test.assertTrue(run.last_stats.converged, run.last_stats)
-            expected_e, expected_r, expected_b = fixture_terms(
-                run.model, run._actors, physical(s), physical(run._original), law
-            )
-            c = run._contact
-            np.testing.assert_allclose(c.energy.numpy(), expected_e, rtol=1e-8, atol=1e-12)
-            np.testing.assert_allclose(c.residual.numpy(), expected_r, rtol=1e-8, atol=1e-10)
-            test.assertLess(
-                np.linalg.norm(batch_matrix(c._batch) - expected_b) / max(1, np.linalg.norm(expected_b)), 1e-5
-            )
-            forces = run.get_contact_forces(s)
-            total = forces.particle_force.sum(axis=0) + forces.body_wrench[:, :3].sum(axis=0)
-            centers = np.zeros((run.model.body_count, 3))
-            centers[list(run._articulation_actor.body_indices)] = run._kinematics.com.numpy()
-            for i, actor in enumerate(run._rigid.actors):
-                centers[actor.body_indices[0]] = s._monolithic_coupled.rigid_com.numpy()[i]
-            torque = np.cross(s.particle_q.numpy(), forces.particle_force).sum(axis=0)
-            torque += (forces.body_wrench[:, 3:] + np.cross(centers, forces.body_wrench[:, :3])).sum(axis=0)
-            bodies = run.model.shape_body.numpy()
-            for pair in run.last_stats.variational["actor_contact_pairs"]:
-                for end, shape in enumerate((pair["source"], pair["target"])):
-                    if shape >= 0 and bodies[shape] < 0:
-                        total += np.asarray(pair["world_wrench"])[end, :3]
-                        torque += np.asarray(pair["world_wrench"])[end, 3:]
-            test.assertLess(np.linalg.norm(total), 1e-8)
-            test.assertLess(np.linalg.norm(torque), 1e-8)
+        run = contact_solver(contact_scene(device, kind, before=True), permuted=True, mode="production")
+        s = contact_state(run, kind)
+        run.step(s, s, run.model.control(), dt=0.001)
+        test.assertTrue(run.last_stats.converged, run.last_stats)
+        expected_e, expected_r, expected_b = fixture_terms(run.model, run._actors, physical(s), physical(run._original))
+        c = run._contact
+        np.testing.assert_allclose(c.energy.numpy(), expected_e, rtol=1e-8, atol=1e-12)
+        np.testing.assert_allclose(c.residual.numpy(), expected_r, rtol=1e-8, atol=1e-10)
+        test.assertLess(np.linalg.norm(batch_matrix(c._batch) - expected_b) / max(1, np.linalg.norm(expected_b)), 1e-5)
+        forces = run.get_contact_forces(s)
+        total = forces.particle_force.sum(axis=0) + forces.body_wrench[:, :3].sum(axis=0)
+        centers = np.zeros((run.model.body_count, 3))
+        centers[list(run._articulation_actor.body_indices)] = run._kinematics.com.numpy()
+        for i, actor in enumerate(run._rigid.actors):
+            centers[actor.body_indices[0]] = s._monolithic_coupled.rigid_com.numpy()[i]
+        torque = np.cross(s.particle_q.numpy(), forces.particle_force).sum(axis=0)
+        torque += (forces.body_wrench[:, 3:] + np.cross(centers, forces.body_wrench[:, :3])).sum(axis=0)
+        bodies = run.model.shape_body.numpy()
+        for pair in run.last_stats.variational["actor_contact_pairs"]:
+            for end, shape in enumerate((pair["source"], pair["target"])):
+                if shape >= 0 and bodies[shape] < 0:
+                    total += np.asarray(pair["world_wrench"])[end, :3]
+                    torque += np.asarray(pair["world_wrench"])[end, 3:]
+        test.assertLess(np.linalg.norm(total), 1e-8)
+        test.assertLess(np.linalg.norm(torque), 1e-8)
 
 
 def test_pooled_assembly_generation(test, device):
     """Reject duplicate or stale contact appends without altering the new assembly."""
-    run = pooled_solver(contact_scene(device, "chain"))
+    run = contact_solver(contact_scene(device, "chain"))
     s = contact_state(run, "chain")
     run.step(s, s, run.model.control(), dt=0.001)
     test.assertTrue(run.last_stats.converged, run.last_stats)
@@ -241,7 +228,7 @@ def test_pooled_assembly_generation(test, device):
 
 def test_pooled_capacity_and_failure(test, device):
     """Continue after complete capacity drops, while hard matrix errors roll back all published state."""
-    run = pooled_solver(contact_scene(device, "A-R"), contact_factor_capacity=0)
+    run = contact_solver(contact_scene(device, "A-R"), contact_factor_capacity=0)
     s = contact_state(run, "A-R")
     with test.assertWarnsRegex(RuntimeWarning, "discarded.*complete contacts"):
         run.step(s, s, run.model.control(), dt=0.001)
@@ -252,7 +239,7 @@ def test_pooled_capacity_and_failure(test, device):
     test.assertEqual(detail["admitted"], 0)
     for values in (run.get_contact_forces(s).particle_force, run.get_contact_forces(s).body_wrench):
         test.assertFalse(values.any())
-    run = pooled_solver(contact_scene(device, "chain"), publish_policy="last_accepted")
+    run = contact_solver(contact_scene(device, "chain"), publish_policy="last_accepted")
     s = contact_state(run, "chain")
     before = snapshot(s)
     builder = run._linear._fixed_bsr[0]
@@ -270,25 +257,24 @@ def test_pooled_capacity_and_failure(test, device):
 
 
 def test_pooled_checkpoint(test, device):
-    """Restore schema4 physical authority and pool identity, rejecting legacy identity without partial loads."""
+    """Restore schema4 physical authority and pool identity, rejecting another dataflow without partial loads."""
     model = contact_scene(device, "chain")
-    run = pooled_solver(model, mode="production", graph=device.is_cuda)
+    run = contact_solver(model, mode="production", graph=device.is_cuda)
     s = contact_state(run, "chain")
     run.step(s, s, model.control(), dt=0.001)
     test.assertTrue(run.last_stats.converged, run.last_stats)
     with tempfile.TemporaryDirectory() as directory:
         path = Path(directory) / "state.npz"
         run.save_checkpoint(s, path)
-        resumed = pooled_solver(model, mode="production", graph=device.is_cuda)
+        resumed = contact_solver(model, mode="production", graph=device.is_cuda)
         restored = resumed.create_state(dt=0.001)
         resumed.load_checkpoint(restored, path)
         assert_snapshot(test, restored, snapshot(s))
-        with patch.object(solver_monolithic, "ContactObjective", ContactObjective):
-            legacy = contact_solver(model)
-        target = legacy.create_state(dt=0.001)
+        complete = pooled_solver(model)
+        target = complete.create_state(dt=0.001)
         before = snapshot(target)
         with test.assertRaises(ValueError):
-            legacy.load_checkpoint(target, path)
+            complete.load_checkpoint(target, path)
         assert_snapshot(test, target, before)
         run.step(s, s, model.control(), dt=0.001)
         resumed.step(restored, restored, model.control(), dt=0.001)
@@ -299,7 +285,7 @@ def test_pooled_checkpoint(test, device):
 
 def test_pooled_output_rebind(test, device):
     """Consume rebound pooled outputs and rebind result graphs before combining or publishing forces."""
-    run = pooled_solver(contact_scene(device, "chain"), mode="production", graph=device.is_cuda)
+    run = contact_solver(contact_scene(device, "chain"), mode="production", graph=device.is_cuda)
     s = contact_state(run, "chain")
     run.step(s, s, run.model.control(), dt=0.001)
     test.assertTrue(run.last_stats.converged, run.last_stats)
@@ -330,36 +316,32 @@ def test_pooled_output_rebind(test, device):
 
 
 def test_pooled_device_energy(test, device):
-    """Preserve legacy A+T native objective gates in device iteration and graph/plain energy packets."""
+    """Preserve A+T native objective gates in device iteration and graph/plain energy packets."""
     modes = [("diagnostic", False), ("production", False)]
     if device.is_cuda:
         modes.append(("production", True))
-    for law in ("C-EE", "C-IE", "C-II"):
-        for mode, graph in modes:
-            with patch.object(solver_monolithic, "ContactObjective", _PooledContactObjective):
-                run = solver(scene(device, fixed=True), law=law, mode=mode, graph=graph)
-            s = run.create_state(dt=0.001)
-            run.step(s, s, run.model.control(), dt=0.001)
-            test.assertTrue(run.last_stats.converged, run.last_stats)
-            expected_e, expected_r, expected_b = independent_objective(
-                run, s.joint_q.numpy(), s.particle_q.numpy(), 0.001
-            )
-            energy, residual, absolute = run._evaluate(s, 0.001, device_result=True)
-            host_e, host_r, host_abs = run._evaluate(s, 0.001, device_result=False)
-            test.assertLessEqual(abs(energy - expected_e), 5.820766091346741e-11 / 8)
-            np.testing.assert_allclose(residual.numpy(), expected_r, rtol=0, atol=2.0935893019213836e-9 / 8)
-            np.testing.assert_array_equal(residual.numpy(), host_r)
-            test.assertLessEqual(abs(energy - host_e), 5.820766091346741e-11 / 8)
-            test.assertLessEqual(abs(absolute - host_abs), 5.820766091346741e-11 / 8)
-            run._assemble(run._metrics["nonlinear_iterations"])
-            np.testing.assert_allclose(
-                run._linear.densify_for_test(generation=run._generation).raw_matrix, expected_b, rtol=2e-5, atol=2e-3
-            )
+    for mode, graph in modes:
+        run = solver(scene(device, fixed=True), mode=mode, graph=graph)
+        s = run.create_state(dt=0.001)
+        run.step(s, s, run.model.control(), dt=0.001)
+        test.assertTrue(run.last_stats.converged, run.last_stats)
+        expected_e, expected_r, expected_b = independent_objective(run, s.joint_q.numpy(), s.particle_q.numpy(), 0.001)
+        energy, residual, absolute = run._evaluate(s, 0.001, device_result=True)
+        host_e, host_r, host_abs = run._evaluate(s, 0.001, device_result=False)
+        test.assertLessEqual(abs(energy - expected_e), 5.820766091346741e-11 / 8)
+        np.testing.assert_allclose(residual.numpy(), expected_r, rtol=0, atol=2.0935893019213836e-9 / 8)
+        np.testing.assert_array_equal(residual.numpy(), host_r)
+        test.assertLessEqual(abs(energy - host_e), 5.820766091346741e-11 / 8)
+        test.assertLessEqual(abs(absolute - host_abs), 5.820766091346741e-11 / 8)
+        run._assemble(run._metrics["nonlinear_iterations"])
+        np.testing.assert_allclose(
+            run._linear.densify_for_test(generation=run._generation).raw_matrix, expected_b, rtol=2e-5, atol=2e-3
+        )
 
 
 def test_pooled_rejected_trial(test, device):
     """Recompute accepted E/r/B and force after a nonfinite trial and an eligible Stopped publication."""
-    run = pooled_solver(
+    run = contact_solver(
         contact_scene(device, "chain"), mode="production", graph=device.is_cuda, publish_policy="last_accepted"
     )
     before = contact_state(run, "chain")

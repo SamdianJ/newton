@@ -13,8 +13,7 @@ import numpy as np
 import newton
 from newton._src.solvers.monolithic import solver_monolithic
 from newton._src.solvers.monolithic.articulation import _configuration_digest, _TreeKinematics
-from newton._src.solvers.monolithic.contact import ContactObjective
-from newton._src.solvers.monolithic.contact_pipeline import _PooledContactObjective
+from scripts.monolithic_reference.contact_routes import pooled_audit_route
 from scripts.monolithic_reference.contact_system_audit import ContactSystemAudit
 from scripts.monolithic_reference.coupled_fixtures import NORMAL
 
@@ -97,8 +96,6 @@ def certify_configuration(run, fields, reference_digest):
     c = run._contact
     algorithm = {"contact_dataflow", "contact_resources", "contact_spatial"}
     if run._contact_spatial:
-        if c.law_margin != 0:
-            raise ValueError("Frozen experimental recipe requires zero law margin")
         expected = {
             "contact_dataflow": np.frombuffer(b"spatial-pool/newton-frozen/v1", np.uint8),
             "contact_resources": np.array(
@@ -111,7 +108,7 @@ def certify_configuration(run, fields, reference_digest):
                 ],
                 np.int64,
             ),
-            "contact_spatial": np.array([c.law_margin], np.float64),
+            "contact_spatial": np.zeros(1, np.float64),
         }
         for name, value in expected.items():
             actual = projected.pop(name)
@@ -123,8 +120,8 @@ def certify_configuration(run, fields, reference_digest):
         # The frozen constructor used the full static factor budget. Preserve its physical guard.
         guard[1] = 3 * c.count
         removed += [*sorted(algorithm), "guard_capacity[1]: full static factor budget"]
-    elif run._contact_pool or projected.keys() & algorithm:
-        raise ValueError("Frozen robot comparison supports legacy Q1 or explicit B3")
+    else:
+        raise ValueError("Frozen robot comparison requires the spatial dataflow")
     if _configuration_digest(projected).hex() != reference_digest:
         raise ValueError("Projected configuration differs from frozen reference")
     return _ConfigurationCertificate(run, fields, reference_digest, removed)
@@ -156,8 +153,8 @@ class _ConfigurationCertificate:
 class FrozenRobotFactory:
     """Select a bounded experiment at construction without changing the solver API/default."""
 
-    def __init__(self, scene, *, dataflow="legacy"):
-        if scene not in ("franka-cube", "sharpa-recorded-10mm") or dataflow not in ("legacy", "spatial", "default"):
+    def __init__(self, scene, *, dataflow="spatial"):
+        if scene not in ("franka-cube", "sharpa-recorded-10mm") or dataflow not in ("spatial", "default"):
             raise ValueError("Unsupported frozen robot recipe")
         self.scene, self.dataflow = scene, dataflow
         self.fields, self.run, self.recorder = None, None, None
@@ -174,28 +171,17 @@ class FrozenRobotFactory:
 
         if self.run is not None or "contact_factor_capacity" in options:
             raise ValueError("Robot recipe cannot be reused or override resources")
-        if self.dataflow != "legacy":
-            # Sharpa retains the complete static resource bounds; calibration may reduce them later.
-            # Derive the exact supported enumeration from compact metadata, not a shape-count guess.
-            with patch.object(solver_monolithic, "ContactObjective", _PooledContactObjective):
-                complete = solver_monolithic.SolverMonolithic(model, contact_factor_capacity=0, **options)
-            resources = {}
-            if self.dataflow == "spatial":
-                resources["contact_candidate_capacity"] = (
-                    8192 if self.scene == "franka-cube" else complete._contact.count
-                )
-                resources["contact_factor_capacity"] = (
-                    24576 if self.scene == "franka-cube" else 3 * complete._contact.count
-                )
-            with patch.object(_TreeKinematics, "__init__", capture):
-                run = solver_monolithic.SolverMonolithic(model, **resources, **options)
-            self.recorder = RobotContactRecorder(run, complete)
-        else:
-            with (
-                patch.object(solver_monolithic, "ContactObjective", ContactObjective),
-                patch.object(_TreeKinematics, "__init__", capture),
-            ):
-                run = solver_monolithic.SolverMonolithic(model, **options)
+        # Sharpa retains the complete static resource bounds; calibration may reduce them later.
+        # Derive the exact supported enumeration from compact metadata, not a shape-count guess.
+        with pooled_audit_route():
+            complete = solver_monolithic.SolverMonolithic(model, contact_factor_capacity=0, **options)
+        resources = {}
+        if self.dataflow == "spatial":
+            resources["contact_candidate_capacity"] = 8192 if self.scene == "franka-cube" else complete._contact.count
+            resources["contact_factor_capacity"] = 24576 if self.scene == "franka-cube" else 3 * complete._contact.count
+        with patch.object(_TreeKinematics, "__init__", capture):
+            run = solver_monolithic.SolverMonolithic(model, **resources, **options)
+        self.recorder = RobotContactRecorder(run, complete)
         if len(captured) != 1:
             raise ValueError("Expected one robot constructor configuration")
         self.run, self.fields = run, captured[0]
@@ -218,11 +204,10 @@ class FrozenRobotFactory:
         }
         return {
             "scene": self.scene,
-            "dataflow": "spatial" if self.run._contact_spatial else "legacy",
+            "dataflow": "spatial",
             "precision": "fp64",
             "production_default": self.dataflow == "default",
-            "resources": c.resource_identity.tolist() if self.run._contact_pool else None,
-            "law_margin": c.law_margin if self.run._contact_spatial else None,
+            "resources": c.resource_identity.tolist(),
             "zero_overflow_required": True,
             "additional_approximation_budget": None,
             "numerical_policy": policy,

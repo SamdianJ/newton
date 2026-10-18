@@ -1,42 +1,31 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 The Newton Developers
 # SPDX-License-Identifier: Apache-2.0
 
-"""Compare complete legacy/pool contacts using authenticated native actor inputs.
+"""Audit spatial contact states and actor recordings against the independent full oracle.
 
-Both algorithms run in the imported source version. Each starts from its own
-fresh state and keeps its own configuration identity. No checkpoint is loaded
-across algorithms. Contact audits run on separate instances outside step timing.
+Constructor contracts, native contact evaluation, full-system comparisons and
+recording comparisons for the pooled spatial dataflow; no acceptance is granted.
 """
 
-import argparse
 import dataclasses
 import hashlib
 import json
-import time
 from pathlib import Path
 
 import numpy as np
-import warp as wp
 
 from newton._src.solvers.monolithic.articulation import _configuration_digest
-from newton._src.solvers.monolithic.coupled_kernels import contact_forces
 from newton._src.solvers.monolithic.linear_types import MonolithicLinearGeneration, MonolithicLinearStatus
-from newton.examples.softbody.monolithic_recording import serial, state_arrays
+from newton.examples.softbody.monolithic_recording import serial
 from scripts.monolithic_reference.actor_recording import _semantic, compare_semantic_fields
-from scripts.monolithic_reference.contact_full_oracle import evaluate_stream, export_mesh_fields
-from scripts.monolithic_reference.coupled_fixtures import DIRECTORY, NORMAL, PROTOCOL
-from scripts.monolithic_reference.profiling import capture_count, provenance
-from scripts.monolithic_reference.record_workload import apply_inputs, inputs
-from scripts.monolithic_reference.replay_workload import acceptance_trace
-from scripts.monolithic_reference.retained_assets import FROZEN, INPUTS, retained_hashes, verify_retained
-from scripts.monolithic_reference.run_actor_coupling import CASE, load_case, model_arrays, roles
-from scripts.monolithic_reference.run_baseline import cases as baseline_cases
-from scripts.monolithic_reference.workload_io import digest, load_arrays, open_bundle, write_json
-from scripts.monolithic_reference.workload_objective import replay_objective
-from scripts.monolithic_reference.workload_scene import build_scene, compare_arrays, set_control
+from scripts.monolithic_reference.contact_full_oracle import evaluate_stream
+from scripts.monolithic_reference.profiling import provenance
+from scripts.monolithic_reference.run_actor_coupling import load_case, model_arrays
+from scripts.monolithic_reference.workload_scene import compare_arrays
 
-SCENES = ("actor-coupling", "actor-coupling-before", "actor-coupling-permuted", "tiny-contact", "franka-default")
 ALGORITHM_FIELDS = {"contact_dataflow", "contact_resources"}
+
+
 MODEL_IDENTITY_ADAPTER = "monolithic-owned-geometry/v1"
 
 
@@ -47,20 +36,6 @@ def _exact(a, b):
         )
     except (AssertionError, TypeError) as error:
         raise ValueError("Physical input, policy or sampling differs") from error
-
-
-def _compare_absolute(actual, expected, limits, errors):
-    """Keep original per-field absolute limits; missing and discrete fields remain exact."""
-    if actual.keys() != expected.keys():
-        raise ValueError("State comparison fields differ")
-    for name, value in expected.items():
-        checked = compare_arrays(
-            {name: actual[name]},
-            {name: value},
-            rtol=0,
-            atol=limits.get(name, 0.0) if value.dtype.kind == "f" else 0.0,
-        )
-        errors[name] = max(errors.get(name, 0.0), checked.get(name, 0.0))
 
 
 def _legacy_sampling(contact):
@@ -147,12 +122,14 @@ def _physical_model_arrays(run):
 
 
 def verify_contract(left, right):
-    """Authenticate B1/B2 or B2/B3, allowing only declared algorithm/resource fields."""
-    spatial = left._contact_pool and not left._contact_spatial and right._contact_spatial
-    if not spatial and (left._contact_pool or not right._contact_pool or right._contact_spatial):
-        raise ValueError("Comparison requires legacy/pooled or pooled/spatial algorithms")
-    algorithm_fields = ALGORITHM_FIELDS | ({"contact_spatial"} if spatial else set())
-    labels = ("pooled", "spatial") if spatial else ("legacy", "pooled")
+    """Authenticate a complete-candidate pooled audit run against a spatial run.
+
+    Only declared algorithm/resource fields may differ; all physics must match.
+    """
+    if not (left._contact_pool and not left._contact_spatial and right._contact_spatial):
+        raise ValueError("Comparison requires pooled/spatial algorithms")
+    algorithm_fields = ALGORITHM_FIELDS | {"contact_spatial"}
+    labels = ("pooled", "spatial")
     if left.precision.value != "fp64" or right.precision.value != "fp64":
         raise ValueError("Comparison requires native FP64")
     model_inputs = _physical_model_arrays(left)
@@ -176,7 +153,6 @@ def verify_contract(left, right):
         or left.model.device != right.model.device
         or left._contact.count != right._contact.count
         or left._contact.parameters != right._contact.parameters
-        or left._contact.contact_model != right._contact.contact_model
         or left._contact.alignment_policy != right._contact.alignment_policy
     ):
         raise ValueError("Actor layout or numerical execution policy differs")
@@ -191,12 +167,9 @@ def verify_contract(left, right):
     )
     _exact({name: getattr(left, name) for name in policies}, {name: getattr(right, name) for name in policies})
     a, b = left._coupled_config, right._coupled_config
-    expected_fields = (ALGORITHM_FIELDS, algorithm_fields) if spatial else (set(), ALGORITHM_FIELDS)
-    for run, config, fields in zip((left, right), (a, b), expected_fields, strict=True):
+    for run, config, fields in zip((left, right), (a, b), (ALGORITHM_FIELDS, algorithm_fields), strict=True):
         if config.keys() & algorithm_fields != fields:
             raise ValueError("Unreviewed configuration difference")
-        if not fields:
-            continue
         c = run._contact
         identity = b"spatial-pool/newton-frozen/v1" if run._contact_spatial else b"complete-pool/fixed-tree/v1"
         _exact({"identity": config["contact_dataflow"]}, {"identity": np.frombuffer(identity, dtype=np.uint8)})
@@ -204,7 +177,7 @@ def verify_contract(left, right):
         resources = [c.pool.capacity, c.pool.max_support, c._batch.batch_capacity, config["guard_capacity"][1]]
         if run._contact_spatial:
             resources.append(c.candidate_capacity)
-            _exact({"margin": config["contact_spatial"]}, {"margin": np.array([c.law_margin], np.float64)})
+            _exact({"margin": config["contact_spatial"]}, {"margin": np.zeros(1, np.float64)})
         _exact({"resources": config["contact_resources"]}, {"resources": np.array(resources, np.int64)})
     common_config = {name: value for name, value in a.items() if name not in algorithm_fields}
     right_config = {name: value for name, value in b.items() if name not in algorithm_fields}
@@ -212,16 +185,15 @@ def verify_contract(left, right):
         name: {label: serial(config.get(name)) for label, config in zip(labels, (a, b), strict=True)}
         for name in sorted(algorithm_fields)
     }
-    if spatial:
-        # The old combined field contains a physical guard and a contact resource
-        # budget. Only the latter may vary in the explicit capacity experiment.
-        for config in (common_config, right_config):
-            if config["guard_capacity"].shape != (2,):
-                raise ValueError("Invalid guard/resource configuration")
-            config["guard_capacity"] = config["guard_capacity"][:1]
-        differences["contact_factor_capacity"] = {
-            label: int(config["guard_capacity"][1]) for label, config in zip(labels, (a, b), strict=True)
-        }
+    # The old combined field contains a physical guard and a contact resource
+    # budget. Only the latter may vary in the explicit capacity experiment.
+    for config in (common_config, right_config):
+        if config["guard_capacity"].shape != (2,):
+            raise ValueError("Invalid guard/resource configuration")
+        config["guard_capacity"] = config["guard_capacity"][:1]
+    differences["contact_factor_capacity"] = {
+        label: int(config["guard_capacity"][1]) for label, config in zip(labels, (a, b), strict=True)
+    }
     _exact(common_config, right_config)
     # Bind the exact compared values, rather than asserting two different
     # aggregate configuration hashes happen to represent the same physics.
@@ -277,7 +249,8 @@ def compare_actor_contact_recordings(reference, actual, *, reference_run, actual
             "check_recording",
             "actor_recording",
             "contact_system_audit",
-            "compare_contact_dataflows",
+            "contact_audit",
+            "contact_routes",
         )
     }
     if sources[0].keys() != required or any(sources[0][name] != current[name] for name in required):
@@ -373,11 +346,11 @@ def _contact_at(run, frame, start, dt, *, sparse=False, frozen=None, allow_taint
     query(frame, False)
     if c.flags.numpy()[0] or c.start_flags.numpy()[0]:
         raise ValueError("Invalid native contact audit")
-    if run._contact_pool and c.evaluation_diagnostics()["tainted"] and not allow_tainted:
+    if c.evaluation_diagnostics()["tainted"] and not allow_tainted:
         raise ValueError("Capacity overflow cannot qualify complete contacts")
     sequence = run._assembly_sequence + 1
     run._assembly_sequence = sequence
-    generation = MonolithicLinearGeneration(1, sequence, c.evaluation_generation if run._contact_pool else 1, sequence)
+    generation = MonolithicLinearGeneration(1, sequence, c.evaluation_generation, sequence)
     assembly = run._linear.begin_assembly(generation)
     c.assemble_tangent(assembly)
     result = run._linear.finalize_assembly(generation=generation)
@@ -388,62 +361,19 @@ def _contact_at(run, frame, start, dt, *, sparse=False, frozen=None, allow_taint
         if sparse
         else run._linear.densify_for_test(generation=generation).raw_matrix
     )
-    pairs = []
-    if run._contact_pool:
-        pairs = c.publish(state)
-    else:
-        if c.legacy_count:
-            wp.launch(
-                contact_forces,
-                c.legacy_count,
-                [
-                    c.current,
-                    c.local_residual,
-                    c.shapes,
-                    c.bodies,
-                    c.body_local,
-                    c.triangles,
-                    state.particle_q,
-                    k.com,
-                    k.dof_map,
-                    h.contact_joint_force,
-                    h.contact_particle_force,
-                    h.contact_body_force,
-                ],
-                device=run.model.device,
-            )
-        if c.actor_contact is not None:
-            pairs = c.actor_contact.publish(state, k)
+    c.publish(state)
     static = np.zeros((run.model.shape_count, 6))
     bodies = run.model.shape_body.numpy()
-    if run._contact_pool:
-        # Actor pair diagnostics omit legacy T contacts; the committed ledger does not.
-        records, samples = c.pool.records, c._batch.all_samples
-        count = int(records.count.numpy()[0])
-        identities, wrenches = records.identities.numpy()[:count], records.pairs.numpy()[:count]
-        sources, targets = samples.sources.numpy(), samples.targets.numpy()
-        for i in np.argsort(identities, kind="stable"):
-            key = int(identities[i])
-            for shape, wrench in zip((sources[key], targets[key]), wrenches[i], strict=True):
-                if shape >= 0 and bodies[shape] < 0:
-                    static[shape] += wrench
-    else:
-        for pair in pairs:
-            for shape, wrench in zip((pair["source"], pair["target"]), pair["world_wrench"], strict=True):
-                if shape >= 0 and bodies[shape] < 0:
-                    static[shape] += wrench
-        if c.legacy_count:
-            shapes = c.shapes.numpy()
-            keys = np.arange(c.legacy_count)
-            targets = shapes[keys % len(shapes)]
-            keys = keys[bodies[targets] < 0]
-            # Use native local/rotation operands and the original quadrature point.
-            world = np.einsum("nij,nj->ni", c.current.rotation.numpy()[keys], c.local_residual.numpy()[keys])
-            bary = np.full((len(keys), 3), 1 / 6, dtype=c.numpy_dtype)
-            bary[np.arange(len(keys)), keys // len(shapes) % 3] = 2 / 3
-            triangles = c.triangles.numpy()[keys // (3 * len(shapes))]
-            points = np.einsum("ni,nij->nj", bary, state.particle_q.numpy()[triangles])
-            np.add.at(static, targets[keys], np.column_stack((world, np.cross(points, world))))
+    # Actor pair diagnostics omit T contacts; the committed ledger does not.
+    records, samples = c.pool.records, c._batch.all_samples
+    count = int(records.count.numpy()[0])
+    identities, wrenches = records.identities.numpy()[:count], records.pairs.numpy()[:count]
+    sources, targets = samples.sources.numpy(), samples.targets.numpy()
+    for i in np.argsort(identities, kind="stable"):
+        key = int(identities[i])
+        for shape, wrench in zip((sources[key], targets[key]), wrenches[i], strict=True):
+            if shape >= 0 and bodies[shape] < 0:
+                static[shape] += wrench
     return {
         "energy": c.energy.numpy().reshape(-1, 2).sum(axis=0),
         "residual": c.residual.numpy().copy(),
@@ -516,7 +446,6 @@ def audit_contact_state(run, frame, start, dt, *, mesh_fields=None):
         run._actors,
         frame,
         start,
-        c.contact_model,
         radius=radius,
         stiffness=stiffness,
         mu=mu,
@@ -565,7 +494,6 @@ def audit_spatial_contact_state(run, frame, start, dt, *, frozen=None, mesh_fiel
         run._actors,
         frame,
         start,
-        c.contact_model,
         candidate_keys=fields[candidates],
         admitted_keys=fields[admitted],
         radius=radius,
@@ -601,310 +529,3 @@ def audit_spatial_contact_state(run, frame, start, dt, *, frozen=None, mesh_fiel
             if name not in ("full", "candidate", "admitted", "spatial_omission")
         },
     }
-
-
-def _audit_pair(audits, frame, start, dt, label, *, mesh_fields=None, published=None):
-    left = audits[0]
-    c = left._contact
-    stiffness, mu, velocity, width, radius = c.parameters
-    full = evaluate_stream(
-        left.model,
-        left._actors,
-        frame,
-        start,
-        c.contact_model,
-        radius=radius,
-        stiffness=stiffness,
-        mu=mu,
-        width=width,
-        falloff=velocity * dt,
-        mesh_fields=mesh_fields,
-        alignment_policy=c.alignment_policy,
-    )
-    if full["full_count"] != c.count:
-        raise ValueError("Independent full enumeration disagrees with the declared complete set")
-    result = []
-    for algorithm, audit in zip(("legacy", "pooled"), audits, strict=True):
-        actual = _contact_at(audit, frame, start, dt, sparse=True)
-        publication_errors = {}
-        if published is not None and algorithm == label["state_origin"]:
-            for name, value in published.items():
-                np.testing.assert_allclose(value, actual[name], rtol=1e-8, atol=1e-10, err_msg=name)
-                publication_errors[name] = float(np.max(np.abs(value - actual[name]), initial=0))
-        result.append(
-            {
-                **label,
-                "algorithm": algorithm,
-                "full_count": full["full_count"],
-                "state_sha256": _configuration_digest(frame).hex(),
-                "step_start_sha256": _configuration_digest(start).hex(),
-                "max_penetration_m": max(0, -full["min_gap"]),
-                "errors": _check_contact_sparse(actual, full["full"]),
-                "published_force_errors": publication_errors,
-            }
-        )
-    return result
-
-
-def compare(root, *, device="cuda:0"):
-    """Authenticate a complete input window and advance independently under frozen gates."""
-    root = Path(root)
-    manifest, source = open_bundle(root), provenance()
-    canonical = manifest.get("scene") == "tiny-contact"
-    robot = manifest.get("scene") == "franka-default"
-    if canonical:
-        # Keep the existing computational replay envelope and physical gates.
-        # This short recipe does not qualify the frozen loading/settling run.
-        case = {
-            "steps": NORMAL["substeps"],
-            "dt": PROTOCOL["dt"],
-            "equivalence": {"rtol": 2e-5, "atol": 2e-6},
-            "gates": {
-                "min_det_f": NORMAL["acceptance"]["min_det_f"],
-                "max_penetration_m": NORMAL["acceptance"]["penetration_acceptance_limit_m"],
-            },
-        }
-        fixtures = [DIRECTORY / "p3_coupled_t4_v1.json", DIRECTORY / PROTOCOL["normal_source"]]
-    elif robot:
-        definition = next(
-            row for row in baseline_cases() if row["id"] == "franka-cube--ArmijoOrResNorm--C-IE--production--graph1"
-        )
-        protocol = INPUTS / "comparison-tolerances.json"
-        verify_retained(protocol, retained_hashes())
-        case = {
-            "steps": definition["steps"],
-            "dt": 0.001,
-            "equivalence": {"absolute": json.loads(protocol.read_text())["cases"][definition["id"]]["absolute"]},
-            # This is the original accepted-tet guard from check_recording;
-            # the full grasp/hold/reference gate is not a short-window claim.
-            "gates": {"min_det_f": 0.2},
-        }
-        fixtures = [FROZEN, protocol]
-    else:
-        case, fixtures = load_case(), [CASE]
-    if (
-        manifest.get("scene") not in SCENES
-        or manifest.get("contact_dataflow", "legacy") != "legacy"
-        or manifest.get("source", {}).get("source_hashes") != source["source_hashes"]
-        or manifest.get("precision") != "fp64"
-        or manifest.get("pcg_mode") != "production"
-        or manifest.get("comparison") != {"rtol": 2e-5, "atol": 2e-6}
-        or type(manifest.get("graph")) is not bool
-        or type(manifest.get("steps")) is not int
-        or not 1 <= manifest["steps"] <= case["steps"]
-        or manifest.get("windows") != [[1, manifest["steps"]]]
-        or manifest.get("dt") != case["dt"]
-        or manifest.get("device") != str(wp.get_device(device))
-        or (robot and (not manifest["graph"] or not wp.get_device(device).is_cuda))
-    ):
-        raise ValueError("Unreviewed algorithm, source, input range or execution identity")
-    needed = {"checkpoint-1.npz", "trace.jsonl"} | {
-        f"{name}-{step}.npz" for step in range(1, manifest["steps"] + 1) for name in ("inputs", "state")
-    }
-    if not needed <= manifest["files"].keys():
-        raise ValueError("Unauthenticated comparison payload")
-    traces = [json.loads(line) for line in (root / "trace.jsonl").read_text().splitlines()]
-    if [row["step"] for row in traces] != list(range(1, manifest["steps"] + 1)):
-        raise ValueError("Incomplete comparison trace")
-    routes = [
-        build_scene(manifest["scene"], device=device, graph=manifest["graph"], contact_dataflow=name)
-        for name in ("legacy", "pooled")
-    ]
-    left, right = (route[1] for route in routes)
-    contract = verify_contract(left, right)
-    if left._kinematics.digest.hex() != manifest.get("physical_digest"):
-        raise ValueError("Recorded physical identity differs")
-    restored = left.create_state(dt=manifest["dt"])
-    left.load_checkpoint(restored, root / "checkpoint-1.npz")
-    _exact(state_arrays(restored), state_arrays(routes[0][2]))
-    initial = [state_arrays(route[2]) for route in routes]
-    _exact(
-        {k: v for k, v in initial[0].items() if k != "history.config_digest"},
-        {k: v for k, v in initial[1].items() if k != "history.config_digest"},
-    )
-    # The audit solvers never advance trajectories, so contact-only assembly
-    # cannot disturb live PCG workspaces, accepted states or graph bindings.
-    audits = [
-        build_scene(manifest["scene"], device=device, graph=manifest["graph"], contact_dataflow=name)[1]
-        for name in ("legacy", "pooled")
-    ]
-    verify_contract(*audits)
-    mesh_fields = export_mesh_fields(audits[0].model, audits[0]._contact.smooth_sdf) if robot else None
-    controls = [route[0].control() for route in routes]
-    errors, work, same_state = {}, [], []
-    metadata = None if canonical or robot else {"roles": roles(left.model, left._actors)}
-    for step in range(1, manifest["steps"] + 1):
-        key = f"inputs-{step}.npz"
-        values = load_arrays(root / key, manifest["array_schemas"][key])
-        starts, frames, row = [], [], {"step": step, "algorithms": []}
-        for index, ((model, run, state, samples), control) in enumerate(zip(routes, controls, strict=True)):
-            set_control(control, samples, step)
-            # This allowlisted recipe has no external-force or gravity changes.
-            # Changed controls remain errors even if payload hashes are rewritten.
-            _exact(values, inputs(model, state, control))
-            apply_inputs(values, model, state, control)
-            starts.append(_physical(state))
-            captures = capture_count(run)
-            wp.synchronize_device(model.device)
-            begin = time.perf_counter()
-            run.step(state, state, control, dt=manifest["dt"])
-            wp.synchronize_device(model.device)
-            seconds = time.perf_counter() - begin
-            stats = run.last_stats
-            if not stats.converged or stats.rolled_back or stats.variational.get("contact_pool", {}).get("tainted"):
-                raise ValueError("Stopped, failed or capacity-tainted trajectory cannot qualify complete contacts")
-            run._states.validate(state)
-            frames.append(_physical(state))
-            row["algorithms"].append(
-                {
-                    "dataflow": ("legacy", "pooled")[index],
-                    "step_seconds": seconds,
-                    "new_captures": capture_count(run) - captures,
-                    "converged": stats.converged,
-                    "newton": stats.nonlinear_iterations,
-                    "pcg": stats.linear_iterations,
-                    "line_search": stats.line_search_iterations,
-                    "acceptance": acceptance_trace(run._variational["trials"]),
-                }
-            )
-        recorded = f"state-{step}.npz"
-        recorded_state = load_arrays(root / recorded, manifest["array_schemas"][recorded])
-        if robot:
-            _compare_absolute(state_arrays(routes[0][2]), recorded_state, case["equivalence"]["absolute"], {})
-        else:
-            compare_arrays(state_arrays(routes[0][2]), recorded_state, **manifest["comparison"])
-        expected = traces[step - 1]
-        for name in ("converged", "rolled_back", "nonlinear_iterations", "linear_iterations", "line_search_iterations"):
-            if getattr(left.last_stats, name) != expected["stats"][name]:
-                raise ValueError("Legacy baseline execution differs from its authenticated trace")
-        if acceptance_trace(left._variational["trials"]) != acceptance_trace(expected["trials"]):
-            raise ValueError("Legacy baseline acceptance differs from its authenticated trace")
-        if canonical or robot:
-            # Each state was validated against its own configuration above.
-            # All other authority/history/publication fields keep their gates.
-            states = [
-                {k: v for k, v in state_arrays(route[2]).items() if k != "history.config_digest"} for route in routes
-            ]
-            if robot:
-                _compare_absolute(*states, case["equivalence"]["absolute"], errors)
-            else:
-                for name, value in compare_arrays(*states, **case["equivalence"]).items():
-                    errors[name] = max(errors.get(name, 0), value)
-        elif not compare_semantic_fields(
-            _semantic(state_arrays(routes[0][2]), metadata),
-            _semantic(state_arrays(routes[1][2]), metadata),
-            case["equivalence"],
-            errors,
-        ):
-            raise ValueError("Independent trajectories violate the frozen actor envelope")
-        for origin, (frame, start) in enumerate(zip(frames, starts, strict=True)):
-            checked = _audit_pair(
-                audits,
-                frame,
-                start,
-                manifest["dt"],
-                {"step": step, "state_origin": ("legacy", "pooled")[origin]},
-                mesh_fields=mesh_fields,
-                published={
-                    key: getattr(routes[origin][2]._monolithic_coupled, name).numpy()
-                    for key, name in (
-                        ("particle_force", "contact_particle_force"),
-                        ("body_wrench", "contact_body_force"),
-                        ("joint_force", "contact_joint_force"),
-                    )
-                },
-            )
-            if (
-                "max_penetration_m" in case["gates"]
-                and checked[0]["max_penetration_m"] > case["gates"]["max_penetration_m"]
-            ):
-                raise ValueError("Independent trajectory violates the frozen penetration gate")
-            if (
-                routes[origin][1].last_stats.min_det_f < case["gates"]["min_det_f"]
-                if robot
-                else routes[origin][1].last_stats.min_det_f <= case["gates"]["min_det_f"]
-            ):
-                raise ValueError("Independent trajectory violates the frozen determinant gate")
-            same_state.extend(checked)
-        work.append(row)
-    for name in manifest["snapshots"]:
-        if not {name + "/" + file for file in ("call.json", "input.npz", "output.npz")} <= manifest["files"].keys():
-            raise ValueError("Unauthenticated hotspot payload")
-        path = root / name
-        call = json.loads((path / "call.json").read_text())
-        if call["boundary"] != "objective":
-            continue
-        if (
-            call["state"] not in ("_original", "_accepted", "_trial")
-            or call["step"] not in range(1, manifest["steps"] + 1)
-            or call["dt"] != manifest["dt"]
-            or call["physical_digest"] != manifest["physical_digest"]
-            or call.get("contact_dataflow", "legacy") != "legacy"
-        ):
-            raise ValueError("Hotspot physical identity differs from its bundle")
-        arrays = load_arrays(path / "input.npz", call["input_schema"])
-        expected = load_arrays(path / "output.npz", call["output_schema"])
-        replay_objective(
-            arrays, call, expected, scene=manifest["scene"], device=device, graph=manifest["graph"], repeat=1
-        )
-
-        def physical(arrays, prefix):
-            return {
-                "q": arrays[prefix + ".joint_q"],
-                "x": arrays[prefix + ".particle_q"],
-                "com": arrays[prefix + ".history.rigid_com"],
-                "rotation": arrays[prefix + ".history.rigid_rotation"],
-            }
-
-        same_state.extend(
-            _audit_pair(
-                audits,
-                physical(arrays, call["state"]),
-                physical(arrays, "_original"),
-                call["dt"],
-                {
-                    "step": call["step"],
-                    "snapshot": name,
-                    "state_owner": call["state"],
-                    "state_origin": "recorded_objective",
-                },
-                mesh_fields=mesh_fields,
-            )
-        )
-    return {
-        "schema": "monolithic-contact-dataflow-comparison/1",
-        "status": "PASS_LOCAL_COMPLETE_CONTACT",
-        "qualification": "Local complete-contact comparison; stage E2E/nightly/performance qualification NOT_RUN",
-        "source": source,
-        "bundle_manifest_sha256": digest(root / "manifest.json"),
-        "fixture_sha256": digest(fixtures[0]),
-        "fixture_sha256s": {path.name: digest(path) for path in fixtures},
-        "scene": manifest["scene"],
-        "steps": manifest["steps"],
-        "asset_sha256": case.get("tet_asset_sha256"),
-        "device": str(left.model.device),
-        "graph": manifest["graph"],
-        **contract,
-        "trajectory_limits": case["equivalence"],
-        "trajectory_fields": errors,
-        "same_state_checks": len(same_state),
-        "same_state": same_state,
-        "work": work,
-        "timing": "Diagnostic synchronized full steps, including captures; audit/restore outside timing",
-    }
-
-
-def main():
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--bundle", required=True, type=Path)
-    parser.add_argument("--device", default="cuda:0")
-    parser.add_argument("--output", required=True, type=Path)
-    args = parser.parse_args()
-    result = compare(args.bundle, device=args.device)
-    args.output.mkdir(parents=True, exist_ok=False)
-    write_json(args.output / "receipt.json", result)
-    print(json.dumps({"status": result["status"], "output": str(args.output)}))
-
-
-if __name__ == "__main__":
-    main()

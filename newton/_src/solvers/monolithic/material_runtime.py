@@ -13,7 +13,8 @@ from . import coupled_kernels as kernels
 from .articulation import ArticulationObjective
 from .cable_system import CableBlock
 from .cloth_system import ClothBlock
-from .contact_pipeline import _PooledContactObjective, _SpatialContactObjective
+from .contact_pipeline import _SpatialContactObjective
+from .contact_pipeline import _SpatialContactObjective as ContactObjective
 from .linear import MonolithicLinearWorkspace
 from .linear_types import MonolithicLinearCapacities, MonolithicLinearGeneration
 from .rigid import _scatter_residual, _scatter_tangent
@@ -53,14 +54,14 @@ def create_contact(self, model, config, smooth_sdf):
         if not np.all(radii == radii[0]):
             raise ValueError("Tet contact requires a uniform particle radius")
         tet_radius = float(radii[0])
-    return _PooledContactObjective(
+    capacity = config["contact_candidate_capacity"]
+    return ContactObjective(
         model,
         mapping,
         q_dof_count=self._layout.q_dof_count,
         layout=self._layout,
         articulation_actor=self._articulation_actor,
         actors=self._actors,
-        contact_model=config["contact_model"],
         normal_stiffness=config["contact_stiffness"],
         friction_coefficient=config["friction_coefficient"],
         friction_velocity_scale=config["friction_velocity_scale"],
@@ -70,6 +71,7 @@ def create_contact(self, model, config, smooth_sdf):
         alignment_policy=config["alignment_policy"],
         dtype=self._dtype,
         _materials=self._materials,
+        **({} if capacity == "automatic" else {"candidate_capacity": capacity}),
     )
 
 
@@ -111,7 +113,8 @@ def initialize(self):
     self._graphs = _SegmentGraphCache(device, enabled=self._use_cuda_graph)
     self._states._graphs = self._graphs
     self._contact_pool = self._contact.count > 0
-    self._contact_spatial = isinstance(self._contact, _SpatialContactObjective)
+    # Contact-free material scenes never begin a spatial step.
+    self._contact_spatial = self._contact_pool and isinstance(self._contact, _SpatialContactObjective)
     self._device_iteration = False
     if self._contact_pool:
         capacity = config["contact_factor_capacity"]

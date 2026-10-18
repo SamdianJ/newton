@@ -874,7 +874,6 @@ class _ContactBatch:
                 self.dtype(c.parameters[3]),
                 self.dtype(c.parameters[1]),
                 self.dtype(c.numpy_dtype(c.parameters[2]) * c.numpy_dtype(dt)),
-                ("C-EE", "C-IE", "C-II").index(c.contact_model),
                 int(mode == 4 or c._alignment_policy == "mask"),
                 self._flags,
                 out.energy,

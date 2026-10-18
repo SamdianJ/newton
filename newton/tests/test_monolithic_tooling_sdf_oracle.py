@@ -83,7 +83,7 @@ class TestNaturalSplineOracle(unittest.TestCase):
             np.testing.assert_allclose(actual / units, wanted / units, rtol=5e-12, atol=5e-12)
 
     def test_snapshot_and_reuse(self):
-        """Own immutable inputs and reuse field derivatives through every local contact law."""
+        """Own immutable inputs and reuse field derivatives through the local contact law."""
         lo, hi = np.array([-0.2, -0.1, -0.3]), np.array([0.2, 0.4, 0.3])
         z, y, x = np.meshgrid(
             np.linspace(lo[2], hi[2], 5), np.linspace(lo[1], hi[1], 4), np.linspace(lo[0], hi[0], 3), indexing="ij"
@@ -94,15 +94,14 @@ class TestNaturalSplineOracle(unittest.TestCase):
         kind = {**raw, "natural_spline": prepared}
         point, old = np.array([0.01, 0.05, -0.02]), np.array([0, 0.05, -0.021])
         options = {"offset": 0.03, "stiffness": 11, "width": 0.01, "a": 0.005}
-        expected = {law: local(point, old, raw, np.ones(3), law, **options) for law in ("C-EE", "C-IE", "C-II")}
+        wanted = local(point, old, raw, np.ones(3), **options)
         values.fill(np.nan)
         lo[:], hi[:] = 99, -99
         with patch("scipy.interpolate.CubicSpline", side_effect=AssertionError("Rebuilt a spline during query")):
-            for law, wanted in expected.items():
-                for _ in range(3):
-                    actual = local(point, old, kind, np.ones(3), law, **options)
-                    for a, b in zip(actual, wanted, strict=True):
-                        np.testing.assert_allclose(a, b, rtol=2e-11, atol=2e-11)
+            for _ in range(3):
+                actual = local(point, old, kind, np.ones(3), **options)
+                for a, b in zip(actual, wanted, strict=True):
+                    np.testing.assert_allclose(a, b, rtol=2e-11, atol=2e-11)
         with self.assertRaises(ValueError):
             prepared.values[0, 0, 0] = 1
 

@@ -13,13 +13,10 @@ from newton.tests.unittest_utils import add_function_test, get_test_devices
 
 
 def test_unsupported_contact_inputs(test, device):
-    """Reject spring parameters and laws outside the supported contact-law API."""
+    """Reject spring parameters outside the supported contact API."""
     model = scene(device)
     with test.assertRaisesRegex(TypeError, "tangential_stiffness"):
         solver(model, tangential_stiffness=1e6)
-    for law in ("spring", "Huber", "EE", "IE", "II"):
-        with test.assertRaisesRegex(ValueError, "supported contact law"):
-            solver(model, law)
 
 
 def test_initialization_history_boundary(test, device):

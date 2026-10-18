@@ -19,6 +19,7 @@ from scripts.monolithic_reference.profiling import capture_count, contact_pair_d
 from scripts.monolithic_reference.record_workload import apply_inputs
 from scripts.monolithic_reference.replay_workload import acceptance_trace
 from scripts.monolithic_reference.workload_io import digest, load_arrays, open_bundle, write_json
+from scripts.monolithic_reference.workload_objective import replay_dataflow
 from scripts.monolithic_reference.workload_scene import build_scene, compare_arrays
 
 
@@ -36,11 +37,8 @@ def benchmark(root, *, device="cuda:0", warmup=2, repeat=5, contact_diagnostics=
         raise ValueError("Positive warmup and repeat counts are required")
     root = Path(root)
     manifest = open_bundle(root)
-    contact_dataflow = manifest.get("contact_dataflow", "legacy")
-    if (
-        contact_dataflow in ("pooled", "spatial")
-        and manifest["source"]["source_hashes"] != provenance()["source_hashes"]
-    ):
+    contact_dataflow = replay_dataflow(manifest)
+    if manifest["source"]["source_hashes"] != provenance()["source_hashes"]:
         raise ValueError("Pooled workload source identity differs")
     selected = {step for first, last in manifest["windows"] for step in range(first, last + 1)}
     trace = {}

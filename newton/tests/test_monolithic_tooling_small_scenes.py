@@ -112,7 +112,7 @@ class TestSmallSceneTools(unittest.TestCase):
             self.assertAlmostEqual(q, x)
             self.assertAlmostEqual(v, 0.0)
         with tempfile.TemporaryDirectory() as folder:
-            result = run_case("normal_loading", "C-EE", "cpu", Path(folder) / "partial", steps=2, reference=True)
+            result = run_case("normal_loading", "cpu", Path(folder) / "partial", steps=2, reference=True)
             self.assertFalse(result["complete"])
             self.assertEqual(result["successful_steps"], 2)
             self.assertEqual(result["expected_steps"], 1000)
@@ -124,7 +124,7 @@ class TestSmallSceneTools(unittest.TestCase):
 def test_cube_driver(test, device):
     """Build the frozen clamp and advance it without constructing an obsolete solver."""
     with tempfile.TemporaryDirectory() as folder:
-        result = run_case("cube1", "C-EE", str(device), Path(folder) / "partial", steps=2)
+        result = run_case("cube1", str(device), Path(folder) / "partial", steps=2)
         test.assertIsNone(result["failure"])
         test.assertEqual(result["successful_steps"], 2)
         test.assertEqual(result["expected_steps"], 1500)

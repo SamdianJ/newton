@@ -5,7 +5,6 @@
 
 import gzip
 import hashlib
-import itertools
 import json
 import tempfile
 import unittest
@@ -16,11 +15,11 @@ from unittest.mock import patch
 import numpy as np
 
 from newton._src.solvers.monolithic.articulation import _configuration_digest
-from newton._src.solvers.monolithic.contact import ContactObjective
 from newton.tests import test_monolithic_tooling_recording_compatibility as compatibility
 from newton.tests.test_monolithic_solver_coupled import scene, snapshot, solver
 from newton.tests.unittest_utils import add_function_test, get_test_devices
 from scripts.monolithic_reference.check_recording import compare
+from scripts.monolithic_reference.contact_routes import pooled_audit_route
 from scripts.monolithic_reference.robot_contact_acceptance import (
     FrozenRobotFactory,
     certify_configuration,
@@ -30,7 +29,7 @@ from scripts.monolithic_reference.robot_contact_acceptance import (
 
 def test_robot_policy_certificate(test, device):
     """Authenticate only the declared Q1/contact changes and every recorded frame digest."""
-    factory = FrozenRobotFactory("franka-cube", dataflow="legacy")
+    factory = FrozenRobotFactory("franka-cube", dataflow="default")
     from newton.solvers.experimental.monolithic import SolverMonolithic  # noqa: PLC0415
 
     factory.JointTerms = SolverMonolithic.JointTerms
@@ -51,7 +50,10 @@ def test_robot_policy_certificate(test, device):
     run._config = original
     test.assertEqual(factory.recipe(), recipe)
     fields = factory.fields
-    old = {name: value.copy() for name, value in fields.items() if name != "direction_policy"}
+    # A frozen reference predates Q1 and the spatial algorithm fields and used the full static factor budget.
+    retired = {"direction_policy", "contact_dataflow", "contact_resources", "contact_spatial"}
+    old = {name: value.copy() for name, value in fields.items() if name not in retired}
+    old["guard_capacity"][1] = 3 * run._contact.count
     digest = _configuration_digest(old).hex()
     proof = certify_configuration(run, fields, digest)
     current = snapshot(run.create_state(dt=0.001))
@@ -115,20 +117,20 @@ def test_robot_diagnostics(test, device):
     from newton.examples.softbody.monolithic_recording import measure, serial  # noqa: PLC0415
     from newton.solvers.experimental.monolithic import SolverMonolithic  # noqa: PLC0415
 
-    for law, dataflow in itertools.product(("C-EE", "C-IE", "C-II"), ("spatial", "default")):
+    for dataflow in ("spatial", "default"):
         factory = FrozenRobotFactory("franka-cube", dataflow=dataflow)
         factory.JointTerms = SolverMonolithic.JointTerms
         with patch("newton.tests.test_monolithic_solver_coupled.SolverMonolithic", factory):
-            run = solver(scene(device), law=law, mode="production", graph=device.is_cuda)
+            run = solver(scene(device), mode="production", graph=device.is_cuda)
         test.assertEqual(run._config.regularization_values, (0.0,))
         test.assertEqual(factory.recipe()["production_default"], dataflow == "default")
         if dataflow == "default":
             test.assertEqual(run._contact.candidate_capacity, run._contact.count)
         test.assertEqual(factory.recorder.audit.complete._config, run._config)
-        with patch("newton._src.solvers.monolithic.solver_monolithic.ContactObjective", ContactObjective):
-            legacy = solver(scene(device), law=law, mode="production", graph=device.is_cuda)
-        states = [owner.create_state(dt=0.001) for owner in (run, legacy)]
-        for owner, state in zip((run, legacy), states, strict=True):
+        with pooled_audit_route():
+            complete = solver(scene(device), mode="production", graph=device.is_cuda)
+        states = [owner.create_state(dt=0.001) for owner in (run, complete)]
+        for owner, state in zip((run, complete), states, strict=True):
             owner.step(state, state, owner.model.control(), dt=0.001)
             test.assertTrue(owner.last_stats.converged, owner.last_stats)
         before = snapshot(states[0])
@@ -136,7 +138,7 @@ def test_robot_diagnostics(test, device):
         generation = run._contact.evaluation_generation
         stats = serial(run.last_stats)
         fields = factory.measure(run, states[0])
-        expected = measure(legacy, states[1])
+        expected = measure(complete, states[1])
         test.assertEqual(fields["full_system"]["status"], "PASS_FULL_RESIDUAL")
         test.assertTrue(run._device_iteration)
         test.assertIsInstance(run._reference_residual, wp.array)

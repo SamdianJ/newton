@@ -14,7 +14,7 @@ import numpy as np
 
 from newton.examples.softbody.monolithic_recording import state_arrays
 from newton.tests.test_monolithic_contact_actor_pairs import physical
-from newton.tests.test_monolithic_contact_batch import batch_matrix
+from newton.tests.test_monolithic_contact_components import batch_matrix
 from newton.tests.unittest_utils import add_function_test, get_test_devices
 from scripts.monolithic_reference.benchmark_workload import benchmark
 from scripts.monolithic_reference.contact_full_oracle import evaluate_full
@@ -62,7 +62,6 @@ def test_pooled_workload(test, device):
                     run._actors,
                     physical(state),
                     physical(run._original),
-                    c.contact_model,
                     radius=radius,
                     stiffness=stiffness,
                     mu=mu,

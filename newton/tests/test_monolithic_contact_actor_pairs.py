@@ -9,19 +9,15 @@ from unittest.mock import patch
 
 import numpy as np
 import warp as wp
-import warp.sparse as sparse
 
 import newton
 from newton._src.geometry import GeoType, Mesh
 from newton._src.solvers.monolithic.actors import ActorTable
+from newton._src.solvers.monolithic.contact_batch import _ContactBatch
 from newton._src.solvers.monolithic.contact_sampling import _checked_contact_capacity, _surface_samples
-from newton._src.solvers.monolithic.linear import MonolithicLinearWorkspace
-from newton._src.solvers.monolithic.linear_types import (
-    MonolithicLinearCapacities,
-    MonolithicLinearGeneration,
-    MonolithicPcgWarmStart,
-)
+from newton._src.solvers.monolithic.linear_types import MonolithicPcgWarmStart
 from newton.tests.monolithic_test_utils import add_contact_free_tet
+from newton.tests.test_monolithic_contact_components import batch_matrix
 from newton.tests.test_monolithic_linear_assembly import _pcg_config
 from newton.tests.test_monolithic_solver_actor_contacts import contact_scene, contact_solver, contact_state
 from newton.tests.test_monolithic_solver_coupled import assert_snapshot, snapshot
@@ -40,33 +36,26 @@ def physical(state):
     }
 
 
-def query(run, state, *, start=False):
-    c, k, h = run._contact, run._kinematics, state._monolithic_coupled
+def native_inputs(run, state):
+    k, h = run._kinematics, state._monolithic_coupled
     k.evaluate(k.gather_q(state))
-    fn = c.begin_step if start else c.evaluate
-    options = {} if start else {"dt": 0.001}
-    fn(state.particle_q, k.poses, k.com, k.jt, k.jw, rigid_com=h.rigid_com, rigid_rotation=h.rigid_rotation, **options)
+    return (state.particle_q, k.poses, k.com, k.jt, k.jw), {
+        "rigid_com": h.rigid_com,
+        "rigid_rotation": h.rigid_rotation,
+    }
 
 
-def contact_matrix(run, *, factor_capacity=None, triplet_capacity=None):
-    c = run._contact
-    linear = MonolithicLinearWorkspace(
-        run._layout,
-        MonolithicLinearCapacities(
-            c.triplet_capacity if triplet_capacity is None else triplet_capacity,
-            0,
-            3 * c.count if factor_capacity is None else factor_capacity,
-            200,
-            202,
-        ),
-        run._tet.mapping,
-        device=run.model.device,
-        contact_support=c.factor_support,
-    )
-    generation = MonolithicLinearGeneration(1, 1, 1, 1)
-    assembly = linear.begin_assembly(generation)
-    c.assemble_tangent(assembly)
-    return linear, generation, assembly
+def native_batch(run):
+    """Evaluate the solver's compact contact metadata with every candidate in the production producer."""
+    return _ContactBatch(run._contact, batch_capacity=run._contact.count, capacity=None)
+
+
+def query(batch, run, state, *, start=False):
+    inputs, options = native_inputs(run, state)
+    if start:
+        batch.begin_step(*inputs, **options)
+    else:
+        batch.evaluate(*inputs, dt=0.001, **options)
 
 
 def perturb(run, state, values, direction, h):
@@ -118,34 +107,26 @@ def test_surface_area(test, device):
 
 
 def test_dense_contact(test, device):
-    """Match all four paths' E/r/PSD B, full cross blocks, matvec and conservative derivatives."""
-    for kind, law, permuted in itertools.product(
-        ("A-R", "R-R", "R-T", "R-static"), ("C-EE", "C-IE", "C-II"), (False, True)
-    ):
-        with test.subTest(kind=kind, law=law, permuted=permuted):
-            run = contact_solver(contact_scene(device, kind), law=law, permuted=permuted)
+    """Match all four paths' E/r/PSD B and full cross blocks against independent virtual work."""
+    for kind, permuted in itertools.product(("A-R", "R-R", "R-T", "R-static"), (False, True)):
+        with test.subTest(kind=kind, permuted=permuted):
+            run = contact_solver(contact_scene(device, kind), permuted=permuted)
+            batch = native_batch(run)
             state = contact_state(run, kind)
             start = physical(state)
-            query(run, state, start=True)
+            query(batch, run, state, start=True)
             direction = np.linspace(-0.2, 0.3, run._layout.scalar_dof_count)
             perturb(run, state, start, direction, 1e-6)
-            query(run, state)
-            current = physical(state)
-            energy, residual, b = fixture_terms(run.model, run._actors, current, start, law)
-            c = run._contact
-            test.assertEqual(c.flags.numpy()[0], 0)
-            np.testing.assert_allclose(c.energy.numpy().sum(axis=0), energy, rtol=1e-8, atol=1e-12)
-            np.testing.assert_allclose(c.residual.numpy(), residual, rtol=1e-8, atol=1e-10)
-            linear, generation, _ = contact_matrix(run)
-            test.assertEqual(int(linear.finalize_assembly(generation=generation).status), 0)
-            matrix = linear.densify_for_test(generation=generation).raw_matrix
+            query(batch, run, state)
+            energy, residual, b = fixture_terms(run.model, run._actors, physical(state), start)
+            test.assertEqual(int(batch.flags.numpy()[0]), 0)
+            np.testing.assert_allclose(batch.pool.energy.result.numpy()[:2], energy, rtol=1e-8, atol=1e-12)
+            np.testing.assert_allclose(batch.pool.residual.result.numpy(), residual, rtol=1e-8, atol=1e-10)
+            matrix = batch_matrix(batch)
             scale = max(1, np.linalg.norm(b))
             test.assertLess(np.linalg.norm(matrix - b) / scale, 1e-5)
             test.assertLess(np.linalg.norm(matrix - matrix.T) / scale, 1e-5)
             test.assertGreaterEqual(np.linalg.eigvalsh(matrix).min(), -1e-6 * scale)
-            out = wp.empty(len(direction), dtype=float, device=device)
-            sparse.bsr_mv(linear.k_global_scalar_bsr, wp.array(direction.astype(np.float32), device=device), out)
-            np.testing.assert_allclose(out.numpy(), matrix @ direction.astype(np.float32), rtol=1e-5, atol=1e-5)
             # Each negative example must violate this independent dense comparison.
             missing = matrix.copy()
             rigid = run._rigid.actors[0]
@@ -160,19 +141,10 @@ def test_dense_contact(test, device):
             missing_rotation[rows[3:], :] = 0
             missing_rotation[:, rows[3:]] = 0
             test.assertGreater(np.linalg.norm(missing_rotation - b) / scale, 1e-5)
-            if law == "C-EE":
-                expected = residual @ direction
-                for h in (1e-8, 3e-9):
-                    values = []
-                    for sign in (1, -1):
-                        perturb(run, state, current, direction, sign * h)
-                        query(run, state)
-                        values.append(c.energy.numpy().sum())
-                    test.assertLess(abs((values[0] - values[1]) / (2 * h) - expected) / max(1, abs(expected)), 1e-6)
 
 
 def test_sampling_identity_and_capacity(test, device):
-    """Preserve rebuilt pair identity and reject capacity/weight errors without publication."""
+    """Preserve rebuilt pair identity and reject int32 capacity overflow."""
     run = contact_solver(contact_scene(device, "R-R"))
     samples = run._contact.actor_samples
     test.assertEqual(samples.count, 72)
@@ -193,54 +165,27 @@ def test_sampling_identity_and_capacity(test, device):
             test.assertEqual(rebuilt._kinematics.digest, run._kinematics.digest)
             test.assertEqual(rebuilt._contact.actor_samples.keys, samples.keys)
             assert_snapshot(test, state, before)
-    query(run, state, start=True)
-    query(run, state)
-    for factor_capacity, triplets in ((1, None), (None, 1)):
-        query(run, state)
-        linear, generation, _ = contact_matrix(run, factor_capacity=factor_capacity, triplet_capacity=triplets)
-        test.assertNotEqual(int(linear.finalize_assembly(generation=generation).status), 0)
-        test.assertNotEqual(run._contact.flags.numpy()[0], 0)
-    query(run, state)
-    weights = run._contact.weights.numpy().copy()
-    weights[0, 0] = -1
-    run._contact.weights.assign(weights)
-    linear, generation, _ = contact_matrix(run)
-    test.assertNotEqual(int(linear.finalize_assembly(generation=generation).status), 0)
-    query(run, state)
-    linear, generation, assembly = contact_matrix(run)
-    linear.finalize_assembly(generation=generation)
-    run._contact.assemble_tangent(assembly)
-    test.assertNotEqual(run._contact.flags.numpy()[0], 0)
 
 
 def test_real_trial_activation(test, device):
     """Keep a distant legal pair's stable slots and activate it in a later trial."""
-    run = contact_solver(contact_scene(device, "A-R"), law="C-II")
+    run = contact_solver(contact_scene(device, "A-R"))
+    batch = native_batch(run)
+    test.assertEqual(run._contact.actor_samples.count, 72)
     state = contact_state(run, "A-R")
     current = physical(state)
     state._monolithic_coupled.rigid_com.assign(current["com"] + np.array([0.1, 0, 0]))
-    query(run, state, start=True)
-    query(run, state)
-    test.assertEqual(np.count_nonzero(run._contact.weights.numpy()), 0)
-    frozen = run._contact.actor_contact.start.y.numpy().copy()
+    query(batch, run, state, start=True)
+    query(batch, run, state)
+    test.assertEqual(int(batch.flags.numpy()[0]), 0)
+    test.assertEqual(int(batch.pool.records.count.numpy()[0]), 0)
+    frozen = batch.start.y.numpy().copy()
     state._monolithic_coupled.rigid_com.assign(current["com"])
-    query(run, state)
-    test.assertGreater(np.count_nonzero(run._contact.weights.numpy()), 0)
-    np.testing.assert_array_equal(run._contact.actor_contact.start.y.numpy(), frozen)
-    test.assertEqual(run._contact.actor_contact.count, 72)
-    explicit = contact_solver(contact_scene(device, "A-R"), law="C-EE")
-    state = contact_state(explicit, "A-R")
-    query(explicit, state, start=True)
-    state._monolithic_coupled.rigid_com.assign(state._monolithic_coupled.rigid_com.numpy() + np.array([0.1, 1e-6, 0]))
-    query(explicit, state)
-    geometry = explicit._contact.actor_contact
-    shapes = geometry.bounded_shapes.numpy()
-    lo, hi = geometry.bound_lower.numpy(), geometry.bound_upper.numpy()
-    source, target = [int(np.flatnonzero(shapes == s)[0]) for s in (0, 1)]
-    test.assertLess(hi[source, 0], lo[target, 0])
-    test.assertGreater(np.linalg.norm(explicit._contact.residual.numpy()), 1e-4)
-    test.assertEqual(np.count_nonzero(explicit._contact.weights.numpy()[:, 0]), 0)
-    test.assertGreater(np.count_nonzero(explicit._contact.weights.numpy()[:, 1:]), 0)
+    query(batch, run, state)
+    test.assertEqual(int(batch.flags.numpy()[0]), 0)
+    test.assertGreater(int(batch.pool.records.count.numpy()[0]), 0)
+    test.assertGreater(np.linalg.norm(batch.pool.residual.result.numpy()), 1e-4)
+    np.testing.assert_array_equal(batch.start.y.numpy(), frozen)
 
 
 def test_branch_and_fixed_support(test, device):
@@ -266,10 +211,18 @@ def test_branch_and_fixed_support(test, device):
     run = contact_solver(model)
     samples = run._contact.actor_samples
     arm = next(a for a in ActorTable.from_model(model).actors if a.kind == "articulation")
-    for i, (source, target, _face, _slot) in enumerate(samples.keys):
-        test.assertNotEqual(model.shape_body.numpy()[source], model.shape_body.numpy()[target])
+    # Compact metadata stores no per-key support; the producer expands each endpoint body's support.
+    support = native_batch(run).support
+    offsets, rows, bodies = support.offsets.numpy(), support.columns.numpy(), model.shape_body.numpy()
+
+    def body_columns(shape):
+        body = bodies[shape]
+        return set(rows[offsets[body] : offsets[body + 1]]) if body >= 0 else set()
+
+    for source, target, _face, _slot in samples.keys:
+        test.assertNotEqual(bodies[source], bodies[target])
         endpoint = source if source < 3 else target
-        columns = set(samples.supports[i])
+        columns = body_columns(source) | body_columns(target)
         if endpoint == shapes[0]:
             test.assertFalse(columns & set(range(arm.dof_start, arm.dof_start + arm.dof_count)))
             test.assertIn(source, shapes[3:])
@@ -325,34 +278,33 @@ def test_contact_linear_blocks(test, device):
 
 
 def test_local_transform_and_law_branches(test, device):
-    """Keep native off-center geometry and three laws correct at zero friction and zero smoothing."""
-    for law, mu, width in itertools.product(("C-EE", "C-IE", "C-II"), (0, 0.5), (0, 1e-4)):
-        with test.subTest(law=law, mu=mu, width=width):
+    """Keep native off-center geometry and the C-IE law correct at zero friction and zero smoothing."""
+    for mu, width in itertools.product((0, 0.5), (0, 1e-4)):
+        with test.subTest(mu=mu, width=width):
             model = contact_scene(device, "R-static")
             transforms = model.shape_transform.numpy().copy()
             transforms[1] = np.asarray(
                 wp.transform((0, 0.001, 0.002), wp.quat_from_axis_angle(wp.vec3(0, 0, 1), 0.005))
             )
             model.shape_transform.assign(transforms)
-            run = contact_solver(model, law=law, friction_coefficient=mu, normal_smoothing=width)
+            run = contact_solver(model, friction_coefficient=mu, normal_smoothing=width)
+            batch = native_batch(run)
             state = contact_state(run, "R-static")
             start = physical(state)
-            query(run, state, start=True)
+            query(batch, run, state, start=True)
             direction = np.linspace(-0.2, 0.3, run._layout.scalar_dof_count)
             perturb(run, state, start, direction, 1e-6)
-            query(run, state)
-            c = run._contact
-            energy, residual, b = fixture_terms(model, run._actors, physical(state), start, law, mu=mu, width=width)
-            np.testing.assert_allclose(c.energy.numpy().sum(axis=0), energy, atol=1e-12, rtol=1e-8)
-            np.testing.assert_allclose(c.residual.numpy(), residual, atol=1e-10, rtol=1e-8)
-            linear, generation, _ = contact_matrix(run)
-            test.assertEqual(int(linear.finalize_assembly(generation=generation).status), 0)
-            matrix = linear.densify_for_test(generation=generation).raw_matrix
+            query(batch, run, state)
+            energy, residual, b = fixture_terms(model, run._actors, physical(state), start, mu=mu, width=width)
+            test.assertEqual(int(batch.flags.numpy()[0]), 0)
+            np.testing.assert_allclose(batch.pool.energy.result.numpy()[:2], energy, atol=1e-12, rtol=1e-8)
+            np.testing.assert_allclose(batch.pool.residual.result.numpy(), residual, atol=1e-10, rtol=1e-8)
+            matrix = batch_matrix(batch)
             test.assertLess(np.linalg.norm(matrix - b) / max(1, np.linalg.norm(b)), 1e-5)
-            saved = c.residual.numpy().copy()
+            saved = batch.pool.residual.result.numpy().copy()
             state.body_q.fill_(100)
-            query(run, state)
-            np.testing.assert_array_equal(c.residual.numpy(), saved)
+            query(batch, run, state)
+            np.testing.assert_array_equal(batch.pool.residual.result.numpy(), saved)
 
 
 class TestActorContactPairs(unittest.TestCase):

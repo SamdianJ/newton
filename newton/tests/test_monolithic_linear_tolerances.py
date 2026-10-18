@@ -203,8 +203,6 @@ class TestMonolithicPcgTolerances(unittest.TestCase):
                 # configuration above rejects values it cannot represent.
                 solver = SolverMonolithic(
                     model,
-                    contact_model="C-EE",
-                    globalization="Armijo",
                     friction_velocity_scale=0.01,
                     mass_mode="lumped",
                     linear_absolute_tolerance=value,
@@ -215,8 +213,6 @@ class TestMonolithicPcgTolerances(unittest.TestCase):
                 with self.subTest(public=value), self.assertRaises(expected):
                     SolverMonolithic(
                         model,
-                        contact_model="C-EE",
-                        globalization="Armijo",
                         friction_velocity_scale=0.01,
                         mass_mode="lumped",
                         linear_absolute_tolerance=value,

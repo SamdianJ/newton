@@ -114,15 +114,12 @@ class MaterialScene:
             precision=SolverMonolithic.Precision.FP64,
             pcg_mode=SolverMonolithic.PCGMode(pcg_mode),
             use_cuda_graph=use_cuda_graph,
-            allow_nonconservative_energy=True,
             joint_residual_tolerance=c.get("joint_residual_tolerance"),
             cloth_position_tolerance=c.get("cloth_position_tolerance"),
             contact_stiffness=r.get("contact_stiffness", c["contact_stiffness"]),
             **{
                 key: c[key]
                 for key in (
-                    "contact_model",
-                    "globalization",
                     "publish_policy",
                     "friction_coefficient",
                     "friction_velocity_scale",

@@ -70,22 +70,16 @@ def penalty(gap, stiffness, width):
     return stiffness * p**2 / 2, stiffness * p * dp, stiffness * (dp**2 + p * ddp)
 
 
-def local(y, yn, kind, scale, law, *, offset, stiffness, width=1e-4, mu=0.5, a=1e-5):
+def local(y, yn, kind, scale, *, offset, stiffness, width=1e-4, mu=0.5, a=1e-5):
+    """Evaluate one C-IE sample: friction load from the gap linearized at the start point."""
     phi, g, h = geometry(y, kind, scale)
-    old_phi, old_g, _ = geometry(yn, kind, scale)
-    d, dn = phi - offset, old_phi - offset
+    d = phi - offset
     en, force, curvature = penalty(d, stiffness, width)
     u = y - yn
-    if law == "C-EE":
-        n = old_g / np.linalg.norm(old_g)
-        load = penalty(dn, stiffness, width)[1]
-        dnmat, dload = np.zeros((3, 3)), np.zeros(3)
-    else:
-        n = g / np.linalg.norm(g)
-        dnmat = (np.eye(3) - np.outer(n, n)) @ h / np.linalg.norm(g)
-        gap = d - g @ u if law == "C-IE" else d
-        _, load, load_curvature = penalty(gap, stiffness, width)
-        dload = load_curvature * h @ u if law == "C-IE" else -load_curvature * g
+    n = g / np.linalg.norm(g)
+    dnmat = (np.eye(3) - np.outer(n, n)) @ h / np.linalg.norm(g)
+    _, load, load_curvature = penalty(d - g @ u, stiffness, width)
+    dload = load_curvature * h @ u
     p = np.eye(3) - np.outer(n, n)
     v = p @ u
     rho = np.linalg.norm(v)
@@ -103,7 +97,7 @@ def local(y, yn, kind, scale, law, *, offset, stiffness, width=1e-4, mu=0.5, a=1
     return np.array([en, mu * load * psi]), -force * g + friction, dr, b
 
 
-def evaluate(model, q, x, qn, xn, law, *, kinds, mapping=None, mu=0.5, radius=0.001):
+def evaluate(model, q, x, qn, xn, *, kinds, mapping=None, mu=0.5, radius=0.001):
     """Two coordinates: rotation about world Y, translation along world X."""
     if mapping is None:
         mapping = np.arange(len(x))
@@ -135,7 +129,7 @@ def evaluate(model, q, x, qn, xn, law, *, kinds, mapping=None, mu=0.5, radius=0.
                 hy[:, 0, 1:] = -GENERATOR @ j[:, 1:]
                 hy[:, 1:, 0] = hy[:, 0, 1:]
                 e, r, exact, fitted = local(
-                    y, yn, kind, scales[shape], law, offset=radius + margins[shape], stiffness=1e7 * area / 3, mu=mu
+                    y, yn, kind, scales[shape], offset=radius + margins[shape], stiffness=1e7 * area / 3, mu=mu
                 )
                 energies.append(e)
                 residual += j.T @ r

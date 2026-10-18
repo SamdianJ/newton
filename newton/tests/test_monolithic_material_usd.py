@@ -79,9 +79,7 @@ class TestMaterialUSD(unittest.TestCase):
                 run = SolverMonolithic(
                     second.finalize(device="cpu"),
                     **second_inputs,
-                    contact_model="C-IE",
                     friction_velocity_scale=0.1,
-                    globalization="ResNorm",
                 )
                 state = run.create_state(dt=0.001)
                 run.step(state, state, run.create_control(), dt=0.001)

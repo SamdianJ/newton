@@ -5,8 +5,8 @@
 
 import tempfile
 import unittest
+from contextlib import nullcontext
 from dataclasses import replace
-from functools import partial
 from math import asin, cos, pi, sqrt
 from pathlib import Path
 from unittest.mock import patch
@@ -26,9 +26,10 @@ from newton._src.solvers.monolithic.linear_types import MonolithicLinearCapaciti
 from newton._src.solvers.monolithic.material_inputs import _MaterialInputs
 from newton.solvers.experimental.monolithic import SolverMonolithic, build_smooth_sdf
 from newton.tests.monolithic_test_utils import add_contact_free_tet
-from newton.tests.test_monolithic_contact_batch import batch_matrix
+from newton.tests.test_monolithic_contact_components import batch_matrix
 from newton.tests.test_monolithic_material_state import snapshot
 from newton.tests.unittest_utils import add_function_test, get_test_devices
+from scripts.monolithic_reference.contact_routes import pooled_audit_route
 
 
 def scene(*, cable=False, body=False, device="cpu", mixed=False, fixed=False, mesh=False, plane=False):
@@ -111,13 +112,11 @@ def contact_solver(
     body=False,
     device="cpu",
     mu=0.0,
-    law="C-EE",
     smoothing=1e-5,
     mesh=False,
     plane=False,
     mixed=False,
     fixed=False,
-    globalization="ResNorm",
     **options,
 ):
     model, _, _, cloth, cables = scene(
@@ -130,8 +129,6 @@ def contact_solver(
         model,
         cloth_inputs=cloth,
         cable_inputs=cables,
-        contact_model=law,
-        globalization=globalization,
         friction_velocity_scale=0.1,
         contact_stiffness=100,
         friction_coefficient=mu,
@@ -145,20 +142,20 @@ def contact_solver(
 
 def query(solver, state, *, begin=False):
     c, k, h = solver._contact, solver._kinematics, state._monolithic_coupled
-    k.evaluate(k.gather_q(state))
+    q = k.gather_q(state)
+    k.evaluate(q)
     c._batch.material_surface.update(state, begin=begin)
-    fn = c.begin_step if begin else c.evaluate
-    fn(
-        state.particle_q,
-        k.poses,
-        k.com,
-        k.jt,
-        k.jw,
-        rigid_com=h.rigid_com,
-        rigid_rotation=h.rigid_rotation,
-        **({} if begin else {"dt": 0.001}),
-    )
-    if not begin and c.flags.numpy()[0]:
+    inputs = (state.particle_q, k.poses, k.com, k.jt, k.jw)
+    options = {"rigid_com": h.rigid_com, "rigid_rotation": h.rigid_rotation}
+    spatial = isinstance(c, _SpatialContactObjective)
+    if begin:
+        c.begin_step(*inputs, **({"kinematics": k, "q0": q} if spatial else {}), **options)
+        return
+    if spatial:
+        # Select candidates at this Newton point, as the solver does before evaluation.
+        c.refresh(q, state.particle_q, rigid_com=h.rigid_com)
+    c.evaluate(*inputs, dt=0.001, **options)
+    if c.flags.numpy()[0]:
         raise AssertionError(c.flags.numpy())
 
 
@@ -171,8 +168,6 @@ class TestMaterialContactSampling(unittest.TestCase):
                 model,
                 cable_inputs=[replace(cables[0], radius=1e-200)],
                 mass_mode="lumped",
-                globalization="ResNorm",
-                contact_model="C-EE",
                 friction_velocity_scale=0.1,
             )
 
@@ -235,10 +230,8 @@ class TestMaterialContactSampling(unittest.TestCase):
             cloth_inputs=cloth,
             cable_inputs=cables,
             mass_mode="lumped",
-            globalization="ResNorm",
             contact_stiffness=100,
             friction_coefficient=0,
-            contact_model="C-EE",
             friction_velocity_scale=0.1,
         )
         material_runtime.initialize(solver)
@@ -256,7 +249,7 @@ class TestMaterialContactSampling(unittest.TestCase):
         query(solver, b, begin=True)
         c, k, h = solver._contact, solver._kinematics, b._monolithic_coupled
         selection = _ContactSpatial(
-            c._batch, k, k.gather_q(b), b.particle_q, k.poses, rigid_com=h.rigid_com, capacity=c.count, law_margin=0
+            c._batch, k, k.gather_q(b), b.particle_q, k.poses, rigid_com=h.rigid_com, capacity=c.count
         )
         selection.update(k.gather_q(b), b.particle_q, rigid_com=h.rigid_com)
         self.assertEqual(selection.check(), 0)
@@ -273,10 +266,8 @@ class TestMaterialContactSampling(unittest.TestCase):
                 model,
                 cloth_inputs=cloth,
                 mass_mode="lumped",
-                globalization="ResNorm",
                 contact_stiffness=100,
                 friction_coefficient=0,
-                contact_model="C-EE",
                 friction_velocity_scale=0.1,
             )
             material_runtime.initialize(solver)
@@ -329,8 +320,6 @@ class TestMaterialContactDerivatives(unittest.TestCase):
                 model,
                 cloth_inputs=cloth,
                 cable_inputs=cables,
-                contact_model="C-EE",
-                globalization="ResNorm",
                 friction_velocity_scale=0.1,
                 friction_coefficient=0,
                 contact_stiffness=100,
@@ -484,7 +473,8 @@ class TestMaterialContactDerivatives(unittest.TestCase):
 
         for cable in (False, True):
             with self.subTest(cable=cable):
-                solver = contact_solver(cable=cable, body=True, mu=0.4)
+                with pooled_audit_route():
+                    solver = contact_solver(cable=cable, body=True, mu=0.4)
                 state = solver.create_state(dt=0.001)
                 query(solver, state, begin=True)
                 query(solver, state)
@@ -498,7 +488,6 @@ class TestMaterialContactDerivatives(unittest.TestCase):
                     k.poses,
                     rigid_com=h.rigid_com,
                     capacity=c.count,
-                    law_margin=0,
                 )
                 selection.update(k.gather_q(state), state.particle_q, rigid_com=h.rigid_com)
                 self.assertEqual(selection.check(), 0)
@@ -522,8 +511,6 @@ class TestMaterialContactStep(unittest.TestCase):
             m,
             cloth_inputs=cloth,
             cable_inputs=cable,
-            contact_model="C-EE",
-            globalization="ResNorm",
             friction_velocity_scale=0.1,
             contact_stiffness=100,
             friction_coefficient=0,
@@ -597,20 +584,17 @@ class TestMaterialContactStep(unittest.TestCase):
         for name, value in before.items():
             np.testing.assert_array_equal(snapshot(b)[name], value, err_msg=name)
 
-    def test_articulation_laws(self):
-        """Converge both material kinds against a mechanical tree with each friction law."""
+    def test_articulation_contact(self):
+        """Converge both material kinds against a mechanical tree with friction."""
         for cable in (False, True):
-            for law in ("C-EE", "C-IE", "C-II"):
-                with self.subTest(cable=cable, law=law):
-                    solver = contact_solver(cable=cable, body="articulation", law=law, mu=0.4)
-                    a, b = solver.create_state(dt=0.001), solver.create_state(dt=0.001)
-                    solver.step(a, b, solver.create_control(), dt=0.001)
-                    self.assertTrue(solver._last_stats.converged, solver._last_stats.failure_reason)
-                    force = solver.get_contact_forces(b)
-                    np.testing.assert_allclose(
-                        force.particle_force.sum(axis=0) + force.body_wrench[0, :3], 0, atol=1e-13
-                    )
-                    self.assertAlmostEqual(force.joint_force[0], force.body_wrench[0, 2], delta=1e-13)
+            with self.subTest(cable=cable):
+                solver = contact_solver(cable=cable, body="articulation", mu=0.4)
+                a, b = solver.create_state(dt=0.001), solver.create_state(dt=0.001)
+                solver.step(a, b, solver.create_control(), dt=0.001)
+                self.assertTrue(solver._last_stats.converged, solver._last_stats.failure_reason)
+                force = solver.get_contact_forces(b)
+                np.testing.assert_allclose(force.particle_force.sum(axis=0) + force.body_wrench[0, :3], 0, atol=1e-13)
+                self.assertAlmostEqual(force.joint_force[0], force.body_wrench[0, 2], delta=1e-13)
 
     def test_mixed_and_fixed_contact(self):
         """Publish active A/R/T/cloth/cable contact and reactions with no free material rows."""
@@ -630,25 +614,19 @@ class TestMaterialContactStep(unittest.TestCase):
                     np.testing.assert_array_equal(a.particle_q.numpy(), b.particle_q.numpy())
 
     def test_energy_acceptance_policy(self):
-        """Require the existing heuristic opt-in for material face selection."""
-        with self.assertRaisesRegex(ValueError, "nonconservative"):
-            contact_solver(globalization="Armijo")
-        solver = contact_solver(globalization="Armijo", allow_nonconservative_energy=True)
+        """Accept material face selection through the nonconservative C-IE energy heuristic."""
+        solver = contact_solver()
         a, b = solver.create_state(dt=0.001), solver.create_state(dt=0.001)
         solver.step(a, b, solver.create_control(), dt=0.001)
         self.assertTrue(solver._last_stats.converged, solver._last_stats.failure_reason)
         self.assertFalse(solver._conservative_energy())
 
     def test_spatial_step(self):
-        """Run material steps through the private B3 backend and its full reference."""
+        """Run material steps with a bounded spatial candidate capacity."""
 
         for cable in (False, True):
             with self.subTest(cable=cable):
-                with patch(
-                    "newton._src.solvers.monolithic.material_runtime._PooledContactObjective",
-                    partial(_SpatialContactObjective, candidate_capacity=1024, law_margin=0),
-                ):
-                    solver = contact_solver(cable=cable, body=True, mu=0.4)
+                solver = contact_solver(cable=cable, body=True, mu=0.4, contact_candidate_capacity=1024)
                 a, b = solver.create_state(dt=0.001), solver.create_state(dt=0.001)
                 solver.step(a, b, solver.create_control(), dt=0.001)
                 self.assertTrue(solver._last_stats.converged, solver._last_stats.failure_reason)
@@ -657,27 +635,25 @@ class TestMaterialContactStep(unittest.TestCase):
 def test_material_contact_native_devices(test, device):
     """Exercise production contact, material spin and graph reuse on each native device."""
     for cable in (False, True):
-        for law in ("C-EE", "C-IE", "C-II"):
-            with test.subTest(cable=cable, law=law):
-                solver = contact_solver(
-                    cable=cable,
-                    body=True,
-                    device=device,
-                    mu=0.4,
-                    law=law,
-                    pcg_mode=SolverMonolithic.PCGMode.PRODUCTION,
-                    use_cuda_graph=device.is_cuda,
-                )
-                a, b = solver.create_state(dt=0.001), solver.create_state(dt=0.001)
-                control = solver.create_control()
-                for _ in range(3):
-                    solver.step(a, b, control, dt=0.001)
-                    test.assertTrue(solver._last_stats.converged, solver._last_stats.failure_reason)
-                    test.assertTrue(np.isfinite(solver.get_contact_forces(b).cable_torque).all())
-                    a, b = b, a
-                if device.is_cuda:
-                    test.assertGreater(sum(solver._contact._batch.graphs.captures.values()), 0)
-                    test.assertGreater(sum(solver._contact._batch.graphs.replays.values()), 0)
+        with test.subTest(cable=cable):
+            solver = contact_solver(
+                cable=cable,
+                body=True,
+                device=device,
+                mu=0.4,
+                pcg_mode=SolverMonolithic.PCGMode.PRODUCTION,
+                use_cuda_graph=device.is_cuda,
+            )
+            a, b = solver.create_state(dt=0.001), solver.create_state(dt=0.001)
+            control = solver.create_control()
+            for _ in range(3):
+                solver.step(a, b, control, dt=0.001)
+                test.assertTrue(solver._last_stats.converged, solver._last_stats.failure_reason)
+                test.assertTrue(np.isfinite(solver.get_contact_forces(b).cable_torque).all())
+                a, b = b, a
+            if device.is_cuda:
+                test.assertGreater(sum(solver._contact._batch.graphs.captures.values()), 0)
+                test.assertGreater(sum(solver._contact._batch.graphs.replays.values()), 0)
 
 
 def test_material_contact_precision(test, device):
@@ -745,8 +721,7 @@ def test_material_plane_spatial_steps(test, device):
     for cable in (False, True):
         results = []
         for spatial in (False, True):
-            factory = _SpatialContactObjective if spatial else material_runtime._PooledContactObjective
-            with patch.object(material_runtime, "_PooledContactObjective", factory):
+            with nullcontext() if spatial else pooled_audit_route():
                 solver = contact_solver(
                     cable=cable,
                     body="articulation",

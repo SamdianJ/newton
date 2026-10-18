@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 The Newton Developers
 # SPDX-License-Identifier: Apache-2.0
 
-"""Check globalization acceptance and native convergence goals."""
+"""Check the fixed ArmijoOrResNorm acceptance and native convergence goals."""
 
 import unittest
 from dataclasses import replace
@@ -16,7 +16,7 @@ from newton._src.solvers.monolithic.solver_types import _SolverMonolithicInterna
 
 
 class TestGlobalization(unittest.TestCase):
-    """Guard the shared Armijo/ResNorm acceptance predicate."""
+    """Guard the fixed ArmijoOrResNorm acceptance predicate."""
 
     def test_absolute_material_force_caps(self):
         """Prevent a large frozen reference from accepting excessive raw joint or cloth force."""
@@ -41,20 +41,22 @@ class TestGlobalization(unittest.TestCase):
             self.assertLess(reduced[name][0], reduced[name][2])
 
     def test_predicates(self):
-        """Exercise A/R truth tables, nonnegative slopes, equality and nonfinite rejection."""
+        """Exercise the A/R/OR truth table, nonnegative slopes, equality, noise and nonfinite rejection."""
         kw = {"energy_noise": 0, "residual_noise": 0, "slope_noise": 0}
-        for mode in ("Armijo", "ResNorm", "ArmijoOrResNorm"):
-            for a, r in product((False, True), repeat=2):
-                value = acceptance(mode, 1, 0.5 if a else 2, -1, 1, 1, 0.5 if r else 2, **kw)
-                self.assertEqual(value[:3], (a if mode == "Armijo" else r if mode == "ResNorm" else a or r, a, r))
-        self.assertEqual(acceptance("ArmijoOrResNorm", 1, 2, 1, 1, 1, 0.5, **kw), (True, False, True, True))
-        self.assertEqual(acceptance("ResNorm", 1, 1, 0, 1, 1, 1, **kw), (True, False, True, False))
-        self.assertFalse(acceptance("ResNorm", 1, 0.5, -1, 1, 1, 1, **kw)[3])
-        self.assertFalse(
-            acceptance("Armijo", 1, 1, -1, 1, 1, 0.5, energy_noise=0.001, residual_noise=0, slope_noise=0)[3]
+        for a, r in product((False, True), repeat=2):
+            value = acceptance(1, 0.5 if a else 2, -1, 1, 1, 0.5 if r else 2, **kw)
+            self.assertEqual(value[:3], (a or r, a, r))
+        # Non-descent directions are still accepted by a strict residual decrease.
+        self.assertEqual(acceptance(1, 2, 1, 1, 1, 0.5, **kw), (True, False, True, True))
+        # Equal residuals are accepted but are not an improvement.
+        self.assertEqual(acceptance(1, 1, 0, 1, 1, 1, **kw), (True, False, True, False))
+        # An energy decrease within its noise is not an improvement either.
+        self.assertEqual(
+            acceptance(1, 1, -1, 1, 1, 1, energy_noise=0.001, residual_noise=0, slope_noise=0),
+            (True, True, True, False),
         )
         with self.assertRaises(ValueError):
-            acceptance("ArmijoOrResNorm", 1, float("nan"), -1, 1, 1, 0, **kw)
+            acceptance(1, float("nan"), -1, 1, 1, 0, **kw)
 
     def test_native_host_targets(self):
         for dtype in (np.float32, np.float64):
@@ -95,14 +97,14 @@ class TestGlobalization(unittest.TestCase):
         trial = material_merit(solver, np.array([4e-10, 2e-13]), values, scale)
         kw = {"energy_noise": 0, "residual_noise": 0, "slope_noise": 0}
         with self.subTest(case="torque_improvement"):
-            self.assertTrue(acceptance("ResNorm", 1, 1, 0, 1, current, trial, **kw)[0])
-            self.assertFalse(acceptance("ResNorm", 1, 1, 0, 1, trial, current, **kw)[0])
+            self.assertTrue(acceptance(1, 1, 0, 1, current, trial, **kw)[0])
+            self.assertFalse(acceptance(1, 1, 0, 1, trial, current, **kw)[0])
         solver._cable_raw_theta_norms["cable_0_theta"] = 4e-13
         current = material_merit(solver, np.array([4e-10, 0.0]), values, scale)
         solver._cable_raw_theta_norms["cable_0_theta"] = 8e-13
         trial = material_merit(solver, np.array([2e-10, 0.0]), values, scale)
         with self.subTest(case="omitted_gauge_equation"):
-            self.assertFalse(acceptance("ResNorm", 1, 1, 0, 1, current, trial, **kw)[0])
+            self.assertFalse(acceptance(1, 1, 0, 1, current, trial, **kw)[0])
 
 
 if __name__ == "__main__":

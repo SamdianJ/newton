@@ -263,23 +263,15 @@ class _ContactSpatial:
     Construction and begin_step snapshot the physical-step start. Updates query q0→q1,
     vertex segments and COM segments. Trials consume the resulting frozen IDs;
     they can miss contacts outside these envelopes, without automatic repair.
-    ``law_margin`` is an explicit experimental length, not a qualified default.
+    Candidate envelopes use the law's smoothing width with no extra margin.
     The solver lifecycle owner controls refresh/freeze and rollback.
     """
 
-    def __init__(self, batch, kinematics, q0, x0, poses0, *, rigid_com=None, rigid_rotation=None, capacity, law_margin):
+    def __init__(self, batch, kinematics, q0, x0, poses0, *, rigid_com=None, rigid_rotation=None, capacity):
         c, m, k = batch.contact, batch.contact.model, kinematics
-        if (
-            k.model is not m
-            or k.dtype != c.dtype
-            or k.count != c.nq
-            or k.bodies != c.body_count
-            or not np.isfinite(law_margin)
-            or law_margin < 0
-        ):
-            raise ValueError("Invalid spatial contact model or law margin")
+        if k.model is not m or k.dtype != c.dtype or k.count != c.nq or k.bodies != c.body_count:
+            raise ValueError("Invalid spatial contact model")
         self.batch, self.kinematics, self.device, self.capacity = batch, k, m.device, capacity
-        self.law_margin = float(law_margin)
         if rigid_com is None:
             rigid_com = batch._empty_vector
         for a, dtype, shape in (
@@ -442,7 +434,7 @@ class _ContactSpatial:
         self.face_material = wp.array(face_material, dtype=int, device=self.device)
         self.face_radius = wp.array(face_reach, dtype=wp.float64, device=self.device)
         gaps = batch.all_samples.gaps.numpy().astype(float)
-        reach = [float(gaps[targets == target].max()) + c.parameters[3] + self.law_margin for target in unique_targets]
+        reach = [float(gaps[targets == target].max()) + c.parameters[3] for target in unique_targets]
         geometry("target", unique_targets, np.zeros(len(unique_targets), np.int32), target_lo, target_hi, reach)
         self.sweep = _ArticulationSweep(k, arm_radii)
         self._bounds(q0, x0, self.com0)

@@ -80,13 +80,13 @@ def test_hotspot_dependencies(test, device):
                             arrays, metadata, bad, scene="tiny-contact", device=device, graph=graph, repeat=1
                         )
                     damaged = {k: v.copy() for k, v in arrays.items()}
-                    damaged["_contact.weights"].fill(0)
+                    damaged["contact.pool.records.triplet_values"].fill(0)
                     with test.assertRaises(AssertionError):
                         replay_objective(
                             damaged, metadata, output, scene="tiny-contact", device=device, graph=graph, repeat=1
                         )
                     damaged = {k: v.copy() for k, v in arrays.items()}
-                    damaged["_contact.weights"].fill(np.nan)
+                    damaged["contact.pool.records.triplet_values"].fill(np.nan)
                     with test.assertRaises(ValueError):
                         replay_objective(
                             damaged, metadata, output, scene="tiny-contact", device=device, graph=graph, repeat=1

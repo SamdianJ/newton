@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 The Newton Developers
 # SPDX-License-Identifier: Apache-2.0
 
-"""Run the ten P4 scene configurations in native precision; default to FP32."""
+"""Run the frozen baseline scene configurations in native precision; default to FP32."""
 
 import argparse
 import gzip
@@ -21,7 +21,7 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 def cases():
-    """Match the existing ten FP64 baselines; include globalization in every ID."""
+    """Match the frozen FP64 baselines; include globalization in every ID."""
     return [
         {
             "scene": c["id"].split("--")[0],
@@ -55,15 +55,13 @@ def build(case, *, input_manifest=FROZEN, solver_factory=None):
 
         scene = FrankaGrasp(
             INPUTS / "franka/sdf-cache",
-            law=case["law"],
-            globalization=case["globalization"],
             precision=case["precision"],
             **({"solver_factory": solver_factory} if solver_factory is not None else {}),
         )
         samples = [franka_targets(scene.high, scene.low, i * case["dt"])[:2] for i in range(case["steps"] + 1)]
         return scene.model, scene.solver, scene.state, np.asarray(samples, dtype=np.float32)
     if case["scene"] != "sharpa-recorded-10mm":
-        raise ValueError("T5-C only supports the ten frozen Franka/Sharpa configurations")
+        raise ValueError("T5-C only supports the frozen Franka/Sharpa configurations")
     payload = json.loads((INPUTS / "sharpa/recorded-control.json").read_text())
     model, _, mapping, curve, terms, trajectory, _ = build_recorded(payload)
     if (trajectory.steps, trajectory.dt) != (case["steps"], case["dt"]):
@@ -76,12 +74,9 @@ def build(case, *, input_manifest=FROZEN, solver_factory=None):
     smooth = build_smooth_sdf(model, qualified_directory=resolve_input(directory))
     run = (solver_factory or SolverMonolithic)(
         model,
-        contact_model=case["law"],
-        globalization=case["globalization"],
         friction_velocity_scale=0.01,
         alignment_policy="mask",
         publish_policy=case["publish_policy"],
-        allow_nonconservative_energy=True,
         tet_rest_density=wp.full(model.tet_count, 1000.0, dtype=float, device=model.device),
         joint_terms=terms,
         pcg_mode="production",

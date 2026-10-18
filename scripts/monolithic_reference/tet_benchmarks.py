@@ -98,9 +98,6 @@ class TetBenchmark:
             )
         self.solver = SolverMonolithic(
             self.model,
-            contact_model="C-IE",
-            globalization="ArmijoOrResNorm",
-            allow_nonconservative_energy=True,
             friction_velocity_scale=0.01,
             material_model=material_model,
             mass_mode=mass_mode,

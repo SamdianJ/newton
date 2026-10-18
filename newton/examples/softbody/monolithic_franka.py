@@ -190,8 +190,6 @@ class FrankaGrasp:
         cache,
         device="cuda:0",
         *,
-        law="C-IE",
-        globalization="ArmijoOrResNorm",
         precision="fp64",
         solver_factory=SolverMonolithic,
     ):
@@ -212,11 +210,8 @@ class FrankaGrasp:
         widths = (0.01,) * 7 + (0.001,) * 2
         self.solver = solver_factory(
             self.model,
-            contact_model=law,
-            globalization=globalization,
             alignment_policy="mask",
             publish_policy="current_iterate",
-            allow_nonconservative_energy=True,
             friction_velocity_scale=0.01,
             contact_stiffness=1e7,
             friction_coefficient=0.5,

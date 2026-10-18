@@ -14,7 +14,8 @@ import warp as wp
 
 import newton
 from newton._src.solvers.monolithic.actors import ActorTable
-from newton._src.solvers.monolithic.contact import ContactObjective
+from newton._src.solvers.monolithic.contact_batch import _ContactBatch
+from newton._src.solvers.monolithic.contact_pipeline import _SpatialContactObjective
 from newton._src.solvers.monolithic.linear_types import (
     MonolithicLinearStatus,
     MonolithicPcgWarmStart,
@@ -106,56 +107,51 @@ def test_dense_layout(test, device):
 
 
 def test_layout_integration(test, device):
-    """Converge three active-contact steps for every law, acceptance mode and layout."""
+    """Converge three active-contact steps for every execution route and layout."""
     modes = [("diagnostic", False), ("production", False)]
     if device.is_cuda:
         modes.append(("production", True))
-    for law in ("C-EE", "C-IE", "C-II"):
-        for globalization in ("Armijo", "ResNorm", "ArmijoOrResNorm"):
-            for mode, graph in modes:
-                reference = None
-                for order in ((0, 1), (1, 0)):
-                    with test.subTest(law=law, globalization=globalization, mode=mode, graph=graph, order=order):
-                        model = scene(device)
-                        run = permuted_solver(
-                            model,
-                            order,
-                            law=law,
-                            globalization=globalization,
-                            mode=mode,
-                            graph=graph,
-                            allow_nonconservative_energy=True,
-                        )
-                        state = run.create_state(dt=0.001)
-                        for _ in range(3):
-                            run.step(state, state, model.control(), dt=0.001)
-                            test.assertTrue(run.last_stats.converged, run.last_stats)
-                            matrix = run._linear.densify_for_test(generation=run._generation).raw_matrix
-                            a, t = run._layout.indices("articulation"), run._layout.indices("tet")
-                            test.assertGreater(np.linalg.norm(matrix[np.ix_(a, t)]), 0)
-                            history = state._monolithic_coupled
-                            test.assertGreater(np.linalg.norm(history.contact_body_force.numpy()), 0)
-                            test.assertGreater(np.linalg.norm(history.contact_particle_force.numpy()), 0)
-                            np.testing.assert_allclose(
-                                history.contact_body_force.numpy()[:, :3].sum(axis=0)
-                                + history.contact_particle_force.numpy().sum(axis=0),
-                                0,
-                                atol=1e-12,
-                            )
-                        current = snapshot(state)
-                        if reference is None:
-                            reference = current
-                        else:
-                            for name in ("joint_q", "particle_q"):
-                                np.testing.assert_allclose(current[name], reference[name], rtol=0, atol=1e-7)
-                            for name in ("joint_qd", "particle_qd"):
-                                np.testing.assert_allclose(current[name], reference[name], rtol=0, atol=1e-6)
-                            for name in (
-                                "history.contact_body_force",
-                                "history.contact_particle_force",
-                                "history.contact_joint_force",
-                            ):
-                                np.testing.assert_allclose(current[name], reference[name], rtol=1e-5, atol=1e-4)
+    for mode, graph in modes:
+        reference = None
+        for order in ((0, 1), (1, 0)):
+            with test.subTest(mode=mode, graph=graph, order=order):
+                model = scene(device)
+                run = permuted_solver(
+                    model,
+                    order,
+                    mode=mode,
+                    graph=graph,
+                )
+                state = run.create_state(dt=0.001)
+                for _ in range(3):
+                    run.step(state, state, model.control(), dt=0.001)
+                    test.assertTrue(run.last_stats.converged, run.last_stats)
+                    matrix = run._linear.densify_for_test(generation=run._generation).raw_matrix
+                    a, t = run._layout.indices("articulation"), run._layout.indices("tet")
+                    test.assertGreater(np.linalg.norm(matrix[np.ix_(a, t)]), 0)
+                    history = state._monolithic_coupled
+                    test.assertGreater(np.linalg.norm(history.contact_body_force.numpy()), 0)
+                    test.assertGreater(np.linalg.norm(history.contact_particle_force.numpy()), 0)
+                    np.testing.assert_allclose(
+                        history.contact_body_force.numpy()[:, :3].sum(axis=0)
+                        + history.contact_particle_force.numpy().sum(axis=0),
+                        0,
+                        atol=1e-12,
+                    )
+                current = snapshot(state)
+                if reference is None:
+                    reference = current
+                else:
+                    for name in ("joint_q", "particle_q"):
+                        np.testing.assert_allclose(current[name], reference[name], rtol=0, atol=1e-7)
+                    for name in ("joint_qd", "particle_qd"):
+                        np.testing.assert_allclose(current[name], reference[name], rtol=0, atol=1e-6)
+                    for name in (
+                        "history.contact_body_force",
+                        "history.contact_particle_force",
+                        "history.contact_joint_force",
+                    ):
+                        np.testing.assert_allclose(current[name], reference[name], rtol=1e-5, atol=1e-4)
 
 
 def test_sparse_support(test, device):
@@ -175,32 +171,24 @@ def test_sparse_support(test, device):
     builder.particle_mass[0] = 0
     model = builder.finalize(device=device)
     for order in ((0, 1), (1, 0)):
-        with patch("newton._src.solvers.monolithic.solver_monolithic.ContactObjective", ContactObjective):
-            run = permuted_solver(model, order)
-        offsets, columns, local = run._contact.factor_support
-        test.assertEqual(len(offsets), 3 * run._contact.count + 1)
+        run = permuted_solver(model, order)
         test.assertEqual(run._layout.dynamic_particle_count, 3)
-        triangles = model.tri_indices.numpy()
-        for key in range(run._contact.count):
-            face, shape = key // 6, key % 2
-            expected = set()
-            if shape == 0:
-                expected.update(run._layout.indices("articulation")[:2])
-            for particle in triangles[face]:
-                start = run._actors.maps["particle_to_global"][particle]
-                if start >= 0:
-                    expected.update(range(start, start + 3))
-            for component in range(3):
-                slot = 3 * key + component
-                test.assertEqual(set(columns[offsets[slot] : offsets[slot + 1]]), expected)
-        test.assertEqual(len(columns), sum(np.diff(offsets)))
-        test.assertEqual(run._contact.triplet_capacity, sum(int(k) ** 2 for k in np.diff(offsets)))
-        test.assertEqual(len(local), len(columns))
+        batch = _ContactBatch(run._contact, batch_capacity=run._contact.count, capacity=None)
+        offsets, columns = batch.support.offsets.numpy(), batch.support.columns.numpy()
+        a = run._layout.indices("articulation")
+        # Each body carries only its ancestor joints; the static ground has no rows.
+        for body, expected in zip(bodies, (a[[0]], a[[0, 1]], a[[0, 2]]), strict=True):
+            test.assertEqual(set(columns[offsets[body] : offsets[body + 1]]), set(expected))
+        particles = batch.support.particles.numpy()
+        np.testing.assert_array_equal(particles, run._actors.maps["particle_to_global"])
+        test.assertEqual(particles[0], -1)
+        # Plane samples: two ancestor q rows and three dynamic vertices of one face.
+        test.assertEqual(batch.pool.max_support, 11)
 
     # Own terms and contact terms must fit together, before allocating CSR storage.
     def overflow(*args, **kwargs):
         kwargs["base_triplet_count"] = 2**31 - 1
-        return ContactObjective(*args, **kwargs)
+        return _SpatialContactObjective(*args, **kwargs)
 
     with patch("newton._src.solvers.monolithic.solver_monolithic.ContactObjective", side_effect=overflow):
         with test.assertRaisesRegex(ValueError, "Contact support/triplet capacity"):

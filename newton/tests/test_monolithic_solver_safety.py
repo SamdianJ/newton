@@ -74,53 +74,38 @@ def test_publication(test, device):
 def test_native_trials(test, device):
     """Check written trial displacements, independent E/r and actual B32 posterior."""
     for precision in ("fp64", "fp32"):
-        for law in ("C-EE", "C-IE", "C-II"):
-            model = scene(device)
-            run = solver(model, law, precision=precision, publish_policy="current_iterate")
-            state = run.create_state(dt=0.001)
-            run.step(state, state, model.control(), dt=0.001)
-            test.assertFalse(run.last_stats.rolled_back)
-            original = snapshot(run._original)
-            direction = np.linspace(-0.3, 0.7, 14, dtype=np.float32) * np.float32(1e-5)
-            run._delta.assign(direction)
-            q, x = run._accepted.joint_q.numpy(), run._accepted.particle_q.numpy()
-            for alpha in (1.0, 0.5, 0.125):
-                run._take_trial(alpha, run._dt)
-                effective = run._effective_displacement()
-                actual = np.r_[run._trial.joint_q.numpy() - q, (run._trial.particle_q.numpy() - x).ravel()]
-                np.testing.assert_array_equal(effective, actual)
-                test.assertEqual(effective.dtype, run._numpy_dtype)
-                qe, xe = run._trial.joint_q.numpy().astype(float), run._trial.particle_q.numpy().astype(float)
-                e, r, _ = run._evaluate(run._trial, run._dt)
-                with patch.object(coupled, "joint_terms", wraps=coupled.joint_terms) as reference:
-                    oe, orr, _ = independent_objective(
-                        run, run._trial.joint_q.numpy(), run._trial.particle_q.numpy(), run._dt
-                    )
-                for value in reference.call_args.args:
-                    if isinstance(value, np.ndarray):
-                        test.assertEqual(value.dtype, np.float64)
-                tolerance = 2e-9 if precision == "fp64" else 8e-5
-                np.testing.assert_allclose(r, orr, rtol=tolerance, atol=tolerance)
-                test.assertAlmostEqual(float(e), float(oe), delta=tolerance)
-                _, scale = run._assemble(0)
-                matrix = run._linear.densify_for_test(generation=run._generation).raw_matrix
-                post = run._physical_linear_error(None, direction, r, scale)
-                expected = scale.astype(float) * (matrix @ direction.astype(float) + r.astype(float))
-                np.testing.assert_allclose(post, expected, rtol=tolerance, atol=tolerance)
-                if law == "C-EE":
-                    # Differentiate the independent E at the actual native candidate.
-                    z = np.r_[qe, xe.ravel()]
-                    h = 1e-7
-                    d = np.linspace(-0.2, 0.3, 14)
-                    d[:2] *= 0.01
-                    values = []
-                    for sign in (-1, 1):
-                        trial = z + sign * h * d
-                        values.append(
-                            independent_objective(run, trial[:2], trial[2:].reshape(-1, 3), float(run._dt))[0]
-                        )
-                    test.assertAlmostEqual((values[1] - values[0]) / (2 * h), orr @ d, delta=2e-7)
-            assert_snapshot(test, run._original, original)
+        model = scene(device)
+        run = solver(model, precision=precision, publish_policy="current_iterate")
+        state = run.create_state(dt=0.001)
+        run.step(state, state, model.control(), dt=0.001)
+        test.assertFalse(run.last_stats.rolled_back)
+        original = snapshot(run._original)
+        direction = np.linspace(-0.3, 0.7, 14, dtype=np.float32) * np.float32(1e-5)
+        run._delta.assign(direction)
+        q, x = run._accepted.joint_q.numpy(), run._accepted.particle_q.numpy()
+        for alpha in (1.0, 0.5, 0.125):
+            run._take_trial(alpha, run._dt)
+            effective = run._effective_displacement()
+            actual = np.r_[run._trial.joint_q.numpy() - q, (run._trial.particle_q.numpy() - x).ravel()]
+            np.testing.assert_array_equal(effective, actual)
+            test.assertEqual(effective.dtype, run._numpy_dtype)
+            e, r, _ = run._evaluate(run._trial, run._dt)
+            with patch.object(coupled, "joint_terms", wraps=coupled.joint_terms) as reference:
+                oe, orr, _ = independent_objective(
+                    run, run._trial.joint_q.numpy(), run._trial.particle_q.numpy(), run._dt
+                )
+            for value in reference.call_args.args:
+                if isinstance(value, np.ndarray):
+                    test.assertEqual(value.dtype, np.float64)
+            tolerance = 2e-9 if precision == "fp64" else 8e-5
+            np.testing.assert_allclose(r, orr, rtol=tolerance, atol=tolerance)
+            test.assertAlmostEqual(float(e), float(oe), delta=tolerance)
+            _, scale = run._assemble(0)
+            matrix = run._linear.densify_for_test(generation=run._generation).raw_matrix
+            post = run._physical_linear_error(None, direction, r, scale)
+            expected = scale.astype(float) * (matrix @ direction.astype(float) + r.astype(float))
+            np.testing.assert_allclose(post, expected, rtol=tolerance, atol=tolerance)
+        assert_snapshot(test, run._original, original)
 
 
 def test_checkpoint_corruption(test, device):
@@ -164,39 +149,34 @@ def test_checkpoint_corruption(test, device):
 
 
 def test_modes_and_identity(test, device):
-    """Exercise each globalization in native modes, then reject the other precision atomically."""
+    """Exercise native modes in both precisions, then reject the other precision atomically."""
     model = scene(device)
     modes = [("diagnostic", False), ("production", False)]
     if device.is_cuda:
         modes.append(("production", True))
-    for globalization in ("Armijo", "ResNorm", "ArmijoOrResNorm"):
-        for law in ("C-EE", "C-IE", "C-II"):
-            for mode, graph in modes:
-                runs = [
-                    solver(
-                        model,
-                        law,
-                        precision=precision,
-                        globalization=globalization,
-                        allow_nonconservative_energy=True,
-                        mode=mode,
-                        graph=graph,
-                        publish_policy="current_iterate",
-                    )
-                    for precision in ("fp64", "fp32")
-                ]
-                states = [run.create_state(dt=0.001) for run in runs]
-                for _ in range(2):
-                    for run, state in zip(runs, states, strict=True):
-                        run.step(state, state, model.control(), dt=0.001)
-                        test.assertFalse(run.last_stats.rolled_back, run.last_stats)
-                        run._states.validate(state)
-                        test.assertTrue(run.get_contact_forces(state).force_valid)
-                for i, run in enumerate(runs):
-                    before = snapshot(states[i])
-                    with test.assertRaises(ValueError):
-                        run.step(states[1 - i], states[i], model.control(), dt=0.001)
-                    assert_snapshot(test, states[i], before)
+    for mode, graph in modes:
+        runs = [
+            solver(
+                model,
+                precision=precision,
+                mode=mode,
+                graph=graph,
+                publish_policy="current_iterate",
+            )
+            for precision in ("fp64", "fp32")
+        ]
+        states = [run.create_state(dt=0.001) for run in runs]
+        for _ in range(2):
+            for run, state in zip(runs, states, strict=True):
+                run.step(state, state, model.control(), dt=0.001)
+                test.assertFalse(run.last_stats.rolled_back, run.last_stats)
+                run._states.validate(state)
+                test.assertTrue(run.get_contact_forces(state).force_valid)
+        for i, run in enumerate(runs):
+            before = snapshot(states[i])
+            with test.assertRaises(ValueError):
+                run.step(states[1 - i], states[i], model.control(), dt=0.001)
+            assert_snapshot(test, states[i], before)
 
 
 def test_host_contact_failure_identity(test, device):

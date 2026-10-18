@@ -12,9 +12,7 @@ import subprocess
 import sys
 import time
 from contextlib import nullcontext
-from functools import partial
 from pathlib import Path
-from unittest.mock import patch
 
 import numpy as np
 import warp as wp
@@ -24,9 +22,27 @@ import newton
 from newton.examples.softbody.monolithic_recording import save, serial, state_arrays
 from newton.examples.softbody.monolithic_soft_cube import load_cube
 from scripts.monolithic_reference.check_recording import sha
+from scripts.monolithic_reference.contact_routes import pooled_audit_route, spatial_parameters
 
 REPO = Path(__file__).resolve().parents[2]
 CASE = Path(__file__).with_name("fixtures") / "actor_coupling_v1.json"
+
+
+# Fixtures record the fixed production choices; the solver no longer accepts them.
+FIXED_SOLVER_CHOICES = {
+    "contact_model": "C-IE",
+    "globalization": "ArmijoOrResNorm",
+    "allow_nonconservative_energy": True,
+}
+
+
+def production_solver_options(options):
+    """Return fixture solver options without the fixed choices, rejecting any other value."""
+    options = dict(options)
+    for name, value in FIXED_SOLVER_CHOICES.items():
+        if options.pop(name, value) != value:
+            raise ValueError(f"Fixture requests an unsupported solver choice: {name}")
+    return options
 
 
 def load_case():
@@ -169,30 +185,18 @@ def build_model(*, device="cuda:0", before=False, rigid_count=2):
 
 
 def make_solver(model, *, mode=None, graph=None, contact_dataflow=None, spatial=None, contact_factor_capacity=None):
-    """Use the solver default unless an offline comparison route is explicitly requested."""
-    if contact_dataflow not in (None, "legacy", "pooled", "spatial"):
+    """Use the spatial solver default, an explicit spatial capacity, or the pooled audit route."""
+    if contact_dataflow not in (None, "pooled", "spatial"):
         raise ValueError("Unsupported actor contact dataflow")
     if (contact_dataflow == "spatial") != (spatial is not None):
-        raise ValueError("Spatial actor experiments require explicit capacity and law margin")
-    context = nullcontext()
-    if contact_dataflow == "legacy":
-        from newton._src.solvers.monolithic.contact import ContactObjective  # noqa: PLC0415
-
-        context = patch("newton._src.solvers.monolithic.solver_monolithic.ContactObjective", ContactObjective)
-    elif contact_dataflow is not None:
-        from newton._src.solvers.monolithic.contact_pipeline import (  # noqa: PLC0415
-            _PooledContactObjective,
-            _SpatialContactObjective,
-        )
-
-        objective = _PooledContactObjective
-        if contact_dataflow == "spatial":
-            if type(spatial) is not dict or set(spatial) != {"candidate_capacity", "law_margin"}:
-                raise ValueError("Invalid spatial actor experiment parameters")
-            objective = partial(_SpatialContactObjective, **spatial)
-        context = patch("newton._src.solvers.monolithic.solver_monolithic.ContactObjective", objective)
+        raise ValueError("Spatial actor experiments require an explicit candidate capacity")
+    context, resources = nullcontext(), {}
+    if contact_dataflow == "pooled":
+        context = pooled_audit_route()
+    elif contact_dataflow == "spatial":
+        resources["contact_candidate_capacity"] = spatial_parameters(spatial)["candidate_capacity"]
     case = load_case()
-    options = dict(case["solver"])
+    options = production_solver_options(case["solver"])
     if mode is not None:
         options["pcg_mode"] = mode
     if graph is not None:
@@ -201,6 +205,7 @@ def make_solver(model, *, mode=None, graph=None, contact_dataflow=None, spatial=
         return SolverMonolithic(
             model,
             **options,
+            **resources,
             contact_factor_capacity=contact_factor_capacity,
             contact_stiffness=case["contact_stiffness"],
             normal_smoothing=case["normal_smoothing_m"],
@@ -216,11 +221,7 @@ def contact_algorithm(run):
     return {
         "contact_dataflow": "spatial" if run._contact_spatial else "pooled",
         "contact_factor_capacity": int(run._coupled_config["guard_capacity"][1]),
-        "spatial": (
-            {"candidate_capacity": run._contact.candidate_capacity, "law_margin": run._contact.law_margin}
-            if run._contact_spatial
-            else None
-        ),
+        "spatial": ({"candidate_capacity": run._contact.candidate_capacity} if run._contact_spatial else None),
     }
 
 
@@ -258,25 +259,15 @@ def roles(model, table):
 def sampling(run):
     """Record fixed keys, weights, support and allocation bounds once."""
     c = run._contact
-    if run._contact_pool:
-        # Compact metadata is authenticated directly; pooled execution has no
-        # permanent per-contact expanded support table to archive.
-        return {
-            "fields": {name: value.tolist() for name, value in c.actor_samples.fields.items()},
-            "keys": c.count,
-            "triplets": c.triplet_capacity,
-            # Pool payload only; lazy query/reference scratch is not part of
-            # fixed sampling identity or a total-device-memory measurement.
-            "pool_bytes": sum(a.size * wp.types.type_size_in_bytes(a.dtype) for a in c.pool.buffers()),
-        }
-    sample = c.actor_contact.samples
+    # Compact metadata is authenticated directly; pooled execution has no
+    # permanent per-contact expanded support table to archive.
     return {
-        "fields": {name: value.tolist() for name, value in sample.fields.items()},
-        "offsets": c.factor_support[0].tolist(),
-        "columns": c.factor_support[1].tolist(),
+        "fields": {name: value.tolist() for name, value in c.actor_samples.fields.items()},
         "keys": c.count,
         "triplets": c.triplet_capacity,
-        "bytes": sum(a.size * wp.types.type_size_in_bytes(a.dtype) for a in c.actor_contact.buffers()),
+        # Pool payload only; lazy query/reference scratch is not part of
+        # fixed sampling identity or a total-device-memory measurement.
+        "pool_bytes": sum(a.size * wp.types.type_size_in_bytes(a.dtype) for a in c.pool.buffers()),
     }
 
 
@@ -288,23 +279,13 @@ def model_arrays(model):
 
 def measure(run, state, step, *, metadata=None):
     """Measure accepted native geometry and both endpoint world-origin wrenches."""
-    c = run._contact
-    gaps = []
-    if not run._contact_pool and c.legacy_count:
-        shapes = c.shapes.numpy()
-        gaps.extend(c.current.distance.numpy() - c.parameters[4] - c.margins.numpy()[np.resize(shapes, c.legacy_count)])
-    if c.actor_contact is not None:
-        gaps.extend(c.actor_contact.current.distance.numpy() - c.actor_contact.offsets.numpy())
+    from scripts.monolithic_reference.actor_recording import _penetration  # noqa: PLC0415
+
     pairs = []
     role_map = roles(run.model, run._actors)
-    if run._contact_pool:
-        from scripts.monolithic_reference.actor_recording import _penetration  # noqa: PLC0415
-
-        # This is an offline full-sampling geometry guard, independent of the
-        # frozen query/admission set. It does not repair missing contributions.
-        penetration = _penetration(state_arrays(state), metadata or {"roles": role_map, "sampling": sampling(run)}, run)
-    else:
-        penetration = max(0.0, -min(gaps, default=0.0))
+    # This is an offline full-sampling geometry guard, independent of the
+    # frozen query/admission set. It does not repair missing contributions.
+    penetration = _penetration(state_arrays(state), metadata or {"roles": role_map, "sampling": sampling(run)}, run)
     matrix = run._linear.densify_for_test(generation=run._generation).raw_matrix
     for row in run.last_stats.variational["actor_contact_pairs"]:
         pair = dict(row)
@@ -548,7 +529,8 @@ def record_run(
                 REPO / "scripts/monolithic_reference/check_recording.py",
                 REPO / "scripts/monolithic_reference/actor_recording.py",
                 REPO / "scripts/monolithic_reference/contact_system_audit.py",
-                REPO / "scripts/monolithic_reference/compare_contact_dataflows.py",
+                REPO / "scripts/monolithic_reference/contact_audit.py",
+                REPO / "scripts/monolithic_reference/contact_routes.py",
             ]
         },
     )
@@ -704,33 +686,22 @@ def main():
         help="New directory for manual acceptance (5000 steps; spatial also runs a 2000-step full comparison)",
     )
     parser.add_argument("--retain-recordings", choices=("all", "failures"), default="failures")
-    parser.add_argument("--contact-dataflow", choices=("legacy", "pooled", "spatial"), default="legacy")
-    parser.add_argument("--candidate-capacity", type=int)
-    parser.add_argument("--law-margin", type=float)
-    parser.add_argument("--contact-factor-capacity", type=int)
+    parser.add_argument("--candidate-capacity", type=int, help="Spatial candidate capacity (default: sample bound)")
+    parser.add_argument("--contact-factor-capacity", type=int, help="Contact factor capacity (default: automatic)")
     args = parser.parse_args()
-    spatial = None
-    if args.contact_dataflow == "spatial":
-        if any(v is None for v in (args.candidate_capacity, args.law_margin, args.contact_factor_capacity)):
-            parser.error("Spatial acceptance requires explicit candidate capacity, law margin and factor budget")
-        spatial = {"candidate_capacity": args.candidate_capacity, "law_margin": args.law_margin}
-    elif args.candidate_capacity is not None or args.law_margin is not None:
-        parser.error("Spatial parameters require --contact-dataflow spatial")
-    elif args.contact_dataflow == "legacy" and args.contact_factor_capacity is not None:
-        parser.error("The frozen legacy command retains its original factor budget")
+    spatial = None if args.candidate_capacity is None else {"candidate_capacity": args.candidate_capacity}
     args.output.mkdir(parents=True, exist_ok=False)
     from scripts.monolithic_reference.check_recording import check_actor, compare_actor  # noqa: PLC0415
 
-    reports = {name: {"status": "NOT_RUN"} for name in ("primary", "restored", "reordered")}
-    if args.contact_dataflow == "spatial":
-        reports["complete"] = {"status": "NOT_RUN"}
+    cases = ("primary", "restored", "reordered", "complete")
+    reports = {name: {"status": "NOT_RUN"} for name in cases}
     primary_run = None
     try:
         for name, before, start in (("primary", False, 0), ("restored", False, 1000), ("reordered", True, 0)):
             reports[name] = {"status": "IN_PROGRESS"}
             run = make_solver(
                 build_model(before=before),
-                contact_dataflow=args.contact_dataflow,
+                contact_dataflow=None if spatial is None else "spatial",
                 spatial=spatial,
                 contact_factor_capacity=args.contact_factor_capacity,
             )
@@ -738,12 +709,10 @@ def main():
             if start:
                 restore_midpoint(run, state, args.output / "primary/recording/midpoint.npz", start)
             folder = args.output / name / "recording"
-            system_audit = None
-            if args.contact_dataflow == "spatial":
-                from scripts.monolithic_reference.contact_system_audit import ContactSystemAudit  # noqa: PLC0415
+            from scripts.monolithic_reference.contact_system_audit import ContactSystemAudit  # noqa: PLC0415
 
-                complete = make_solver(build_model(before=before), contact_dataflow="pooled", contact_factor_capacity=0)
-                system_audit = ContactSystemAudit(run, complete)
+            complete = make_solver(build_model(before=before), contact_dataflow="pooled", contact_factor_capacity=0)
+            system_audit = ContactSystemAudit(run, complete)
             summary = record_run(run, state, folder, before=before, start_step=start, system_audit=system_audit)
             reports[name] = {
                 "status": summary["status"],
@@ -770,11 +739,11 @@ def main():
         reports["failure"] = {"status": "FAIL", "error": f"{type(failure).__name__}: {failure}"}
     # The complete counter-trajectory is independent of restored/reordered
     # qualification; retain it even when either of those comparisons fails.
-    if args.contact_dataflow == "spatial" and reports["primary"]["status"] == "PASS":
+    if reports["primary"]["status"] == "PASS":
         name = "complete"
         reports[name] = {"status": "IN_PROGRESS"}
         try:
-            from scripts.monolithic_reference.compare_contact_dataflows import (  # noqa: PLC0415
+            from scripts.monolithic_reference.contact_audit import (  # noqa: PLC0415
                 compare_actor_contact_recordings,
             )
 
@@ -800,11 +769,6 @@ def main():
                 raise ValueError("Complete/spatial independent trajectories differ")
         except Exception as failure:
             reports[name].update(status="FAIL", error=f"{type(failure).__name__}: {failure}")
-    cases = (
-        ("primary", "restored", "reordered", "complete")
-        if args.contact_dataflow == "spatial"
-        else ("primary", "restored", "reordered")
-    )
     status = "PASS" if all(reports[n]["status"] == "PASS" for n in cases) else "FAIL"
     retained = status != "PASS" or args.retain_recordings == "all"
     for name in cases:

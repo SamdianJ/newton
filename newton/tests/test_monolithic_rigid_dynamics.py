@@ -369,15 +369,6 @@ def test_rigid_failures_and_reset(test, device):
         with test.assertRaisesRegex(RuntimeError, "output publication"):
             run.step(state, output, control, dt=0.001)
     assert_snapshot(test, output, previous)
-    for mode in ("Armijo", "ArmijoOrResNorm"):
-        denied = rigid_solver(model, globalization=mode)
-        denied_state, denied_out = denied.create_state(dt=0.001), denied.create_state(dt=0.001)
-        apply_wrench(denied, denied_state, control)
-        denied_before, denied_after = snapshot(denied_state), snapshot(denied_out)
-        with test.assertRaisesRegex(ValueError, "allow_nonconservative_energy"):
-            denied.step(denied_state, denied_out, control, dt=0.001)
-        assert_snapshot(test, denied_state, denied_before)
-        assert_snapshot(test, denied_out, denied_after)
     rates = state.joint_qd.numpy()
     rates[run._rigid.dof_indices[0, 3]] = 2000
     state.joint_qd.assign(rates)

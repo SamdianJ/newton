@@ -213,21 +213,14 @@ class SceneOracle:
         masks, gaps, invalid = [], [], []
         for shape, current, old in zip(self.shapes, frames, old_frames, strict=True):
             y, phi, g, outside, jacobian, rotation, soft, body, points = current
-            old_y, old_phi, old_g, old_outside, *_ = old
+            old_y, _, _, old_outside, *_ = old
             area = np.repeat(self.contact["area"].astype(float), 3) / 3
             gap = phi - radius - float(self.contact["margins"][shape])
             u = y - old_y
             en, load_normal = penalty(gap, stiffness * area, width)
-            law = self.config["law"]
-            direction = old_g if law == "C-EE" else g
-            laggap = (
-                old_phi - radius - float(self.contact["margins"][shape])
-                if law == "C-EE"
-                else gap - np.sum(g * u, axis=1)
-                if law == "C-IE"
-                else gap
-            )
-            _, load = penalty(laggap, stiffness * area, width)
+            # C-IE: friction load from the gap linearized at the frozen start point.
+            direction = g
+            _, load = penalty(gap - np.sum(g * u, axis=1), stiffness * area, width)
             if mu == 0:
                 load[:] = 0
             length = np.linalg.norm(direction, axis=1)
