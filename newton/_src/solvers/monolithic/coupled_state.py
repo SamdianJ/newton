@@ -127,18 +127,24 @@ class CoupledState(ArticulationState):
                     getattr(history, "cable_" + name).assign(np.concatenate(values).astype(self.kinematics.numpy_dtype))
 
     def _copy_coordinates(self, state, source):
-        if self.materials is not None and not self.model.joint_count:
+        # Model.state() leaves arrays of absent kinds as None; keep complete empty arrays.
+        if not self.model.joint_count:
             state.joint_q = wp.zeros(0, dtype=self.dtype, device=self.device)
             state.joint_qd = wp.zeros(0, dtype=self.dtype, device=self.device)
         else:
             super()._copy_coordinates(state, source)
-        if self.materials is not None and not self.model.body_count:
+        if not self.model.body_count:
             for name, dtype in (
                 ("body_q", wp.transform),
                 ("body_qd", wp.spatial_vector),
                 ("body_f", wp.spatial_vector),
             ):
                 setattr(state, name, wp.zeros(0, dtype=dtype, device=self.device))
+        if not self.model.particle_count:
+            for name in ("particle_q", "particle_qd"):
+                setattr(state, name, wp.zeros(0, dtype=self.vector, device=self.device))
+            state.particle_f = wp.zeros(0, dtype=wp.vec3, device=self.device)
+            return
         for name in ("particle_q", "particle_qd"):
             setattr(state, name, wp.array(getattr(source, name).numpy(), dtype=self.vector, device=self.device))
         if getattr(source, "particle_f", None) is not None:

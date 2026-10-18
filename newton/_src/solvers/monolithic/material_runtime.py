@@ -3,32 +3,20 @@
 
 """Material producers for the existing monolithic iteration and publication path."""
 
-from dataclasses import replace
 from typing import Any
 
 import numpy as np
 import warp as wp
 
 from . import coupled_kernels as kernels
-from .articulation import ArticulationObjective
-from .cable_system import CableBlock
-from .cloth_system import ClothBlock
-from .contact_pipeline import _SpatialContactObjective
-from .contact_pipeline import _SpatialContactObjective as ContactObjective
-from .linear import MonolithicLinearWorkspace
-from .linear_types import MonolithicLinearCapacities, MonolithicLinearGeneration
-from .producers import build_producers
+from .linear_types import MonolithicLinearGeneration
 from .rigid import _scatter_residual, _scatter_tangent
-from .segment_graph import _SegmentGraphCache
-from .solver_types import _SolverMonolithicInternalConfig, _StepFailure
+from .solver_types import _StepFailure
 from .state_checks import scalar_view
 from .tet_assembly import (
     TetScatterBuffers,
     assemble_tet_residual_tangent,
-    build_tet_triplet_pattern,
-    create_tet_assembly_workspace,
 )
-from .tet_precision import TetObjective
 
 
 @wp.kernel
@@ -41,174 +29,6 @@ def _scatter(values: wp.array[Any], start: int, output: wp.array[Any]):
 def _add_contact(source: wp.array[Any], target: wp.array[Any]):
     i = wp.tid()
     target[i] += source[i]
-
-
-def create_contact(self, model, config, smooth_sdf):
-    mapping = np.full(model.particle_count, -1, dtype=np.int32)
-    dynamic = model.particle_inv_mass.numpy() > 0
-    mapping[dynamic] = np.arange(dynamic.sum())
-    radius = model.particle_radius.numpy()
-    tet = next((a for a in self._actors.actors if a.kind == "tet"), None)
-    tet_radius = 0.0
-    if tet is not None:
-        radii = radius[list(tet.particle_indices)]
-        if not np.all(radii == radii[0]):
-            raise ValueError("Tet contact requires a uniform particle radius")
-        tet_radius = float(radii[0])
-    capacity = config["contact_candidate_capacity"]
-    return ContactObjective(
-        model,
-        mapping,
-        q_dof_count=self._layout.q_dof_count,
-        layout=self._layout,
-        articulation_actor=self._articulation_actor,
-        actors=self._actors,
-        normal_stiffness=config["contact_stiffness"],
-        friction_coefficient=config["friction_coefficient"],
-        friction_velocity_scale=config["friction_velocity_scale"],
-        smoothing_width=config["normal_smoothing"],
-        particle_radius=tet_radius,
-        smooth_sdf=smooth_sdf,
-        alignment_policy=config["alignment_policy"],
-        dtype=self._dtype,
-        _materials=self._materials,
-        **({} if capacity == "automatic" else {"candidate_capacity": capacity}),
-    )
-
-
-def initialize(self):
-    """Allocate material producers once; retain the existing Newton/PCG driver."""
-    config, model, layout = self._material_config, self.model, self._layout
-    device, dtype = model.device, self._dtype
-    self._cloths = []
-    self._cables = []
-    for actor in self._actors.actors:
-        if actor.kind == "cloth":
-            obj = self._materials.cloth[actor.source_index]
-            self._cloths.append(ClothBlock(obj, actor, dtype=dtype, device=device))
-        if actor.kind == "cable":
-            obj = self._materials.cable[actor.source_index]
-            phi_offset = sum(len(c["ref_twist"]) for c in self._materials.cable[: actor.source_index])
-            self._cables.append(CableBlock(obj, actor, dtype=dtype, device=device, phi_offset=phi_offset))
-    parameters = self._joint_terms.params.numpy()
-    self._objective = ArticulationObjective(self._kinematics, parameters)
-    self._joint_parameters_host = parameters.astype(self._numpy_dtype)
-    self._globalization = config["globalization"]
-    self._guard = config["min_det_f_guard"]
-    self._config = replace(
-        _SolverMonolithicInternalConfig(),
-        regularization_values=(0.0, 1e-6, 1e-5, 1e-4, 1e-3, 1e-2, 0.1, 1.0),
-        merit_absolute_cable_x=config["cable_position_tolerance"],
-        merit_absolute_cable_theta=config["cable_theta_tolerance"],
-        joint_residual_tolerance=config.get("joint_residual_tolerance"),
-        cloth_position_tolerance=config.get("cloth_position_tolerance"),
-        merit_absolute_global=1e-7,
-        merit_absolute_q=2.5e-8,
-        merit_absolute_x=1e-7,
-        merit_relative_global=1e-6,
-        merit_relative_q=1e-5,
-        merit_relative_x=1e-6,
-        step_tolerance_global=1e-10,
-        step_tolerance_x=1e-10,
-    )
-    self._graphs = _SegmentGraphCache(device, enabled=self._use_cuda_graph)
-    self._states._graphs = self._graphs
-    self._contact_pool = self._contact.count > 0
-    # Contact-free material scenes never begin a spatial step.
-    self._contact_spatial = self._contact_pool and isinstance(self._contact, _SpatialContactObjective)
-    self._device_iteration = False
-    if self._contact_pool:
-        capacity = config["contact_factor_capacity"]
-        self._contact.initialize_pool(
-            3 * self._contact.count if capacity == "automatic" else capacity, use_cuda_graph=self._use_cuda_graph
-        )
-    self._original = self._accepted = self._trial = self._out_backup = None
-    self._step_generation = self._assembly_sequence = 0
-    self._dt = None
-    self._old_joint_t = wp.empty_like(self._kinematics.joint_translations)
-    self._old_joint_r = wp.empty_like(self._kinematics.joint_rotations)
-    self._input_status = wp.zeros(4, dtype=int, device=device)
-    self._force_status = wp.zeros(3, dtype=int, device=device)
-    self._evaluation_status = wp.zeros(1, dtype=int, device=device)
-    self._tet = None
-    nq = layout.q_dof_count
-    global_rows = list(np.repeat(layout.indices("articulation"), nq))
-    global_columns = list(np.tile(layout.indices("articulation"), nq))
-    internal_rows = internal_columns = np.empty(0, dtype=np.int32)
-    tet_actor = next((a for a in self._actors.actors if a.kind == "tet"), None)
-    mapping = np.full(model.particle_count, -1, dtype=np.int32)
-    self._dynamic_ids_host = np.empty(0, dtype=np.int32)
-    if tet_actor is not None:
-        density = config["tet_rest_density"]
-        self._tet = TetObjective(
-            model,
-            material_model=config["material_model"],
-            mass_mode=config["mass_mode"],
-            density=None if isinstance(density, str) else wp.array(density, dtype=float, device=device),
-            dtype=dtype,
-            actor=tet_actor,
-            allow_cloth=bool(self._materials.cloth),
-        )
-        mapping = self._tet.mapping.numpy()
-        self._dynamic_ids_host = self._tet.ids.numpy()
-        pattern = build_tet_triplet_pattern(model.tet_indices.numpy(), mapping, x_dof_start=layout.x_scalar_offset)
-        global_rows.extend(pattern.global_rows)
-        global_columns.extend(pattern.global_columns)
-        internal_rows, internal_columns = pattern.ax_rows, pattern.ax_columns
-        self._tet_assembly = create_tet_assembly_workspace(
-            pattern, tet_count=model.tet_count, device=device, physics=self._tet.physics
-        )
-        self._tet_r32 = wp.zeros(layout.dynamic_particle_count, dtype=wp.vec3, device=device)
-    self._particle_mapping = wp.array(mapping, dtype=int, device=device)
-    self._rigid_triplet_offset = len(global_rows)
-    global_rows.extend(np.repeat(self._rigid.rows_numpy, 6, axis=1).ravel())
-    global_columns.extend(np.tile(self._rigid.rows_numpy, (1, 6)).ravel())
-    for block in self._cloths + self._cables:
-        block.triplet_offset = len(global_rows)
-        global_rows.extend(block.triplet_rows)
-        global_columns.extend(block.triplet_columns)
-    self._linear = MonolithicLinearWorkspace(
-        layout,
-        MonolithicLinearCapacities(
-            len(global_rows) + (self._contact.triplet_capacity if self._contact_pool else 0),
-            len(internal_rows),
-            0,
-            self.linear_max_iterations,
-            self.linear_max_iterations + 2,
-        ),
-        self._particle_mapping,
-        device=device,
-        pcg_mode=self.pcg_mode.value,
-        use_cuda_graph=self._use_cuda_graph,
-        cable_row_order=np.concatenate([c.order for c in self._cables])
-        if self._cables
-        else np.empty(0, dtype=np.int32),
-    )
-    self._linear._set_fixed_triplet_pattern(
-        global_rows=np.asarray(global_rows, dtype=np.int32),
-        global_columns=np.asarray(global_columns, dtype=np.int32),
-        internal_rows=internal_rows,
-        internal_columns=internal_columns,
-    )
-    if self._contact_pool:
-        self._linear._enable_fixed_bsr_storage()
-    for name in ("_rhs", "_y", "_delta", "_diagonal", "_correction_rhs", "_correction_delta", "_direction_base"):
-        setattr(self, name, wp.zeros(layout.scalar_dof_count, dtype=float, device=device))
-    for name in ("_native_delta", "_complete_r", "_post_r", "_post_error", "_post_original", "_post_regularization"):
-        setattr(self, name, wp.zeros(layout.scalar_dof_count, dtype=dtype, device=device))
-    self._post_lambda = wp.zeros(1, dtype=float, device=device)
-    self._direction_status = wp.zeros(1, dtype=int, device=device)
-    self._frozen_force = wp.zeros(model.particle_count, dtype=wp.vec3, device=device)
-    self._frozen_gravity = wp.zeros_like(model.gravity)
-    self._cable_target_x = wp.array(model.particle_q.numpy(), dtype=self._states.vector, device=device)
-    self._cable_target_theta = wp.zeros(self._materials.theta_count, dtype=dtype, device=device)
-    self._cable_torque = wp.zeros_like(self._cable_target_theta)
-    self._material_scale = np.ones(layout.scalar_dof_count, dtype=np.float32)
-    for cable in self._cables:
-        rows = cable.rows_host[3 * cable.ids.size :]
-        self._material_scale[rows[rows >= 0]] = 1 / float(cable.reference["length_scale"])
-    self._temporary_gauges = []
-    self._producers = build_producers(self)
 
 
 def evaluate(self, state, dt, *, build_tangent=True):
@@ -228,7 +48,7 @@ def evaluate(self, state, dt, *, build_tangent=True):
     )
     parts = np.r_[obj.link_energy.numpy(), obj.joint_energy.numpy(), self._rigid.energy.numpy()]
     total, absolute = parts.sum(), abs(parts).sum()
-    if self._tet is not None:
+    if self._has_tet:
         self._tet.evaluate(
             state.particle_q,
             self._original.particle_q,
@@ -373,7 +193,7 @@ def assemble(self, iteration):
         [self._objective.tangent32, assembly.aq_actor_dense, assembly.global_scalar_triplets.values, self._diagonal],
         device=self.model.device,
     )
-    if self._tet is not None:
+    if self._has_tet:
         scatter = TetScatterBuffers(
             assembly.ax_internal_triplets.values,
             assembly.global_scalar_triplets.values[nq * nq : nq * nq + 9 * assembly.ax_internal_triplets.capacity],

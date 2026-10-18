@@ -16,7 +16,6 @@ import warp as wp
 
 import newton
 from newton._src.geometry import GeoType
-from newton._src.solvers.monolithic import material_runtime
 from newton._src.solvers.monolithic.actors import ActorTable
 from newton._src.solvers.monolithic.contact_pipeline import _SpatialContactObjective
 from newton._src.solvers.monolithic.contact_sampling import ContactSamples
@@ -136,7 +135,6 @@ def contact_solver(
         **options,
     )
 
-    material_runtime.initialize(solver)
     return solver
 
 
@@ -234,7 +232,6 @@ class TestMaterialContactSampling(unittest.TestCase):
             friction_coefficient=0,
             friction_velocity_scale=0.1,
         )
-        material_runtime.initialize(solver)
         samples = solver._contact.actor_samples
         self.assertEqual(samples.count, 2 * (6 + 512))
         for source, face, target in zip(samples.source_shapes, samples.faces, samples.targets, strict=True):
@@ -270,7 +267,6 @@ class TestMaterialContactSampling(unittest.TestCase):
                 friction_coefficient=0,
                 friction_velocity_scale=0.1,
             )
-            material_runtime.initialize(solver)
             state = solver.create_state(dt=0.001)
             query(solver, state, begin=True)
             query(solver, state)
@@ -325,7 +321,6 @@ class TestMaterialContactDerivatives(unittest.TestCase):
                 contact_stiffness=100,
                 normal_smoothing=1e-8,
             )
-            material_runtime.initialize(solver)
             state = solver.create_state(dt=0.001)
             x = state.particle_q.numpy().copy()
             x[:, 2] = -0.2

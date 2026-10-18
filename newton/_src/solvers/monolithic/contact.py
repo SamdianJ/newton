@@ -462,10 +462,13 @@ class ContactObjective:
             triplet_count += samples.triplet_capacity
         self.triplet_capacity = triplet_count
         self.model, self.contact_model = model, "C-IE"
+        # Solver actor tables own articulation bodies; a standalone owner uses every body.
         self.body_count = (
-            (model.body_count if _materials is None else 0)
-            if articulation_actor is None
-            else len(articulation_actor.body_indices)
+            len(articulation_actor.body_indices)
+            if articulation_actor is not None
+            else model.body_count
+            if actors is None and _materials is None
+            else 0
         )
         self.parameters, self.nq, self.count = parameters, q_dof_count, count
         self._descriptors = descriptors.copy() if descriptors is not None else None

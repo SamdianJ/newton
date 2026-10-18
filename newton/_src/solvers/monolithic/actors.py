@@ -197,7 +197,7 @@ class ActorTable:
         if not model.joint_enabled.numpy().all() or not np.isin(flags, [BodyFlags.DYNAMIC, BodyFlags.KINEMATIC]).all():
             raise ValueError("Actors require enabled joints and supported body flags")
         material_mode = materials is not None and bool(materials.cloth or materials.cable)
-        actor_worlds = np.r_[worlds, model.particle_world.numpy()] if material_mode else worlds
+        actor_worlds = np.r_[worlds, model.particle_world.numpy()]
         if (
             len(actor_worlds) == 0
             or len(np.unique(actor_worlds)) != 1
@@ -262,12 +262,14 @@ class ActorTable:
                 )
             )
         arm_count = sum(a.kind == "articulation" for a in actors)
-        if len(owned) != model.body_count or arm_count > 1 or (not material_mode and arm_count != 1):
+        if len(owned) != model.body_count or arm_count > 1:
             raise ValueError("Monolithic requires uniquely owned bodies and at most one mechanical articulation")
         inv_mass = model.particle_inv_mass.numpy()
         dynamic = np.flatnonzero(inv_mass > 0)
         actors.sort(key=lambda a: (a.kind != "articulation", a.source_index))
-        if model.tet_count or not material_mode:
+        if not model.tet_count and not material_mode and dynamic.size:
+            raise ValueError("Dynamic particles require a tet, cloth or cable owner")
+        if model.tet_count:
             if material_mode:
                 # Validate only the native tet boundary; cloth faces are independently owned.
                 selected = np.concatenate([obj["triangle_ids"] for obj in materials.cloth]) if materials.cloth else []

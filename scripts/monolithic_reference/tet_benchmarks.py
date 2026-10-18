@@ -47,9 +47,6 @@ class TetBenchmark:
         self.cells = tuple(cells or r["cells"][-1])
         self.dt, self.steps, self.history = r["dt"], 0, []
         builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0))
-        # The current constructor requires one articulation; this link has no shape or load.
-        link = builder.add_link(mass=1.0, inertia=wp.diag(wp.vec3(0.01)), label="auxiliary")
-        builder.add_articulation([builder.add_joint_prismatic(-1, link, axis=newton.Axis.X, limit_ke=0, limit_kd=0)])
         nx, ny, nz = self.cells
         builder.add_soft_grid(
             pos=wp.vec3(0.0),

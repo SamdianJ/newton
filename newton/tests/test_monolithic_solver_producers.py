@@ -6,8 +6,11 @@
 import unittest
 
 import numpy as np
+import warp as wp
 
+import newton
 from newton._src.solvers.monolithic.producers import Producer, validate_row_partition
+from newton.solvers.experimental.monolithic import SolverMonolithic
 from newton.tests.test_monolithic_material_state import scene as material_scene
 from newton.tests.test_monolithic_solver_actor_contacts import contact_scene, contact_solver
 
@@ -57,6 +60,36 @@ class TestSolverProducers(unittest.TestCase):
         self.assertEqual(policies["cloth_0"], (False, "coordinate"))
         self.assertEqual(policies["cable_1"], (False, "coordinate"))
         self.assertEqual(policies["tet"], (True, "diagonal"))
+
+
+def free_box_scene(device):
+    """One free box resting just above a plane, with no articulation or tet auxiliaries."""
+    half, mass, gap = 0.02, 0.01, 0.0005
+    builder = newton.ModelBuilder(gravity=(0, 0, -9.81))
+    cfg = builder.ShapeConfig(density=0, margin=0, has_particle_collision=False)
+    body = builder.add_body(
+        xform=wp.transform((0.0, 0.0, half + gap), wp.quat_identity()),
+        mass=mass,
+        inertia=wp.diag(wp.vec3(mass * (2 * half) ** 2 / 6)),
+        label="box",
+    )
+    builder.add_shape_box(body, hx=half, hy=half, hz=half, cfg=cfg)
+    builder.add_shape_plane(body=-1, width=0, length=0, cfg=cfg)
+    return builder.finalize(device=device)
+
+
+class TestSolverWithoutTet(unittest.TestCase):
+    def test_free_box_without_auxiliaries_steps(self):
+        model = free_box_scene("cpu")
+        solver = SolverMonolithic(model, friction_velocity_scale=0.01, publish_policy="strict")
+        state = solver.create_state(dt=0.001)
+        for _ in range(3):
+            solver.step(state, state, solver.create_control(), dt=0.001)
+            self.assertTrue(solver.last_stats.converged, solver.last_stats)
+        self.assertEqual([p.name for p in solver._producers], ["rigid", "contact"])
+        # The box settles onto the plane instead of falling through it.
+        com = state._monolithic_coupled.rigid_com.numpy()[0]
+        self.assertGreater(com[2], 0.02 - 0.002)
 
 
 if __name__ == "__main__":

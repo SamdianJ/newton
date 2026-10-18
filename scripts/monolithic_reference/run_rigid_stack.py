@@ -280,7 +280,7 @@ def record_run(output, *, max_steps=None, device="cuda:0"):
         "collision_window_includes_captures": True,
     }
     metrics = {
-        "bodies": model.body_count - 1,
+        "bodies": model.body_count,
         "expected_pairs": len(expected),
         "seen_pairs": len(seen),
         "full_residual_checks": full_checks,

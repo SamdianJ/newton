@@ -12,7 +12,6 @@ from contextlib import contextmanager
 from unittest.mock import patch
 
 SOLVER_CONTACT = "newton._src.solvers.monolithic.solver_monolithic.ContactObjective"
-MATERIAL_CONTACT = "newton._src.solvers.monolithic.material_runtime.ContactObjective"
 
 
 def spatial_parameters(spatial):
@@ -35,5 +34,5 @@ def pooled_audit_route():
     """Construct solvers with the complete-candidate pooled objective inside this block."""
     from newton._src.solvers.monolithic.contact_pipeline import _PooledContactObjective  # noqa: PLC0415
 
-    with patch(SOLVER_CONTACT, _PooledContactObjective), patch(MATERIAL_CONTACT, _PooledContactObjective):
+    with patch(SOLVER_CONTACT, _PooledContactObjective):
         yield
