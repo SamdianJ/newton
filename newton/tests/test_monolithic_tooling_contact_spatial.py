@@ -91,7 +91,13 @@ def test_spatial_workload(test, device):
         run._contact._batch.reference_rows.graphs.captures["probe"] = 2
         test.assertEqual(capture_count(run), before + 5)
     with test.assertRaises(ValueError):
-        build_scene("tiny-contact", device=device, contact_dataflow="spatial")
+        build_scene(
+            "tiny-contact",
+            device=device,
+            graph=device.is_cuda,
+            contact_dataflow="spatial",
+            spatial={"candidate_capacity": -1},
+        )
 
 
 class TestContactSpatialWorkload(unittest.TestCase):
