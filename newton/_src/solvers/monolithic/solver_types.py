@@ -82,6 +82,13 @@ class MassMode(str, enum.Enum):
     CONSISTENT = "consistent"
 
 
+class Precision(enum.Enum):
+    """Construction-time precision of nonlinear state and decisions."""
+
+    FP64 = "fp64"
+    FP32 = "fp32"
+
+
 class PCGMode(str, enum.Enum):
     """Experimental PCG observation policy, fixed at construction."""
 

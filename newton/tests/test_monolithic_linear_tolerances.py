@@ -209,8 +209,8 @@ class TestMonolithicPcgTolerances(unittest.TestCase):
                 )
                 self.assertEqual(solver.linear_absolute_tolerance, value)
             else:
-                expected = TypeError if value is None or isinstance(value, str) else ValueError
-                with self.subTest(public=value), self.assertRaises(expected):
+                # The option configuration rejects every malformed value before allocation.
+                with self.subTest(public=value), self.assertRaises(ValueError):
                     SolverMonolithic(
                         model,
                         friction_velocity_scale=0.01,

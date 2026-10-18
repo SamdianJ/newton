@@ -3,7 +3,6 @@
 
 """Complete monolithic q+x solver with transactional state and force publication."""
 
-import enum
 import math
 import os
 import tempfile
@@ -22,6 +21,7 @@ from .actors import Actor, ActorTable
 from .articulation import ArticulationObjective, _TreeKinematics
 from .cable_system import CableBlock
 from .cloth_system import ClothBlock
+from .config import GLOBALIZATION, MonolithicConfig
 from .contact import ContactStatus
 from .contact_forces import MonolithicContactForces
 from .contact_pipeline import _PooledContactObjective, _SpatialContactObjective
@@ -47,6 +47,7 @@ from .solver_types import (
     MassMode,
     MaterialModel,
     PCGMode,
+    Precision,
     Stats,
     Status,
     _SolverMonolithicInternalConfig,
@@ -57,10 +58,6 @@ from .tet_assembly import (
     create_tet_assembly_workspace,
 )
 from .tet_precision import TetObjective
-
-# The single supported contact law and trial acceptance (P8 production combination).
-CONTACT_MODEL = "C-IE"
-GLOBALIZATION = "ArmijoOrResNorm"
 
 
 class _AbsentTet:
@@ -115,12 +112,7 @@ class SolverMonolithic(SolverBase):
     policy publishes rejected trials. Force validity is not equilibrium.
     """
 
-    class Precision(enum.Enum):
-        """Construction-time precision of nonlinear state and decisions."""
-
-        FP64 = "fp64"
-        FP32 = "fp32"
-
+    Precision = Precision
     supports_collision_pipeline = False
     Status = Status
     Stats = Stats
@@ -164,70 +156,55 @@ class SolverMonolithic(SolverBase):
         joint_residual_tolerance=None,
         cloth_position_tolerance=None,
     ):
+        # Reject invalid options before building actors or allocating storage.
+        options = MonolithicConfig(
+            friction_velocity_scale=friction_velocity_scale,
+            contact_stiffness=contact_stiffness,
+            friction_coefficient=friction_coefficient,
+            normal_smoothing=normal_smoothing,
+            material_model=material_model,
+            mass_mode=mass_mode,
+            min_det_f_guard=min_det_f_guard,
+            contact_factor_capacity=contact_factor_capacity,
+            contact_candidate_capacity=contact_candidate_capacity,
+            publish_policy=publish_policy,
+            alignment_policy=alignment_policy,
+            newton_max_iterations=newton_max_iterations,
+            line_search_max_iterations=line_search_max_iterations,
+            linear_max_iterations=linear_max_iterations,
+            linear_tolerance=linear_tolerance,
+            linear_absolute_tolerance=linear_absolute_tolerance,
+            pcg_mode=pcg_mode,
+            use_cuda_graph=use_cuda_graph,
+            precision=precision,
+            cable_position_tolerance=cable_position_tolerance,
+            cable_theta_tolerance=cable_theta_tolerance,
+            joint_residual_tolerance=joint_residual_tolerance,
+            cloth_position_tolerance=cloth_position_tolerance,
+        )
+        self._options = options
+        if use_cuda_graph and not model.device.is_cuda:
+            raise ValueError("use_cuda_graph requires CUDA production PCG and a bool")
         cloth_inputs, cable_inputs = tuple(cloth_inputs), tuple(cable_inputs)
         self._materials = _MaterialInputs(model, cloth_inputs, cable_inputs) if cloth_inputs or cable_inputs else None
+        residual_caps = options.residual_caps
+        if residual_caps and self._materials is None:
+            raise ValueError("Joint/cloth physical residual caps require a material scene")
         self._actors = ActorTable.from_model(model, materials=self._materials)
         layout = MonolithicLinearLayout.from_actors(self._actors)
         self._layout = layout
         self._articulation_actor = next((actor for actor in self._actors.actors if actor.kind == "articulation"), None)
         tet_actor = next((actor for actor in self._actors.actors if actor.kind == "tet"), None)
-        self._precision = self.Precision(precision)
+        self._precision = options.precision
         self._dtype = wp.float64 if self._precision == self.Precision.FP64 else wp.float32
         self._numpy_dtype = np.float64 if self._precision == self.Precision.FP64 else np.float32
-        residual_caps = {
-            name: value
-            for name, value in (
-                ("joint_residual_tolerance", joint_residual_tolerance),
-                ("cloth_position_tolerance", cloth_position_tolerance),
-            )
-            if value is not None
-        }
-        if residual_caps and self._materials is None:
-            raise ValueError("Joint/cloth physical residual caps require a material scene")
-        for name, value in (
-            ("cable_position_tolerance", cable_position_tolerance),
-            ("cable_theta_tolerance", cable_theta_tolerance),
-            *residual_caps.items(),
-        ):
-            if (
-                isinstance(value, (bool, np.bool_))
-                or not isinstance(value, (int, float, np.integer, np.floating))
-                or not np.isfinite(float(value))
-                or float(value) <= 0
-            ):
-                raise ValueError(f"{name} must be a positive finite physical residual tolerance")
-            with np.errstate(over="ignore", under="ignore"):
-                representable = self._numpy_dtype(value)
-            if not np.isfinite(representable) or representable <= 0:
-                raise ValueError(f"{name} must be representable in the selected precision")
         self._rigid = RigidObjective(model, self._actors, dtype=self._dtype)
         if smooth_sdf is not None:
             smooth_sdf = smooth_sdf.for_precision(self._dtype)
-        if publish_policy not in ("strict", "last_accepted", "current_iterate"):
-            raise ValueError("Unknown coupled publication policy")
-        if alignment_policy not in ("guard", "mask"):
-            raise ValueError("Unknown contact alignment policy")
         self._coupled_publish_policy = publish_policy
         self._stopped_failure = None
-        if not np.isfinite(min_det_f_guard) or min_det_f_guard <= 0:
-            raise ValueError("Invalid detF guard")
-        material_model = self.MaterialModel(material_model).value
-        mass_mode = self.MassMode(mass_mode).value
-        self._pcg_mode = self.PCGMode(pcg_mode)
-        if type(use_cuda_graph) is not bool or (
-            use_cuda_graph and (self._pcg_mode != self.PCGMode.PRODUCTION or not model.device.is_cuda)
-        ):
-            raise ValueError("use_cuda_graph requires CUDA production PCG and a bool")
-        if contact_factor_capacity is not None and (
-            type(contact_factor_capacity) is not int or contact_factor_capacity < 0
-        ):
-            raise ValueError("Contact factor capacity must be a nonnegative integer")
-        for value in (newton_max_iterations, line_search_max_iterations, linear_max_iterations):
-            if type(value) is not int or value <= 0:
-                raise ValueError("Iteration budgets must be positive integers")
-        for value in (linear_tolerance, linear_absolute_tolerance):
-            if isinstance(value, bool) or not np.isfinite(value) or value < 0:
-                raise ValueError("Invalid linear tolerance")
+        material_model, mass_mode = options.material_model.value, options.mass_mode.value
+        self._pcg_mode = options.pcg_mode
         if tet_actor is None and tet_rest_density is not None:
             raise ValueError("tet_rest_density requires a tet with consistent mass")
         tet_radius = 0.0
@@ -351,16 +328,11 @@ class SolverMonolithic(SolverBase):
                 physics_sources[name] = getattr(model, name)
         self._physics_values = {name: value.numpy().copy() for name, value in physics_sources.items()}
         self._sdf_fields = self._freeze_sdf(model)
+        # Options plus the values resolved from the Model and contact resources.
         self._coupled_config = {
+            **self._options.identity_fields(),
             "contact_parameters": np.asarray(self._contact.parameters, dtype=float),
-            "contact_model": np.frombuffer(CONTACT_MODEL.encode(), dtype=np.uint8),
-            "globalization": np.frombuffer(GLOBALIZATION.encode(), dtype=np.uint8),
-            "material": np.frombuffer(material_model.encode(), dtype=np.uint8),
-            "mass": np.frombuffer(mass_mode.encode(), dtype=np.uint8),
             "guard_capacity": np.array([min_det_f_guard, capacity]),
-            "publication_policy": np.frombuffer(publish_policy.encode(), dtype=np.uint8),
-            "alignment_policy": np.frombuffer(alignment_policy.encode(), dtype=np.uint8),
-            "heuristic_energy": np.array([True], dtype=np.uint8),
             "contact_dataflow": self._contact.dataflow_identity,
             "contact_resources": self._contact.resource_identity,
         }
@@ -380,29 +352,9 @@ class SolverMonolithic(SolverBase):
         if smooth_sdf is not None:
             self._coupled_config["smooth_sdf_digest"] = np.frombuffer(bytes.fromhex(smooth_sdf.digest), dtype=np.uint8)
         if self._materials is not None:
-            self._coupled_config.update(
-                material_digest=np.frombuffer(bytes.fromhex(self._materials.identity), dtype=np.uint8),
-                material_policy=np.array(
-                    [
-                        cable_position_tolerance,
-                        cable_theta_tolerance,
-                        residual_caps.get("joint_residual_tolerance", np.nan),
-                        residual_caps.get("cloth_position_tolerance", np.nan),
-                    ]
-                ),
+            self._coupled_config["material_digest"] = np.frombuffer(
+                bytes.fromhex(self._materials.identity), dtype=np.uint8
             )
-        # Include effective numeric policy in checkpoint identity; device execution
-        # mode is deliberately excluded so CPU/CUDA checkpoints remain portable.
-        self._coupled_config["iteration_policy"] = np.array(
-            [
-                newton_max_iterations,
-                line_search_max_iterations,
-                linear_max_iterations,
-                linear_tolerance,
-                linear_absolute_tolerance,
-            ]
-        )
-        self._coupled_config["direction_policy"] = np.array([1], dtype=np.int32)
         self._kinematics = self._make_kinematics(
             model,
             extra_config={

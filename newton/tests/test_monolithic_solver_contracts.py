@@ -398,6 +398,44 @@ class TestArticulationContracts(unittest.TestCase):
         passed, a, r, _ = acceptance(0.0, 1.0, 1.0, 1.0, 1.0, 0.5, energy_noise=0, residual_noise=0, slope_noise=0)
         self.assertEqual((passed, a, r), (True, False, True))
 
+    def test_config_rejects_invalid_values_before_allocation(self):
+        """Validate every option without a Model, before any solver storage exists."""
+        from newton._src.solvers.monolithic.config import MonolithicConfig  # noqa: PLC0415
+
+        valid = MonolithicConfig(friction_velocity_scale=0.01)
+        self.assertEqual(valid.newton_max_iterations, 10)
+        for field, value in (
+            ("newton_max_iterations", 0),
+            ("linear_tolerance", float("nan")),
+            ("contact_stiffness", 0.0),
+            ("publish_policy", "unknown"),
+            ("contact_candidate_capacity", -1),
+            ("contact_factor_capacity", True),
+            ("cable_theta_tolerance", -1.0),
+        ):
+            with self.subTest(field=field), self.assertRaises(ValueError):
+                MonolithicConfig(friction_velocity_scale=0.01, **{field: value})
+        with self.assertRaises(ValueError):
+            MonolithicConfig(friction_velocity_scale=0.01, use_cuda_graph=True)
+
+    def test_config_identity_is_order_independent_and_complete(self):
+        """Bind every numerical option, but not execution mode or resource budgets."""
+        from newton._src.solvers.monolithic.config import MonolithicConfig  # noqa: PLC0415
+
+        a = MonolithicConfig(friction_velocity_scale=0.01).identity_fields()
+        b = MonolithicConfig(friction_velocity_scale=0.01).identity_fields()
+        self.assertEqual(a.keys(), b.keys())
+        for name in a:
+            np.testing.assert_array_equal(a[name], b[name])
+        self.assertIn("publish_policy", a)
+        self.assertEqual(int(a["config_version"][0]), 3)
+        for name in ("use_cuda_graph", "pcg_mode", "contact_factor_capacity", "contact_candidate_capacity"):
+            self.assertNotIn(name, a)
+        changed = MonolithicConfig(friction_velocity_scale=0.01, publish_policy="last_accepted").identity_fields()
+        self.assertFalse(np.array_equal(changed["publish_policy"], a["publish_policy"]))
+        mode = MonolithicConfig(friction_velocity_scale=0.01, pcg_mode="production").identity_fields()
+        self.assertEqual(_configuration_digest(mode), _configuration_digest(a))
+
     def test_digest_encoding(self):
         """Match a fixed little-endian, length-prefixed configuration digest."""
         metadata = b'{"dtype":"<i4","field_name":"a","schema_version":1,"shape":[2]}'

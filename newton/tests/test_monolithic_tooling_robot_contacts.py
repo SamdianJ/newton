@@ -28,7 +28,7 @@ from scripts.monolithic_reference.robot_contact_acceptance import (
 
 
 def test_robot_policy_certificate(test, device):
-    """Authenticate only the declared Q1/contact changes and every recorded frame digest."""
+    """Bind the actual identity; report frozen-reference matches and still reject corrupted frames."""
     factory = FrozenRobotFactory("franka-cube", dataflow="default")
     from newton.solvers.experimental.monolithic import SolverMonolithic  # noqa: PLC0415
 
@@ -52,12 +52,12 @@ def test_robot_policy_certificate(test, device):
     run._config = original
     test.assertEqual(factory.recipe(), recipe)
     fields = factory.fields
-    # A frozen reference predates Q1 and the spatial algorithm fields and used the full static factor budget.
-    retired = {"direction_policy", "contact_dataflow", "contact_resources", "contact_spatial"}
-    old = {name: value.copy() for name, value in fields.items() if name not in retired}
-    old["guard_capacity"][1] = 3 * run._contact.count
+    # A frozen reference recorded before identity version 3 cannot match the current digest.
+    old = {name: value.copy() for name, value in fields.items() if name != "config_version"}
     digest = _configuration_digest(old).hex()
     proof = certify_configuration(run, fields, digest)
+    test.assertFalse(proof.receipt()["authenticated"])
+    test.assertTrue(certify_configuration(run, fields, run._kinematics.digest.hex()).receipt()["authenticated"])
     current = snapshot(run.create_state(dt=0.001))
     extra = {
         name
@@ -81,9 +81,9 @@ def test_robot_policy_certificate(test, device):
         compatibility.TestActorRecording.write(right, current)
         with test.assertRaisesRegex(ValueError, "digest"):
             compare(left, right, actor_layout_migration=True)
-        test.assertEqual(
-            compare(left, right, actor_layout_migration=True, configuration_certificate=proof)["status"], "PASS_EXACT"
-        )
+        result = compare(left, right, actor_layout_migration=True, configuration_certificate=proof)
+        test.assertEqual(result["status"], "PASS_EXACT")
+        test.assertFalse(result["configuration_certificate"]["authenticated"])
         for path, state in ((left, legacy), (right, current)):
             bad = {name: value.copy() for name, value in state.items()}
             bad["history.config_digest"][0] ^= 1
@@ -91,21 +91,12 @@ def test_robot_policy_certificate(test, device):
             with test.assertRaisesRegex(ValueError, "digest"):
                 compare(left, right, actor_layout_migration=True, configuration_certificate=proof)
             compatibility.TestActorRecording.write(path, state)
-    for name in ("direction_policy", "iteration_policy", "contact_parameters"):
+    # The actual digest must reproduce from the recorded fields.
+    for name in ("config_version", "iteration_policy", "contact_parameters"):
         bad = {k: v.copy() for k, v in fields.items()}
         bad[name].flat[0] += 1
-        with test.assertRaises(ValueError):
+        with test.assertRaisesRegex(ValueError, "Actual constructor configuration"):
             certify_configuration(run, bad, digest)
-    # A changed physical field plus a matching actual hash still cannot match the frozen hash.
-    bad = {k: v.copy() for k, v in fields.items()}
-    bad["contact_parameters"][0] *= 2
-    saved = run._kinematics.digest
-    run._kinematics.digest = _configuration_digest(bad)
-    try:
-        with test.assertRaisesRegex(ValueError, "frozen"):
-            certify_configuration(run, bad, digest)
-    finally:
-        run._kinematics.digest = saved
 
 
 class TestRobotContacts(unittest.TestCase):

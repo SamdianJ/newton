@@ -101,8 +101,7 @@ class Observer:
         self.direction = direction.numpy().astype(self.run._numpy_dtype) if device_result else direction.copy()
         # Capture actual B32 storage; offline audit applies the matrix independently.
         data = {"direction": self.direction, "residual": residual, "scale": scale, "native_error": result}
-        if "direction_policy" in self.run._coupled_config:
-            data["actual_regularization"] = np.array([self.run._linear._lambda], dtype=np.float32)
+        data["actual_regularization"] = np.array([self.run._linear._lambda], dtype=np.float32)
         data = {
             name: value.numpy().astype(self.run._numpy_dtype) if isinstance(value, wp.array) else value
             for name, value in data.items()

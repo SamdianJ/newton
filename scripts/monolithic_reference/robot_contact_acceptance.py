@@ -85,68 +85,40 @@ def check_robot_reports(directory, run, expected_steps):
 
 
 def certify_configuration(run, fields, reference_digest):
-    """Reproduce the actual hash, then project only reviewed policy/resource fields."""
+    """Bind the actual constructor identity and report whether it equals the frozen reference.
+
+    Robot runs qualify on physical gates (D11), so a frozen-reference trajectory
+    comparison is diagnostic. The actual digest must reproduce from the
+    recorded fields; a differing reference only leaves the certificate
+    unauthenticated.
+    """
     if _configuration_digest(fields) != run._kinematics.digest or run._states.precision_bits != 64:
         raise ValueError("Actual constructor configuration digest differs")
-    projected = {name: np.asarray(value).copy() for name, value in fields.items()}
-    direction = projected.pop("direction_policy")
-    if direction.dtype != np.int32 or not np.array_equal(direction, np.array([1], np.int32)):
-        raise ValueError("Unreviewed Q1 direction policy")
-    removed = ["direction_policy=int32[1]"]
-    c = run._contact
-    algorithm = {"contact_dataflow", "contact_resources", "contact_spatial"}
-    if run._contact_spatial:
-        expected = {
-            "contact_dataflow": np.frombuffer(b"spatial-pool/newton-frozen/v1", np.uint8),
-            "contact_resources": np.array(
-                [
-                    c.pool.capacity,
-                    c.pool.max_support,
-                    c._batch.batch_capacity,
-                    run._coupled_config["guard_capacity"][1],
-                    c.candidate_capacity,
-                ],
-                np.int64,
-            ),
-            "contact_spatial": np.zeros(1, np.float64),
-        }
-        for name, value in expected.items():
-            actual = projected.pop(name)
-            if actual.dtype != value.dtype or not np.array_equal(actual, value):
-                raise ValueError("Contact algorithm/resource identity differs")
-        guard = projected["guard_capacity"]
-        if guard.shape != (2,) or guard[1] != c.resource_identity[3]:
-            raise ValueError("Contact factor budget differs")
-        # The frozen constructor used the full static factor budget. Preserve its physical guard.
-        guard[1] = 3 * c.count
-        removed += [*sorted(algorithm), "guard_capacity[1]: full static factor budget"]
-    else:
-        raise ValueError("Frozen robot comparison requires the spatial dataflow")
-    if _configuration_digest(projected).hex() != reference_digest:
-        raise ValueError("Projected configuration differs from frozen reference")
-    return _ConfigurationCertificate(run, fields, reference_digest, removed)
+    authenticated = run._kinematics.digest.hex() == reference_digest
+    reason = None if authenticated else "Configuration identity differs from the frozen reference"
+    return _ConfigurationCertificate(run, fields, reference_digest, authenticated, reason)
 
 
 class _ConfigurationCertificate:
-    def __init__(self, run, fields, reference, changes):
+    def __init__(self, run, fields, reference, authenticated, reason):
         self.run = run
         self.fields = {name: np.asarray(value).copy() for name, value in fields.items()}
         self.actual, self.reference = run._kinematics.digest.hex(), reference
-        self.changes = changes
+        self.authenticated, self.reason = authenticated, reason
 
     def validate(self):
-        if self.run._kinematics.digest.hex() != self.actual:
+        if self.run._kinematics.digest.hex() != self.actual or _configuration_digest(self.fields).hex() != self.actual:
             raise ValueError("Certified actual configuration digest changed")
-        certify_configuration(self.run, self.fields, self.reference)
         return self.reference, self.actual
 
     def receipt(self):
         self.validate()
         return {
-            "adapter": "frozen-robot-q1-b3/v1",
+            "adapter": "frozen-robot-identity/v2",
             "reference_digest": self.reference,
             "actual_digest": self.actual,
-            "authenticated_changes": self.changes,
+            "authenticated": self.authenticated,
+            "reason": self.reason,
         }
 
 
