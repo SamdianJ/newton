@@ -108,6 +108,11 @@ class _PooledContactObjective(ContactObjective):
             [self.pool.capacity, self.pool.max_support, self._batch.batch_capacity, factor_capacity],
             dtype=np.int64,
         )
+        # Snapshots must not serialize uninitialized reduction scratch as
+        # nonfinite live-in data. Evaluations overwrite only the active range.
+        for owner in (self.pool._identity, self.pool.energy, self.pool.residual, self.pool.force):
+            for array in owner.buffers():
+                array.zero_()
 
     @property
     def flags(self):
@@ -274,17 +279,9 @@ class _SpatialContactObjective(_PooledContactObjective):
     def initialize_pool(self, factor_capacity, *, use_cuda_graph):
         super().initialize_pool(factor_capacity, use_cuda_graph=use_cuda_graph)
         self._batch.initialize_reference()
-        # Cold reference snapshots must not serialize uninitialized reduction
-        # scratch as nonfinite live-in data. Later evaluations overwrite it.
-        for owner in (
-            self.pool._identity,
-            self.pool.energy,
-            self.pool.residual,
-            self.pool.force,
-            self._batch.reference_rows,
-        ):
-            for array in owner.buffers():
-                array.zero_()
+        # The pool scratch is cleared by the base; clear the reference rows too.
+        for array in self._batch.reference_rows.buffers():
+            array.zero_()
         self.query_graphs = _SegmentGraphCache(self.model.device, enabled=use_cuda_graph and self.model.device.is_cuda)
         self.dataflow_identity = np.frombuffer(b"spatial-pool/newton-frozen/v1", dtype=np.uint8)
         self.resource_identity = np.append(self.resource_identity, self.candidate_capacity)
