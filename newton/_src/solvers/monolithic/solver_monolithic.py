@@ -625,7 +625,7 @@ class SolverMonolithic(SolverBase):
             raise ValueError("SolverMonolithic does not accept external Contacts")
 
     def update_contacts(self, contacts, state=None):
-        """Reject external contact updates; use the independent collision pipeline separately."""
+        """Reject external contact updates; contact is evaluated internally."""
         raise ValueError("SolverMonolithic does not accept external Contacts")
 
     def set_collision_frequency(self, *, collision_frequency=None, collision_frequency_type=None):

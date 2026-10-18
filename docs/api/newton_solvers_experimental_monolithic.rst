@@ -4,13 +4,14 @@
 newton.solvers.experimental.monolithic
 ======================================
 
-Experimental implicit articulated rigid/tet solver with P1Q3 contact.
+Experimental implicit articulation, rigid, tet, cloth and cable solver with P1Q3 contact.
 
 .. experimental::
 
-The solver advances one supported articulation and one connected tet body with
-C-IE contact, ArmijoOrResNorm acceptance, scaled PCG and transactional
-publication.
+The solver advances one world with at most one articulation, at most one
+connected tet body, FREE rigid actors and cloth/cable inputs through one step
+pipeline, with C-IE contact, ArmijoOrResNorm acceptance, spatial contact
+candidates, scaled PCG and transactional publication.
 
 State and migration
 -------------------
@@ -18,8 +19,9 @@ State and migration
 Construct ``SolverMonolithic(model, friction_velocity_scale=..., ...)``
 directly. The experimental q-only, tet-only and private coupled factories are no
 longer supported. Constructor options are explicit; historical spring friction
-and ``tangential_stiffness`` are rejected. The defaults remain strict
-publication, diagnostic PCG and CUDA graphs disabled.
+and ``tangential_stiffness`` are rejected; option values are validated before
+the Model is inspected. The defaults remain strict publication, diagnostic PCG
+and CUDA graphs disabled.
 Contact always uses C-IE: the normal penalty acts on the current gap and the
 friction load uses the gap linearized at the step start. A Newton trial is
 accepted when either the Armijo energy predicate or the residual-norm predicate
@@ -38,7 +40,8 @@ after success. ``load_checkpoint(state, path)`` validates in scratch before
 replacing the target. Both return None. Incompatible configurations or edited
 bound models are rejected; rebuild the solver after model changes.
 
-``get_contact_forces(state)`` returns an independent read-only FP64 NumPy snapshot.
+``get_contact_forces(state)`` returns an independent read-only NumPy snapshot in
+the solver's precision.
 Later stepping, resetting or loading does not modify previously returned arrays.
 Fresh/reset states have invalid zero forces; published Stopped states can have
 valid forces without satisfying equilibrium. Hard failures retain the original
@@ -63,7 +66,7 @@ through the keyword-only ``cloth_inputs`` and ``cable_inputs`` arguments.
 Independent cloth/cable and supported mixed articulation/rigid/tet/material
 scenes use the shared nonlinear solve and transactional publication path.
 Material surfaces contact supported articulation, rigid and static targets
-through the complete deterministic contact pool. Self-collision and soft-soft
+through the same spatial candidates as other scenes. Self-collision and soft-soft
 contact remain unsupported. Existing nonmaterial stepping is unchanged.
 
 Cloth inputs select Model triangle rows, bending coefficients ``(alpha, beta)``,

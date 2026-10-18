@@ -1,7 +1,11 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 The Newton Developers
 # SPDX-License-Identifier: Apache-2.0
 
-"""Complete-candidate pooled contact adapter for coupled assembly and publication."""
+"""Pooled contact adapter and the production spatial objective built on it.
+
+The complete-candidate pooled objective is an offline audit oracle; the solver
+always constructs the spatial objective.
+"""
 
 import warnings
 from typing import Any

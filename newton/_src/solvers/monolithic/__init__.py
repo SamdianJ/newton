@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 The Newton Developers
 # SPDX-License-Identifier: Apache-2.0
 
-"""Experimental implicit articulated rigid/tet solver with P1Q3 contact.
+"""Experimental implicit articulation, rigid, tet, cloth and cable solver with P1Q3 contact.
 
 .. experimental::
 

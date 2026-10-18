@@ -8,31 +8,26 @@ Monolithic Coupled Solver
 
 .. experimental::
 
-   :mod:`newton.solvers.experimental.monolithic` supports one articulation and
-   one connected tetrahedral body, with optional single-body world-root FREE
-   rigid actors. Independent cloth/open cables and mixed material scenes support
-   contact with articulation, free rigid and static shapes; see
-   :doc:`monolithic_cloth` and :doc:`monolithic_cable`. Its interfaces may change
-   without the normal deprecation period. The old BE, q-only and tet-only solver entry points and
+   :mod:`newton.solvers.experimental.monolithic` supports one world with at
+   most one articulation, at most one connected tetrahedral body, single-body
+   world-root FREE rigid actors and independent cloth/open cables. Any of these
+   may be absent, but the scene needs at least one dynamic degree of freedom.
+   Every scene uses the same step pipeline and contact path; see
+   :doc:`monolithic_cloth` and :doc:`monolithic_cable` for material inputs. Its
+   interfaces may change without the normal deprecation period. The old BE, q-only and tet-only solver entry points and
    their examples have been retired.
 
-For scenes without cloth/cable, spatial contact is the default. Candidates refresh at each Newton boundary and
-remain frozen during its trials, using zero additional law margin [m]. This
+Every scene, including cloth/cable scenes, uses spatial contact. Candidates
+refresh at each Newton boundary and remain frozen during its trials. This
 approximation can omit contacts reached by a trial outside the frozen bounds;
 it does not provide continuous collision detection or automatic correction.
 The step-start convergence reference still uses complete contact enumeration.
 
-Candidate capacity defaults to the model's complete static sample upper bound;
-``contact_factor_capacity=None`` reserves three times that bound. These are
-fixed capacities, not active contact counts. Explicitly reducing the factor
-budget can discard whole contacts; overflow is reported and taints the result.
-Existing checkpoints from the previous complete-contact default have a different
-configuration identity and cannot be loaded into the new default. Use the offline
-legacy recording tools to inspect those records, or start a new spatial run.
-
-Material scenes use complete contact enumeration in the deterministic pool.
-Their capacity overflow rolls back the step without publishing partial forces.
-This separate material policy is described in :doc:`monolithic_cloth`.
+``contact_candidate_capacity=None`` reserves the model's complete static sample
+upper bound, and ``contact_factor_capacity=None`` reserves three times that
+bound. These are fixed capacities, not active contact counts. Explicitly
+reducing either budget can discard whole contacts; candidate or factor overflow
+fails the step and rolls it back without publishing partial forces.
 
 Use the public API
 ------------------
@@ -58,7 +53,9 @@ used directly for continuation.
    solver.load_checkpoint(state, "checkpoint.npz")
 
 The default solver uses FP64 nonlinear arithmetic, strict publication, diagnostic
-PCG and no CUDA graph.
+PCG and no CUDA graph. Constructor options are validated before the Model is
+inspected. Regularized direction retries use the same schedule for every scene,
+starting without regularization.
 Force results are independent read-only NumPy snapshots; check ``force_valid``
 and ``force_generation`` before using them. Stopped publication under an opt-in
 production policy is not convergence. Reset with ``reset_state(state, dt=...)``.
@@ -96,11 +93,15 @@ physical guards and noise envelopes may reject a candidate.
 
 The precision-tagged state uses schema 4, including actor ownership, layout
 identity and native rigid continuation fields. Cross-layout and cross-precision
-checkpoint loads are rejected. Schema-2 FP64 and schema-3 checkpoints are
-validated against their original complete fields and physical digest in scratch
-before migration to a matching canonical articulation-plus-tet model; failed
-loads preserve the destination. A plain initialization source
-is a new start, not a conversion of integration history.
+checkpoint loads are rejected. The configuration identity covers every option
+that changes the solution, the resolved contact resources and the physical,
+material and SDF digests; PCG mode and CUDA graph use are excluded. The
+resolved contact batch size differs between CPU and CUDA, so checkpoints of
+scenes with more than 256 contact samples are device specific. Checkpoints
+written before configuration version 3, including every schema-2 and schema-3
+checkpoint, are rejected; start a new run. Failed loads preserve the
+destination. A plain initialization source is a new start, not a conversion of
+integration history.
 
 FREE actors use native world COM position, rotation, velocity and integration
 history. ``body_q`` and ``body_qd`` are derived FP32 displays. The FREE coordinate
@@ -193,21 +194,22 @@ Historical manifest hashes remain unchanged; recorded paths are resolved through
    uv run --no-sync python -m scripts.monolithic_reference.run_regression --profile nightly --list
    uv run --no-sync python -m scripts.monolithic_reference.run_regression --profile nightly --output /path/to/new-output
 
-The nightly profile contains nine Franka configurations and one Sharpa configuration
-and is triggered manually for overnight regression. The full profile selects the
-same ten cases; dev selects the default configuration of each scene and still runs
-two complete trajectories. Routine development and ordinary CI use functional
-component and small integration tests instead. The Monolithic project policy is
+The nightly profile runs the production Franka and recorded Sharpa FP64
+trajectories (C-IE, ArmijoOrResNorm, CUDA production graphs) and the 64-box
+rigid collision scene; it is triggered manually for overnight regression. The
+dev and full profiles run the two robot trajectories. Routine development and
+ordinary CI use functional component and small integration tests instead. The Monolithic project policy is
 in the workspace file ``dev/monolithic/project.md``; repository ``AGENTS.md``
 links to that project-specific policy. The runner binds each case
 to ``asset/monolithic/references.json``, verifies retained file hashes and frozen
-controls, and rejects a changed physical configuration before stepping. Franka
-uses its existing frozen comparison envelopes. The rebuilt Sharpa reference uses
-native state chunks, read without conversion on disk; comparison includes the
-initial frame, complete history, publication labels and frozen control frames.
-Sharpa requires exact equality because no repeatability envelope has been
-qualified for the rebuilt generation. Missing or differing data produces FAIL;
-filtered profiles remain PARTIAL.
+controls, and rejects a changed physical configuration before stepping. Robot
+cases qualify on the frozen physical plausibility gates in
+``scripts/monolithic_reference/fixtures/physical_gates_v1.json``: no hard
+failures, at most 1% Stopped steps, sampled penetration of at most 2 mm, a
+minimum tet determinant of 0.2 and, for Franka, a held cube. Comparison with the
+retained reference trajectories is reported as a diagnostic only; new results
+need not match them. Missing frozen inputs produce FAIL; filtered profiles
+remain PARTIAL.
 
 After completion, review ``summary.json``, ``RESULTS.md`` and per-case receipts.
 By default, successful new recordings are removed after their summaries and
@@ -220,8 +222,8 @@ checks for stage qualification. Retired driver snapshots, hashes and migration
 notes are documented in the workspace file
 ``dev/monolithic/P4/script_records/legacy_retirement.md``.
 
-The precision experiment runner uses the same ten configurations, defaults to
-FP32, and accepts ``--precision both``. The retained controls already match the
+The precision experiment runner uses the same two robot configurations,
+defaults to FP32, and accepts ``--precision both``. The retained controls already match the
 rebuilt manifest; they do not need to be generated again::
 
    uv run --no-sync python -m scripts.monolithic_reference.run_precision --list
