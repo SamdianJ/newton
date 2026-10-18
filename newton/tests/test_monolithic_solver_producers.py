@@ -47,15 +47,19 @@ class TestSolverProducers(unittest.TestCase):
     def test_robot_scene_producers(self):
         solver = contact_solver(contact_scene("cpu", "chain"))
         self.assert_partition(solver, ["articulation", "rigid", "tet", "contact"])
-        self.assertTrue(all(p.capturable for p in solver._producers))
+        self.assertTrue(solver._capturable)
+        self.assertFalse(solver._native_direction)
 
     def test_material_scene_producers(self):
-        names = ["articulation", "rigid", "tet", "cloth_0", "cable_0", "cable_1"]
+        names = ["articulation", "rigid", "tet", "cloth_0", "cable_0", "cable_1", "contact"]
         _, solver = material_scene(mechanical=True, rigid=True, tet=True, cloth=True, cables=2)
-        # This scene has no collision shape, so it has no contact producer.
+        # A scene without a collision shape keeps an empty contact producer.
         self.assert_partition(solver, names)
+        self.assertEqual(solver._contact.count, 0)
         _, solver = material_scene(mechanical=True, rigid=True, tet=True, cloth=True, cables=2, shape_radius=0.5)
-        self.assert_partition(solver, [*names, "contact"])
+        self.assert_partition(solver, names)
+        self.assertFalse(solver._capturable)
+        self.assertTrue(solver._native_direction)
         policies = {p.name: (p.capturable, p.scale_policy) for p in solver._producers}
         self.assertEqual(policies["cloth_0"], (False, "coordinate"))
         self.assertEqual(policies["cable_1"], (False, "coordinate"))

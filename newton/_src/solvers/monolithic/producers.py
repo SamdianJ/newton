@@ -6,6 +6,16 @@
 from typing import Any, Protocol
 
 import numpy as np
+import warp as wp
+
+from ...sim import JointType
+from . import coupled_kernels as kernels
+from . import iteration_device
+from .articulation_state import _predict, _recover_history
+from .rigid import _scatter_residual, _scatter_tangent
+from .solver_types import _StepFailure
+from .state_checks import scalar_view
+from .tet_assembly import TetScatterBuffers, assemble_tet_residual_tangent
 
 
 class Producer(Protocol):
@@ -55,28 +65,238 @@ def validate_row_partition(producers, scalar_dof_count):
         raise ValueError("Producer rows leave scalar DoFs uncovered")
 
 
+@wp.kernel
+def _scatter_values(values: wp.array[Any], start: int, output: wp.array[Any]):
+    i = wp.tid()
+    output[start + i] = values[i]
+
+
+@wp.kernel
+def _add_values(source: wp.array[Any], target: wp.array[Any]):
+    i = wp.tid()
+    target[i] += source[i]
+
+
 class _Producer:
-    """Name, owned rows and declared policies of one physical term set."""
+    """Name, owned rows, declared policies and default no-op step methods."""
 
     capturable = True
     scale_policy = "diagonal"
+    # Step-start predictions read state_in; articulation and rigid prediction run last.
+    begin_rank = 0
 
     def __init__(self, name, rows):
         self.name, self.rows = name, np.asarray(rows, dtype=np.int32)
+
+    def begin_step(self, solver, state_in):
+        """Freeze step-start inputs and write this producer's predictor into the accepted state."""
+
+    def candidate(self, solver, accepted, trial, direction, alpha, dt):
+        """Write this producer's trial coordinates from the accepted state and direction."""
+
+    def evaluate(self, solver, state, dt, residual, *, build_tangent):
+        """Add this producer's residual rows; return its host energy and absolute energy."""
+        return 0.0, 0.0
+
+    def assemble(self, solver, assembly, dt):
+        """Write this producer's tangent into its fixed triplet slots."""
+
+    def scale(self, solver, diagonal, coordinate):
+        """Write coordinate-policy unit scales for this producer's rows."""
+
+    def displacement(self, solver, accepted, trial, out):
+        """Write the effective trial displacement of this producer's rows."""
+
+    def domain(self, solver, accepted, candidate):
+        """Return whether the candidate lies in this producer's local chart."""
+        return True
+
+    def publish(self, solver, state):
+        """Publish this producer's final history or forces into the accepted state."""
 
 
 class ArticulationProducer(_Producer):
     """Articulation coordinates with joint, PD, limit and friction terms."""
 
+    begin_rank = 1
+
     def __init__(self, solver):
         super().__init__("articulation", solver._layout.indices("articulation"))
+
+    def begin_step(self, solver, state_in):
+        k, obj, device = solver._kinematics, solver._objective, solver.model.device
+        k.evaluate(k.gather_q(state_in))
+        wp.copy(obj.tn, k.com)
+        wp.copy(obj.rn, k.rotations)
+        wp.copy(solver._old_joint_t, k.joint_translations)
+        wp.copy(solver._old_joint_r, k.joint_rotations)
+        wp.copy(obj.qn, k.gather_q(state_in))
+        wp.copy(obj.vn, k.gather_qd(state_in))
+        history = getattr(state_in, solver._states.namespace)
+        dt = solver._dtype(solver._dt)
+        wp.launch(
+            _predict,
+            k.bodies,
+            [
+                obj.tn,
+                obj.rn,
+                history.link_v_com,
+                history.link_omega,
+                history.link_vsym,
+                dt,
+                obj.predicted_t,
+                obj.predicted_r,
+            ],
+            device=device,
+        )
+        wp.utils.array_cast(solver._joint_terms.target_q, obj.qt)
+        wp.utils.array_cast(solver._joint_terms.target_qd, obj.vt)
+        accepted = solver._accepted
+        wp.launch(
+            kernels._coordinate_predictor,
+            k.count,
+            [obj.qn, obj.vn, dt, k.coord_map, k.dof_map, accepted.joint_q, accepted.joint_qd],
+            device=device,
+        )
+
+    def candidate(self, solver, accepted, trial, direction, alpha, dt):
+        k = solver._kinematics
+        wp.launch(
+            kernels._coordinate_trial,
+            k.count,
+            [
+                accepted.joint_q,
+                direction,
+                solver._layout.q_scalar_offset,
+                solver._dtype(alpha),
+                solver._objective.qn,
+                solver._dtype(dt),
+                k.coord_map,
+                k.dof_map,
+                trial.joint_q,
+                trial.joint_qd,
+            ],
+            device=solver.model.device,
+        )
+
+    def evaluate(self, solver, state, dt, residual, *, build_tangent):
+        k, obj = solver._kinematics, solver._objective
+        obj.evaluate(k.gather_q(state), dt, build_tangent=build_tangent)
+        wp.launch(
+            _scatter_values,
+            k.count,
+            [obj.residual, solver._layout.q_scalar_offset, residual],
+            device=solver.model.device,
+        )
+        parts = np.r_[obj.link_energy.numpy(), obj.joint_energy.numpy()]
+        return parts.sum(), abs(parts).sum()
+
+    def assemble(self, solver, assembly, dt):
+        nq = solver._kinematics.count
+        wp.launch(
+            kernels._scatter,
+            (nq, nq),
+            [
+                solver._objective.tangent32,
+                assembly.aq_actor_dense,
+                assembly.global_scalar_triplets.values,
+                solver._diagonal,
+            ],
+            device=solver.model.device,
+        )
+
+    def displacement(self, solver, accepted, trial, out):
+        coords = list(solver._articulation_actor.coord_indices)
+        out[self.rows] = trial.joint_q.numpy()[coords] - accepted.joint_q.numpy()[coords]
+
+    def domain(self, solver, accepted, candidate):
+        return iteration_device.domain(solver, candidate, int(JointType.REVOLUTE))
+
+    def publish(self, solver, state):
+        k, obj, device = solver._kinematics, solver._objective, solver.model.device
+        final = getattr(state, solver._states.namespace)
+        dt = solver._dtype(solver._dt)
+        wp.launch(
+            _recover_history,
+            k.bodies,
+            [obj.tn, obj.rn, k.com, k.rotations, dt, final.link_v_com, final.link_omega, final.link_vsym],
+            device=device,
+        )
+        wp.launch(
+            _recover_history,
+            k.joints,
+            [
+                solver._old_joint_t,
+                solver._old_joint_r,
+                k.joint_translations,
+                k.joint_rotations,
+                dt,
+                final.joint_v,
+                final.joint_omega,
+                final.joint_vsym,
+            ],
+            device=device,
+        )
+        k.evaluate(k.gather_q(state), state=state)
 
 
 class RigidProducer(_Producer):
     """Every FREE rigid actor: three COM and three rotation rows each."""
 
+    begin_rank = 2
+
     def __init__(self, solver):
         super().__init__("rigid", solver._rigid.rows_numpy.ravel())
+
+    def begin_step(self, solver, state_in):
+        wp.copy(solver._accepted._monolithic_coupled.rigid_com, solver._rigid.predicted_t)
+
+    def candidate(self, solver, accepted, trial, direction, alpha, dt):
+        solver._rigid.trial(accepted, trial, direction, alpha)
+
+    def evaluate(self, solver, state, dt, residual, *, build_tangent):
+        rigid = solver._rigid
+        rigid.evaluate(state, dt, build_tangent)
+        wp.launch(
+            _scatter_residual, (rigid.count, 6), [rigid.rows, rigid.residual, residual], device=solver.model.device
+        )
+        energy = rigid.energy.numpy()
+        return energy.sum(), abs(energy).sum()
+
+    def assemble(self, solver, assembly, dt):
+        rigid = solver._rigid
+        wp.launch(
+            _scatter_tangent,
+            (rigid.count, 6, 6),
+            [
+                rigid.tangent,
+                rigid.rows,
+                rigid.diagonal,
+                solver._rigid_triplet_offset,
+                assembly.global_scalar_triplets.values,
+                solver._diagonal,
+            ],
+            device=solver.model.device,
+        )
+
+    def displacement(self, solver, accepted, trial, out):
+        rows = solver._rigid.rows_numpy
+        a, b = accepted._monolithic_coupled, trial._monolithic_coupled
+        out[rows[:, :3]] = b.rigid_com.numpy() - a.rigid_com.numpy()
+        # Each trial is exactly the left Exp(alpha*delta) retraction within the local domain.
+        qa, qb = a.rigid_rotation.numpy(), b.rigid_rotation.numpy()
+        vector = qb[:, 3:] * -qa[:, :3] + qa[:, 3:] * qb[:, :3] + np.cross(qb[:, :3], -qa[:, :3])
+        scalar = np.sum(qb * qa, axis=1)
+        vector *= np.where(scalar < 0, -1, 1)[:, None]
+        length = np.linalg.norm(vector, axis=1)
+        factor = np.divide(2 * np.arctan2(length, abs(scalar)), length, out=np.full_like(length, 2), where=length > 0)
+        out[rows[:, 3:]] = vector * factor[:, None]
+
+    def domain(self, solver, accepted, candidate):
+        return solver._rigid.domain(candidate)
+
+    def publish(self, solver, state):
+        solver._rigid.recover(state, solver._dt)
 
 
 class TetProducer(_Producer):
@@ -85,29 +305,185 @@ class TetProducer(_Producer):
     def __init__(self, solver):
         super().__init__("tet", solver._layout.indices("tet"))
 
+    def begin_step(self, solver, state_in):
+        accepted = solver._accepted
+        wp.launch(
+            kernels.particle_predict,
+            solver.model.particle_count,
+            [
+                state_in.particle_q,
+                state_in.particle_qd,
+                solver._tet.mapping,
+                solver._dtype(solver._dt),
+                accepted.particle_q,
+                accepted.particle_qd,
+            ],
+            device=solver.model.device,
+        )
 
-class ClothProducer(_Producer):
-    """One cloth object; its host-side evaluation is not graph-capturable yet."""
+    def candidate(self, solver, accepted, trial, direction, alpha, dt):
+        wp.launch(
+            kernels.particle_trial,
+            solver.model.particle_count,
+            [
+                accepted.particle_q,
+                solver._original.particle_q,
+                solver._tet.mapping,
+                direction,
+                solver._layout.x_scalar_offset,
+                solver._dtype(alpha),
+                solver._dtype(dt),
+                trial.particle_q,
+                trial.particle_qd,
+            ],
+            device=solver.model.device,
+        )
+
+    def evaluate(self, solver, state, dt, residual, *, build_tangent):
+        tet = solver._tet
+        tet.evaluate(
+            state.particle_q,
+            solver._original.particle_q,
+            solver._original.particle_qd,
+            solver._frozen_force,
+            solver._frozen_gravity,
+            dt=dt,
+            min_det_f_guard=solver._guard,
+        )
+        if tet.flags.numpy()[0]:
+            raise _StepFailure(solver.Status.TET_INVERSION, "Invalid tet candidate")
+        wp.launch(
+            _scatter_values,
+            3 * tet.ids.size,
+            [scalar_view(tet.residual), solver._layout.x_scalar_offset, residual],
+            device=solver.model.device,
+        )
+        parts = tet.parts.numpy()
+        solver._metrics["min_det_f"] = float(tet.min_det_f.numpy()[0])
+        return parts.sum(), abs(parts).sum()
+
+    def assemble(self, solver, assembly, dt):
+        nq = solver._kinematics.count
+        scatter = TetScatterBuffers(
+            assembly.ax_internal_triplets.values,
+            assembly.global_scalar_triplets.values[nq * nq : nq * nq + 9 * assembly.ax_internal_triplets.capacity],
+        )
+        assemble_tet_residual_tangent(
+            solver.model,
+            candidate_particle_q=solver._current_state.particle_q,
+            particle_q_n=solver._original.particle_q,
+            particle_qd_n=solver._original.particle_qd,
+            frozen_particle_f=solver._frozen_force,
+            dynamic_particle_ids=solver._tet.ids,
+            particle_to_dynamic=solver._tet.mapping,
+            residual_x=solver._tet_r32,
+            dt=float(dt),
+            min_det_f_guard=solver._guard,
+            workspace=solver._tet_assembly,
+            scatter=scatter,
+            frozen_gravity=solver._frozen_gravity,
+        )
+        if solver._tet_assembly.failure_flags.numpy()[0]:
+            raise _StepFailure(solver.Status.TET_PROJECTION_FAILURE, "Invalid tet tangent")
+
+    def displacement(self, solver, accepted, trial, out):
+        ids = solver._dynamic_ids_host
+        out[self.rows] = (trial.particle_q.numpy()[ids] - accepted.particle_q.numpy()[ids]).ravel()
+
+
+class _MaterialProducer(_Producer):
+    """One cloth or cable object; host-side evaluation is not graph-capturable yet."""
 
     capturable = False
     scale_policy = "coordinate"
 
-    def __init__(self, solver, block):
+    def __init__(self, solver, kind, block):
         source = block.actor.source_index
-        super().__init__(f"cloth_{source}", solver._layout.indices("cloth", source))
+        super().__init__(f"{kind}_{source}", solver._layout.indices(kind, source))
         self.block = block
 
+    def gravity(self, solver):
+        return wp.vec3(solver._frozen_gravity.numpy()[int(self.block.reference["world"])])
 
-class CableProducer(_Producer):
+    def assemble(self, solver, assembly, dt):
+        self.block.assemble(assembly, dt)
+
+    def displacement(self, solver, accepted, trial, out):
+        local = self.local(trial) - self.local(accepted)
+        free = self.block.rows_host >= 0
+        out[self.block.rows_host[free]] = local[free]
+
+    def local(self, state):
+        return state.particle_q.numpy()[list(self.block.actor.particle_indices), :].ravel()
+
+    def domain(self, solver, accepted, candidate):
+        return self.block.path_valid(accepted, candidate)
+
+
+class ClothProducer(_MaterialProducer):
+    """One cloth object."""
+
+    def __init__(self, solver, block):
+        super().__init__(solver, "cloth", block)
+
+    def begin_step(self, solver, state_in):
+        cloth, original, accepted = self.block, solver._original, solver._accepted
+        cloth.begin_step(original, solver._frozen_force)
+        cloth.candidate(original, original, accepted, solver._delta, 0.0, solver._dt, predict=True)
+        if not cloth.path_valid(original, accepted):
+            # An inertial guess is optional; retain the valid input chart.
+            cloth.candidate(original, original, accepted, solver._delta, 0.0, solver._dt)
+
+    def candidate(self, solver, accepted, trial, direction, alpha, dt):
+        self.block.candidate(accepted, solver._original, trial, direction, alpha, dt)
+
+    def evaluate(self, solver, state, dt, residual, *, build_tangent):
+        try:
+            return self.block.evaluate(state, self.gravity(solver), dt, residual, build_tangent=build_tangent)
+        except ValueError as error:
+            raise _StepFailure(solver.Status.NONFINITE, str(error)) from error
+
+
+class CableProducer(_MaterialProducer):
     """One cable object; theta rows use a fixed inverse-length scale."""
 
-    capturable = False
-    scale_policy = "coordinate"
-
     def __init__(self, solver, block):
-        source = block.actor.source_index
-        super().__init__(f"cable_{source}", solver._layout.indices("cable", source))
-        self.block = block
+        super().__init__(solver, "cable", block)
+
+    def begin_step(self, solver, state_in):
+        self.block.begin_step(solver._original, solver._frozen_force)
+        self.block.candidate(
+            solver._original,
+            solver._original,
+            solver._accepted,
+            solver._delta,
+            solver._cable_target_x,
+            solver._cable_target_theta,
+            0.0,
+            solver._dt,
+            predict=True,
+        )
+
+    def candidate(self, solver, accepted, trial, direction, alpha, dt):
+        self.block.candidate(
+            accepted, solver._original, trial, direction, solver._cable_target_x, solver._cable_target_theta, alpha, dt
+        )
+
+    def evaluate(self, solver, state, dt, residual, *, build_tangent):
+        try:
+            return self.block.evaluate(
+                state, solver._original, solver._cable_torque, self.gravity(solver), dt, residual
+            )
+        except ValueError as error:
+            raise _StepFailure(solver.Status.NONFINITE, str(error)) from error
+
+    def scale(self, solver, diagonal, coordinate):
+        rows = self.block.rows_host[3 * self.block.ids.size :]
+        coordinate[rows[rows >= 0]] = 1 / float(self.block.reference["length_scale"])
+
+    def local(self, state):
+        theta = state._monolithic_coupled.cable_theta.numpy()[list(self.block.actor.theta_indices)]
+        return np.r_[super().local(state), theta]
 
 
 class ContactProducer(_Producer):
@@ -118,6 +494,80 @@ class ContactProducer(_Producer):
     def __init__(self, solver):
         super().__init__("contact", np.empty(0, dtype=np.int32))
 
+    def begin_step(self, solver, state_in):
+        contact, k = solver._contact, solver._kinematics
+        q = k.gather_q(state_in)
+        k.evaluate(q)
+        history = state_in._monolithic_coupled
+        surface = contact._batch.material_surface
+        if surface is not None:
+            surface.update(state_in, begin=True)
+        contact.begin_step(
+            state_in.particle_q,
+            k.poses,
+            k.com,
+            k.jt,
+            k.jw,
+            rigid_com=history.rigid_com,
+            rigid_rotation=history.rigid_rotation,
+            **({"kinematics": k, "q0": q} if solver._contact_spatial else {}),
+        )
+
+    def evaluate(self, solver, state, dt, residual, *, build_tangent):
+        contact, k = solver._contact, solver._kinematics
+        reference_mode = solver._contact_spatial and contact._reference_mode
+        history = state._monolithic_coupled
+        surface = contact._batch.material_surface
+        if surface is not None:
+            try:
+                surface.update(state)
+            except ValueError as error:
+                raise _StepFailure(solver.Status.NONFINITE, str(error)) from error
+        contact.evaluate(
+            state.particle_q,
+            k.poses,
+            k.com,
+            k.jt,
+            k.jw,
+            dt=dt,
+            rigid_com=history.rigid_com,
+            rigid_rotation=history.rigid_rotation,
+        )
+        diagnostics = {} if reference_mode else contact.evaluation_diagnostics()
+        if not reference_mode:
+            solver._variational["contact_pool"] = diagnostics
+        if (
+            contact.flags.numpy()[0]
+            or diagnostics.get("dropped", 0)
+            or (solver._contact_spatial and contact._query_dropped)
+        ):
+            raise _StepFailure(solver.Status.NONFINITE, "Invalid or incomplete contact evaluation")
+        wp.launch(_add_values, residual.size, [contact.residual, residual], device=solver.model.device)
+        # Material blocks report their raw residual including the contact reaction.
+        forces = contact.pool.force.result.numpy()
+        model = solver.model
+        for block in solver._cloths + solver._cables:
+            raw = block.raw.numpy()
+            if reference_mode:
+                rows = block.rows_host
+                free = rows >= 0
+                raw[free] += contact.residual.numpy()[rows[free]]
+                block.raw.assign(raw)
+                continue
+            ids = block.ids.numpy()
+            raw[: 3 * len(ids)] -= forces[: 3 * model.particle_count].reshape(-1, 3)[ids].ravel()
+            if block in solver._cables:
+                offset = 3 * model.particle_count + 6 * model.body_count + int(block.reference["theta_offset"])
+                raw[3 * len(ids) :] -= forces[offset : offset + len(ids) - 1]
+            block.raw.assign(raw)
+        return contact.energy.numpy().sum(), contact.absolute_energy.numpy().sum()
+
+    def assemble(self, solver, assembly, dt):
+        solver._contact.assemble_tangent(assembly)
+
+    def publish(self, solver, state):
+        solver._variational["actor_contact_pairs"] = solver._contact.publish(state)
+
 
 def build_producers(solver):
     """Order producers as articulation, rigid, tet, cloth, cable and contact."""
@@ -127,11 +577,11 @@ def build_producers(solver):
         producers.append(ArticulationProducer(solver))
     if solver._rigid.count:
         producers.append(RigidProducer(solver))
-    if layout.dynamic_particle_count and getattr(solver, "_tet", None) is not None:
+    if solver._has_tet:
         producers.append(TetProducer(solver))
-    producers.extend(ClothProducer(solver, block) for block in getattr(solver, "_cloths", ()))
-    producers.extend(CableProducer(solver, block) for block in getattr(solver, "_cables", ()))
-    if solver._contact.count:
-        producers.append(ContactProducer(solver))
+    producers.extend(ClothProducer(solver, block) for block in solver._cloths)
+    producers.extend(CableProducer(solver, block) for block in solver._cables)
+    # A contact-free scene keeps its empty contact producer, as it keeps an empty pool.
+    producers.append(ContactProducer(solver))
     validate_row_partition([p for p in producers if len(p.rows)], layout.scalar_dof_count)
     return producers

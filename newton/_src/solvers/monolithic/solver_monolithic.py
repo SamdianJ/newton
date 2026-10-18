@@ -14,13 +14,12 @@ from types import MappingProxyType, SimpleNamespace
 import numpy as np
 import warp as wp
 
-from ...sim import JointType, Model
+from ...sim import Model
 from ..solver import SolverBase
 from . import coupled_kernels as kernels
-from . import iteration_device, material_runtime, state_checks
+from . import iteration_device, state_checks
 from .actors import Actor, ActorTable
 from .articulation import ArticulationObjective, _TreeKinematics
-from .articulation_state import _predict, _recover_history
 from .cable_system import CableBlock
 from .cloth_system import ClothBlock
 from .contact import ContactStatus
@@ -39,7 +38,7 @@ from .linear_types import (
 )
 from .material_inputs import _MaterialInputs
 from .producers import build_producers
-from .rigid import RigidObjective, _scatter_residual, _scatter_tangent
+from .rigid import RigidObjective, _scatter_residual
 from .segment_graph import _SegmentGraphCache
 from .solver_types import (
     CableInput,
@@ -54,8 +53,6 @@ from .solver_types import (
     _StepFailure,
 )
 from .tet_assembly import (
-    TetScatterBuffers,
-    assemble_tet_residual_tangent,
     build_tet_triplet_pattern,
     create_tet_assembly_workspace,
 )
@@ -422,7 +419,7 @@ class SolverMonolithic(SolverBase):
         self._input_status = wp.zeros(4, dtype=int, device=device)
         self._config = replace(
             _SolverMonolithicInternalConfig(),
-            regularization_values=(0.0,) if self._materials is None else (0.0, 1e-6, 1e-5, 1e-4, 1e-3, 1e-2, 0.1, 1.0),
+            regularization_values=(0.0, 1e-6, 1e-5, 1e-4, 1e-3, 1e-2, 0.1, 1.0),
             merit_absolute_cable_x=cable_position_tolerance,
             merit_absolute_cable_theta=cable_theta_tolerance,
             joint_residual_tolerance=residual_caps.get("joint_residual_tolerance"),
@@ -490,17 +487,26 @@ class SolverMonolithic(SolverBase):
         self._cable_target_x = wp.array(model.particle_q.numpy(), dtype=self._states.vector, device=device)
         self._cable_target_theta = wp.zeros(theta_count, dtype=self._dtype, device=device)
         self._cable_torque = wp.zeros_like(self._cable_target_theta)
-        self._material_scale = np.ones(n, dtype=np.float32)
-        for cable in self._cables:
-            rows = cable.rows_host[3 * cable.ids.size :]
-            self._material_scale[rows[rows >= 0]] = 1 / float(cable.reference["length_scale"])
         self._temporary_gauges = []
         self._assembly_gauges = ()
         self._out_backup = None
         self._dt = None
+        self._producers = build_producers(self)
+        # Graph-captured E/r requires every producer to evaluate without host reads.
+        self._capturable = all(p.capturable for p in self._producers)
+        coordinate = [p for p in self._producers if p.scale_policy == "coordinate"]
+        # Coordinate rows select native direction accumulation and goal-normalized merit (until P8b).
+        self._native_direction = self._material_blocks = bool(coordinate)
+        scale, mask = np.ones(n, dtype=np.float32), np.zeros(n, dtype=np.int32)
+        for producer in coordinate:
+            mask[producer.rows] = 1
+            producer.scale(self, None, scale)
+        self._coordinate_rows = bool(mask.any())
+        self._coordinate_scale = wp.array(scale, dtype=float, device=device)
+        self._coordinate_mask = wp.array(mask, dtype=wp.int32, device=device)
         # P6a reductions assume contiguous A -> T with no rigid blocks.
         self._device_iteration = (
-            self._materials is None
+            self._capturable
             and self._has_tet
             and self._kinematics.count > 0
             and not self._rigid.count
@@ -508,7 +514,6 @@ class SolverMonolithic(SolverBase):
             and self._layout.x_scalar_offset == self._kinematics.count
         )
         iteration_device.initialize(self)
-        self._producers = build_producers(self)
 
     def create_control(self):
         """Create experimental cable position [m], angle [rad] and torque [N m] controls.
@@ -647,13 +652,14 @@ class SolverMonolithic(SolverBase):
     def get_contact_forces(self, state):
         """Return an independent, read-only snapshot of this state's final contact forces."""
         history = self._states.validate(state)
+        torque = getattr(history, "contact_cable_torque", None)
         return MonolithicContactForces(
             history.contact_particle_force.numpy(),
             history.contact_body_force.numpy(),
             history.contact_joint_force.numpy(),
             bool(history.force_valid.numpy()[0]),
             int(history.force_generation.numpy()[0]),
-            cable_torque=history.contact_cable_torque.numpy() if self._materials is not None else None,
+            cable_torque=None if torque is None else torque.numpy(),
         )
 
     @property
@@ -773,39 +779,6 @@ class SolverMonolithic(SolverBase):
             "configuration": self._kinematics.digest.hex(),
         }
         k, obj = self._kinematics, self._objective
-        k.evaluate(k.gather_q(state_in))
-        wp.copy(obj.tn, k.com)
-        wp.copy(obj.rn, k.rotations)
-        wp.copy(self._old_joint_t, k.joint_translations)
-        wp.copy(self._old_joint_r, k.joint_rotations)
-        wp.copy(obj.qn, k.gather_q(state_in))
-        wp.copy(obj.vn, k.gather_qd(state_in))
-        history = getattr(state_in, self._states.namespace)
-        wp.launch(
-            _predict,
-            k.bodies,
-            [
-                obj.tn,
-                obj.rn,
-                history.link_v_com,
-                history.link_omega,
-                history.link_vsym,
-                self._dtype(dt),
-                obj.predicted_t,
-                obj.predicted_r,
-            ],
-            device=self.model.device,
-        )
-        wp.utils.array_cast(self._joint_terms.target_q, obj.qt)
-        wp.utils.array_cast(self._joint_terms.target_qd, obj.vt)
-        wp.launch(
-            kernels._coordinate_predictor,
-            k.count,
-            [obj.qn, obj.vn, self._dtype(dt), k.coord_map, k.dof_map, self._accepted.joint_q, self._accepted.joint_qd],
-            device=self.model.device,
-        )
-        if self._rigid.count:
-            wp.copy(self._accepted._monolithic_coupled.rigid_com, self._rigid.predicted_t)
         k.evaluate(k.gather_q(self._accepted))
         if not self._domain(self._accepted):
             if self._rigid.count:
@@ -825,38 +798,6 @@ class SolverMonolithic(SolverBase):
                     k.validate_inertia()
                 except ValueError as error:
                     raise _StepFailure(self.Status.NONFINITE, str(error)) from error
-                final = getattr(self._accepted, self._states.namespace)
-                wp.launch(
-                    _recover_history,
-                    k.bodies,
-                    [
-                        obj.tn,
-                        obj.rn,
-                        k.com,
-                        k.rotations,
-                        self._dtype(dt),
-                        final.link_v_com,
-                        final.link_omega,
-                        final.link_vsym,
-                    ],
-                    device=self.model.device,
-                )
-                wp.launch(
-                    _recover_history,
-                    k.joints,
-                    [
-                        self._old_joint_t,
-                        self._old_joint_r,
-                        k.joint_translations,
-                        k.joint_rotations,
-                        self._dtype(dt),
-                        final.joint_v,
-                        final.joint_omega,
-                        final.joint_vsym,
-                    ],
-                    device=self.model.device,
-                )
-                k.evaluate(k.gather_q(self._accepted), state=self._accepted)
                 self._finish_candidate(self._accepted, dt)
                 self._states.bind(self._accepted, dt=dt)
                 self._states.validate(self._accepted)
@@ -917,13 +858,12 @@ class SolverMonolithic(SolverBase):
                     if "convergence_ratio" + suffix in self._metrics
                 },
             }
-            if self._materials is not None:
-                detail["stopped_candidate"]["final_ratios"].update(
-                    {
-                        name: values["convergence_ratio_" + name]
-                        for name, values in detail.get("material_blocks", {}).items()
-                    }
-                )
+            detail["stopped_candidate"]["final_ratios"].update(
+                {
+                    name: values["convergence_ratio_" + name]
+                    for name, values in detail.get("material_blocks", {}).items()
+                }
+            )
         self._last_stats = replace(
             stats,
             variational=MappingProxyType(detail),
@@ -968,85 +908,12 @@ class SolverMonolithic(SolverBase):
             self._out_backup.assign(state_out)
         wp.copy(self._frozen_force, state_in.particle_f)
         wp.copy(self._frozen_gravity, self.model.gravity)
-        if self._materials is not None:
-            wp.launch(
-                kernels.particle_predict,
-                self.model.particle_count,
-                [
-                    state_in.particle_q,
-                    state_in.particle_qd,
-                    self._particle_mapping,
-                    self._dtype(dt),
-                    self._accepted.particle_q,
-                    self._accepted.particle_qd,
-                ],
-                device=self.model.device,
-            )
-            for cloth in self._cloths:
-                cloth.begin_step(self._original, self._frozen_force)
-                cloth.candidate(self._original, self._original, self._accepted, self._delta, 0.0, dt, predict=True)
-                if not cloth.path_valid(self._original, self._accepted):
-                    # An inertial guess is optional; retain the valid input chart.
-                    cloth.candidate(self._original, self._original, self._accepted, self._delta, 0.0, dt)
-            for cable in self._cables:
-                cable.begin_step(self._original, self._frozen_force)
-                cable.candidate(
-                    self._original,
-                    self._original,
-                    self._accepted,
-                    self._delta,
-                    self._cable_target_x,
-                    self._cable_target_theta,
-                    0.0,
-                    dt,
-                    predict=True,
-                )
-            if self._contact_pool:
-                k = self._kinematics
-                k.evaluate(k.gather_q(state_in))
-                h = state_in._monolithic_coupled
-                self._contact._batch.material_surface.update(state_in, begin=True)
-                self._contact.begin_step(
-                    state_in.particle_q,
-                    k.poses,
-                    k.com,
-                    k.jt,
-                    k.jw,
-                    rigid_com=h.rigid_com,
-                    rigid_rotation=h.rigid_rotation,
-                    **({"kinematics": k, "q0": k.gather_q(state_in)} if self._contact_spatial else {}),
-                )
-            return
-        k = self._kinematics
-        k.evaluate(k.gather_q(state_in))
-        history = state_in._monolithic_coupled
-        self._contact.begin_step(
-            state_in.particle_q,
-            k.poses,
-            k.com,
-            k.jt,
-            k.jw,
-            rigid_com=history.rigid_com,
-            rigid_rotation=history.rigid_rotation,
-            **({"kinematics": k, "q0": k.gather_q(state_in)} if self._contact_spatial else {}),
-        )
-        wp.launch(
-            kernels.particle_predict,
-            self.model.particle_count,
-            [
-                state_in.particle_q,
-                state_in.particle_qd,
-                self._tet.mapping,
-                self._dtype(dt),
-                self._accepted.particle_q,
-                self._accepted.particle_qd,
-            ],
-            device=self.model.device,
-        )
+        for producer in sorted(self._producers, key=lambda p: p.begin_rank):
+            producer.begin_step(self, state_in)
 
     def _evaluate(self, state, dt, *, build_tangent=True, device_result=False):
-        if self._materials is not None:
-            return material_runtime.evaluate(self, state, dt, build_tangent=build_tangent)
+        if not self._capturable:
+            return self._evaluate_eager(state, dt, build_tangent=build_tangent)
         k, contact, tet = self._kinematics, self._contact, self._tet
         local_q = k.gather_q(state)
         buffers = [
@@ -1197,6 +1064,56 @@ class SolverMonolithic(SolverBase):
             absolute = abs(parts[: -contact.energy.size]).sum() + packet[3:5].sum()
         return parts.sum(), residual, absolute
 
+    def _evaluate_eager(self, state, dt, *, build_tangent):
+        """Accumulate every producer's E/r in order, with host reads between producers."""
+        self._complete_r.zero_()
+        self._temporary_gauges = []
+        self._cable_raw_theta_norms = {}
+        total = absolute = 0.0
+        for producer in self._producers:
+            energy, magnitude = producer.evaluate(self, state, dt, self._complete_r, build_tangent=build_tangent)
+            total += energy
+            absolute += magnitude
+        self._settle_cable_gauges()
+        residual = self._complete_r.numpy().copy()
+        if not np.isfinite(residual).all() or not np.isfinite(total):
+            raise _StepFailure(self.Status.NONFINITE, "Nonfinite material-scene E/r")
+        self._current_state = state
+        return total, residual, absolute
+
+    def _settle_cable_gauges(self):
+        """Measure free cable angles and select temporary gauges for common-angle null modes."""
+        reference_mode = self._contact_spatial and self._contact._reference_mode
+        for cable in self._cables:
+            raw = cable.raw.numpy()[3 * cable.ids.size :]
+            self._cable_raw_theta_norms[f"cable_{cable.actor.source_index}_theta"] = float(
+                np.linalg.norm(raw[~cable.reference["fixed_theta"]])
+            )
+            if reference_mode or cable.reference["fixed_theta"].any():
+                continue
+            jacobian = cable.objective.jacobian.numpy()
+            null = np.array_equal(jacobian[:, :, 9], -jacobian[:, :, 10])
+            if null:
+                rows = cable.rows_host[3 * cable.ids.size :]
+                records = self._contact.pool.records
+                count = int(records.factor_count.numpy()[0])
+                offsets = records.factor_offsets.numpy()
+                columns = records.factor_columns.numpy()
+                values = records.factor_values.numpy()
+                weights = records.factor_weights.numpy()
+                for factor in range(count):
+                    first, end = offsets[factor : factor + 2]
+                    if weights[factor] > 0 and values[first:end][np.isin(columns[first:end], rows)].sum() != 0:
+                        null = False
+                        break
+            if bool(cable.reference["gauge"]) or null:
+                if abs(raw.sum()) > self._config.merit_absolute_cable_theta:
+                    raise _StepFailure(
+                        self.Status.LINEAR_NON_POSITIVE_CURVATURE, "Cable common-angle mode has incompatible net torque"
+                    )
+            if null and not bool(cable.reference["gauge"]):
+                self._temporary_gauges.append(cable)
+
     def _initial_reference(self, dt, *, device_result=False):
         if self._contact_spatial:
             self._contact._reference_mode = True
@@ -1219,8 +1136,6 @@ class SolverMonolithic(SolverBase):
             raise _StepFailure(self.Status.NONFINITE, str(error)) from error
 
     def _conservative_energy(self):
-        if self._materials is not None and not self._contact_pool:
-            return not self._rigid.has_torque
         return self._contact.conservative_energy and not self._rigid.has_torque
 
     def _trial_evaluation(self, dt, *, device_result=False):
@@ -1231,56 +1146,9 @@ class SolverMonolithic(SolverBase):
             return None
 
     def _take_trial(self, alpha, dt):
-        direction = self._native_delta if self._materials is not None else self._delta
-        wp.launch(
-            kernels._coordinate_trial,
-            self._kinematics.count,
-            [
-                self._accepted.joint_q,
-                direction,
-                self._layout.q_scalar_offset,
-                self._dtype(alpha),
-                self._objective.qn,
-                self._dtype(dt),
-                self._kinematics.coord_map,
-                self._kinematics.dof_map,
-                self._trial.joint_q,
-                self._trial.joint_qd,
-            ],
-            device=self.model.device,
-        )
-        self._rigid.trial(self._accepted, self._trial, direction, alpha)
-        wp.launch(
-            kernels.particle_trial,
-            self.model.particle_count,
-            [
-                self._accepted.particle_q,
-                self._original.particle_q,
-                self._particle_mapping,
-                direction,
-                self._layout.x_scalar_offset,
-                self._dtype(alpha),
-                self._dtype(dt),
-                self._trial.particle_q,
-                self._trial.particle_qd,
-            ],
-            device=self.model.device,
-        )
-
-        if self._materials is not None:
-            for cloth in self._cloths:
-                cloth.candidate(self._accepted, self._original, self._trial, direction, alpha, dt)
-            for cable in self._cables:
-                cable.candidate(
-                    self._accepted,
-                    self._original,
-                    self._trial,
-                    direction,
-                    self._cable_target_x,
-                    self._cable_target_theta,
-                    alpha,
-                    dt,
-                )
+        direction = self._native_delta if self._native_direction else self._delta
+        for producer in self._producers:
+            producer.candidate(self, self._accepted, self._trial, direction, alpha, dt)
 
     def _effective_displacement(self, *, device_result=False):
         if device_result:
@@ -1298,104 +1166,24 @@ class SolverMonolithic(SolverBase):
                 device=self.model.device,
             )
             return self._effective_device
-        ids = self._dynamic_ids_host
         displacement = np.empty(self._layout.scalar_dof_count, dtype=self._numpy_dtype)
-        coords = [] if self._articulation_actor is None else list(self._articulation_actor.coord_indices)
-        displacement[self._layout.indices("articulation")] = (
-            self._trial.joint_q.numpy()[coords] - self._accepted.joint_q.numpy()[coords]
-        )
-        displacement[self._layout.indices("tet")] = (
-            self._trial.particle_q.numpy()[ids] - self._accepted.particle_q.numpy()[ids]
-        ).ravel()
-        if self._materials is not None:
-            ax, bx = self._accepted.particle_q.numpy(), self._trial.particle_q.numpy()
-            at, bt = (
-                self._accepted._monolithic_coupled.cable_theta.numpy(),
-                self._trial._monolithic_coupled.cable_theta.numpy(),
-            )
-            for cloth in self._cloths:
-                local = (bx[cloth.actor.particle_indices, :] - ax[cloth.actor.particle_indices, :]).ravel()
-                free = cloth.rows_host >= 0
-                displacement[cloth.rows_host[free]] = local[free]
-            for cable in self._cables:
-                local = np.r_[
-                    (bx[cable.actor.particle_indices, :] - ax[cable.actor.particle_indices, :]).ravel(),
-                    bt[list(cable.actor.theta_indices)] - at[list(cable.actor.theta_indices)],
-                ]
-                free = cable.rows_host >= 0
-                displacement[cable.rows_host[free]] = local[free]
-        if self._rigid.count:
-            a, b = self._accepted._monolithic_coupled, self._trial._monolithic_coupled
-            displacement[self._rigid.rows_numpy[:, :3]] = b.rigid_com.numpy() - a.rigid_com.numpy()
-            # Each trial is exactly the left Exp(alpha*delta) retraction within the local domain.
-            qa, qb = a.rigid_rotation.numpy(), b.rigid_rotation.numpy()
-            vector = qb[:, 3:] * -qa[:, :3] + qa[:, 3:] * qb[:, :3] + np.cross(qb[:, :3], -qa[:, :3])
-            scalar = np.sum(qb * qa, axis=1)
-            sign = np.where(scalar < 0, -1, 1)
-            vector *= sign[:, None]
-            length = np.linalg.norm(vector, axis=1)
-            factor = np.divide(
-                2 * np.arctan2(length, abs(scalar)), length, out=np.full_like(length, 2), where=length > 0
-            )
-            displacement[self._rigid.rows_numpy[:, 3:]] = vector * factor[:, None]
+        for producer in self._producers:
+            producer.displacement(self, self._accepted, self._trial, displacement)
         return displacement
 
     def _assemble(self, iteration, *, device_result=False):
-        if self._materials is not None:
-            return material_runtime.assemble(self, iteration)
         k, linear, obj = self._kinematics, self._linear, self._objective
         self._assembly_sequence += 1
         self._generation = MonolithicLinearGeneration(
             self._step_generation,
             iteration,
-            self._contact.evaluation_generation if self._contact_pool else self._step_generation,
+            self._contact.evaluation_generation,
             self._assembly_sequence,
             history_epoch=self._step_generation,
         )
         assembly = linear.begin_assembly(self._generation)
-        nq = k.count
-        wp.launch(
-            kernels._scatter,
-            (nq, nq),
-            [obj.tangent32, assembly.aq_actor_dense, assembly.global_scalar_triplets.values, self._diagonal],
-            device=self.model.device,
-        )
-        if self._has_tet:
-            scatter = TetScatterBuffers(
-                assembly.ax_internal_triplets.values,
-                assembly.global_scalar_triplets.values[nq * nq : nq * nq + 9 * assembly.ax_internal_triplets.capacity],
-            )
-            assemble_tet_residual_tangent(
-                self.model,
-                candidate_particle_q=self._current_state.particle_q,
-                particle_q_n=self._original.particle_q,
-                particle_qd_n=self._original.particle_qd,
-                frozen_particle_f=self._frozen_force,
-                dynamic_particle_ids=self._tet.ids,
-                particle_to_dynamic=self._tet.mapping,
-                residual_x=self._tet_r32,
-                dt=float(self._dt),
-                min_det_f_guard=self._guard,
-                workspace=self._tet_assembly,
-                scatter=scatter,
-                frozen_gravity=self._frozen_gravity,
-            )
-            if self._tet_assembly.failure_flags.numpy()[0]:
-                raise _StepFailure(self.Status.TET_PROJECTION_FAILURE, "Invalid tet tangent")
-        self._contact.assemble_tangent(assembly)
-        wp.launch(
-            _scatter_tangent,
-            (self._rigid.count, 6, 6),
-            [
-                self._rigid.tangent,
-                self._rigid.rows,
-                self._rigid.diagonal,
-                self._rigid_triplet_offset,
-                assembly.global_scalar_triplets.values,
-                self._diagonal,
-            ],
-            device=self.model.device,
-        )
+        for producer in self._producers:
+            producer.assemble(self, assembly, self._dt)
         if self._contact.flags.numpy()[0]:
             status = (
                 self.Status.CONTACT_OVERFLOW
@@ -1423,9 +1211,26 @@ class SolverMonolithic(SolverBase):
             ],
             device=self.model.device,
         )
-        self._require_linear(
-            linear.build_scaling(self._diagonal, epsilon_d=self._config.epsilon_d, generation=self._generation)
-        )
+        epsilon_d = self._config.epsilon_d
+        if self._coordinate_rows:
+            status = linear.build_mixed_scaling(
+                self._diagonal,
+                self._coordinate_scale,
+                self._coordinate_mask,
+                epsilon_d=epsilon_d,
+                generation=self._generation,
+            )
+        else:
+            status = linear.build_scaling(self._diagonal, epsilon_d=epsilon_d, generation=self._generation)
+        self._require_linear(status)
+        # Cable common-angle null modes are pinned in the cable preconditioner.
+        self._assembly_gauges = tuple(self._temporary_gauges)
+        if linear._cable_preconditioner is not None:
+            pins = np.full(len(self._cables), -1, dtype=np.int32)
+            for i, cable in enumerate(self._cables):
+                if cable in self._temporary_gauges:
+                    pins[i] = cable.rows_host[3 * cable.ids.size]
+            linear._cable_preconditioner.gauge_rows.assign(pins)
         self._metrics["matrix_assembly_count"] += 1
         return None, linear.scale if device_result else linear.scale.numpy().astype(self._numpy_dtype)
 
@@ -1440,7 +1245,7 @@ class SolverMonolithic(SolverBase):
             b.offsets,
             b.columns,
             b.values,
-            self._native_delta if self._materials is not None else self._delta,
+            self._native_delta if self._native_direction else self._delta,
             self._post_r,
             self._linear.scale,
             self._post_lambda,
@@ -1458,6 +1263,20 @@ class SolverMonolithic(SolverBase):
             lambda: wp.launch(kernels.sparse_posterior, self._post_error.size, buffers, device=self.model.device),
         )
         return self._post_error if device_result else self._post_error.numpy().copy()
+
+    def _accumulate_direction(self, correction):
+        """Accumulate FP32 corrections in native precision, then select the null representative."""
+        before = self._native_delta.numpy().copy()
+        delta = (
+            (before + self._correction_delta.numpy()) if correction else self._delta.numpy().astype(self._numpy_dtype)
+        )
+        for cable in self._assembly_gauges:
+            rows = cable.rows_host[3 * cable.ids.size :]
+            delta[rows] -= delta[rows].mean(dtype=np.float64)
+        if not np.isfinite(delta).all():
+            raise _StepFailure(self.Status.NONFINITE, "Nonfinite corrected material direction")
+        self._native_delta.assign(delta)
+        return not np.array_equal(before, delta) if correction else True
 
     def _prepare_direction_correction(self):
         wp.launch(
@@ -1505,23 +1324,21 @@ class SolverMonolithic(SolverBase):
             raise _StepFailure(self.Status.NONLINEAR_STAGNATION, "Final coupled candidate failed strict physical gates")
 
     def _finish_candidate(self, state, dt):
-        self._rigid.recover(state, dt)
-        if self._materials is not None:
-            self._variational["cloth_reactions"] = tuple(c.raw.numpy().tolist() for c in self._cloths)
-            self._variational["cable_reactions"] = tuple(c.raw.numpy().tolist() for c in self._cables)
-            state._monolithic_coupled.contact_cable_torque.zero_()
-        contact = self._contact
         history = getattr(state, self._states.namespace)
         arrays = [history.contact_joint_force, history.contact_particle_force, history.contact_body_force]
+        torque = getattr(history, "contact_cable_torque", None)
+        if torque is not None:
+            arrays.append(torque)
         for array in arrays:
             array.zero_()
-        if self._contact_pool:
-            self._variational["actor_contact_pairs"] = contact.publish(state)
+        for producer in self._producers:
+            producer.publish(self, state)
+        if self._cloths or self._cables:
+            self._variational["cloth_reactions"] = tuple(c.raw.numpy().tolist() for c in self._cloths)
+            self._variational["cable_reactions"] = tuple(c.raw.numpy().tolist() for c in self._cables)
         for pair in self._variational.get("actor_contact_pairs", ()):
             pair["force_generation"] = self._step_generation
         self._force_status.zero_()
-        if self._materials is not None:
-            arrays.append(history.contact_cable_torque)
         for index, array in enumerate(arrays):
             values = state_checks.scalar_view(array)
             if values.size:
@@ -1535,19 +1352,15 @@ class SolverMonolithic(SolverBase):
             raise _StepFailure(self.Status.NONFINITE, "Final contact force is nonfinite")
         history.force_generation.fill_(self._step_generation)
         history.force_valid.fill_(1)
-        self._variational["contact_model"] = contact.contact_model
+        self._variational["contact_model"] = self._contact.contact_model
         self._variational["contact_force_generation"] = self._step_generation
-        self._variational["contact_keys"] = contact.count
+        self._variational["contact_keys"] = self._contact.count
 
     def _restore(self, state):
         state.assign(self._out_backup)
 
     def _domain(self, state):
-        if self._materials is not None and not all(
-            c.path_valid(self._accepted, state) for c in self._cloths + self._cables
-        ):
-            return False
-        return iteration_device.domain(self, state, int(JointType.REVOLUTE)) and self._rigid.domain(state)
+        return all(producer.domain(self, self._accepted, state) for producer in self._producers)
 
     def _joint_force_metrics(self, state):
         """Bind scalar force diagnostics to the successfully published state."""

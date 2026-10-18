@@ -165,7 +165,7 @@ def solve_direction(solver, residual, scale, limits, pcg, *, iteration, retry, r
     remaining = pcg.maximum_iterations
     correction = 0
     solve_config = pcg
-    material = self._materials is not None
+    material = self._material_blocks
     if material:
         # Each FP32 inner solve need only contract its own residual. Qualification
         # of the native accumulated direction still uses the frozen physical caps.
@@ -211,10 +211,8 @@ def solve_direction(solver, residual, scale, limits, pcg, *, iteration, retry, r
                 self._require_linear(self._linear.recover_delta(self._y, output, generation=self._generation))
             elif not result.output_valid:
                 raise _StepFailure(self.Status.NONFINITE, "Invalid PCG output")
-            if getattr(self, "_materials", None) is not None:
-                from .material_runtime import accumulate_direction  # noqa: PLC0415
-
-                changed = accumulate_direction(self, correction)
+            if self._native_direction:
+                changed = self._accumulate_direction(correction)
             else:
                 changed = self._combine_direction_correction() if correction else True
         except _StepFailure as error:
@@ -224,7 +222,7 @@ def solve_direction(solver, residual, scale, limits, pcg, *, iteration, retry, r
                 else error.status.value
             )
             return False
-        delivered = self._native_delta if self._materials is not None else self._delta
+        delivered = self._native_delta if self._native_direction else self._delta
         direction = delivered if self._device_iteration else delivered.numpy().astype(self._numpy_dtype)
         error = self._physical_linear_error(None, direction, residual, scale, device_result=self._device_iteration)
         errors = direction_norms(self, error)
@@ -325,7 +323,7 @@ def iterate(solver, dt):
         self._reference_residual = reference
         values = measure(self, residual, reference, scale)
         merit = values["global"][0]
-        if self._materials is not None:
+        if self._material_blocks:
             merit = material_merit(self, residual, values, scale)
             self._variational["residual_merit"] = "block_goal_normalized_l2"
         self._metrics["nonlinear_iterations"] = iteration
@@ -398,7 +396,7 @@ def iterate(solver, dt):
                 self, residual, scale, limits, pcg, iteration=iteration, retry=retry, regularization=regularization
             ):
                 continue
-            delivered = self._native_delta if self._materials is not None else self._delta
+            delivered = self._native_delta if self._native_direction else self._delta
             direction = delivered if device else delivered.numpy().astype(native)
             for search in range(self.line_search_max_iterations):
                 alpha = native(0.5**search)
@@ -427,7 +425,7 @@ def iterate(solver, dt):
                 )
                 slope = terms[0] / alpha
                 trial_merit = (np.sqrt(terms[1]) if device else np.linalg.norm(scale * tr)) / np.sqrt(native(tr.size))
-                if self._materials is not None:
+                if self._material_blocks:
                     trial_merit = material_merit(self, tr, values, scale)
                 # Keep the PR2 common envelope; the coupled entry qualifies the
                 # complete E/r against it before any physical trajectory use.

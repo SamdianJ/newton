@@ -34,7 +34,7 @@ class TestPerformanceSummary(unittest.TestCase):
             case, contact_dataflow="spatial", device="cpu", graph=False
         )
         self.assertEqual(case["steps"], 2000)
-        self.assertEqual(run._config.regularization_values, (0.0,))
+        self.assertEqual(run._config.regularization_values, (0.0, 1e-6, 1e-5, 1e-4, 1e-3, 1e-2, 0.1, 1.0))
         self.assertEqual(control[0].shape, (2001, model.joint_target_q.size))
         self.assertEqual(control[1].shape, (2001, model.joint_dof_count))
         self.assertEqual(control[0].dtype, np.float32)

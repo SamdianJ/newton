@@ -22,16 +22,17 @@ def modes(device):
     return [("diagnostic", False), ("production", False)] + ([("production", True)] if device.is_cuda else [])
 
 
-def test_default_unregularized_failure(test, device):
-    """Stop after a failed default zero-lambda direction and preserve explicit retry support."""
+def test_default_regularization_schedule(test, device):
+    """Try zero lambda first, retry the unified positive schedule, then stop without publication."""
+    default = (0.0, 1e-6, 1e-5, 1e-4, 1e-3, 1e-2, 0.1, 1.0)
     for mode, graph in modes(device):
         model = scene(device, contact=False)
         run = solver(model, mode=mode, graph=graph)
+        test.assertEqual(run._config.regularization_values, default)
         state = run.create_state(dt=0.001)
         before = snapshot(state)
-        for configured in (False, True):
-            if configured:
-                run._config = replace(run._config, regularization_values=(0.0, 0.01))
+        for schedule in (default, (0.0, 0.01)):
+            run._config = replace(run._config, regularization_values=schedule)
             attempted = []
 
             def decline(*args, attempted=attempted, **kwargs):
@@ -40,8 +41,8 @@ def test_default_unregularized_failure(test, device):
 
             with patch("newton._src.solvers.monolithic.iteration.solve_direction", side_effect=decline):
                 run.step(state, state, model.control(), dt=0.001)
-            test.assertEqual(attempted, [0.0, 0.01] if configured else [0.0])
-            test.assertEqual(run.last_stats.regularization_retries, int(configured))
+            test.assertEqual(attempted, list(schedule))
+            test.assertEqual(run.last_stats.regularization_retries, len(schedule) - 1)
             test.assertEqual(run.last_stats.status, run.Status.REGULARIZATION_EXHAUSTED)
             test.assertFalse(run.last_stats.converged)
             test.assertTrue(run.last_stats.rolled_back)
@@ -218,7 +219,7 @@ class TestDirection(unittest.TestCase):
 
 add_function_test(TestDirection, "test_regularized_posterior", test_regularized_posterior, devices=get_test_devices())
 for _test in (
-    test_default_unregularized_failure,
+    test_default_regularization_schedule,
     test_native_correction,
     test_precision_floor_and_budget,
     test_regularized_trial_and_final_gate,

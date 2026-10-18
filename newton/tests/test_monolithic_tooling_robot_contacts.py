@@ -38,7 +38,9 @@ def test_robot_policy_certificate(test, device):
     recipe = factory.recipe()
     policy = recipe["numerical_policy"]
     test.assertEqual(policy["effective_internal_config"], asdict(run._config))
-    test.assertEqual(policy["effective_internal_config"]["regularization_values"], (0.0,))
+    test.assertEqual(
+        policy["effective_internal_config"]["regularization_values"], (0.0, 1e-6, 1e-5, 1e-4, 1e-3, 1e-2, 0.1, 1.0)
+    )
     test.assertEqual(policy["constructor_digest"], run._kinematics.digest.hex())
     test.assertEqual(
         recipe["numerical_policy_sha256"],
@@ -122,7 +124,7 @@ def test_robot_diagnostics(test, device):
         factory.JointTerms = SolverMonolithic.JointTerms
         with patch("newton.tests.test_monolithic_solver_coupled.SolverMonolithic", factory):
             run = solver(scene(device), mode="production", graph=device.is_cuda)
-        test.assertEqual(run._config.regularization_values, (0.0,))
+        test.assertEqual(run._config.regularization_values, (0.0, 1e-6, 1e-5, 1e-4, 1e-3, 1e-2, 0.1, 1.0))
         test.assertEqual(factory.recipe()["production_default"], dataflow == "default")
         if dataflow == "default":
             test.assertEqual(run._contact.candidate_capacity, run._contact.count)
