@@ -107,15 +107,11 @@ def test_solver_option(test, device):
             values.append(config.linear_absolute_tolerance)
             limits = config.residual_norm_limits
             test.assertIsNotNone(limits)
-            metrics = solver._metrics
-            for i, block in enumerate(("global", "q", "x")):
-                ref = metrics["merit_reference" if i == 0 else f"merit_{block}_reference"]
-                goal = (
-                    getattr(solver._config, f"merit_absolute_{block}")
-                    + getattr(solver._config, f"merit_relative_{block}") * ref
-                )
-                count = (14, 2, 12)[i]  # TinyFixture's scalar global/q/x counts.
-                np.testing.assert_allclose(limits[i] / np.sqrt(count), 0.5 * goal, rtol=1e-12, atol=0)
+            # Each block stops at the global forcing term or at half its smallest scaled row tolerance.
+            scaled = solver._linear.scale.numpy().astype(float) * solver._criterion.tau.numpy().astype(float)
+            forcing = solver.linear_tolerance * np.linalg.norm(solver._rhs.numpy().astype(float))
+            for i, part in enumerate((slice(None), slice(0, 2), slice(2, None))):  # TinyFixture global/q/x rows.
+                np.testing.assert_allclose(limits[i], max(0.5 * scaled[part].min(), forcing), rtol=1e-6, atol=0)
             return original(*args, **kwargs)
 
         with patch.object(solver._linear, "solve_pcg", solve):

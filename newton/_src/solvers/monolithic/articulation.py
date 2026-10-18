@@ -13,6 +13,7 @@ import warp as wp
 
 from ...geometry import ShapeFlags
 from ...sim import BodyFlags, JointType
+from .convergence import abs3, axial_absolute
 from .joint_parameters import _validate_joint_coordinate_layout
 
 
@@ -498,6 +499,7 @@ def _joint_variation(
     h: Any,
     energy: wp.array[Any],
     residual: wp.array[Any],
+    absolute: wp.array[Any],
     tangent: wp.array[Any],
 ):
     i = wp.tid()
@@ -510,12 +512,14 @@ def _joint_variation(
         - force[i] * delta
     )
     r = armature[i] * inertial / (h * h) + damping[i] * v - force[i]
+    magnitude = wp.abs(armature[i] * inertial / (h * h)) + wp.abs(damping[i] * v) + wp.abs(force[i])
     b = armature[i] / (h * h) + damping[i] / h
     kp, kd, effort = params[i, 0], params[i, 1], params[i, 2]
     a = kp + kd / h
     if a > type(h)(0.0):
         u = kp * (q[i] - qt[i]) + kd * (v - vt[i])
         r += wp.clamp(u, -effort, effort)
+        magnitude += wp.abs(wp.clamp(u, -effort, effort))
         if wp.abs(u) < effort:
             e += u * u / (type(h)(2.0) * a)
             b += a
@@ -532,6 +536,7 @@ def _joint_variation(
         )
         e += el
         r += sign * rl
+        magnitude += wp.abs(rl)
         b += bl
     f, eps = params[i, 8], params[i, 9]
     # Scaled hypot avoids intermediate overflow for finite velocities.
@@ -539,9 +544,11 @@ def _joint_variation(
     denom = scale * wp.sqrt((v / scale) * (v / scale) + (eps / scale) * (eps / scale))
     e += h * f * v * (v / (denom + eps))
     r += f * (v / denom)
+    magnitude += wp.abs(f * (v / denom))
     b += f / h * (eps / denom) * (eps / denom) / denom
     energy[i] = e
     residual[i] = r
+    absolute[i] = magnitude
     tangent[i] = b
 
 
@@ -559,6 +566,8 @@ def _link_variation(
     energy: wp.array[Any],
     translation_gradient: wp.array[Any],
     rotation_gradient: wp.array[Any],
+    translation_absolute: wp.array[Any],
+    rotation_absolute: wp.array[Any],
     rotation_tangent: wp.array[Any],
     build_tangent: bool,
 ):
@@ -567,8 +576,10 @@ def _link_variation(
     rs = dr * second[b]
     energy[b] = (mass[b] * wp.dot(dt, dt) + _inner(rs, dr)) / (type(h)(2.0) * h * h) - wp.dot(force[b], t[b] - tn[b])
     translation_gradient[b] = mass[b] * dt / (h * h) - force[b]
+    translation_absolute[b] = abs3(mass[b] * dt / (h * h)) + abs3(force[b])
     a = rs * wp.transpose(r[b]) / (h * h)
     rotation_gradient[b] = type(t[0])(a[2, 1] - a[1, 2], a[0, 2] - a[2, 0], a[1, 0] - a[0, 1])
+    rotation_absolute[b] = axial_absolute(a)
     if build_tangent:
         c = r[b] * second[b] * wp.transpose(predicted_r[b])
         local = (wp.identity(n=3, dtype=type(h)) * wp.trace(c) - (c + wp.transpose(c)) * type(h)(0.5)) / (h * h)
@@ -589,14 +600,19 @@ def _reduced_variation(
     kr: wp.array[Any],
     joint_r: wp.array[Any],
     joint_b: wp.array[Any],
+    gta: wp.array[Any],
+    gra: wp.array[Any],
+    joint_absolute: wp.array[Any],
     h: Any,
     residual: wp.array[Any],
+    absolute: wp.array[Any],
     tangent: wp.array2d[Any],
     tangent32: wp.array2d[float],
 ):
     i, j = wp.tid()
     b = type(h)(0.0)
     r = joint_r[i]
+    magnitude = joint_absolute[i]
     if i == j:
         b = joint_b[i]
     for link in range(mass.shape[0]):
@@ -604,10 +620,12 @@ def _reduced_variation(
         b += (wp.dot(jw[link, i], kr[link] * jw[link, j]) + wp.dot(jw[link, j], kr[link] * jw[link, i])) * type(h)(0.5)
         if i == j:
             r += wp.dot(jt[link, i], gt[link]) + wp.dot(jw[link, i], gr[link])
+            magnitude += wp.dot(abs3(jt[link, i]), gta[link]) + wp.dot(abs3(jw[link, i]), gra[link])
     tangent[i, j] = b
     tangent32[i, j] = float(b)
     if i == j:
         residual[i] = r
+        absolute[i] = magnitude
 
 
 @wp.kernel
@@ -617,13 +635,20 @@ def _reduced_residual(
     gt: wp.array[Any],
     gr: wp.array[Any],
     joint_r: wp.array[Any],
+    gta: wp.array[Any],
+    gra: wp.array[Any],
+    joint_absolute: wp.array[Any],
     residual: wp.array[Any],
+    absolute: wp.array[Any],
 ):
     i = wp.tid()
     r = joint_r[i]
+    magnitude = joint_absolute[i]
     for link in range(gt.shape[0]):
         r += wp.dot(jt[link, i], gt[link]) + wp.dot(jw[link, i], gr[link])
+        magnitude += wp.dot(abs3(jt[link, i]), gta[link]) + wp.dot(abs3(jw[link, i]), gra[link])
     residual[i] = r
+    absolute[i] = magnitude
 
 
 class ArticulationObjective:
@@ -636,9 +661,21 @@ class ArticulationObjective:
         self.params = wp.array(parameters, dtype=k.dtype, device=device)
         self.armature = wp.array(k.values["joint_armature"], dtype=k.dtype, device=device)
         self.damping = wp.array(k.values["joint_damping"], dtype=k.dtype, device=device)
-        for name in ("qn", "vn", "qt", "vt", "joint_force", "joint_energy", "joint_r", "joint_b", "residual"):
+        for name in (
+            "qn",
+            "vn",
+            "qt",
+            "vt",
+            "joint_force",
+            "joint_energy",
+            "joint_r",
+            "joint_absolute",
+            "joint_b",
+            "residual",
+            "absolute",
+        ):
             setattr(self, name, wp.zeros(n, dtype=k.dtype, device=device))
-        for name in ("tn", "predicted_t", "force", "gt", "gr"):
+        for name in ("tn", "predicted_t", "force", "gt", "gr", "gta", "gra"):
             setattr(self, name, wp.zeros(b, dtype=k.vector, device=device))
         for name in ("rn", "predicted_r", "kr"):
             setattr(self, name, wp.zeros(b, dtype=k.matrix, device=device))
@@ -667,6 +704,7 @@ class ArticulationObjective:
                 k.dtype(h),
                 self.joint_energy,
                 self.joint_r,
+                self.joint_absolute,
                 self.joint_b,
             ],
             device=k.device,
@@ -687,6 +725,8 @@ class ArticulationObjective:
                 self.link_energy,
                 self.gt,
                 self.gr,
+                self.gta,
+                self.gra,
                 self.kr,
                 build_tangent,
             ],
@@ -694,7 +734,21 @@ class ArticulationObjective:
         )
         if not build_tangent:
             wp.launch(
-                _reduced_residual, k.count, [k.jt, k.jw, self.gt, self.gr, self.joint_r, self.residual], device=k.device
+                _reduced_residual,
+                k.count,
+                [
+                    k.jt,
+                    k.jw,
+                    self.gt,
+                    self.gr,
+                    self.joint_r,
+                    self.gta,
+                    self.gra,
+                    self.joint_absolute,
+                    self.residual,
+                    self.absolute,
+                ],
+                device=k.device,
             )
             return
         wp.launch(
@@ -709,8 +763,12 @@ class ArticulationObjective:
                 self.kr,
                 self.joint_r,
                 self.joint_b,
+                self.gta,
+                self.gra,
+                self.joint_absolute,
                 k.dtype(h),
                 self.residual,
+                self.absolute,
                 self.tangent,
                 self.tangent32,
             ],

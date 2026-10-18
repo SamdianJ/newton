@@ -13,8 +13,9 @@ from .solver_types import MassMode, MaterialModel, PCGMode, Precision
 # The single supported contact law and trial acceptance (P8 production combination).
 CONTACT_MODEL = "C-IE"
 GLOBALIZATION = "ArmijoOrResNorm"
-# Version 3 (P8a): one producer pipeline and one option identity for every scene.
-CONFIG_VERSION = 3
+# Version 4 (P8b): per-row physical convergence replaces the scaled-norm goals and
+# the cable, cloth and joint residual tolerance options.
+CONFIG_VERSION = 4
 
 
 def _number(value):
@@ -52,10 +53,6 @@ class MonolithicConfig:
     pcg_mode: PCGMode = PCGMode.DIAGNOSTIC
     use_cuda_graph: bool = False
     precision: Precision = Precision.FP64
-    cable_position_tolerance: float = 1e-9
-    cable_theta_tolerance: float = 1e-11
-    joint_residual_tolerance: float | None = None
-    cloth_position_tolerance: float | None = None
 
     def __post_init__(self):
         for name, kind in (
@@ -98,31 +95,6 @@ class MonolithicConfig:
                 raise ValueError("Invalid linear tolerance")
         if type(self.use_cuda_graph) is not bool or (self.use_cuda_graph and self.pcg_mode != PCGMode.PRODUCTION):
             raise ValueError("use_cuda_graph requires CUDA production PCG and a bool")
-        native = np.float64 if self.precision == Precision.FP64 else np.float32
-        for name in (
-            "cable_position_tolerance",
-            "cable_theta_tolerance",
-            "joint_residual_tolerance",
-            "cloth_position_tolerance",
-        ):
-            value = getattr(self, name)
-            if value is None and name in ("joint_residual_tolerance", "cloth_position_tolerance"):
-                continue
-            if not _number(value) or not math.isfinite(float(value)) or float(value) <= 0:
-                raise ValueError(f"{name} must be a positive finite physical residual tolerance")
-            with np.errstate(over="ignore", under="ignore"):
-                representable = native(value)
-            if not np.isfinite(representable) or representable <= 0:
-                raise ValueError(f"{name} must be representable in the selected precision")
-
-    @property
-    def residual_caps(self):
-        """Return the explicitly set joint and cloth raw-residual caps."""
-        return {
-            name: getattr(self, name)
-            for name in ("joint_residual_tolerance", "cloth_position_tolerance")
-            if getattr(self, name) is not None
-        }
 
     def identity_fields(self):
         """Return the option part of checkpoint identity.
@@ -161,14 +133,4 @@ class MonolithicConfig:
                 dtype=np.float64,
             ),
             "precision": _text(self.precision.value),
-            # Set caps are positive, so zero records an unset cap without a nonfinite value.
-            "residual_tolerances": np.array(
-                [
-                    self.cable_position_tolerance,
-                    self.cable_theta_tolerance,
-                    self.joint_residual_tolerance or 0.0,
-                    self.cloth_position_tolerance or 0.0,
-                ],
-                dtype=np.float64,
-            ),
         }

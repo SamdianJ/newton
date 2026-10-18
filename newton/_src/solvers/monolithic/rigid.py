@@ -10,6 +10,7 @@ import warp as wp
 
 from .articulation import _inner
 from .articulation_state import _initial_symmetric, _predict, _recover_history, _skew
+from .convergence import abs3, axial_absolute
 
 
 @wp.kernel
@@ -137,6 +138,7 @@ def _terms(
     tangent: bool,
     energy: wp.array[Any],
     residual: wp.array2d[Any],
+    absolute: wp.array2d[Any],
     b: wp.array3d[float],
     diagonal: wp.array2d[Any],
 ):
@@ -150,11 +152,15 @@ def _terms(
     a = rs * wp.transpose(r) / (h * h)
     rt = mass[i] * dt / (h * h) - force[i]
     rr = type(com[0])(a[2, 1] - a[1, 2], a[0, 2] - a[2, 0], a[1, 0] - a[0, 1]) - torque[i]
+    at = abs3(mass[i] * dt / (h * h)) + abs3(force[i])
+    ar = axial_absolute(a) + abs3(torque[i])
     inertia = wp.trace(second[i]) * wp.identity(n=3, dtype=type(h)) - second[i]
     world = r * inertia * wp.transpose(r)
     for j in range(3):
         residual[i, j] = rt[j]
         residual[i, j + 3] = rr[j]
+        absolute[i, j] = at[j]
+        absolute[i, j + 3] = ar[j]
         diagonal[i, j] = mass[i] / (h * h)
         diagonal[i, j + 3] = world[j, j] / (h * h)
     if tangent:
@@ -257,6 +263,7 @@ class RigidObjective:
             setattr(self, name, wp.zeros(self.count, dtype=self.matrix, device=self.device))
         self.energy = wp.zeros(self.count, dtype=dtype, device=self.device)
         self.residual = wp.zeros((self.count, 6), dtype=dtype, device=self.device)
+        self.absolute = wp.zeros((self.count, 6), dtype=dtype, device=self.device)
         self.tangent = wp.zeros((self.count, 6, 6), dtype=float, device=self.device)
         self.diagonal = wp.zeros((self.count, 6), dtype=dtype, device=self.device)
         self.mirror_q = wp.zeros((self.count, 7), dtype=dtype, device=self.device)
@@ -432,6 +439,7 @@ class RigidObjective:
                 tangent,
                 self.energy,
                 self.residual,
+                self.absolute,
                 self.tangent,
                 self.diagonal,
             ],

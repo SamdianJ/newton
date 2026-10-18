@@ -71,8 +71,6 @@ class CableBenchmark:
             "line_search_max_iterations": 20,
             "linear_max_iterations": 400,
             "linear_tolerance": 0.5,
-            "cable_position_tolerance": r["solve_position_tolerance"] * max(1, ea_multiplier),
-            "cable_theta_tolerance": r["solve_theta_tolerance"],
             "pcg_mode": SolverMonolithic.PCGMode(pcg_mode),
             "use_cuda_graph": use_cuda_graph,
         }

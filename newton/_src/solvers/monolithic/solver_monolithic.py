@@ -13,10 +13,10 @@ from types import MappingProxyType, SimpleNamespace
 import numpy as np
 import warp as wp
 
-from ...sim import Model
+from ...sim import JointType, Model
 from ..solver import SolverBase
+from . import convergence, iteration_device, state_checks
 from . import coupled_kernels as kernels
-from . import iteration_device, state_checks
 from .actors import Actor, ActorTable
 from .articulation import ArticulationObjective, _TreeKinematics
 from .cable_system import CableBlock
@@ -68,6 +68,7 @@ class _AbsentTet:
         self.ids = wp.zeros(0, dtype=int, device=device)
         self.mapping = wp.full(model.particle_count, -1, dtype=int, device=device)
         self.residual = wp.zeros(0, dtype=wp.vec3d if dtype == wp.float64 else wp.vec3, device=device)
+        self.absolute = wp.zeros_like(self.residual)
         self.parts = wp.zeros(0, dtype=dtype, device=device)
         self.min_det_f = wp.ones(1, dtype=dtype, device=device)
         self.flags = wp.zeros(1, dtype=int, device=device)
@@ -97,14 +98,11 @@ class SolverMonolithic(SolverBase):
     energy is not a potential, so Armijo acceptance is heuristic, not a
     variational guarantee.
 
-    ``cable_position_tolerance`` [N] and ``cable_theta_tolerance`` [N m]
-    set per-cable original-unit L2 residual goals (defaults 1e-9 and 1e-11).
-    Both are experimental numerical policies included in checkpoint identity.
-
-    Material scenes optionally accept ``cloth_position_tolerance`` [N] and
-    ``joint_residual_tolerance`` [N or N m per joint coordinate]. These cap each
-    cloth/joint block's raw L2 residual in addition to the scaled relative goals.
-    They are experimental numerical policies included in checkpoint identity.
+    A step converges when every residual row satisfies its own physical
+    tolerance [N or N m]: the largest of an absolute target, a relative
+    tolerance on its block's step-start residual and a multiple of the
+    precision's rounding magnitude for that row. Rows are not pooled into a
+    norm, so small local loads are resolved regardless of model size.
 
     Stopped publication retains all physical/state gates except the residual goal.
     ``last_accepted`` requires an accepted Newton update; ``current_iterate``
@@ -151,10 +149,6 @@ class SolverMonolithic(SolverBase):
         precision=Precision.FP64,
         cloth_inputs=(),
         cable_inputs=(),
-        cable_position_tolerance=1e-9,
-        cable_theta_tolerance=1e-11,
-        joint_residual_tolerance=None,
-        cloth_position_tolerance=None,
     ):
         # Reject invalid options before building actors or allocating storage.
         options = MonolithicConfig(
@@ -177,19 +171,12 @@ class SolverMonolithic(SolverBase):
             pcg_mode=pcg_mode,
             use_cuda_graph=use_cuda_graph,
             precision=precision,
-            cable_position_tolerance=cable_position_tolerance,
-            cable_theta_tolerance=cable_theta_tolerance,
-            joint_residual_tolerance=joint_residual_tolerance,
-            cloth_position_tolerance=cloth_position_tolerance,
         )
         self._options = options
         if use_cuda_graph and not model.device.is_cuda:
             raise ValueError("use_cuda_graph requires CUDA production PCG and a bool")
         cloth_inputs, cable_inputs = tuple(cloth_inputs), tuple(cable_inputs)
         self._materials = _MaterialInputs(model, cloth_inputs, cable_inputs) if cloth_inputs or cable_inputs else None
-        residual_caps = options.residual_caps
-        if residual_caps and self._materials is None:
-            raise ValueError("Joint/cloth physical residual caps require a material scene")
         self._actors = ActorTable.from_model(model, materials=self._materials)
         layout = MonolithicLinearLayout.from_actors(self._actors)
         self._layout = layout
@@ -329,8 +316,10 @@ class SolverMonolithic(SolverBase):
         self._physics_values = {name: value.numpy().copy() for name, value in physics_sources.items()}
         self._sdf_fields = self._freeze_sdf(model)
         # Options plus the values resolved from the Model and contact resources.
+        policy = convergence.ConvergencePolicy()
         self._coupled_config = {
             **self._options.identity_fields(),
+            "convergence_policy": np.array([*policy.absolute, *policy.relative, *policy.noise], dtype=np.float64),
             "contact_parameters": np.asarray(self._contact.parameters, dtype=float),
             "guard_capacity": np.array([min_det_f_guard, capacity]),
             "contact_dataflow": self._contact.dataflow_identity,
@@ -372,18 +361,7 @@ class SolverMonolithic(SolverBase):
         self._config = replace(
             _SolverMonolithicInternalConfig(),
             regularization_values=(0.0, 1e-6, 1e-5, 1e-4, 1e-3, 1e-2, 0.1, 1.0),
-            merit_absolute_cable_x=cable_position_tolerance,
-            merit_absolute_cable_theta=cable_theta_tolerance,
-            joint_residual_tolerance=residual_caps.get("joint_residual_tolerance"),
-            cloth_position_tolerance=residual_caps.get("cloth_position_tolerance"),
-            merit_absolute_global=1e-7,
-            merit_absolute_q=2.5e-8,
-            merit_absolute_x=1e-7,
-            merit_relative_global=1e-6,
-            merit_relative_q=1e-5,
-            merit_relative_x=1e-6,
-            step_tolerance_global=1e-10,
-            step_tolerance_x=1e-10,
+            convergence=policy,
         )
         self._globalization = GLOBALIZATION
         self.newton_max_iterations, self.line_search_max_iterations = newton_max_iterations, line_search_max_iterations
@@ -427,7 +405,16 @@ class SolverMonolithic(SolverBase):
         n = layout.scalar_dof_count
         for name in ("_rhs", "_y", "_delta", "_diagonal", "_correction_rhs", "_correction_delta", "_direction_base"):
             setattr(self, name, wp.zeros(n, dtype=float, device=device))
-        native = ("_native_delta", "_complete_r", "_post_r", "_post_error", "_post_original", "_post_regularization")
+        native = (
+            "_native_delta",
+            "_complete_r",
+            "_complete_a",
+            "_coordinates",
+            "_post_r",
+            "_post_error",
+            "_post_original",
+            "_post_regularization",
+        )
         for name in native:
             setattr(self, name, wp.zeros(n, dtype=self._dtype, device=device))
         self._post_lambda = wp.zeros(1, dtype=float, device=device)
@@ -456,6 +443,12 @@ class SolverMonolithic(SolverBase):
         self._coordinate_rows = bool(mask.any())
         self._coordinate_scale = wp.array(scale, dtype=float, device=device)
         self._coordinate_mask = wp.array(mask, dtype=wp.int32, device=device)
+        k = self._kinematics
+        revolute = k.types.numpy()[k.dof_joint.numpy()] == int(JointType.REVOLUTE)
+        units = np.where(revolute, convergence.Unit.TORQUE, convergence.Unit.FORCE)
+        self._criterion = convergence.Criterion(
+            convergence.row_groups(layout, units), self._config.convergence, dtype=self._dtype, device=device
+        )
         # P6a reductions assume contiguous A -> T with no rigid blocks.
         self._device_iteration = (
             self._capturable
@@ -931,6 +924,9 @@ class SolverMonolithic(SolverBase):
                 [self._rigid.rows, self._rigid.residual, self._complete_r],
                 device=self.model.device,
             )
+            self._complete_a.zero_()
+            for producer in self._producers:
+                producer.magnitude(self, self._complete_a)
             if device_result:
                 iteration_device.evaluate(self)
             else:
@@ -964,6 +960,10 @@ class SolverMonolithic(SolverBase):
             tet.residual,
             contact.residual,
             self._complete_r,
+            self._objective.absolute,
+            tet.absolute,
+            self._rigid.absolute,
+            self._complete_a,
             self._rigid.rows,
             self._rigid.residual,
             self._rigid.energy,
@@ -1019,11 +1019,13 @@ class SolverMonolithic(SolverBase):
     def _evaluate_eager(self, state, dt, *, build_tangent):
         """Accumulate every producer's E/r in order, with host reads between producers."""
         self._complete_r.zero_()
+        self._complete_a.zero_()
         self._temporary_gauges = []
         self._cable_raw_theta_norms = {}
         total = absolute = 0.0
         for producer in self._producers:
             energy, magnitude = producer.evaluate(self, state, dt, self._complete_r, build_tangent=build_tangent)
+            producer.magnitude(self, self._complete_a)
             total += energy
             absolute += magnitude
         self._settle_cable_gauges()
@@ -1059,7 +1061,7 @@ class SolverMonolithic(SolverBase):
                         null = False
                         break
             if bool(cable.reference["gauge"]) or null:
-                if abs(raw.sum()) > self._config.merit_absolute_cable_theta:
+                if abs(raw.sum()) > self._config.convergence.absolute[convergence.Unit.TORQUE]:
                     raise _StepFailure(
                         self.Status.LINEAR_NON_POSITIVE_CURVATURE, "Cable common-angle mode has incompatible net torque"
                     )
@@ -1071,6 +1073,7 @@ class SolverMonolithic(SolverBase):
             self._contact._reference_mode = True
         try:
             residual = self._evaluate(self._original, dt, build_tangent=False, device_result=device_result)[1]
+            self._criterion.freeze_reference(self._complete_r)
         finally:
             if self._contact_spatial:
                 self._contact._reference_mode = self._contact._evaluated = False
@@ -1261,7 +1264,7 @@ class SolverMonolithic(SolverBase):
             wp.copy(self._accepted_r, residual)
             residual = self._accepted_r
         _, scale = self._assemble(self._metrics["nonlinear_iterations"], device_result=device)
-        values = measure(self, residual, self._reference_residual, scale)
+        assessment = measure(self, residual, self._reference_residual, scale)
         if device:
             wp.copy(self._stats_residual, residual)
         self._variational.update(objective_total=energy, residual=self._stats_residual if device else residual.tolist())
@@ -1270,9 +1273,7 @@ class SolverMonolithic(SolverBase):
             raise _StepFailure(self.Status.NONFINITE, "Final coupled candidate contains nonfinite E/r/scale")
         if not self._domain(self._accepted):
             raise _StepFailure(self.Status.NONFINITE, "Final coupled candidate left the local domain")
-        if not self._can_publish(status) or (
-            status == self.Status.SUCCESS and any(m > goal for m, _, goal, _ in values.values())
-        ):
+        if not self._can_publish(status) or (status == self.Status.SUCCESS and not assessment.converged):
             raise _StepFailure(self.Status.NONLINEAR_STAGNATION, "Final coupled candidate failed strict physical gates")
 
     def _finish_candidate(self, state, dt):

@@ -37,6 +37,35 @@ def measure_terms(
 
 
 @wp.kernel
+def assessment_terms(
+    residual: wp.array[Any],
+    reference: wp.array[Any],
+    tau: wp.array[Any],
+    scale: wp.array[float],
+    nq: int,
+    terms: wp.array2d[Any],
+    minimum: wp.array[Any],
+):
+    i = wp.tid()
+    a, b = residual[i] / tau[i], reference[i] / tau[i]
+    scaled = type(tau[0])(scale[i]) * tau[i]
+    for block in range(3):
+        aa, bb = type(a)(0.0), type(a)(0.0)
+        if block == 0 or (block == 1 and i < nq) or (block == 2 and i >= nq):
+            aa, bb = a * a, b * b
+            wp.atomic_min(minimum, block, scaled)
+        terms[2 * block, i] = aa
+        terms[2 * block + 1, i] = bb
+
+
+@wp.kernel
+def unrepresentable_rows(effective: wp.array[Any], coordinates: wp.array[Any], eps: Any, count: wp.array[int]):
+    i = wp.tid()
+    if wp.abs(effective[i]) > eps * coordinates[i]:
+        wp.atomic_add(count, 0, 1)
+
+
+@wp.kernel
 def norm_terms(r: wp.array[Any], nq: int, terms: wp.array2d[Any]):
     i = wp.tid()
     for block in range(3):
@@ -194,6 +223,10 @@ def initialize(solver):
         setattr(self, name, wp.zeros(n, dtype=dtype, device=device))
     self._nonlinear_terms = wp.zeros((9, n), dtype=dtype, device=device)
     self._nonlinear_sums = wp.zeros((9, 1), dtype=dtype, device=device)
+    self._assessment_terms = wp.zeros((6, n), dtype=dtype, device=device)
+    self._assessment_sums = wp.zeros((6, 1), dtype=dtype, device=device)
+    self._assessment_minimum = wp.zeros(3, dtype=dtype, device=device)
+    self._unrepresentable = wp.zeros(1, dtype=int, device=device)
     self._norm_terms = wp.zeros((3, n), dtype=dtype, device=device)
     self._norm_sums = wp.zeros((3, 1), dtype=dtype, device=device)
     energy_size = sum(
@@ -350,3 +383,42 @@ def domain(solver, state, revolute):
 
     self._graphs.run("nonlinear_domain", (), buffers, execute)
     return not bool(flags.numpy()[0])
+
+
+def assessment(solver, residual, reference):
+    """Return per-block RMS of ``r/tau`` and ``r0/tau`` and the smallest scaled tolerance.
+
+    Rows are ordered global/q/x; only these three small results are read back.
+    """
+    self = solver
+    tau = self._criterion.tau
+    self._assessment_minimum.fill_(np.inf)
+    wp.launch(
+        assessment_terms,
+        residual.size,
+        [
+            residual,
+            reference,
+            tau,
+            self._linear.scale,
+            self._kinematics.count,
+            self._assessment_terms,
+            self._assessment_minimum,
+        ],
+        device=self.model.device,
+    )
+    wp.utils.array_sum(self._assessment_terms, out=self._assessment_sums, axis=1)
+    return self._assessment_sums.numpy().reshape(3, 2), self._assessment_minimum.numpy()
+
+
+def representable(solver, effective, eps):
+    """Return whether no accepted row moved by more than its coordinate rounding."""
+    self = solver
+    self._unrepresentable.zero_()
+    wp.launch(
+        unrepresentable_rows,
+        effective.size,
+        [effective, self._coordinates, self._dtype(eps), self._unrepresentable],
+        device=self.model.device,
+    )
+    return not bool(self._unrepresentable.numpy()[0])

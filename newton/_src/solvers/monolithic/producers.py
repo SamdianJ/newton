@@ -40,6 +40,10 @@ class Producer(Protocol):
         self, solver: Any, state: Any, dt: float, residual: Any, *, build_tangent: bool
     ) -> tuple[Any, Any]: ...
 
+    def magnitude(self, solver: Any, out: Any) -> None: ...
+
+    def coordinates(self, solver: Any, state: Any, out: Any) -> None: ...
+
     def assemble(self, solver: Any, assembly: Any, dt: float) -> None: ...
 
     def scale(self, solver: Any, diagonal: Any, coordinate: np.ndarray) -> None: ...
@@ -77,6 +81,60 @@ def _add_values(source: wp.array[Any], target: wp.array[Any]):
     target[i] += source[i]
 
 
+@wp.kernel
+def _add_offset(values: wp.array[Any], start: int, output: wp.array[Any]):
+    i = wp.tid()
+    output[start + i] += values[i]
+
+
+@wp.kernel
+def _add_absolute(values: wp.array[Any], output: wp.array[Any]):
+    i = wp.tid()
+    output[i] += wp.abs(values[i])
+
+
+@wp.kernel
+def _add_rows(values: wp.array[Any], rows: wp.array[int], output: wp.array[Any]):
+    i = wp.tid()
+    if rows[i] >= 0:
+        output[rows[i]] += values[i]
+
+
+@wp.kernel
+def _write_absolute(values: wp.array[Any], start: int, output: wp.array[Any]):
+    i = wp.tid()
+    output[start + i] = wp.abs(values[i])
+
+
+@wp.kernel
+def _particle_coordinates(x: wp.array[Any], ids: wp.array[int], start: int, output: wp.array[Any]):
+    i = wp.tid()
+    output[start + i] = type(output[0])(wp.abs(x[ids[i / 3]][i % 3]))
+
+
+@wp.kernel
+def _rigid_coordinates(com: wp.array[Any], rows: wp.array2d[int], output: wp.array[Any]):
+    i, j = wp.tid()
+    # Rotation coordinates are orthonormal matrix entries of unit magnitude.
+    value = type(output[0])(1.0)
+    if j < 3:
+        value = type(output[0])(wp.abs(com[i][j]))
+    output[rows[i, j]] = value
+
+
+@wp.kernel
+def _material_coordinates(
+    x: wp.array[Any], ids: wp.array[int], theta: wp.array[Any], rows: wp.array[int], output: wp.array[Any]
+):
+    r = wp.tid()
+    if rows[r] >= 0:
+        nv = ids.shape[0]
+        if r < 3 * nv:
+            output[rows[r]] = type(output[0])(wp.abs(x[ids[r / 3]][r % 3]))
+        else:
+            output[rows[r]] = wp.abs(theta[r - 3 * nv])
+
+
 class _Producer:
     """Name, owned rows, declared policies and default no-op step methods."""
 
@@ -97,6 +155,12 @@ class _Producer:
     def evaluate(self, solver, state, dt, residual, *, build_tangent):
         """Add this producer's residual rows; return its host energy and absolute energy."""
         return 0.0, 0.0
+
+    def magnitude(self, solver, out):
+        """Add the absolute contributions summed into this producer's last residual rows."""
+
+    def coordinates(self, solver, state, out):
+        """Write the magnitude of each owned row's coordinate in ``state``."""
 
     def assemble(self, solver, assembly, dt):
         """Write this producer's tangent into its fixed triplet slots."""
@@ -191,6 +255,20 @@ class ArticulationProducer(_Producer):
         parts = np.r_[obj.link_energy.numpy(), obj.joint_energy.numpy()]
         return parts.sum(), abs(parts).sum()
 
+    def magnitude(self, solver, out):
+        obj = solver._objective
+        wp.launch(
+            _add_offset,
+            obj.absolute.size,
+            [obj.absolute, solver._layout.q_scalar_offset, out],
+            device=solver.model.device,
+        )
+
+    def coordinates(self, solver, state, out):
+        k = solver._kinematics
+        q = k.gather_q(state)
+        wp.launch(_write_absolute, k.count, [q, solver._layout.q_scalar_offset, out], device=solver.model.device)
+
     def assemble(self, solver, assembly, dt):
         nq = solver._kinematics.count
         wp.launch(
@@ -262,6 +340,19 @@ class RigidProducer(_Producer):
         )
         energy = rigid.energy.numpy()
         return energy.sum(), abs(energy).sum()
+
+    def magnitude(self, solver, out):
+        rigid = solver._rigid
+        if rigid.count:
+            wp.launch(
+                _scatter_residual, (rigid.count, 6), [rigid.rows, rigid.absolute, out], device=solver.model.device
+            )
+
+    def coordinates(self, solver, state, out):
+        rigid = solver._rigid
+        if rigid.count:
+            com = state._monolithic_coupled.rigid_com
+            wp.launch(_rigid_coordinates, (rigid.count, 6), [com, rigid.rows, out], device=solver.model.device)
 
     def assemble(self, solver, assembly, dt):
         rigid = solver._rigid
@@ -362,6 +453,21 @@ class TetProducer(_Producer):
         solver._metrics["min_det_f"] = float(tet.min_det_f.numpy()[0])
         return parts.sum(), abs(parts).sum()
 
+    def magnitude(self, solver, out):
+        absolute = scalar_view(solver._tet.absolute)
+        wp.launch(
+            _add_offset, absolute.size, [absolute, solver._layout.x_scalar_offset, out], device=solver.model.device
+        )
+
+    def coordinates(self, solver, state, out):
+        ids = solver._tet.ids
+        wp.launch(
+            _particle_coordinates,
+            3 * ids.size,
+            [state.particle_q, ids, solver._layout.x_scalar_offset, out],
+            device=solver.model.device,
+        )
+
     def assemble(self, solver, assembly, dt):
         nq = solver._kinematics.count
         scatter = TetScatterBuffers(
@@ -407,6 +513,23 @@ class _MaterialProducer(_Producer):
 
     def assemble(self, solver, assembly, dt):
         self.block.assemble(assembly, dt)
+
+    def magnitude(self, solver, out):
+        block = self.block
+        wp.launch(_add_rows, block.absolute.size, [block.absolute, block.rows, out], device=solver.model.device)
+
+    def theta(self, state):
+        """Return this object's angle coordinates; cloth has none."""
+        return wp.zeros(0, dtype=state.particle_q.dtype._wp_scalar_type_, device=state.particle_q.device)
+
+    def coordinates(self, solver, state, out):
+        block = self.block
+        wp.launch(
+            _material_coordinates,
+            block.rows.size,
+            [state.particle_q, block.ids, self.theta(state), block.rows, out],
+            device=solver.model.device,
+        )
 
     def displacement(self, solver, accepted, trial, out):
         local = self.local(trial) - self.local(accepted)
@@ -485,6 +608,10 @@ class CableProducer(_MaterialProducer):
         theta = state._monolithic_coupled.cable_theta.numpy()[list(self.block.actor.theta_indices)]
         return np.r_[super().local(state), theta]
 
+    def theta(self, state):
+        start = self.block.theta_offset
+        return state._monolithic_coupled.cable_theta[start : start + self.block.objective.lengths.size]
+
 
 class ContactProducer(_Producer):
     """Spatial contact; it adds coupling terms to rows owned by other producers."""
@@ -561,6 +688,10 @@ class ContactProducer(_Producer):
                 raw[3 * len(ids) :] -= forces[offset : offset + len(ids) - 1]
             block.raw.assign(raw)
         return contact.energy.numpy().sum(), contact.absolute_energy.numpy().sum()
+
+    def magnitude(self, solver, out):
+        residual = solver._contact.residual
+        wp.launch(_add_absolute, residual.size, [residual, out], device=solver.model.device)
 
     def assemble(self, solver, assembly, dt):
         solver._contact.assemble_tangent(assembly)

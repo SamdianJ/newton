@@ -164,13 +164,13 @@ def test_robot_diagnostics(test, device):
             with test.assertRaisesRegex(ValueError, "tainted"):
                 check_robot_reports(path, run, 1)
             row["contact_pool"]["tainted"] = False
-            row["full_system"]["blocks"]["q"]["goal"] *= 2
+            row["full_system"]["blocks"]["q"]["full_ratio"] = 2.0
             write(row)
             with test.assertRaisesRegex(ValueError, "original physical gate"):
                 check_robot_reports(path, run, 1)
             row["full_system"] = serial(fields["full_system"])
             block = row["full_system"]["blocks"]["q"]
-            block["full_merit"], block["full_pass"] = block["goal"] * 2, False
+            block["full_ratio"], block["full_pass"] = 2.0, False
             row["full_system"]["status"] = "FAIL_FULL_RESIDUAL"
             write(row)
             with test.assertRaisesRegex(ValueError, "complete system gate"):

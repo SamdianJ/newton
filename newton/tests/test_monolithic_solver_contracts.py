@@ -411,7 +411,6 @@ class TestArticulationContracts(unittest.TestCase):
             ("publish_policy", "unknown"),
             ("contact_candidate_capacity", -1),
             ("contact_factor_capacity", True),
-            ("cable_theta_tolerance", -1.0),
         ):
             with self.subTest(field=field), self.assertRaises(ValueError):
                 MonolithicConfig(friction_velocity_scale=0.01, **{field: value})
@@ -428,7 +427,7 @@ class TestArticulationContracts(unittest.TestCase):
         for name in a:
             np.testing.assert_array_equal(a[name], b[name])
         self.assertIn("publish_policy", a)
-        self.assertEqual(int(a["config_version"][0]), 3)
+        self.assertEqual(int(a["config_version"][0]), 4)
         for name in ("use_cuda_graph", "pcg_mode", "contact_factor_capacity", "contact_candidate_capacity"):
             self.assertNotIn(name, a)
         changed = MonolithicConfig(friction_velocity_scale=0.01, publish_policy="last_accepted").identity_fields()

@@ -19,44 +19,22 @@ from scripts.monolithic_reference.material_scene import MaterialScene, load_frac
 
 class TestMaterialAcceptance(unittest.TestCase):
     def test_stiff_shell_force_corrections(self):
-        """Reach explicit force goals using representable corrections below the default step tolerance."""
-        recipe = json.loads(RECIPE_PATH.with_name("material_acceptance_v3.json").read_text())
-        recipe["common"]["linear_tolerance"] = 1e-3
-        with tempfile.TemporaryDirectory() as folder:
-            path = Path(folder) / "recipe.json"
-            path.write_text(json.dumps(recipe))
-            case = MaterialScene("precreased-box", recipe=path)
-            case.state.joint_q.assign([0.00652])
-            case.state.joint_qd.assign([0.012])
-            case.solver.reset_state(case.state, dt=case.dt)
-            case.steps = 1172
-            for _ in range(2):
-                case.step()
-                self.assertLessEqual(case.solver.last_stats.raw_residual_q_norm, 1e-9)
-                blocks = case.solver.last_stats.variational["material_blocks"]
-                self.assertLessEqual(blocks["cloth_0_x"]["raw_residual_cloth_0_x_norm"], 1e-9)
+        """Resolve every row of a stiff precreased box below its physical force gate."""
+        case = MaterialScene("precreased-box", recipe=RECIPE_PATH.with_name("material_acceptance_v7.json"))
+        case.state.joint_q.assign([0.00652])
+        case.state.joint_qd.assign([0.012])
+        case.solver.reset_state(case.state, dt=case.dt)
+        case.steps = 1172
+        gate = case.common["gates"]["force_residual_inf_N"]
+        for _ in range(2):
+            case.step()
+            residual = np.asarray(case.solver.last_stats.variational["residual"])
+            self.assertLessEqual(np.abs(residual).max(), gate)
 
-    def test_physical_cap_inputs_and_checkpoint(self):
-        """Reject invalid raw caps and checkpoint continuation under different solve goals."""
-        recipe = json.loads(RECIPE_PATH.with_name("material_acceptance_v3.json").read_text())
-        with tempfile.TemporaryDirectory() as folder:
-            path = Path(folder) / "recipe.json"
-            for key in ("joint_residual_tolerance", "cloth_position_tolerance"):
-                for invalid in (True, 0, -1, float("nan"), "1e-9"):
-                    changed = dict(recipe, common={**recipe["common"], key: invalid})
-                    path.write_text(json.dumps(changed))
-                    with self.subTest(key=key, invalid=invalid), self.assertRaises(ValueError):
-                        MaterialScene("cloth-press", recipe=path)
-            path.write_text(json.dumps(recipe))
-            first = MaterialScene("cloth-press", recipe=path)
-            first.step()
-            checkpoint = Path(folder) / "checkpoint.npz"
-            first.solver.save_checkpoint(first.state, checkpoint)
-            recipe["common"]["joint_residual_tolerance"] *= 2
-            path.write_text(json.dumps(recipe))
-            second = MaterialScene("cloth-press", recipe=path)
-            with self.assertRaises(ValueError):
-                second.solver.load_checkpoint(second.state, checkpoint)
+    def test_retired_solver_options_rejected(self):
+        """Refuse recipes whose solver residual options were replaced by per-row convergence."""
+        with self.assertRaisesRegex(ValueError, "retired solver options"):
+            MaterialScene("cloth-press", recipe=RECIPE_PATH.with_name("material_acceptance_v6.json"))
 
     def test_cross_mode_evidence(self):
         """Reject an intermediate-frame drift and partial or mixed-source matrices."""

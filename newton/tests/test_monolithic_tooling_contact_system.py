@@ -144,7 +144,7 @@ def test_actor_system_report(test, device):
             **rows[0],
             "blocks": {
                 **rows[0]["blocks"],
-                "global": {**rows[0]["blocks"]["global"], "goal": rows[0]["blocks"]["global"]["goal"] * 2},
+                "global": {**rows[0]["blocks"]["global"], "full_ratio": 2.0},
             },
         }
         (path / report["file"]).write_text("".join(json.dumps(row) + "\n" for row in damaged))

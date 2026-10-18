@@ -15,9 +15,8 @@ import warp as wp
 
 import newton
 from newton._src.geometry import ShapeFlags
-from newton._src.solvers.monolithic import solver_monolithic
+from newton._src.solvers.monolithic import convergence, solver_monolithic
 from newton._src.solvers.monolithic.actors import ActorTable
-from newton._src.solvers.monolithic.iteration import measure
 from newton._src.solvers.monolithic.linear import MonolithicLinearWorkspace
 from newton._src.solvers.monolithic.linear_types import (
     MonolithicLinearCapacities,
@@ -271,14 +270,18 @@ def test_mixed_dense_linear(test, device):
             np.testing.assert_allclose(
                 out.numpy(), np.linalg.solve(oracle.scaled_matrix, rhs_numpy), atol=2e-6, rtol=2e-5
             )
+            rows = run._criterion.rows
             for kind in ("_t", "_r"):
-                run._metrics, run._variational = {}, {}
                 residual = np.zeros(n)
                 name, start, _ = next(g for g in layout.groups if g[0].startswith("rigid_") and g[0].endswith(kind))
                 residual[start] = 3.2e-7 if kind == "_t" else 1e-7
-                measured = measure(run, residual, np.zeros(n), np.ones(n))
-                test.assertLess(measured["global"][0], measured["global"][2])
-                test.assertGreater(measured[name][0], measured[name][2])
+                tau, physical = convergence.tolerances(
+                    np.zeros(n), np.zeros(n), rows, run._config.convergence, np.float64
+                )
+                worst, _ = convergence.assess(residual, tau, physical, rows)
+                # One body's row fails its own tolerance; no other group is charged with it.
+                test.assertGreater(worst[rows.names.index(name)], 1)
+                test.assertEqual(np.count_nonzero(worst), 1)
                 # An isolated body's drift must trigger restart even when
                 # the global and other actor denominators mask it.
                 group = next(i for i, g in enumerate(layout.groups) if g[0] == name)

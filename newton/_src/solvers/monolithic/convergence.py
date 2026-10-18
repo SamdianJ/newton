@@ -1,0 +1,306 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 The Newton Developers
+# SPDX-License-Identifier: Apache-2.0
+
+"""Per-row physical convergence tolerances shared by every producer.
+
+Each residual row ``i`` is converged when ``|r_i| <= tau_i`` with
+
+``tau_i = max(g_u, rtol_u * max_{j in (b, u)} |r0_j|, c_u * eps_T * a_i)``,
+
+where ``u`` is the row's physical unit, ``b`` its convergence block, ``r0`` the
+step-start reference residual and ``a_i`` the row's rounding magnitude (the
+absolute contributions that were summed into ``r_i`` plus the tangent-weighted
+coordinate magnitudes). Rows are never pooled into a norm, so a small local
+load cannot be diluted by the size of the model.
+"""
+
+import enum
+from dataclasses import dataclass
+from typing import Any
+
+import numpy as np
+import warp as wp
+
+wp.set_module_options({"fuse_fp": False})
+
+
+class Unit(enum.IntEnum):
+    """Physical unit of one residual row."""
+
+    FORCE = 0
+    """Force [N]."""
+    TORQUE = 1
+    """Torque [N m]."""
+
+
+@dataclass(frozen=True)
+class ConvergencePolicy:
+    """Per-unit absolute targets, relative tolerances and rounding multipliers, indexed by :class:`Unit`."""
+
+    # Calibrated in P8b PR-01 and approved 2026-10-19. The absolute targets keep the
+    # frozen cable L2 residual gates satisfiable row by row (2163 position and 720
+    # angle rows for the finest helix); the rounding multiplier covers the measured
+    # FP32 arithmetic error (at most 0.83 eps a) plus half-ULP coordinate placement.
+    absolute: tuple[float, float] = (1e-11, 1e-13)
+    """Absolute targets ``g_u`` [N, N m]."""
+    relative: tuple[float, float] = (1e-6, 1e-6)
+    """Tolerances ``rtol_u`` relative to the block's step-start residual."""
+    noise: tuple[float, float] = (4.0, 4.0)
+    """Multipliers ``c_u`` of ``eps_T * a_i``."""
+
+    def __post_init__(self):
+        for name in ("absolute", "relative", "noise"):
+            values = getattr(self, name)
+            if len(values) != len(Unit) or not all(np.isfinite(v) and v > 0 for v in values):
+                raise ValueError(f"Convergence {name} values must be positive and finite per unit")
+
+
+@dataclass(frozen=True)
+class RowGroups:
+    """Unit and convergence group of every scalar row."""
+
+    names: tuple[str, ...]
+    """Group names, such as ``q_torque``, ``x`` or ``rigid_0_r``."""
+    units: np.ndarray
+    """Unit of each row, int32."""
+    groups: np.ndarray
+    """Group index of each row, int32."""
+
+
+def row_groups(layout, joint_units):
+    """Split each layout group by physical unit.
+
+    Args:
+        layout: Linear layout providing the actor convergence groups.
+        joint_units: :class:`Unit` of each articulation DoF, in local order.
+    """
+    n = layout.scalar_dof_count
+    units = np.full(n, -1, dtype=np.int32)
+    groups = np.full(n, -1, dtype=np.int32)
+    names = []
+    for kind, start, count in layout.groups:
+        if kind == "global" or not count:
+            continue
+        rows = np.arange(start, start + count)
+        if kind == "articulation":
+            local = np.asarray(joint_units, dtype=np.int32)
+            if local.shape != (count,):
+                raise ValueError("Joint units must match the articulation rows")
+            parts = [(f"q_{unit.name.lower()}", rows[local == unit], unit) for unit in Unit]
+        else:
+            torque = kind.endswith(("_r", "_theta"))
+            parts = [("x" if kind == "tet" else kind, rows, Unit.TORQUE if torque else Unit.FORCE)]
+        for name, part, unit in parts:
+            if part.size:
+                units[part] = unit
+                groups[part] = len(names)
+                names.append(name)
+    if np.any(groups < 0):
+        raise ValueError("Every scalar row requires a convergence group")
+    return RowGroups(tuple(names), units, groups)
+
+
+def tolerances(reference, magnitude, rows, policy, dtype):
+    """Return per-row tolerances and whether the rounding term decides each one.
+
+    Args:
+        reference: Step-start residual ``r0`` in physical units.
+        magnitude: Rounding magnitudes ``a``.
+        rows: Row units and groups.
+        policy: Convergence policy.
+        dtype: Native NumPy dtype ``T``.
+    """
+    reference, magnitude = np.asarray(reference, dtype=dtype), np.asarray(magnitude, dtype=dtype)
+    block = np.zeros(len(rows.names), dtype=dtype)
+    np.maximum.at(block, rows.groups, np.abs(reference))
+    absolute = np.asarray(policy.absolute, dtype=dtype)[rows.units]
+    relative = np.asarray(policy.relative, dtype=dtype)[rows.units] * block[rows.groups]
+    noise = np.asarray(policy.noise, dtype=dtype)[rows.units] * np.finfo(dtype).eps * magnitude
+    physical = np.maximum(absolute, relative)
+    return np.maximum(physical, noise), physical
+
+
+def assess(residual, tau, physical, rows):
+    """Return each group's largest ``|r|/tau`` and its count of rounding-limited rows.
+
+    A row is rounding limited when it passes only because of the rounding term.
+    """
+    ratio = np.abs(residual) / tau
+    worst = np.zeros(len(rows.names), dtype=ratio.dtype)
+    np.maximum.at(worst, rows.groups, ratio)
+    limited = np.bincount(
+        rows.groups,
+        weights=((ratio <= 1) & (np.abs(residual) > physical)).astype(np.int64),
+        minlength=len(rows.names),
+    ).astype(np.int64)
+    return worst, limited
+
+
+def merit(residual, tau):
+    """Return the tolerance-normalized RMS residual used by the line search."""
+    ratio = np.asarray(residual) / tau
+    return np.sqrt(np.dot(ratio, ratio) / ratio.size) if ratio.size else ratio.dtype.type(0)
+
+
+@wp.func
+def abs3(v: Any):
+    """Return the componentwise absolute value of a 3-vector."""
+    return type(v)(wp.abs(v[0]), wp.abs(v[1]), wp.abs(v[2]))
+
+
+@wp.func
+def axial_absolute(a: Any):
+    """Return the summed magnitudes behind each component of ``axial(a - a^T)``."""
+    return type(a[0])(
+        wp.abs(a[2, 1]) + wp.abs(a[1, 2]), wp.abs(a[0, 2]) + wp.abs(a[2, 0]), wp.abs(a[1, 0]) + wp.abs(a[0, 1])
+    )
+
+
+@wp.kernel
+def _group_reference(reference: wp.array[Any], groups: wp.array[int], block: wp.array[Any]):
+    i = wp.tid()
+    wp.atomic_max(block, groups[i], wp.abs(reference[i]))
+
+
+@wp.kernel
+def _row_tolerance(
+    magnitude: wp.array[Any],
+    groups: wp.array[int],
+    block: wp.array[Any],
+    absolute: wp.array[Any],
+    relative: wp.array[Any],
+    noise: wp.array[Any],
+    tau: wp.array[Any],
+    physical: wp.array[Any],
+):
+    i = wp.tid()
+    limit = wp.max(absolute[i], relative[i] * block[groups[i]])
+    physical[i] = limit
+    tau[i] = wp.max(limit, noise[i] * magnitude[i])
+
+
+@wp.kernel
+def _rounding(
+    offsets: wp.array[int],
+    columns: wp.array[int],
+    values: wp.array[float],
+    coordinates: wp.array[Any],
+    contributions: wp.array[Any],
+    magnitude: wp.array[Any],
+):
+    row = wp.tid()
+    total = contributions[row]
+    for j in range(offsets[row], offsets[row + 1]):
+        total += type(total)(wp.abs(values[j])) * coordinates[columns[j]]
+    magnitude[row] = total
+
+
+@wp.kernel
+def _assess_rows(
+    residual: wp.array[Any],
+    tau: wp.array[Any],
+    physical: wp.array[Any],
+    groups: wp.array[int],
+    worst: wp.array[Any],
+    limited: wp.array[int],
+    squares: wp.array[Any],
+):
+    i = wp.tid()
+    value = wp.abs(residual[i])
+    ratio = value / tau[i]
+    wp.atomic_max(worst, groups[i], ratio)
+    if ratio <= type(ratio)(1.0) and value > physical[i]:
+        wp.atomic_add(limited, groups[i], 1)
+    squares[i] = ratio * ratio
+
+
+class Criterion:
+    """Device storage for one solver's row tolerances and assessments."""
+
+    def __init__(self, rows, policy, *, dtype, device):
+        self.rows, self.policy = rows, policy
+        self.dtype = dtype
+        native = np.float64 if dtype == wp.float64 else np.float32
+        self.native = native
+        n, count = len(rows.units), len(rows.names)
+        self.groups = wp.array(rows.groups, dtype=int, device=device)
+        self.absolute = wp.array(np.asarray(policy.absolute, dtype=native)[rows.units], dtype=dtype, device=device)
+        self.relative = wp.array(np.asarray(policy.relative, dtype=native)[rows.units], dtype=dtype, device=device)
+        self.noise = wp.array(
+            np.asarray(policy.noise, dtype=native)[rows.units] * np.finfo(native).eps, dtype=dtype, device=device
+        )
+        self.block = wp.zeros(count, dtype=dtype, device=device)
+        self.magnitude = wp.zeros(n, dtype=dtype, device=device)
+        self.tau = wp.zeros(n, dtype=dtype, device=device)
+        self.physical = wp.zeros(n, dtype=dtype, device=device)
+        self.worst = wp.zeros(count, dtype=dtype, device=device)
+        self.limited = wp.zeros(count, dtype=int, device=device)
+        self.squares = wp.zeros(n, dtype=dtype, device=device)
+        self.square_sum = wp.zeros(1, dtype=dtype, device=device)
+
+    def buffers(self):
+        return (
+            self.groups,
+            self.absolute,
+            self.relative,
+            self.noise,
+            self.block,
+            self.magnitude,
+            self.tau,
+            self.physical,
+            self.worst,
+            self.limited,
+            self.squares,
+            self.square_sum,
+        )
+
+    def freeze_reference(self, reference):
+        """Record each group's largest step-start residual."""
+        self.block.zero_()
+        wp.launch(_group_reference, reference.size, [reference, self.groups, self.block], device=self.groups.device)
+
+    def round(self, matrix, coordinates, contributions):
+        """Set rounding magnitudes to the summed absolute contributions plus ``|B| |u|``.
+
+        Args:
+            matrix: Assembled physical tangent ``B`` (scalar BSR, unscaled).
+            coordinates: Magnitude ``|u|`` of each row's coordinate as represented.
+            contributions: Absolute contributions summed into each residual row.
+        """
+        wp.launch(
+            _rounding,
+            self.magnitude.size,
+            [matrix.offsets, matrix.columns, matrix.values, coordinates, contributions, self.magnitude],
+            device=self.groups.device,
+        )
+        self.update(self.magnitude)
+
+    def update(self, magnitude):
+        """Recompute ``tau`` from the current rounding magnitudes."""
+        wp.launch(
+            _row_tolerance,
+            magnitude.size,
+            [
+                magnitude,
+                self.groups,
+                self.block,
+                self.absolute,
+                self.relative,
+                self.noise,
+                self.tau,
+                self.physical,
+            ],
+            device=self.groups.device,
+        )
+
+    def assess(self, residual):
+        """Write each group's worst ratio, rounding-limited count and the merit square sum."""
+        self.worst.zero_()
+        self.limited.zero_()
+        wp.launch(
+            _assess_rows,
+            residual.size,
+            [residual, self.tau, self.physical, self.groups, self.worst, self.limited, self.squares],
+            device=self.groups.device,
+        )
+        wp.utils.array_sum(self.squares, out=self.square_sum)

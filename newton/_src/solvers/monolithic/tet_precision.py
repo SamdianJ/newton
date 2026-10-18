@@ -9,6 +9,7 @@ from typing import Any
 import numpy as np
 import warp as wp
 
+from .convergence import abs3
 from .residual import _accumulate_rows, _row_gather_map
 from .tet_common import TetPhysicsWorkspace, _validate_candidate_particles, validate_tet_scope
 from .tet_material import _evaluate_energy_stress
@@ -28,6 +29,7 @@ def _particles(
     consistent: bool,
     dt: Any,
     residual: wp.array[Any],
+    absolute: wp.array[Any],
     parts: wp.array[Any],
     flags: wp.array[int],
 ):
@@ -40,12 +42,15 @@ def _particles(
     delta = displacement - dt * vn[p]
     applied = type(dt)(row_mass[p]) * type(x[0])(gravity[world]) + type(x[0])(forces[p])
     r = -applied
+    magnitude = abs3(applied)
     inertia = type(dt)(0.0)
     if not consistent:
         r += type(dt)(mass[p]) * delta / (dt * dt)
+        magnitude += abs3(type(dt)(mass[p]) * delta / (dt * dt))
         inertia = type(dt)(0.5) * type(dt)(mass[p]) * wp.dot(delta, delta) / (dt * dt)
     external = -wp.dot(applied, displacement)
     residual[i] = r
+    absolute[i] = magnitude
     if not wp.isfinite(inertia) or not wp.isfinite(external) or not wp.isfinite(wp.length(r)):
         wp.atomic_max(flags, 0, 2)
     wp.atomic_add(parts, 0, inertia)
@@ -67,6 +72,7 @@ def _elements(
     dt: Any,
     guard: Any,
     terms: wp.array[Any],
+    absolute_terms: wp.array[Any],
     parts: wp.array[Any],
     min_det: wp.array[Any],
     flags: wp.array[int],
@@ -101,6 +107,7 @@ def _elements(
         else:
             gradient = type(x[0])(pose[a - 1, 0], pose[a - 1, 1], pose[a - 1, 2])
         r = stress * gradient
+        magnitude = abs3(r)
         da = x[ia] - xn[ia] - dt * vn[ia]
         if consistent:
             for b in range(4):
@@ -110,9 +117,11 @@ def _elements(
                 if a == b:
                     weight *= type(dt)(2.0)
                 r += weight * db / (dt * dt)
+                magnitude += abs3(weight * db / (dt * dt))
                 inertia += weight * wp.dot(da, db) / (type(dt)(2.0) * dt * dt)
         if mapping[ia] >= 0:
             terms[4 * e + a] = r
+            absolute_terms[4 * e + a] = magnitude
     if not wp.isfinite(inertia):
         wp.atomic_max(flags, 0, 2)
     wp.atomic_add(parts, 0, inertia)
@@ -159,7 +168,9 @@ class TetObjective:
             mapping[self.physics.indices.numpy().ravel()], len(ids), model.device
         )
         self._residual_terms = wp.zeros(4 * model.tet_count, dtype=self.vector, device=model.device)
+        self._absolute_terms = wp.zeros(4 * model.tet_count, dtype=self.vector, device=model.device)
         self.residual = wp.zeros(len(ids), dtype=self.vector, device=model.device)
+        self.absolute = wp.zeros(len(ids), dtype=self.vector, device=model.device)
         self.parts = wp.zeros(3, dtype=self.dtype, device=model.device)
         self.min_det_f = wp.zeros(1, dtype=self.dtype, device=model.device)
         self.flags = wp.zeros(1, dtype=int, device=model.device)
@@ -190,6 +201,7 @@ class TetObjective:
         self.flags.zero_()
         self.parts.zero_()
         self._residual_terms.zero_()
+        self._absolute_terms.zero_()
         self.min_det_f.fill_(float("inf"))
         wp.launch(
             _validate_candidate_particles,
@@ -213,6 +225,7 @@ class TetObjective:
                 physics.mass_mode == "consistent",
                 self.dtype(dt),
                 self.residual,
+                self.absolute,
                 self.parts,
                 self.flags,
             ],
@@ -235,6 +248,7 @@ class TetObjective:
                 self.dtype(dt),
                 self.dtype(min_det_f_guard),
                 self._residual_terms,
+                self._absolute_terms,
                 self.parts,
                 self.min_det_f,
                 self.flags,
@@ -245,6 +259,12 @@ class TetObjective:
             _accumulate_rows,
             self.residual.size,
             [self._residual_offsets, self._residual_slots, self._residual_terms, self.residual],
+            device=self.model.device,
+        )
+        wp.launch(
+            _accumulate_rows,
+            self.absolute.size,
+            [self._residual_offsets, self._residual_slots, self._absolute_terms, self.absolute],
             device=self.model.device,
         )
         wp.launch(_finite, self.residual.size, [self.residual, self.flags], device=self.model.device)

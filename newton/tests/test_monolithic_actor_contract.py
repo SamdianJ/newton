@@ -32,7 +32,7 @@ def test_link_inertia_reference(test, device):
         return wp.array([value], dtype=wp.mat33d, device=device)
 
     energy = wp.zeros(1, dtype=wp.float64, device=device)
-    gt, gr = wp.zeros(1, dtype=wp.vec3d, device=device), wp.zeros(1, dtype=wp.vec3d, device=device)
+    gt, gr, ta, ra = (wp.zeros(1, dtype=wp.vec3d, device=device) for _ in range(4))
     kr = wp.zeros(1, dtype=wp.mat33d, device=device)
     wp.launch(
         _link_variation,
@@ -50,6 +50,8 @@ def test_link_inertia_reference(test, device):
             energy,
             gt,
             gr,
+            ta,
+            ra,
             kr,
             True,
         ],
@@ -58,6 +60,8 @@ def test_link_inertia_reference(test, device):
     e, r, b = rigid_terms(com, rot, predicted_com, predicted_rot, mass, inertia, dt, force)
     np.testing.assert_allclose(energy.numpy(), [e], rtol=1e-12, atol=1e-12)
     np.testing.assert_allclose(np.r_[gt.numpy()[0], gr.numpy()[0]], r, rtol=1e-11, atol=1e-11)
+    # Rounding magnitudes bound the summed gradients they describe.
+    test.assertTrue(np.all(np.r_[ta.numpy()[0], ra.numpy()[0]] >= np.abs(r) * (1 - 1e-12)))
     np.testing.assert_allclose(kr.numpy()[0], b[3:, 3:], rtol=1e-10, atol=1e-10)
     np.testing.assert_allclose(kr.numpy()[0], kr.numpy()[0].T, rtol=1e-12, atol=1e-12)
     test.assertGreaterEqual(np.linalg.eigvalsh(kr.numpy()[0]).min(), -1e-12)

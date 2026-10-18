@@ -71,24 +71,9 @@ class TestMonolithicCableSolver(unittest.TestCase):
                 np.testing.assert_array_equal(state.particle_q.numpy()[:-1], target[:-1])
                 self.assertAlmostEqual(state.particle_q.numpy()[-1, 0] - 1, float(force[-1, 0]) / 60, delta=1e-10)
 
-    def test_physical_residual_tolerances(self):
-        """Honor tighter physical force caps and bind them to checkpoint identity."""
-        for name in ("cable_position_tolerance", "cable_theta_tolerance"):
-            for value in (0, -1, float("nan"), float("inf"), True):
-                with self.subTest(name=name, value=value), self.assertRaises(ValueError):
-                    self.scene(cloth=False, cables=1, **{name: value})
-        for value in (1e-300, 1e300):
-            with self.assertRaises(ValueError):
-                self.scene(
-                    cloth=False, cables=1, precision=SolverMonolithic.Precision.FP32, cable_position_tolerance=value
-                )
-        _, solver = self.scene(
-            cloth=False,
-            cables=1,
-            fixed_theta=(True, False),
-            cable_position_tolerance=1e-11,
-            cable_theta_tolerance=1e-13,
-        )
+    def test_tiny_loads_resolved_per_row(self):
+        """Resolve sub-nanonewton forces and picometre torques row by row instead of accepting rest."""
+        _, solver = self.scene(cloth=False, cables=1, fixed_theta=(True, False))
         state = solver.create_state(dt=0.1)
         force = state.particle_f.numpy().copy()
         force[-1, 2] = 2e-10
@@ -99,16 +84,11 @@ class TestMonolithicCableSolver(unittest.TestCase):
         self.assertTrue(solver.last_stats.converged, solver.last_stats.status)
         self.assertGreater(state.particle_q.numpy()[-1, 2], 0.0)
         self.assertGreater(state._monolithic_coupled.cable_theta.numpy()[1], 7.2)
-        groups = solver.last_stats.variational["material_blocks"]
-        self.assertLessEqual(groups["cable_0_x"]["raw_residual_cable_0_x_norm"], 1e-11)
-        self.assertLessEqual(groups["cable_0_theta"]["raw_residual_cable_0_theta_norm"], 1e-13)
-        _, other = self.scene(cloth=False, cables=1, fixed_theta=(True, False))
-        target = other.create_state(dt=0.1)
-        with tempfile.TemporaryDirectory() as tmp:
-            path = Path(tmp) / "state.npz"
-            solver.save_checkpoint(state, path)
-            with self.assertRaises(ValueError):
-                other.load_checkpoint(target, path)
+        residual = np.asarray(solver.last_stats.variational["residual"])
+        rows = solver._criterion.rows
+        for unit, load in ((0, 2e-10), (1, 2e-12)):
+            # Every row lies within its own tolerance, far below the applied load.
+            self.assertLess(np.abs(residual[rows.units == unit]).max(), 0.5 * load)
 
     def test_transverse_force_and_theta_boundary(self):
         """Advance positions and massless theta together through ordinary step()."""

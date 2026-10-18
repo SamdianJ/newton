@@ -105,6 +105,9 @@ class MaterialScene:
             builder.add_triangle(*face, tri_ke=material[1], tri_ka=material[0], tri_kd=0, tri_drag=0, tri_lift=0)
         self.model = builder.finalize(device=device)
         self.rest = self.model.particle_q.numpy().astype(float)
+        retired = {"joint_residual_tolerance", "cloth_position_tolerance"} & c.keys()
+        if retired:
+            raise ValueError(f"Recipe sets retired solver options {sorted(retired)}; use material_acceptance_v7.json")
         self.solver = SolverMonolithic(
             self.model,
             cloth_inputs=cloth,
@@ -114,8 +117,6 @@ class MaterialScene:
             precision=SolverMonolithic.Precision.FP64,
             pcg_mode=SolverMonolithic.PCGMode(pcg_mode),
             use_cuda_graph=use_cuda_graph,
-            joint_residual_tolerance=c.get("joint_residual_tolerance"),
-            cloth_position_tolerance=c.get("cloth_position_tolerance"),
             contact_stiffness=r.get("contact_stiffness", c["contact_stiffness"]),
             **{
                 key: c[key]

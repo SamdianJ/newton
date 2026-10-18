@@ -65,6 +65,9 @@ class Observer:
                 "mass": run._tet.physics.mass_mode,
                 "guard": run._guard,
                 "config": serial(run._config),
+                "row_units": run._criterion.rows.units.tolist(),
+                "row_groups": run._criterion.rows.groups.tolist(),
+                "row_group_names": list(run._criterion.rows.names),
                 "sdf_scale_baked": run._contact._descriptors["scale_baked"].tolist()
                 if run._contact._descriptors is not None
                 else None,

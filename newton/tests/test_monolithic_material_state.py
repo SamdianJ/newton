@@ -38,8 +38,6 @@ def scene(
     linear_tolerance=1e-4,
     publish_policy="strict",
     mass_mode="lumped",
-    cable_position_tolerance=1e-9,
-    cable_theta_tolerance=1e-11,
 ):
     builder = newton.ModelBuilder(gravity=(0, 0, 0))
     if mechanical:
@@ -90,8 +88,6 @@ def scene(
         publish_policy=publish_policy,
         friction_velocity_scale=0.1,
         mass_mode=mass_mode,
-        cable_position_tolerance=cable_position_tolerance,
-        cable_theta_tolerance=cable_theta_tolerance,
         tet_rest_density=wp.full(model.tet_count, 1000.0, dtype=float, device=device)
         if mass_mode == "consistent"
         else None,

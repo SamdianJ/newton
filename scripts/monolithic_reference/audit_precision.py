@@ -10,6 +10,7 @@ from pathlib import Path
 
 import numpy as np
 
+from newton._src.solvers.monolithic.convergence import ConvergencePolicy, RowGroups, tolerances
 from scripts.monolithic_reference.articulation_oracle import skew
 from scripts.monolithic_reference.run_precision import sha
 from scripts.monolithic_reference.scene_oracle import SceneOracle, unpack_symmetric
@@ -44,21 +45,25 @@ def posterior_error(data, residual):
     return original + term, original, term
 
 
-def goals(residual, reference, scale, nq, config):
-    """Recompute the original thresholds and expose native scalar-rounding effects."""
-    result = {}
-    for name, part in [("global", slice(None)), ("q", slice(0, nq)), ("x", slice(nq, None))]:
-        size = len(residual[part])
-        merit = np.linalg.norm(scale[part] * residual[part]) / np.sqrt(size)
-        ref = np.linalg.norm(scale[part] * reference[part]) / np.sqrt(size)
-        goal = config["merit_absolute_" + name] + config["merit_relative_" + name] * ref
-        result[name] = {
-            "merit": float(merit),
-            "reference": float(ref),
-            "goal": float(goal),
-            "ratio": float(merit / goal),
-        }
-    return result
+def goals(residual, reference, nq, config):
+    """Judge rows against independently recomputed physical tolerances.
+
+    The precision-specific rounding allowance is not recomputed; rows the native
+    solver reported as rounding limited are expected to exceed these tolerances.
+    """
+    rows = RowGroups(
+        tuple(config["row_group_names"]),
+        np.asarray(config["row_units"], dtype=np.int32),
+        np.asarray(config["row_groups"], dtype=np.int32),
+    )
+    policy = config["config"]["convergence"]
+    policy = ConvergencePolicy(tuple(policy["absolute"]), tuple(policy["relative"]), tuple(policy["noise"]))
+    _, physical = tolerances(reference, np.zeros(len(residual)), rows, policy, np.float64)
+    ratio = np.abs(residual) / physical
+    return {
+        name: {"ratio": float(ratio[part].max(initial=0.0))}
+        for name, part in [("global", slice(None)), ("q", slice(0, nq)), ("x", slice(nq, None))]
+    }
 
 
 def audit(directory):
@@ -127,16 +132,10 @@ def audit(directory):
             item["residual_error"] = error(data["native.residual"], result["residual"])
             item["energy_error"] = abs(float(data["native.energy"]) - result["energy"])
             if last_scale is not None and reference is not None:
-                item["independent_goals"] = goals(
-                    result["residual"], reference, last_scale, oracle.k.n, config["config"]
-                )
+                item["independent_goals"] = goals(result["residual"], reference, oracle.k.n, config)
                 if native_reference is not None:
                     item["native_residual_fp64_goals"] = goals(
-                        data["native.residual"].astype(float),
-                        native_reference.astype(float),
-                        last_scale,
-                        oracle.k.n,
-                        config["config"],
+                        data["native.residual"].astype(float), native_reference.astype(float), oracle.k.n, config
                     )
         if row["role"] == "trial" and "native.residual" in data:
             base = evaluate("base.")
@@ -336,22 +335,18 @@ def audit(directory):
             }
             for name, suffix in [("global", ""), ("q", "_q"), ("x", "_x")]
         }
-        # Scalar target rounding is reported separately from residual error.
-        for name, suffix in [("global", ""), ("q", "_q"), ("x", "_x")]:
-            ref = native["stats"].get("merit" + suffix + "_reference")
-            if ref is not None:
-                dtype = state["joint_q"].dtype.type
-                native_goal = dtype(config["config"]["merit_absolute_" + name]) + dtype(
-                    config["config"]["merit_relative_" + name]
-                ) * dtype(ref)
-                promoted_goal = config["config"]["merit_absolute_" + name] + config["config"][
-                    "merit_relative_" + name
-                ] * float(ref)
-                pub["native_goals"][name]["native_goal"] = float(native_goal)
-                pub["native_goals"][name]["target_rounding"] = float(native_goal) - promoted_goal
+        groups = (native["stats"].get("variational") or {}).get("convergence_groups", {})
+        pub["native_rounding_limited"] = sum(g["rounding_limited"] for g in groups.values())
+        # Rows the solver accepted only within its rounding allowance may exceed the physical tolerance.
         pub["false_convergence"] = bool(
             native["stats"]["converged"]
-            and (pub["independent_goals"] is None or any(v["ratio"] > 1 for v in pub["independent_goals"].values()))
+            and (
+                pub["independent_goals"] is None
+                or (
+                    any(v["ratio"] > 1 for v in pub["independent_goals"].values())
+                    and not pub["native_rounding_limited"]
+                )
+            )
         )
         publications.append(pub)
     result = {

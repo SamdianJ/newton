@@ -84,18 +84,13 @@ loses positive definiteness can retry with diagonal regularization; the original
 energy and residual remain the convergence criteria. Nonmaterial numerical
 policies are unchanged.
 
-The material residual-norm predicate combines block residuals normalized by their
-frozen convergence goals, including the omitted gauge equation. This keeps
-position roundoff from hiding unresolved torque. Independent original-unit
-convergence checks remain unchanged; checkpoint identity records this policy.
+The residual-norm predicate normalizes every row by its own tolerance, so
+position roundoff cannot hide unresolved torque.
 
-Each cable must satisfy independent original-unit L2 force and free-angle torque
-residuals, with default limits of 1e-9 N and 1e-11 N m. The experimental
-``cable_position_tolerance`` and ``cable_theta_tolerance`` solver options set
-these limits and are included in checkpoint identity. Smaller physical scales
-may need tighter tolerances, subject to native coordinate roundoff. The torque
-check includes an eliminated gauge
-equation. Prescribed boundary reactions are excluded from free equilibrium.
+Every cable position and free-angle row must satisfy the solver's per-row force
+[N] and torque [N m] tolerance described in :doc:`monolithic`. A common-angle
+null mode additionally requires the net free-angle torque to stay within the
+absolute torque target. Prescribed boundary reactions are excluded from free equilibrium.
 These accuracy requirements can reject FP32 native runs or poorly conditioned
 inputs. Stopped publication is never analytical convergence. The material
 nonlinear driver uses host acceptance; CUDA graph mode captures the linear

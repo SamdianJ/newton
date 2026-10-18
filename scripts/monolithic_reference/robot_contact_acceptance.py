@@ -23,7 +23,7 @@ def check_robot_reports(directory, run, expected_steps):
     import gzip  # noqa: PLC0415
     import json  # noqa: PLC0415
 
-    from newton._src.solvers.monolithic.iteration import _block_policy, blocks  # noqa: PLC0415
+    from newton._src.solvers.monolithic.iteration import blocks  # noqa: PLC0415
     from scripts.monolithic_reference.check_recording import sha  # noqa: PLC0415
 
     counts = {"full_converged": 0, "stopped": 0}
@@ -50,19 +50,11 @@ def check_robot_reports(directory, run, expected_steps):
             all_full = True
             for name, part in blocks(run):
                 value = report["blocks"][name]
-                goal = (
-                    _block_policy(run._config, "merit_absolute", name)
-                    + _block_policy(run._config, "merit_relative", name) * value["reference_merit"]
-                )
                 if (
                     value["size"] != part.stop - part.start
-                    or value["goal"] != goal
-                    or any(
-                        not np.isfinite(value[n]) or value[n] < 0
-                        for n in ("clipped_merit", "full_merit", "reference_merit")
-                    )
-                    or value["full_pass"] is not bool(value["full_merit"] <= goal)
-                    or value["clipped_pass"] is not bool(value["clipped_merit"] <= goal)
+                    or any(not np.isfinite(value[n]) or value[n] < 0 for n in ("clipped_ratio", "full_ratio"))
+                    or value["full_pass"] is not bool(value["full_ratio"] <= 1)
+                    or value["clipped_pass"] is not bool(value["clipped_ratio"] <= 1)
                 ):
                     raise ValueError("Robot contact report changed an original physical gate")
                 all_full &= value["full_pass"]

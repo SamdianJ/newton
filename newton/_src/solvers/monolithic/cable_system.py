@@ -33,34 +33,43 @@ def _residual(
     rows: wp.array[int],
     dt: Any,
     raw: wp.array[Any],
+    absolute: wp.array[Any],
     complete: wp.array[Any],
     external_energy: wp.array[Any],
 ):
     row = wp.tid()
     nv = x.shape[0]
     value = type(dt)(0.0)
+    magnitude = type(dt)(0.0)
     energy = type(dt)(0.0)
     if row < 3 * nv:
         vertex, axis = row // 3, row % 3
         for edge in range(wp.max(0, vertex - 1), wp.min(nv - 1, vertex + 1)):
             value += stretch[edge, 3 * (vertex - edge) + axis]
+            magnitude += wp.abs(stretch[edge, 3 * (vertex - edge) + axis])
         for stencil in range(wp.max(0, vertex - 2), wp.min(nv - 2, vertex + 1)):
             value += bend[stencil, 3 * (vertex - stencil) + axis]
+            magnitude += wp.abs(bend[stencil, 3 * (vertex - stencil) + axis])
         applied = type(dt)(forces[vertex][axis]) + mass[vertex] * type(dt)(gravity[axis])
         displacement = x[vertex][axis] - xn[vertex][axis]
         prediction_error = displacement - dt * vn[vertex][axis]
         value -= applied
+        magnitude += wp.abs(applied)
         energy -= applied * displacement
         if fixed[vertex] == 0:
             value += mass[vertex] * prediction_error / (dt * dt)
+            magnitude += wp.abs(mass[vertex] * prediction_error / (dt * dt))
             energy += type(dt)(0.5) * mass[vertex] * prediction_error * prediction_error / (dt * dt)
     else:
         edge = row - 3 * nv
         for stencil in range(wp.max(0, edge - 1), wp.min(nv - 2, edge + 1)):
             value += bend[stencil, 9 + edge - stencil]
+            magnitude += wp.abs(bend[stencil, 9 + edge - stencil])
         value -= torque[edge]
+        magnitude += wp.abs(torque[edge])
         energy = -torque[edge] * theta[edge]
     raw[row] = value
+    absolute[row] = magnitude
     external_energy[row] = energy
     if rows[row] >= 0:
         complete[rows[row]] = value
@@ -207,6 +216,7 @@ class CableBlock:
         self.original_v = wp.zeros_like(self.positions)
         self.forces = wp.zeros(nv, dtype=wp.vec3, device=device)
         self.raw = wp.zeros(len(rows), dtype=dtype, device=device)
+        self.absolute = wp.zeros(len(rows), dtype=dtype, device=device)
         self.external_energy = wp.zeros_like(self.raw)
         global_rows, global_columns, kinds, elements, aa, bb = [], [], [], [], [], []
 
@@ -286,6 +296,7 @@ class CableBlock:
                 self.rows,
                 self.dtype(dt),
                 self.raw,
+                self.absolute,
                 complete,
                 self.external_energy,
             ],

@@ -11,6 +11,8 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from types import MappingProxyType
 
+from .convergence import ConvergencePolicy
+
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class ClothInput:
@@ -283,20 +285,8 @@ class _SolverMonolithicInternalConfig:
     residual_floor_global: float = 1.7210128930635914e-4
     residual_floor_q: float = 2.1090331703277343e-5
     residual_floor_x: float = 1.7099733184977595e-4
-    merit_noise: float = 7.92642972091695e-9
-    merit_absolute_global: float = 6.763034882944481e-6
-    merit_absolute_q: float = 2.5e-7
-    merit_absolute_x: float = 7.3049125684417234e-6
-    merit_absolute_cable_x: float = 1e-9
-    merit_absolute_cable_theta: float = 1e-11
-    joint_residual_tolerance: float | None = None
-    cloth_position_tolerance: float | None = None
-    merit_relative_global: float = 1.0e-4
-    merit_relative_q: float = 1.0e-4
-    merit_relative_x: float = 1.0e-4
-    step_tolerance_global: float = 1.6873759893848113e-6
-    step_tolerance_q: float = 9.100770221088748e-10
-    step_tolerance_x: float = 1.8225743746537296e-6
+    convergence: ConvergencePolicy = field(default_factory=ConvergencePolicy)
+    """Per-row physical convergence tolerances."""
     det_f_guard: float = 0.2
     regularization_values: tuple[float, ...] = (0.0,)
 

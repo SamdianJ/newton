@@ -202,6 +202,9 @@ def test_modes_integration(test, device):
                 material_model=material,
                 mass_mode=mass,
                 tet_rest_density=density,
+                # Kim's projected tangent converges linearly here (about 0.93 per
+                # iteration, 54 iterations to the row tolerances).
+                newton_max_iterations=60,
             )
             state = solver.create_state(dt=0.01, source=fixture.state)
             out = solver.create_state(dt=0.01, source=fixture.state)

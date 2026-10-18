@@ -1,0 +1,1 @@
+Remove the experimental `cable_position_tolerance`, `cable_theta_tolerance`, `joint_residual_tolerance` and `cloth_position_tolerance` options from `SolverMonolithic`; the per-row convergence criterion replaces them. Remove these arguments from existing constructor calls.

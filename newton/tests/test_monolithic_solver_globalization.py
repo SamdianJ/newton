@@ -4,41 +4,17 @@
 """Check the fixed ArmijoOrResNorm acceptance and native convergence goals."""
 
 import unittest
-from dataclasses import replace
 from itertools import product
-from types import SimpleNamespace
 
 import numpy as np
 
-from newton._src.solvers.monolithic.iteration import acceptance, material_merit, measure
-from newton._src.solvers.monolithic.linear_types import MonolithicLinearLayout
-from newton._src.solvers.monolithic.solver_types import _SolverMonolithicInternalConfig
+from newton._src.solvers.monolithic import convergence
+from newton._src.solvers.monolithic.convergence import ConvergencePolicy
+from newton._src.solvers.monolithic.iteration import acceptance
 
 
 class TestGlobalization(unittest.TestCase):
     """Guard the fixed ArmijoOrResNorm acceptance predicate."""
-
-    def test_absolute_material_force_caps(self):
-        """Prevent a large frozen reference from accepting excessive raw joint or cloth force."""
-        solver = SimpleNamespace(
-            _numpy_dtype=np.float64,
-            _metrics={},
-            _variational={},
-            _config=replace(
-                _SolverMonolithicInternalConfig(), joint_residual_tolerance=1e-6, cloth_position_tolerance=1e-6
-            ),
-            _linear=SimpleNamespace(
-                layout=SimpleNamespace(groups=(("global", 0, 4), ("articulation", 0, 2), ("cloth_0_x", 2, 2)))
-            ),
-        )
-        scale = np.array([0.1, 10.0, 0.2, 20.0])
-        residual = np.array([2e-6, 0, 2e-6, 0])
-        values = measure(solver, residual, np.ones(4), scale)
-        for name in ("q", "cloth_0_x"):
-            self.assertGreater(values[name][0], values[name][2])
-        reduced = measure(solver, residual / 4, np.ones(4), scale)
-        for name in ("q", "cloth_0_x"):
-            self.assertLess(reduced[name][0], reduced[name][2])
 
     def test_predicates(self):
         """Exercise the A/R/OR truth table, nonnegative slopes, equality, noise and nonfinite rejection."""
@@ -59,52 +35,24 @@ class TestGlobalization(unittest.TestCase):
             acceptance(1, float("nan"), -1, 1, 1, 0, **kw)
 
     def test_native_host_targets(self):
+        """Compute row tolerances and the line-search merit in the selected precision."""
+        rows = convergence.RowGroups(("x",), np.zeros(5, np.int32), np.zeros(5, np.int32))
         for dtype in (np.float32, np.float64):
-            solver = SimpleNamespace(
-                _numpy_dtype=dtype,
-                _metrics={},
-                _config=_SolverMonolithicInternalConfig(),
-                _linear=SimpleNamespace(layout=MonolithicLinearLayout(2, 1)),
-            )
             residual = np.array([0.1, 0.02, -0.5, 3.0, 0.9], dtype=dtype)
-            reference = residual * dtype(7)
-            scale = np.linspace(0.3, 2, 5, dtype=dtype)
-            values = measure(solver, residual, reference, scale)
-            for merit, ref, goal, _ in values.values():
-                self.assertEqual(type(merit), dtype)
-                self.assertEqual(type(ref), dtype)
-                self.assertEqual(type(goal), dtype)
-            np.testing.assert_equal(values["global"][0], np.linalg.norm(scale * residual) / np.sqrt(dtype(5)))
+            tau, physical = convergence.tolerances(
+                residual * dtype(7), np.abs(residual), rows, ConvergencePolicy(), dtype
+            )
+            self.assertEqual((tau.dtype, physical.dtype), (np.dtype(dtype), np.dtype(dtype)))
+            self.assertEqual(type(convergence.merit(residual, tau)), dtype)
 
-    def test_material_merit_resolves_each_physical_goal(self):
-        """Resolve torque improvements despite sub-goal position noise, retaining gauge equations."""
-        solver = SimpleNamespace(
-            _numpy_dtype=np.float64,
-            _linear=SimpleNamespace(
-                layout=SimpleNamespace(
-                    groups=(
-                        ("global", 0, 2),
-                        ("cable_0_x", 0, 1),
-                        ("cable_0_theta", 1, 1),
-                    )
-                )
-            ),
-            _cable_raw_theta_norms={},
-        )
-        values = {"global": (0, 0, 1e-7, 2), "cable_0_x": (0, 0, 1e-9, 1), "cable_0_theta": (0, 0, 1e-12, 1)}
-        scale = np.array([1.0, 10.0])
-        current = material_merit(solver, np.array([2e-10, 4e-13]), values, scale)
-        trial = material_merit(solver, np.array([4e-10, 2e-13]), values, scale)
+    def test_merit_resolves_each_unit(self):
+        """Accept a torque improvement that outweighs sub-tolerance position noise, and not the reverse."""
+        tau = np.array([1e-10, 1e-12])
+        current = convergence.merit(np.array([2e-10, 4e-12]), tau)
+        trial = convergence.merit(np.array([3e-10, 1e-12]), tau)
         kw = {"energy_noise": 0, "residual_noise": 0, "slope_noise": 0}
-        with self.subTest(case="torque_improvement"):
-            self.assertTrue(acceptance(1, 1, 0, 1, current, trial, **kw)[0])
-            self.assertFalse(acceptance(1, 1, 0, 1, trial, current, **kw)[0])
-        solver._cable_raw_theta_norms["cable_0_theta"] = 4e-13
-        current = material_merit(solver, np.array([4e-10, 0.0]), values, scale)
-        solver._cable_raw_theta_norms["cable_0_theta"] = 8e-13
-        trial = material_merit(solver, np.array([2e-10, 0.0]), values, scale)
-        with self.subTest(case="omitted_gauge_equation"):
-            self.assertFalse(acceptance(1, 1, 0, 1, current, trial, **kw)[0])
+        self.assertTrue(acceptance(1, 1, 0, 1, current, trial, **kw)[0])
+        self.assertFalse(acceptance(1, 1, 0, 1, trial, current, **kw)[0])
 
 
 if __name__ == "__main__":

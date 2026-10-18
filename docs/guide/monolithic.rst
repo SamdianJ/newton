@@ -56,6 +56,20 @@ The default solver uses FP64 nonlinear arithmetic, strict publication, diagnosti
 PCG and no CUDA graph. Constructor options are validated before the Model is
 inspected. Regularized direction retries use the same schedule for every scene,
 starting without regularization.
+
+A step converges when every residual row lies within its own tolerance: the
+largest of an absolute target (1e-11 N for force rows, 1e-13 N m for torque
+rows), 1e-6 times the largest step-start residual of the same block and unit,
+and four times the precision's machine epsilon times the row's rounding
+magnitude (its summed absolute contributions plus the tangent-weighted
+coordinate magnitudes). Rows are never pooled into a norm, so a small local
+load is resolved regardless of model size. ``Stats.convergence_ratio*`` report
+each block's largest residual-to-tolerance ratio, and
+``Stats.variational["convergence_groups"]`` counts the rows that passed only
+within their rounding allowance. With FP32 absolute coordinates that
+allowance can exceed small physical loads: a coordinate cannot move by less
+than its unit in the last place. Each Newton direction reduces the scaled
+residual by ``linear_tolerance`` or reaches half of every row tolerance.
 Force results are independent read-only NumPy snapshots; check ``force_valid``
 and ``force_generation`` before using them. Stopped publication under an opt-in
 production policy is not convergence. Reset with ``reset_state(state, dt=...)``.

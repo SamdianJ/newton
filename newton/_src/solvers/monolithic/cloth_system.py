@@ -27,24 +27,30 @@ def _residual(
     rows: wp.array[int],
     dt: Any,
     raw: wp.array[Any],
+    absolute: wp.array[Any],
     output: wp.array[Any],
     energy: wp.array[Any],
 ):
     row = wp.tid()
     vertex, axis = row // 3, row % 3
     value = type(dt)(0.0)
+    magnitude = type(dt)(0.0)
     for i in range(offsets[row], offsets[row + 1]):
         entry = entries[i]
         value += local[entry // 18, entry % 18]
+        magnitude += wp.abs(local[entry // 18, entry % 18])
     force = type(dt)(forces[vertex][axis]) + mass[vertex] * type(dt)(gravity[axis])
     displacement = x[vertex][axis] - xn[vertex][axis]
     difference = displacement - dt * vn[vertex][axis]
     value -= force
+    magnitude += wp.abs(force)
     e = -force * displacement
     if fixed[vertex] == 0:
         value += mass[vertex] * difference / (dt * dt)
+        magnitude += wp.abs(mass[vertex] * difference / (dt * dt))
         e += type(dt)(0.5) * mass[vertex] * difference * difference / (dt * dt)
     raw[row] = value
+    absolute[row] = magnitude
     energy[row] = e
     if rows[row] >= 0:
         output[rows[row]] = value
@@ -151,6 +157,7 @@ class ClothBlock:
         self.original_v = wp.zeros_like(self.positions)
         self.forces = wp.zeros(len(ids), dtype=wp.vec3, device=device)
         self.raw = wp.zeros(len(rows), dtype=dtype, device=device)
+        self.absolute = wp.zeros(len(rows), dtype=dtype, device=device)
         self.external_energy = wp.zeros_like(self.raw)
         contributions = [[] for _ in rows]
         rr, cc, values = [], [], []
@@ -208,6 +215,7 @@ class ClothBlock:
                 self.rows,
                 self.dtype(dt),
                 self.raw,
+                self.absolute,
                 complete,
                 self.external_energy,
             ],

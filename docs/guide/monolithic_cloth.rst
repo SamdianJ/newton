@@ -72,9 +72,8 @@ All cross-node terms remain in the FP32 global matrix. Three-coordinate vertex
 Cholesky blocks are only a preconditioner. Cloth and cable coordinates use one
 Newton direction, line search and transaction.
 
-Each cloth has an independent xyz residual RMS goal of
-``1e-7 N + 1e-6 * initial_RMS`` by default. The existing FP32 absolute-tolerance
-experiment override also applies to cloth xyz groups. Native FP64 is the
+Every cloth coordinate row must satisfy the solver's per-row force tolerance
+described in :doc:`monolithic`. Native FP64 is the
 acceptance path; B and PCG remain FP32 with native direction qualification.
 The full element matrix is checked against independent NumPy/complex-step
 references, including negative lambda, compression, missing neighbors and
@@ -158,9 +157,3 @@ Invalid input is validated before the destination builder is changed.
    )
    export_materials_usd("rest.usda", model, **materials)
 
-For strict absolute-force validation in material scenes,
-``cloth_position_tolerance`` [N] and ``joint_residual_tolerance``
-[N or N m per generalized coordinate] optionally cap each cloth/joint block's
-raw L2 residual in addition to the default relative criterion. Defaults retain
-the existing solver policy. These experimental numerical settings enter the
-checkpoint identity; changing them requires a fresh solve configuration.

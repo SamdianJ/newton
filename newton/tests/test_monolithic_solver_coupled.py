@@ -15,6 +15,7 @@ import warp as wp
 import newton
 from newton._src.geometry import GeoType
 from newton._src.geometry.sdf_texture import TextureSDFData, create_sparse_sdf_textures
+from newton._src.solvers.monolithic import convergence
 from newton._src.solvers.monolithic.articulation import ArticulationKinematics
 from newton._src.solvers.monolithic.solver_monolithic import SolverMonolithic, _StepFailure
 from newton.tests.test_monolithic_contact_mesh import synthetic
@@ -595,21 +596,19 @@ def test_complete_oracle_and_noise(test, device):
                 energy_errors.append(abs(energy - expected_e))
                 residual_errors.append(abs(residual - expected_r))
         run._assemble(0)
-        scale = run._linear.scale.numpy().astype(float)
         actual_b = run._linear.densify_for_test(generation=run._generation).raw_matrix
         np.testing.assert_allclose(actual_b, expected_b, rtol=2e-5, atol=2e-3)
         test.assertLessEqual(8 * max(energy_errors), 5.820766091346741e-11)
         envelope = 8 * np.max(residual_errors, axis=0)
         test.assertLessEqual(envelope.max(), 2.0935893019213836e-9)
-        for name, part in [("global", slice(None)), ("q", slice(0, 2)), ("x", slice(2, None))]:
-            reference = np.linalg.norm(scale[part] * run._reference_residual.numpy()[part]) / np.sqrt(
-                len(expected_r[part])
-            )
-            goal = (
-                getattr(run._config, "merit_absolute_" + name)
-                + getattr(run._config, "merit_relative_" + name) * reference
-            )
-            test.assertLess(np.linalg.norm(scale[part] * envelope[part]) / np.sqrt(len(expected_r[part])), 0.1 * goal)
+        # Evaluation error stays an order below every row's physical tolerance (rounding term excluded).
+        rows = run._criterion.rows
+        reference = run._reference_residual
+        reference = reference.numpy() if hasattr(reference, "numpy") else np.asarray(reference)
+        _, physical = convergence.tolerances(
+            reference, np.zeros(rows.units.size), rows, run._config.convergence, np.float64
+        )
+        test.assertTrue(np.all(envelope < 0.1 * physical), (envelope / physical).max())
 
 
 def test_mesh_binding_graph(test, device):

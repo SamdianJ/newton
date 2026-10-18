@@ -724,14 +724,12 @@ def test_material_plane_spatial_steps(test, device):
                     device=device,
                     pcg_mode=SolverMonolithic.PCGMode.PRODUCTION,
                     use_cuda_graph=device.is_cuda,
-                    joint_residual_tolerance=1e-10,
-                    cloth_position_tolerance=1e-10,
                 )
             state = solver.create_state(dt=0.001)
             for _ in range(3):
                 solver.step(state, state, solver.create_control(), dt=0.001)
                 test.assertTrue(solver.last_stats.converged)
-                test.assertLessEqual(solver.last_stats.raw_residual_q_norm, 1e-10)
+                test.assertLessEqual(solver.last_stats.convergence_ratio_q, 1)
             results.append(snapshot(state))
         for name in results[0]:
             if name == "history.config_digest":

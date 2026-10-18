@@ -262,7 +262,7 @@ def test_scalar_switches(test, device):
     q = wp.zeros(1, dtype=wp.float64, device=device)
     qn, vn, qt, vt, force = [wp.zeros_like(q) for _ in range(5)]
     armature, damping = [wp.full(1, x, dtype=wp.float64, device=device) for x in (0.002, 0.003)]
-    energy, residual, tangent = [wp.zeros_like(q) for _ in range(3)]
+    energy, residual, absolute, tangent = [wp.zeros_like(q) for _ in range(4)]
     parameters = wp.array(params, dtype=wp.float64, device=device)
 
     def evaluate(value):
@@ -270,9 +270,26 @@ def test_scalar_switches(test, device):
         wp.launch(
             _joint_variation,
             1,
-            [q, qn, vn, parameters, armature, damping, qt, vt, force, wp.float64(h), energy, residual, tangent],
+            [
+                q,
+                qn,
+                vn,
+                parameters,
+                armature,
+                damping,
+                qt,
+                vt,
+                force,
+                wp.float64(h),
+                energy,
+                residual,
+                absolute,
+                tangent,
+            ],
             device=device,
         )
+        # The summed term magnitudes bound the joint residual.
+        test.assertGreaterEqual(float(absolute.numpy()[0]), abs(float(residual.numpy()[0])))
         return tuple(float(v.numpy()[0]) for v in (energy, residual, tangent))
 
     for initial, switches in (
