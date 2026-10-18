@@ -48,9 +48,8 @@ an existing bound C2 SDF. Planes must be infinite; material targets may be stati
 or attached to supported moving actors. Material samples
 respect Model world membership; solver actors still share one world.
 Reference areas stay fixed during deformation.
-C-EE, C-IE and C-II share the existing smoothed penalty/friction law. Use
-``globalization="ResNorm"``; energy-based acceptance with material face selection
-requires ``allow_nonconservative_energy=True`` and is reported as heuristic.
+Material contact uses the solver's smoothed C-IE penalty/friction law. Energy
+acceptance with material face selection is reported as heuristic.
 
 Contact uses the bounded deterministic pool. Insufficient material contact
 capacity rolls back the step; it does not publish a truncated force sum.
@@ -153,8 +152,7 @@ Invalid input is validated before the destination builder is changed.
    materials = import_materials_usd(builder, "materials.usda")
    model = builder.finalize()
    solver = SolverMonolithic(
-       model, **materials, contact_model="C-IE",
-       friction_velocity_scale=0.01, globalization="ResNorm",
+       model, **materials, friction_velocity_scale=0.01,
    )
    export_materials_usd("rest.usda", model, **materials)
 

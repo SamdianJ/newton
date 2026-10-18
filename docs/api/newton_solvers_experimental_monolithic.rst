@@ -9,19 +9,22 @@ Experimental implicit articulated rigid/tet solver with P1Q3 contact.
 .. experimental::
 
 The solver advances one supported articulation and one connected tet body with
-explicit C-EE, C-IE or C-II contact, scaled PCG and transactional publication.
-The collision pipeline can also detect tet-face contacts independently.
+C-IE contact, ArmijoOrResNorm acceptance, scaled PCG and transactional
+publication.
 
 State and migration
 -------------------
 
-Construct ``SolverMonolithic(model, contact_model=..., globalization=...,
-friction_velocity_scale=..., ...)`` directly. The experimental q-only, tet-only
-and private coupled factories are no longer supported. Constructor options are
-explicit; historical spring friction and ``tangential_stiffness`` are rejected.
-The defaults remain strict publication, diagnostic PCG and CUDA graphs disabled.
-C-IE/C-II or masked contact with Armijo/ArmijoOrResNorm require the explicit
-``allow_nonconservative_energy=True`` opt-in.
+Construct ``SolverMonolithic(model, friction_velocity_scale=..., ...)``
+directly. The experimental q-only, tet-only and private coupled factories are no
+longer supported. Constructor options are explicit; historical spring friction
+and ``tangential_stiffness`` are rejected. The defaults remain strict
+publication, diagnostic PCG and CUDA graphs disabled.
+Contact always uses C-IE: the normal penalty acts on the current gap and the
+friction load uses the gap linearized at the step start. A Newton trial is
+accepted when either the Armijo energy predicate or the residual-norm predicate
+holds. Frictional C-IE energy is not a potential, so its energy acceptance is
+reported as heuristic rather than variational.
 
 Use ``create_state(dt=..., source=None)`` for complete FP64 coordinates and P3
 integration history. An ordinary ``model.state()`` can supply initial coordinates
@@ -133,9 +136,9 @@ From the development checkout, list the frozen profiles without loading CUDA::
 
 Run with ``--output <new-directory>``. Each case executes serially in its own
 process and binds source paths/hashes, frozen inputs and comparison tolerances.
-Dev includes complete default Franka and recorded Sharpa trajectories. The
-current full profile has nine Franka law/globalization combinations and one
-Sharpa OR/C-IE case, all CUDA production with graphs. ``--case <id>`` filters
+The dev and full profiles run the production Franka and recorded Sharpa
+trajectories, CUDA production with graphs; nightly adds the large rigid
+collision scene. ``--case <id>`` filters
 within the chosen profile and reports PARTIAL instead of profile qualification.
 Missing frozen external inputs block execution; the runner does not fetch or
 replace them. Sharpa completion does not certify grasp success.

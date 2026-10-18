@@ -47,8 +47,6 @@ used directly for continuation.
 
    solver = SolverMonolithic(
        model,
-       contact_model="C-EE",
-       globalization="ResNorm",
        friction_velocity_scale=0.01,
        tet_rest_density=rest_density,
    )
@@ -118,17 +116,14 @@ endpoints contribute to the coupled residual, tangent and published COM wrench.
 Box, sphere and mesh sources are supported; mesh targets require CUDA and a
 bound C2 SDF. New plane targets must be infinite and static. Changing collision
 flags, pair storage or participating geometry requires rebuilding the solver.
-Mixed-contact numerical qualification remains partial. Some Armijo cases stop
-at the existing descent-slope noise floor while a rigid rotation residual still
-exceeds its target. Strict publication rolls back those steps; they are a known
-limitation, not converged results. Existing numerical and publication gates
-apply. Articulation-tet and tet-static contact keep their original sampling and
+Mixed-contact numerical qualification remains partial. Existing numerical and
+publication gates apply. Articulation-tet and tet-static contact keep their original sampling and
 behavior.
 FREE PD, limit gains, friction, damping and armature must be zero.
 Rigid ``body_f`` and FREE ``control.joint_f`` each contribute a world COM wrench
 [N, N·m] once. Convert off-center loads to COM wrenches before calling ``step``.
-Nonzero rigid torque with Armijo or ArmijoOrResNorm requires explicit
-``allow_nonconservative_energy=True``; ResNorm supports that torque directly.
+Nonzero rigid torque is accepted through the residual-norm predicate; its
+energy acceptance is reported as heuristic.
 
 Smooth SDF construction still produces common offline FP64 coefficients.
 The FP32 solver derives a separately identified coefficient copy and retains
@@ -168,7 +163,7 @@ Every step must converge; Stopped and hard failures stop the dependent runs.
 The final 100 hold steps require all three interfaces to carry at least 0.1 N,
 tet displacement of at least 2 mm and relative force variation of at most 5%.
 Native state, determinant, penetration, per-actor residual and reaction balance
-guards also apply. Known Armijo limitations do not waive these gates.
+guards also apply.
 The recording audit recomputes box gaps, tet determinants, native/display
 bindings and force balance. It uses the promoted Model rest matrices and
 normalized joint anchors; device-specific BVH caches are excluded from physical

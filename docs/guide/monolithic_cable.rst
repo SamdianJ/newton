@@ -84,7 +84,7 @@ loses positive definiteness can retry with diagonal regularization; the original
 energy and residual remain the convergence criteria. Nonmaterial numerical
 policies are unchanged.
 
-Material ``ResNorm`` line search combines block residuals normalized by their
+The material residual-norm predicate combines block residuals normalized by their
 frozen convergence goals, including the omitted gauge equation. This keeps
 position roundoff from hiding unresolved torque. Independent original-unit
 convergence checks remain unchanged; checkpoint identity records this policy.
