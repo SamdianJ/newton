@@ -53,3 +53,85 @@ def validate_row_partition(producers, scalar_dof_count):
         owner[rows] = index
     if np.any(owner < 0):
         raise ValueError("Producer rows leave scalar DoFs uncovered")
+
+
+class _Producer:
+    """Name, owned rows and declared policies of one physical term set."""
+
+    capturable = True
+    scale_policy = "diagonal"
+
+    def __init__(self, name, rows):
+        self.name, self.rows = name, np.asarray(rows, dtype=np.int32)
+
+
+class ArticulationProducer(_Producer):
+    """Articulation coordinates with joint, PD, limit and friction terms."""
+
+    def __init__(self, solver):
+        super().__init__("articulation", solver._layout.indices("articulation"))
+
+
+class RigidProducer(_Producer):
+    """Every FREE rigid actor: three COM and three rotation rows each."""
+
+    def __init__(self, solver):
+        super().__init__("rigid", solver._rigid.rows_numpy.ravel())
+
+
+class TetProducer(_Producer):
+    """Dynamic tet particles with inertia, elasticity and frozen external forces."""
+
+    def __init__(self, solver):
+        super().__init__("tet", solver._layout.indices("tet"))
+
+
+class ClothProducer(_Producer):
+    """One cloth object; its host-side evaluation is not graph-capturable yet."""
+
+    capturable = False
+    scale_policy = "coordinate"
+
+    def __init__(self, solver, block):
+        source = block.actor.source_index
+        super().__init__(f"cloth_{source}", solver._layout.indices("cloth", source))
+        self.block = block
+
+
+class CableProducer(_Producer):
+    """One cable object; theta rows use a fixed inverse-length scale."""
+
+    capturable = False
+    scale_policy = "coordinate"
+
+    def __init__(self, solver, block):
+        source = block.actor.source_index
+        super().__init__(f"cable_{source}", solver._layout.indices("cable", source))
+        self.block = block
+
+
+class ContactProducer(_Producer):
+    """Spatial contact; it adds coupling terms to rows owned by other producers."""
+
+    scale_policy = "none"
+
+    def __init__(self, solver):
+        super().__init__("contact", np.empty(0, dtype=np.int32))
+
+
+def build_producers(solver):
+    """Order producers as articulation, rigid, tet, cloth, cable and contact."""
+    layout = solver._layout
+    producers = []
+    if layout.q_dof_count:
+        producers.append(ArticulationProducer(solver))
+    if solver._rigid.count:
+        producers.append(RigidProducer(solver))
+    if layout.dynamic_particle_count and getattr(solver, "_tet", None) is not None:
+        producers.append(TetProducer(solver))
+    producers.extend(ClothProducer(solver, block) for block in getattr(solver, "_cloths", ()))
+    producers.extend(CableProducer(solver, block) for block in getattr(solver, "_cables", ()))
+    if solver._contact.count:
+        producers.append(ContactProducer(solver))
+    validate_row_partition([p for p in producers if len(p.rows)], layout.scalar_dof_count)
+    return producers

@@ -36,6 +36,7 @@ from .linear_types import (
     MonolithicLinearStatus,
 )
 from .material_inputs import _MaterialInputs
+from .producers import build_producers
 from .rigid import RigidObjective, _scatter_residual, _scatter_tangent
 from .segment_graph import _SegmentGraphCache
 from .solver_types import (
@@ -250,6 +251,7 @@ class SolverMonolithic(SolverBase):
                     "smooth_sdf": "none" if smooth_sdf is None else smooth_sdf.digest,
                 },
             )
+            material_runtime.initialize(self)
             return
         _validate_and_collect_boundary_faces(model)
         if not model.particle_count or not model.tet_count:
@@ -470,6 +472,7 @@ class SolverMonolithic(SolverBase):
             and self._layout.x_scalar_offset == self._kinematics.count
         )
         iteration_device.initialize(self)
+        self._producers = build_producers(self)
 
     def _initialize_material_lifecycle(self, model, *, joint_terms, config):
         """Allocate shared material layout and continuation before lazy operator setup."""

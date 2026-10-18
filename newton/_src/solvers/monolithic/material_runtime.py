@@ -17,6 +17,7 @@ from .contact_pipeline import _SpatialContactObjective
 from .contact_pipeline import _SpatialContactObjective as ContactObjective
 from .linear import MonolithicLinearWorkspace
 from .linear_types import MonolithicLinearCapacities, MonolithicLinearGeneration
+from .producers import build_producers
 from .rigid import _scatter_residual, _scatter_tangent
 from .segment_graph import _SegmentGraphCache
 from .solver_types import _SolverMonolithicInternalConfig, _StepFailure
@@ -207,6 +208,7 @@ def initialize(self):
         rows = cable.rows_host[3 * cable.ids.size :]
         self._material_scale[rows[rows >= 0]] = 1 / float(cable.reference["length_scale"])
     self._temporary_gauges = []
+    self._producers = build_producers(self)
 
 
 def evaluate(self, state, dt, *, build_tangent=True):
