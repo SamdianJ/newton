@@ -66,23 +66,3 @@ def max_block_drift(norms: wp.array[float], gap_offset: int, floors: wp.array[fl
             return wp.float64(wp.nan)
         drift = wp.max(drift, block_drift(norms[gap_offset + k], norms[k], floors[k]))
     return drift
-
-
-@wp.kernel
-def decide_restart(
-    gap: wp.array[float],
-    true_norm: wp.array[float],
-    floors: wp.array[float],
-    threshold: wp.float64,
-    error: wp.array[int],
-    result: wp.array[int],
-):
-    drift = wp.float64(0.0)
-    for k in range(floors.shape[0]):
-        if not wp.isfinite(gap[k]) or not wp.isfinite(true_norm[k]):
-            error[0] = 16
-        drift = wp.max(drift, block_drift(gap[k], true_norm[k], floors[k]))
-    if error[0] != 0 or not wp.isfinite(drift):
-        result[0] = -1
-    else:
-        result[0] = int(drift >= threshold)

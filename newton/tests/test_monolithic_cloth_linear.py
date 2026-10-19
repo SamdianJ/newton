@@ -116,8 +116,6 @@ class TestMonolithicClothLinear(unittest.TestCase):
                         delta=delta,
                     )
                     self.assertEqual(result.status, MonolithicLinearStatus.SUCCESS)
-                    if mode == "diagnostic":
-                        workspace.recover_delta(output, delta, generation=generation)
                     actual_matrix = matrix + np.diag(0.1 / scale**2)
                     np.testing.assert_allclose(delta.numpy(), np.linalg.solve(actual_matrix, rhs), atol=2e-6, rtol=2e-5)
                     self.assertLess(np.linalg.norm(actual_matrix @ delta.numpy() - rhs), 1e-5)

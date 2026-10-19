@@ -28,7 +28,6 @@ class MonolithicLinearStatus(enum.IntEnum):
     NON_POSITIVE_PRECONDITIONED_RESIDUAL = 15
     NONFINITE_ITERATION = 16
     MAX_ITERATIONS = 17
-    STAGNATION = 18
 
 
 class MonolithicPcgWarmStart(enum.IntEnum):
@@ -52,12 +51,6 @@ class MonolithicPcgConfig:
     residual_floor_global: float
     residual_floor_q: float
     residual_floor_x: float
-    curvature_absolute_tolerance: float
-    curvature_relative_tolerance: float
-    preconditioner_positive_tolerance: float
-    stagnation_window: int
-    """Number of scheduled true-residual checks without sufficient best-merit reduction."""
-    stagnation_minimum_reduction: float
     residual_replacement_threshold: float = 0.1
     """Relative gap threshold for replacing recursive residual with true residual.
     Replace when max(eta_global, eta_q, eta_x) >= threshold, where each eta is
@@ -112,26 +105,18 @@ class MonolithicPcgConfig:
             raise ValueError("linear_absolute_tolerance must be nonnegative and representable in float32")
         if any(
             not isinstance(value, int) or isinstance(value, bool) or value <= 0
-            for value in (self.maximum_iterations, self.true_residual_interval, self.stagnation_window)
+            for value in (self.maximum_iterations, self.true_residual_interval)
         ):
-            raise ValueError("PCG iteration counts and stagnation window must be positive integers")
+            raise ValueError("PCG iteration counts must be positive integers")
         positive = (self.linear_tolerance, self.residual_floor_global, self.residual_floor_q, self.residual_floor_x)
-        nonnegative = (
-            self.curvature_absolute_tolerance,
-            self.curvature_relative_tolerance,
-            self.preconditioner_positive_tolerance,
-            self.stagnation_minimum_reduction,
-            self.residual_replacement_threshold,
-        )
-        if (
-            any(
-                not np.isfinite(value)
-                or value < np.finfo(np.float32).smallest_subnormal
-                or value > np.finfo(np.float32).max
-                for value in positive
-            )
-            or any(not np.isfinite(value) or value < 0 or value > np.finfo(np.float32).max for value in nonnegative)
-            or self.stagnation_minimum_reduction >= 1
+        if any(
+            not np.isfinite(value)
+            or value < np.finfo(np.float32).smallest_subnormal
+            or value > np.finfo(np.float32).max
+            for value in positive
+        ) or not (
+            np.isfinite(self.residual_replacement_threshold)
+            and 0 <= self.residual_replacement_threshold <= np.finfo(np.float32).max
         ):
             raise ValueError("PCG tolerances must be finite with positive residual floors")
 
@@ -341,15 +326,9 @@ class MonolithicLinearSolveResult:
     rho: float
     rho_q: float
     rho_x: float
-    min_p_ap: float
-    min_r_z: float
     warm_start: MonolithicPcgWarmStart | None = None
-    initial_guess_norm: float = float("nan")
-    """Measured L2 norm of the initial scaled unknown y; NaN before a solve starts."""
-    recursive_true_residual_gap: tuple[float, float, float] = (float("nan"),) * 3
-    """Maximum scaled L2 recursive-minus-true gap in global/q/x slices before replacement."""
-    stagnation_window: int | None = None
-    """Configured stagnation window in scheduled true-residual checks; None before a solve starts."""
+    checkpoint_history: tuple[tuple[int, tuple[float, ...]], ...] = ()
+    """Diagnostic observation only: (slot, true-residual norm per convergence group) at each checkpoint."""
 
     pcg_policy: str = "dynamic_smart_restart_v2"
     scheduled_slots: int = 0

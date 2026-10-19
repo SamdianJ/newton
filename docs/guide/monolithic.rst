@@ -53,7 +53,10 @@ used directly for continuation.
    solver.load_checkpoint(state, "checkpoint.npz")
 
 The default solver uses FP64 nonlinear arithmetic, strict publication, diagnostic
-PCG and no CUDA graph. Constructor options are validated before the Model is
+PCG and no CUDA graph. Both PCG modes run the same solver; the diagnostic mode
+also records every checkpoint's true residual norms and cannot be captured in a
+CUDA graph. PCG has no stagnation exit: it iterates until its tolerance or
+``linear_max_iterations``. Constructor options are validated before the Model is
 inspected. Regularized direction retries use the same schedule for every scene,
 starting without regularization.
 

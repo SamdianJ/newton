@@ -97,10 +97,6 @@ def test_dense_layout(test, device):
         for operator in (linear.operator, linear.preconditioner):
             with test.assertRaises(ValueError):
                 operator.matvec(run._rhs, run._y, run._y, 1.0, 0.0)
-        test.assertEqual(
-            linear.recover_delta(run._y, run._delta, generation=run._generation),
-            MonolithicLinearStatus.STALE_GENERATION,
-        )
         with test.assertRaises(ValueError):
             linear.begin_assembly(replace(run._generation, assembly_sequence=run._generation.assembly_sequence + 1))
         linear.layout = old

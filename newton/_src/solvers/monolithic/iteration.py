@@ -214,9 +214,7 @@ def solve_direction(solver, residual, scale, limits, pcg, *, iteration, retry, r
                 }
             )
             self._require_linear(result.status)
-            if self.pcg_mode == self.PCGMode.DIAGNOSTIC:
-                self._require_linear(self._linear.recover_delta(self._y, output, generation=self._generation))
-            elif not result.output_valid:
+            if not result.output_valid:
                 raise _StepFailure(self.Status.NONFINITE, "Invalid PCG output")
             if self._native_direction:
                 changed = self._accumulate_direction(correction)
@@ -242,11 +240,7 @@ def solve_direction(solver, residual, scale, limits, pcg, *, iteration, retry, r
             terms = direction_norms(
                 self, self._post_regularization if self._device_iteration else self._post_regularization.numpy()
             )
-        internal = (
-            self._linear._true_residual_norms
-            if self.pcg_mode == self.PCGMode.DIAGNOSTIC
-            else self._linear._masked_pcg_plan.norms
-        ).numpy()
+        internal = self._linear._masked_pcg_plan.norms.numpy()
         postchecks = {
             name: {
                 "residual": errors[name],
@@ -378,11 +372,6 @@ def iterate(solver, dt):
             residual_floor_global=config.residual_floor_global,
             residual_floor_q=config.residual_floor_q,
             residual_floor_x=config.residual_floor_x,
-            curvature_absolute_tolerance=0.0,
-            curvature_relative_tolerance=1e-12,
-            preconditioner_positive_tolerance=0.0,
-            stagnation_window=10,
-            stagnation_minimum_reduction=1e-3,
         )
         accepted = False
         for retry, regularization in enumerate(config.regularization_values):

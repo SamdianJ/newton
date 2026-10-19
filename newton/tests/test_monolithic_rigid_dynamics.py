@@ -25,7 +25,9 @@ from newton._src.solvers.monolithic.linear_types import (
     MonolithicLinearStatus,
     MonolithicPcgWarmStart,
 )
+from newton._src.solvers.monolithic.pcg_common import group_policy
 from newton._src.solvers.monolithic.solver_monolithic import _StepFailure
+from newton.tests.monolithic_pcg_oracle import decide_restart
 from newton.tests.monolithic_test_utils import add_contact_free_tet
 from newton.tests.test_monolithic_actor_layout import mixed_model
 from newton.tests.test_monolithic_linear_assembly import _pcg_config
@@ -285,15 +287,28 @@ def test_mixed_dense_linear(test, device):
                 # An isolated body's drift must trigger restart even when
                 # the global and other actor denominators mask it.
                 group = next(i for i, g in enumerate(layout.groups) if g[0] == name)
-                norms = np.full(2 * linear.group_count, 10.0, dtype=np.float32)
-                gap = np.zeros_like(norms)
-                norms[group], gap[group], gap[0] = 1e-5, 2e-6, 2e-6
-                linear._true_norms.assign(norms)
-                linear._gap_norms.assign(gap)
-                test.assertEqual(linear._should_restart(_pcg_config()), 1)
-                gap[group] = 0
-                linear._gap_norms.assign(gap)
-                test.assertEqual(linear._should_restart(_pcg_config()), 0)
+                config = _pcg_config()
+                floors = wp.array(group_policy(linear.layout, config)[0], dtype=float, device=device)
+                true = np.full(linear.group_count, 10.0, dtype=np.float32)
+                gap = np.zeros_like(true)
+                true[group], gap[group], gap[0] = 1e-5, 2e-6, 2e-6
+                for drift, expected in ((gap[group], 1), (0.0, 0)):
+                    gap[group] = drift
+                    error, decision = wp.zeros(1, dtype=int, device=device), wp.zeros(1, dtype=int, device=device)
+                    wp.launch(
+                        decide_restart,
+                        1,
+                        [
+                            wp.array(gap, dtype=float, device=device),
+                            wp.array(true, dtype=float, device=device),
+                            floors,
+                            wp.float64(config.residual_replacement_threshold),
+                            error,
+                            decision,
+                        ],
+                        device=device,
+                    )
+                    test.assertEqual(int(decision.numpy()[0]), expected)
             test.assertEqual(
                 linear.factor_actor_preconditioner(
                     generation=replace(generation, assembly_sequence=2), pivot_tolerance=0

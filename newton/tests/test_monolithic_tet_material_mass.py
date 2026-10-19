@@ -235,7 +235,7 @@ def test_modes_integration(test, device):
                 solution,
                 generation=generation,
                 warm_start=MonolithicPcgWarmStart.ZERO,
-                config=_pcg_config(linear_tolerance=solver.linear_tolerance, curvature_relative_tolerance=1e-12),
+                config=_pcg_config(linear_tolerance=solver.linear_tolerance),
             )
             test.assertEqual(result.status, MonolithicLinearStatus.SUCCESS, result)
             expected_solution = np.linalg.solve(oracle.scaled_matrix, rhs.numpy())

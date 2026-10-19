@@ -284,14 +284,14 @@ def test_linear_postcheck(test, device):
     state = solver.create_state(dt=0.001)
     state.body_f.assign([[1, 0, 0, 0, 0, 0]])
     original = snapshot(state)
-    recover = solver._linear.recover_delta
+    solve = solver._linear.solve_pcg
 
     def corrupt(*args, **kwargs):
-        status = recover(*args, **kwargs)
-        solver._delta.fill_(float("nan"))
-        return status
+        result = solve(*args, **kwargs)
+        kwargs["delta"].fill_(float("nan"))
+        return result
 
-    with patch.object(solver._linear, "recover_delta", side_effect=corrupt):
+    with patch.object(solver._linear, "solve_pcg", side_effect=corrupt):
         solver.step(state, state, model.control(), dt=0.001)
     test.assertFalse(solver.last_stats.converged)
     test.assertTrue(solver.last_stats.rolled_back)

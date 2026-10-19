@@ -12,15 +12,11 @@ from newton.tests import test_monolithic_linear_assembly as fixtures
 from newton.tests.unittest_utils import add_function_test, get_test_devices
 
 
-def test_without_diagnostics(test, device):
-    """Preserve restart decisions and solutions after removing optional buffers."""
+def test_observation_does_not_change_solution(test, device):
+    """Restart and solve identically whether or not every checkpoint is observed."""
     results = []
-    for observe in (True, False):
-        workspace, generation = fixtures._ready_system(device, heterogeneous=True)
-        if not observe:
-            for key in list(vars(workspace)):
-                if key.startswith("_diagnostic_"):
-                    delattr(workspace, key)
+    for mode in ("diagnostic", "production"):
+        workspace, generation = fixtures._ready_system(device, heterogeneous=True, pcg_mode=mode)
         rhs = wp.array(np.linspace(-1, 2, 11, dtype=np.float32), device=device)
         y = wp.zeros(11, dtype=float, device=device)
         result = workspace.solve_pcg(
@@ -36,7 +32,8 @@ def test_without_diagnostics(test, device):
         (a.status, a.iterations, a.residual_replacements), (b.status, b.iterations, b.residual_replacements)
     )
     np.testing.assert_array_equal(results[0][1], results[1][1])
-    test.assertTrue(np.isnan(b.initial_guess_norm))
+    test.assertEqual(len(a.checkpoint_history), a.true_residual_checks)
+    test.assertEqual(b.checkpoint_history, ())
 
 
 class TestMonolithicPcgRestart(unittest.TestCase):
@@ -44,5 +41,8 @@ class TestMonolithicPcgRestart(unittest.TestCase):
 
 
 add_function_test(
-    TestMonolithicPcgRestart, "test_without_diagnostics", test_without_diagnostics, devices=get_test_devices()
+    TestMonolithicPcgRestart,
+    "test_observation_does_not_change_solution",
+    test_observation_does_not_change_solution,
+    devices=get_test_devices(),
 )

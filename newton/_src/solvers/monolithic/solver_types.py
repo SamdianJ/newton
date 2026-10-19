@@ -62,7 +62,6 @@ class Status(enum.Enum):
     LINEAR_NON_POSITIVE_CURVATURE = "linear_non_positive_curvature"
     LINEAR_PRECONDITIONER_NOT_SPD = "linear_preconditioner_not_spd"
     PRECONDITIONER_FACTORIZATION_FAILED = "preconditioner_factorization_failed"
-    LINEAR_STAGNATION = "linear_stagnation"
     LINEAR_MAX_ITERATIONS = "linear_max_iterations"
     LINE_SEARCH_EXHAUSTED = "line_search_exhausted"
     REGULARIZATION_EXHAUSTED = "regularization_exhausted"
@@ -92,7 +91,12 @@ class Precision(enum.Enum):
 
 
 class PCGMode(str, enum.Enum):
-    """Experimental PCG observation policy, fixed at construction."""
+    """Experimental PCG observation level, fixed at construction.
+
+    Both modes run the same masked PCG. ``DIAGNOSTIC`` additionally records
+    every checkpoint's true-residual group norms; ``PRODUCTION`` permits CUDA
+    graph capture.
+    """
 
     DIAGNOSTIC = "diagnostic"
     PRODUCTION = "production"
@@ -171,16 +175,6 @@ class Stats:
     """Number of dynamic-particle 3x3 blocks in the selected preconditioner."""
     warm_start: str | None = None
     """Most recent solve's initial-guess mode; None when no solve started."""
-    initial_guess_norm: float = math.nan
-    """Measured scaled L2 initial-guess norm for the most recent solve."""
-    recursive_true_residual_gap: float = math.nan
-    """Most recent solve's maximum global scaled L2 recursive-minus-true gap."""
-    recursive_true_residual_gap_q: float = math.nan
-    """Most recent solve's maximum joint scaled L2 recursive-minus-true gap."""
-    recursive_true_residual_gap_x: float = math.nan
-    """Most recent solve's maximum particle scaled L2 recursive-minus-true gap."""
-    stagnation_window: int | None = None
-    """Most recent solve's configured window in true-residual checks."""
     linear_scale_generation: int = -1
     """Assembly sequence of the most recent solve, which can precede the current scale."""
     rho: float = math.nan
@@ -235,8 +229,6 @@ class Stats:
     """Actual particle scaled linear residual denominator floor."""
     accepted_alpha: float = math.nan
     lambda_value: float = math.nan
-    min_p_ap: float = math.nan
-    min_r_z: float = math.nan
     true_residual_recomputations: int = 0
     residual_replacements: int = 0
     active_sample_count: int = 0

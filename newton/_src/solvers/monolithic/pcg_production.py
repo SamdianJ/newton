@@ -546,7 +546,7 @@ class MaskedPcgPlan:
         self._launch(_checkpoint_decision, 1, [self.norms, self.state, self.error, self.params, slot, initial, final])
         self._launch(_replace_recursive, self.n, [self.true_r, self.r, self.state])
 
-    def enqueue_solve(self):
+    def enqueue_solve(self, observer=None):
         """Emit bounded PCG with conditional checkpoint batches on supported CUDA graphs.
 
         Does not capture, launch a graph, read device data or return a host
@@ -555,12 +555,20 @@ class MaskedPcgPlan:
         Every replay resets all lifecycle state. Neither
         convergence nor error changes the host node sequence. CPU, non-captured
         execution and older CUDA drivers retain the fixed masked schedule.
+
+        ``observer`` is a diagnostic host callback invoked after each scheduled
+        checkpoint of an uncaptured solve; it may read device data but must not
+        write any bound buffer, so the numerical path is unchanged.
         """
+        if observer is not None and self.device.is_capturing:
+            raise RuntimeError("A checkpoint observer requires an uncaptured solve")
         nslots = self.config.maximum_iterations
         interval = self.config.true_residual_interval
         self._launch(_initialize_state, 1, [self.state, self.error, self.scalars, nslots])
         self._launch(_initialize_vectors, self.n, [self.y, self.r, self.zero_guess])
         self._emit_checkpoint(0, initial=True)
+        if observer is not None:
+            observer()
         self._emit_direction(0)
 
         def iteration(slot, *, checkpoint, final=False):
@@ -574,6 +582,8 @@ class MaskedPcgPlan:
             self._launch(_finish_update, 1, [self.state, self.error, slot])
             if checkpoint:
                 self._emit_checkpoint(slot, final=final)
+                if observer is not None:
+                    observer()
             if not final:
                 self._emit_direction(slot)
 
@@ -660,12 +670,16 @@ class MaskedPcgPlan:
         )
 
 
-def solve_pcg_production(workspace, rhs_hat, y, *, generation, warm_start, config, delta=None, use_graph=False):
+def solve_pcg_production(
+    workspace, rhs_hat, y, *, generation, warm_start, config, delta=None, use_graph=False, observe=False
+):
     """Synchronous compatibility adapter for existing solve_pcg callers.
 
     Host validation and the final packet read are deliberately outside the
     captured core. The outer Newton loop remains synchronous. To embed PCG in
     a larger graph, bind a MaskedPcgPlan outside it and call plan.enqueue_solve() instead.
+    ``observe`` records every checkpoint's true-residual group norms without
+    changing the solve; it requires an uncaptured solve.
     """
 
     def invalid(code):
@@ -678,12 +692,12 @@ def solve_pcg_production(workspace, rhs_hat, y, *, generation, warm_start, confi
             rho=math.nan,
             rho_q=math.nan,
             rho_x=math.nan,
-            min_p_ap=math.nan,
-            min_r_z=math.nan,
             pcg_policy=PCG_POLICY,
         )
 
     workspace._last_masked_pcg_result = None
+    if observe and use_graph:
+        return invalid(MonolithicLinearStatus.INVALID_ARGUMENT)
     if not isinstance(config, MonolithicPcgConfig):
         return invalid(MonolithicLinearStatus.INVALID_ARGUMENT)
     if workspace.device.is_capturing:
@@ -725,6 +739,7 @@ def solve_pcg_production(workspace, rhs_hat, y, *, generation, warm_start, confi
     capture_seconds = 0.0
     graph_rebuilt = False
     workspace._warm_start_key = None
+    history = []
     if use_graph and workspace.device.is_cuda:
         if plan.graph is None:
             capture_start = time.perf_counter()
@@ -737,8 +752,18 @@ def solve_pcg_production(workspace, rhs_hat, y, *, generation, warm_start, confi
         else:
             plan.replay()
     else:
+        checks = 0
+
+        def observer():
+            nonlocal checks
+            state = plan.state.numpy()[0]
+            if int(state["true_residual_checks"]) > checks:
+                checks = int(state["true_residual_checks"])
+                norms = plan.norms.numpy()[: plan.group_count]
+                history.append((int(state["last_true_slot"]), tuple(map(float, norms))))
+
         plan._in_flight = True
-        plan.enqueue_solve()
+        plan.enqueue_solve(observer if observe else None)
     result = plan.collect_result()
     workspace._last_masked_pcg_result = result
     if result.status == ProductionStatus.SUCCESS:
@@ -754,12 +779,8 @@ def solve_pcg_production(workspace, rhs_hat, y, *, generation, warm_start, confi
         rho=ratios[0],
         rho_q=ratios[1],
         rho_x=ratios[2],
-        min_p_ap=math.nan,
-        min_r_z=math.nan,
         warm_start=warm_start,
-        initial_guess_norm=math.nan,
-        recursive_true_residual_gap=(math.nan,) * 3,
-        stagnation_window=None,
+        checkpoint_history=tuple(history),
         pcg_policy=PCG_POLICY,
         scheduled_slots=result.iteration_slots,
         converged_at_slot=result.convergence_slot,

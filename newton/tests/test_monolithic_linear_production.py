@@ -10,14 +10,13 @@ import numpy as np
 import warp as wp
 
 from newton._src.solvers.monolithic import pcg_production as impl
-from newton._src.solvers.monolithic.linear import MonolithicLinearWorkspace
 from newton._src.solvers.monolithic.linear_types import MonolithicLinearStatus, MonolithicPcgWarmStart
-from newton._src.solvers.monolithic.pcg_common import decide_restart
 from newton.solvers.experimental.monolithic import SolverMonolithic
 from newton.tests import test_monolithic_linear_assembly as fixtures
-from newton.tests.monolithic_pcg_oracle import solve_fixed
+from newton.tests.monolithic_pcg_oracle import decide_restart, solve_fixed
 from newton.tests.monolithic_test_utils import build_contact_free_coupled_fixture, build_tiny_cpu_fixture
 from newton.tests.unittest_utils import add_function_test, get_test_devices
+from scripts.monolithic_reference import benchmark_pcg as benchmark
 
 
 def make_plan(device, matrix, rhs, *, nq=1, config=None, scale=None, lower_q=None, lower_x=None, empty=False):
@@ -234,11 +233,7 @@ def test_all_heavy_kernels_masked(test, device):
 def test_binding_and_adapter(test, device):
     """Validate bindings, factor generations, warm starts and exclusive dispatch."""
 
-    original = fixtures.MonolithicLinearWorkspace
-    with patch.object(
-        fixtures, "MonolithicLinearWorkspace", side_effect=lambda *a, **kw: original(*a, **kw, pcg_mode="production")
-    ):
-        workspace, generation = fixtures._ready_system(device, heterogeneous=True)
+    workspace, generation = fixtures._ready_system(device, heterogeneous=True, pcg_mode="production")
     rhs = wp.array(np.linspace(-1, 2, 11, dtype=np.float32), device=device)
     y = wp.zeros(11, dtype=float, device=device)
     delta = wp.zeros_like(y)
@@ -248,26 +243,25 @@ def test_binding_and_adapter(test, device):
         "config": fixtures._pcg_config(),
         "delta": delta,
     }
-    with patch.object(MonolithicLinearWorkspace, "_solve_pcg_diagnostic", side_effect=AssertionError("old host solve")):
-        result = workspace.solve_pcg(rhs, y, **kwargs)
-        test.assertEqual(result.status, MonolithicLinearStatus.SUCCESS)
-        test.assertTrue(result.output_valid)
-        np.testing.assert_allclose(delta.numpy(), workspace.scale.numpy() * y.numpy(), rtol=1e-6)
-        test.assertFalse(hasattr(workspace, "_diagnostic_vector"))
-        old_plan = workspace._masked_pcg_plan
-        result = workspace.solve_pcg(rhs, y, **{**kwargs, "warm_start": MonolithicPcgWarmStart.SAME_GENERATION})
-        test.assertEqual(result.iterations, 0)
-        test.assertIs(workspace._masked_pcg_plan, old_plan)
-        workspace.set_regularization(0.5, generation=generation)
-        result = workspace.solve_pcg(rhs, y, **kwargs)
-        test.assertEqual(result.status, MonolithicLinearStatus.PRECONDITIONER_NOT_FACTORED)
-        workspace.factor_actor_preconditioner(generation=generation, pivot_tolerance=0)
-        result = workspace.solve_pcg(rhs, y, **kwargs)
-        test.assertEqual(result.status, MonolithicLinearStatus.SUCCESS)
-        result = workspace.solve_pcg(rhs, rhs, **kwargs)
-        test.assertEqual(result.status, MonolithicLinearStatus.INVALID_ARGUMENT)
-        result = workspace.solve_pcg(rhs, y, **{**kwargs, "generation": replace(generation, assembly_sequence=99)})
-        test.assertEqual(result.status, MonolithicLinearStatus.STALE_GENERATION)
+    result = workspace.solve_pcg(rhs, y, **kwargs)
+    test.assertEqual(result.status, MonolithicLinearStatus.SUCCESS)
+    test.assertTrue(result.output_valid)
+    np.testing.assert_allclose(delta.numpy(), workspace.scale.numpy() * y.numpy(), rtol=1e-6)
+    test.assertFalse(hasattr(workspace, "_diagnostic_vector"))
+    old_plan = workspace._masked_pcg_plan
+    result = workspace.solve_pcg(rhs, y, **{**kwargs, "warm_start": MonolithicPcgWarmStart.SAME_GENERATION})
+    test.assertEqual(result.iterations, 0)
+    test.assertIs(workspace._masked_pcg_plan, old_plan)
+    workspace.set_regularization(0.5, generation=generation)
+    result = workspace.solve_pcg(rhs, y, **kwargs)
+    test.assertEqual(result.status, MonolithicLinearStatus.PRECONDITIONER_NOT_FACTORED)
+    workspace.factor_actor_preconditioner(generation=generation, pivot_tolerance=0)
+    result = workspace.solve_pcg(rhs, y, **kwargs)
+    test.assertEqual(result.status, MonolithicLinearStatus.SUCCESS)
+    result = workspace.solve_pcg(rhs, rhs, **kwargs)
+    test.assertEqual(result.status, MonolithicLinearStatus.INVALID_ARGUMENT)
+    result = workspace.solve_pcg(rhs, y, **{**kwargs, "generation": replace(generation, assembly_sequence=99)})
+    test.assertEqual(result.status, MonolithicLinearStatus.STALE_GENERATION)
     plan = make_plan(device, np.eye(4), [1, 2, 3, 4])
     plan.columns.assign(np.zeros(16, dtype=np.int32))
     with test.assertRaisesRegex(ValueError, "layout"):
@@ -346,13 +340,7 @@ def test_solver_production_transactions(test, device):
             calls.append(result)
             return result
 
-        with (
-            patch.object(
-                MonolithicLinearWorkspace, "_solve_pcg_diagnostic", side_effect=AssertionError("host fallback")
-            ),
-            patch.object(solver._linear, "recover_delta", side_effect=AssertionError("duplicate recovery")),
-            patch.object(solver._linear, "solve_pcg", side_effect=observed),
-        ):
+        with patch.object(solver._linear, "solve_pcg", side_effect=observed):
             solver.step(fixture.state, fixture.state_next, fixture.control, dt=0.001)
         test.assertTrue(solver.last_stats.converged)
         test.assertTrue(calls)
@@ -471,6 +459,32 @@ def test_binding_rejections(test, device):
         )
 
 
+def test_one_numerical_path(test, device):
+    """Solve identically in both observation levels; diagnostics only add checkpoint norms."""
+    for case in benchmark.synthetic_cases():
+        with test.subTest(case=case.name):
+            results = {}
+            for mode in ("diagnostic", "production"):
+                runner = benchmark.Runner(case, mode, device, benchmark.pcg_config(400))
+                results[mode] = (runner.solve(), runner.delta.numpy().copy())
+            (observed, delta), (plain, expected) = results["diagnostic"], results["production"]
+            test.assertEqual((observed.status, observed.iterations), (plain.status, plain.iterations))
+            np.testing.assert_array_equal(delta, expected)
+            test.assertEqual(len(observed.checkpoint_history), observed.true_residual_checks)
+            test.assertTrue(all(np.isfinite(norms).all() for _, norms in observed.checkpoint_history))
+            test.assertEqual(plain.checkpoint_history, ())
+
+
+def test_no_stagnation_exit(test, device):
+    """Keep iterating through a slow plateau until convergence or the iteration budget."""
+    case = next(c for c in benchmark.synthetic_cases() if c.name == "ill_conditioned")
+    runner = benchmark.Runner(case, "diagnostic", device, benchmark.pcg_config(400))
+    result = runner.solve()
+    test.assertEqual(result.status, MonolithicLinearStatus.MAX_ITERATIONS)
+    test.assertEqual(result.iterations, 400)
+    test.assertNotIn("STAGNATION", MonolithicLinearStatus.__members__)
+
+
 class TestMonolithicPcgProduction(unittest.TestCase):
     pass
 
@@ -489,5 +503,7 @@ for fn in (
     test_solver_production_transactions,
     test_scalar_failures_and_first_slot,
     test_binding_rejections,
+    test_one_numerical_path,
+    test_no_stagnation_exit,
 ):
     add_function_test(TestMonolithicPcgProduction, fn.__name__, fn, devices=get_test_devices())

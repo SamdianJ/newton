@@ -10,7 +10,7 @@ import warp as wp
 import warp.sparse as sparse
 from warp.optim.linear import LinearOperator
 
-from . import bsr, pcg, preconditioner
+from . import bsr, preconditioner
 from .bsr import (
     MonolithicLinearAssembly,
     _create_triplets,
@@ -20,7 +20,6 @@ from .bsr import (
     _MonolithicScalarTriplets,
     _pack_assembly_counts,
     _pack_assembly_result,
-    _scale_vector,
     _validate_aq_finite,
     _validate_bsr_finite,
     _validate_triplets,
@@ -44,8 +43,8 @@ from .linear_types import (
     MonolithicPcgConfig,
     MonolithicPcgWarmStart,
 )
-from .pcg import _MonolithicPcgPacket
 from .pcg_common import group_data
+from .pcg_production import solve_pcg_production
 from .preconditioner import _monolithic_preconditioner_matvec
 
 
@@ -195,41 +194,11 @@ class MonolithicLinearWorkspace:
             "_scaled_x",
             "_k_scaled",
             "_preconditioned",
-            "_r",
-            "_z",
-            "_p",
-            "_ap",
-            "_true_r",
         ):
             setattr(self, name, wp.zeros(n, dtype=float, device=device))
-        for name in ("_r_z", "_old_r_z", "_alpha", "_beta"):
-            setattr(self, name, wp.zeros(1, dtype=float, device=device))
-        self._products = wp.zeros(3, dtype=float, device=device)
-        self._true_sums = wp.zeros(2 * self.group_count, dtype=float, device=device)
-        self._true_maxima = wp.zeros(2 * self.group_count, dtype=float, device=device)
-        self._true_norms = wp.zeros(2 * self.group_count, dtype=float, device=device)
-        self._true_residual_norms = self._true_norms[: self.group_count]
-        if self.pcg_mode == "diagnostic":
-            self._diagnostic_vector = wp.zeros(n, dtype=float, device=device)
-            self._diagnostic_zero = wp.zeros(n, dtype=float, device=device)
-            self._diagnostic_maxima = wp.zeros(2 * self.group_count, dtype=float, device=device)
-            self._diagnostic_sums = wp.zeros(2 * self.group_count, dtype=float, device=device)
-            self._diagnostic_norms = wp.zeros(2 * self.group_count, dtype=float, device=device)
-            self._diagnostic_status = wp.zeros(1, dtype=int, device=device)
-            self._diagnostic_summary = wp.zeros(6, dtype=float, device=device)
-        self._gap_vector = wp.zeros(n, dtype=float, device=device)
-        self._gap_zero = wp.zeros(n, dtype=float, device=device)
-        self._gap_maxima = wp.zeros(2 * self.group_count, dtype=float, device=device)
-        self._gap_sums = wp.zeros(2 * self.group_count, dtype=float, device=device)
-        self._gap_norms = wp.zeros(2 * self.group_count, dtype=float, device=device)
-        self._gap_status = wp.zeros(1, dtype=int, device=device)
-        self._restart_decision = wp.zeros(1, dtype=int, device=device)
-        self._pcg_packet = wp.zeros(1, dtype=_MonolithicPcgPacket, device=device)
-        self._rhs_denominator = wp.zeros(1, dtype=wp.float64, device=device)
         self.factor_setup_count = 0
         self.factor_failure_count = 0
         self.factor_last_status = None
-        self._ratios = wp.zeros(self.group_count, dtype=float, device=device)
         self._status = wp.zeros(1, dtype=int, device=device)
         self.floor_count = wp.zeros(1, dtype=int, device=device)
         self._q_preconditioner = wp.zeros_like(self.aq_actor_dense)
@@ -660,21 +629,6 @@ class MonolithicLinearWorkspace:
         """Return the immutable execution mode selected at construction."""
         return self._pcg_mode
 
-    def _diagnostic_block_norms(self, vector) -> None:
-        return pcg._diagnostic_block_norms(self, vector)
-
-    def _compute_gap_norms_for_restart(self, gap_vector) -> None:
-        return pcg._compute_gap_norms_for_restart(self, gap_vector)
-
-    def _should_restart(self, config):
-        return pcg._should_restart(self, config)
-
-    def _products_of(self, a, b):
-        return pcg._products_of(self, a, b)
-
-    def _true_residual(self, rhs, y, config):
-        return pcg._true_residual(self, rhs, y, config)
-
     def solve_pcg(
         self,
         rhs_hat: wp.array[float],
@@ -690,36 +644,20 @@ class MonolithicLinearWorkspace:
         SAME_GENERATION reuses only the last successful solution array for this
         unchanged K/D/S. Lambda may change, but requires refactorization first.
         Every solve recomputes its initial true residual, including warm starts.
+        Both PCG modes run the same masked kernels; the diagnostic mode only
+        records every checkpoint's true-residual group norms.
         """
-        if self.pcg_mode == "production":
-            from .pcg_production import solve_pcg_production  # noqa: PLC0415 - load only the selected backend
-
-            return solve_pcg_production(
-                self,
-                rhs_hat,
-                y,
-                generation=generation,
-                warm_start=warm_start,
-                config=config,
-                delta=delta,
-                use_graph=self.use_cuda_graph,
-            )
-        return self._solve_pcg_diagnostic(rhs_hat, y, generation=generation, warm_start=warm_start, config=config)
-
-    def _solve_pcg_diagnostic(self, rhs_hat, y, *, generation, warm_start, config):
-        return pcg._solve_pcg_diagnostic(self, rhs_hat, y, generation=generation, warm_start=warm_start, config=config)
-
-    def recover_delta(
-        self, y: wp.array[float], delta: wp.array[float], *, generation: MonolithicLinearGeneration
-    ) -> MonolithicLinearStatus:
-        if not self._current(generation) or not self._scaling_valid:
-            return MonolithicLinearStatus.STALE_GENERATION
-        if not self._vector_valid(y) or not self._vector_valid(delta):
-            return MonolithicLinearStatus.INVALID_ARGUMENT
-        wp.launch(_scale_vector, y.size, [self.scale, y, delta], device=self.device)
-        self._status.zero_()
-        self._products_of(delta, delta)
-        return self._read_status()
+        return solve_pcg_production(
+            self,
+            rhs_hat,
+            y,
+            generation=generation,
+            warm_start=warm_start,
+            config=config,
+            delta=delta,
+            use_graph=self.use_cuda_graph,
+            observe=self.pcg_mode == "diagnostic",
+        )
 
     def densify_for_test(self, *, generation: MonolithicLinearGeneration) -> MonolithicDenseLinearOracle:
         """Copy the finalized production BSR to a host dense debug oracle."""

@@ -8,9 +8,8 @@ from dataclasses import replace
 from unittest.mock import patch
 
 import numpy as np
-import warp as wp
 
-from newton._src.solvers.monolithic import pcg, pcg_production_kernels
+from newton._src.solvers.monolithic import pcg_production_kernels
 from newton._src.solvers.monolithic.pcg_production import MaskedPcgConfig
 from newton.solvers.experimental.monolithic import SolverMonolithic
 from newton.tests.monolithic_test_utils import build_contact_free_coupled_fixture, build_tiny_cpu_fixture
@@ -47,10 +46,8 @@ def test_absolute_acceptance(test, device):
 
 
 def test_block_acceptance(test, device):
-    """Require every block to pass either its relative or absolute bound in both controllers."""
+    """Require every block to pass either its relative or absolute bound."""
     plan = make_plan(device, np.eye(4), [1, 0, 0, 0])
-    packet = wp.zeros(1, dtype=pcg._MonolithicPcgPacket, device=device)
-    ratios = wp.zeros(3, dtype=float, device=device)
     unbounded = (float("inf"),) * 3
     for norms, rhs, limits, expected in (
         ((5e-7, 3e-7, 4e-7), (5e-7, 3e-7, 4e-7), unbounded, True),
@@ -72,24 +69,6 @@ def test_block_acceptance(test, device):
                 [plan.norms, plan.state, plan.error, plan.params, 0, True, False],
             )
             test.assertEqual(int(plan.state.numpy()[0]["status"]) == 0, expected)
-            diagnostic_norms = wp.array([*norms, *rhs], dtype=float, device=device)
-            wp.launch(
-                pcg._pack_monolithic_pcg_residual,
-                1,
-                [
-                    plan.error,
-                    ratios,
-                    diagnostic_norms,
-                    plan.params.floors,
-                    1e-4,
-                    1e-6,
-                    plan.residual_norm_limits,
-                    plan.compat_groups,
-                    packet,
-                ],
-                device=device,
-            )
-            test.assertEqual(bool(packet.numpy()[0]["check"]), expected)
 
 
 def test_solver_option(test, device):
