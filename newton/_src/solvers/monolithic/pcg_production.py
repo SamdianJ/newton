@@ -36,23 +36,25 @@ from .linear_types import (
 )
 from .pcg_common import group_data, group_policy
 from .pcg_production_kernels import (
+    REDUCTION_CHUNK,
     _alpha_guard,
     _begin_slot,
     _checkpoint_decision,
+    _chunk_norm_sums,
+    _chunk_products,
     _clear_norm_work,
-    _clear_products,
     _DeviceResult,
     _finalize_result,
     _finish_direction,
     _finish_norms,
     _finish_update,
     _gamma_and_beta_guard,
+    _group_norm_sums,
     _initialize_state,
     _initialize_vectors,
     _loop_condition,
     _make_products_kernel,
     _masked_direction,
-    _masked_products,
     _masked_q_solve,
     _masked_rigid_solve,
     _masked_scaled_csr_mv,
@@ -63,8 +65,8 @@ from .pcg_production_kernels import (
     _recover_candidate,
     _replace_recursive,
     _residual_and_maxima,
-    _residual_norm_sums,
     _study_mask,
+    _sum_products,
 )
 
 PCG_POLICY = "masked_smart_restart_v3"
@@ -283,6 +285,20 @@ class MaskedPcgPlan:
         for name in ("r", "z", "p", "ap", "true_r", "gap", "temporary", "delta_candidate"):
             setattr(self, name, wp.zeros(self.n, dtype=float, device=self.device))
         self.products = wp.zeros(1, dtype=float, device=self.device)
+        chunk_count = (self.n + REDUCTION_CHUNK - 1) // REDUCTION_CHUNK
+        self.product_partials = wp.zeros(chunk_count, dtype=float, device=self.device)
+        # Residual norms reduce fixed chunks of each contiguous convergence group.
+        chunks, group_chunks = [], [0]
+        for group, (_, start, count) in enumerate(self.layout.groups[1:], 1):
+            end = start + count
+            chunks.extend((group, i, min(i + REDUCTION_CHUNK, end)) for i in range(start, end, REDUCTION_CHUNK))
+            group_chunks.append(len(chunks))
+        chunks = np.asarray(chunks, dtype=np.int32).reshape(-1, 3)
+        self.chunk_group, self.chunk_start, self.chunk_end = (
+            wp.array(chunks[:, k], dtype=int, device=self.device) for k in range(3)
+        )
+        self.group_chunks = wp.array(np.asarray(group_chunks, dtype=np.int32), dtype=int, device=self.device)
+        self.norm_partials = wp.zeros((len(chunks), 6), dtype=float, device=self.device)
         self.scalars = wp.zeros(3, dtype=float, device=self.device)
         self.maxima = wp.zeros(3 * self.group_count, dtype=float, device=self.device)
         self.sums = wp.zeros(3 * self.group_count, dtype=float, device=self.device)
@@ -480,8 +496,9 @@ class MaskedPcgPlan:
                 device=self.device,
             )
         else:
-            self._launch(_clear_products, 1, [self.products, self.state])
-            self._launch(_masked_products, self.n, [a, b, self.products, self.state, self.error])
+            partials = self.product_partials
+            self._launch(_chunk_products, partials.size, [a, b, partials, self.state, self.error])
+            self._launch(_sum_products, 1, [partials, self.products, self.state])
 
     def _emit_direction(self, slot):
         if self._cloth_preconditioner is not None:
@@ -536,9 +553,26 @@ class MaskedPcgPlan:
             ],
         )
         self._launch(
-            _residual_norm_sums,
-            self.n,
-            [self.rhs, self.true_r, self.gap, self.maxima, self.sums, self.state, self.error, self.row_groups, initial],
+            _chunk_norm_sums,
+            self.norm_partials.shape[0],
+            [
+                self.rhs,
+                self.true_r,
+                self.gap,
+                self.maxima,
+                self.chunk_group,
+                self.chunk_start,
+                self.chunk_end,
+                self.norm_partials,
+                self.state,
+                self.error,
+                initial,
+            ],
+        )
+        self._launch(
+            _group_norm_sums,
+            self.group_count,
+            [self.norm_partials, self.group_chunks, self.sums, self.state, self.error, initial],
         )
         self._launch(
             _finish_norms, 3 * self.group_count, [self.maxima, self.sums, self.norms, self.state, self.error, initial]

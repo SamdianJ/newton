@@ -254,31 +254,41 @@ def _masked_x_solve(
             wp.atomic_max(error, 0, _NONFINITE)
 
 
-@wp.kernel
-def _clear_products(products: wp.array[float], state: wp.array[_DeviceResult]):
-    if state[0].enabled == 0:
-        return
-    products[0] = 0.0
+# Fixed-order reductions: each chunk is summed sequentially by one thread, then
+# chunks are combined in index order, so results do not depend on scheduling.
+REDUCTION_CHUNK = 256
 
 
 @wp.kernel
-def _masked_products(
+def _chunk_products(
     a: wp.array[float],
     b: wp.array[float],
-    products: wp.array[float],
+    partials: wp.array[float],
     state: wp.array[_DeviceResult],
     error: wp.array[int],
 ):
     if state[0].enabled == 0:
         return
-    i = wp.tid()
-    av, bv = a[i], b[i]
-    if not wp.isfinite(av) or not wp.isfinite(bv):
-        wp.atomic_max(error, 0, _NONFINITE)
+    c = wp.tid()
+    start = c * REDUCTION_CHUNK
+    total = float(0.0)
+    for i in range(start, wp.min(start + REDUCTION_CHUNK, a.shape[0])):
+        av, bv = a[i], b[i]
+        if not wp.isfinite(av) or not wp.isfinite(bv):
+            wp.atomic_max(error, 0, _NONFINITE)
+            return
+        total += av * bv
+    partials[c] = total
+
+
+@wp.kernel
+def _sum_products(partials: wp.array[float], products: wp.array[float], state: wp.array[_DeviceResult]):
+    if state[0].enabled == 0:
         return
-    # Retain the existing float32 inner products; changing reduction precision
-    # is a separate numerical/performance change, not a graph requirement.
-    wp.atomic_add(products, 0, av * bv)
+    total = float(0.0)
+    for c in range(partials.shape[0]):
+        total += partials[c]
+    products[0] = total
 
 
 @functools.cache
@@ -500,35 +510,71 @@ def _residual_and_maxima(
 
 
 @wp.kernel
-def _residual_norm_sums(
+def _chunk_norm_sums(
     rhs: wp.array[float],
     true_r: wp.array[float],
     gap: wp.array[float],
     maxima: wp.array[float],
-    sums: wp.array[float],
+    chunk_group: wp.array[int],
+    chunk_start: wp.array[int],
+    chunk_end: wp.array[int],
+    partials: wp.array2d[float],
     state: wp.array[_DeviceResult],
     error: wp.array[int],
-    groups: wp.array[int],
     initial: bool,
 ):
+    """Sum maxima-scaled squares of one group chunk, for the global and its own group."""
     if state[0].status != _RUNNING or error[0] != 0:
         return
-    i = wp.tid()
-    block = groups[i]
+    c = wp.tid()
     group_count = maxima.shape[0] / 3
     for k in range(2):
         part = int(0)
         if k == 1:
-            part = block
-        if maxima[part] > 0.0:
-            v = true_r[i] / maxima[part]
-            wp.atomic_add(sums, part, v * v)
-        if maxima[group_count + part] > 0.0:
-            v = gap[i] / maxima[group_count + part]
-            wp.atomic_add(sums, group_count + part, v * v)
-        if initial and maxima[2 * group_count + part] > 0.0:
-            v = rhs[i] / maxima[2 * group_count + part]
-            wp.atomic_add(sums, 2 * group_count + part, v * v)
+            part = chunk_group[c]
+        t, d, r = float(0.0), float(0.0), float(0.0)
+        for i in range(chunk_start[c], chunk_end[c]):
+            if maxima[part] > 0.0:
+                v = true_r[i] / maxima[part]
+                t += v * v
+            if maxima[group_count + part] > 0.0:
+                v = gap[i] / maxima[group_count + part]
+                d += v * v
+            if initial and maxima[2 * group_count + part] > 0.0:
+                v = rhs[i] / maxima[2 * group_count + part]
+                r += v * v
+        partials[c, 3 * k] = t
+        partials[c, 3 * k + 1] = d
+        partials[c, 3 * k + 2] = r
+
+
+@wp.kernel
+def _group_norm_sums(
+    partials: wp.array2d[float],
+    group_chunks: wp.array[int],
+    sums: wp.array[float],
+    state: wp.array[_DeviceResult],
+    error: wp.array[int],
+    initial: bool,
+):
+    """Combine chunk sums in index order; group 0 is global and spans every chunk."""
+    if state[0].status != _RUNNING or error[0] != 0:
+        return
+    g = wp.tid()
+    group_count = sums.shape[0] / 3
+    # group_chunks[g - 1] .. group_chunks[g] are the chunks of actor group g >= 1.
+    column, start, end = int(0), int(0), int(partials.shape[0])
+    if g > 0:
+        column, start, end = int(3), int(group_chunks[g - 1]), int(group_chunks[g])
+    t, d, r = float(0.0), float(0.0), float(0.0)
+    for c in range(start, end):
+        t += partials[c, column]
+        d += partials[c, column + 1]
+        r += partials[c, column + 2]
+    sums[g] = t
+    sums[group_count + g] = d
+    if initial:
+        sums[2 * group_count + g] = r
 
 
 @wp.kernel

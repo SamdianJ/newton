@@ -2,8 +2,10 @@
 # SPDX-License-Identifier: Apache-2.0
 """Exercise the fixed masked policy using real kernels and small dense systems."""
 
+import ast
 import unittest
 from dataclasses import replace
+from pathlib import Path
 from unittest.mock import patch
 
 import numpy as np
@@ -485,8 +487,35 @@ def test_no_stagnation_exit(test, device):
     test.assertNotIn("STAGNATION", MonolithicLinearStatus.__members__)
 
 
+def test_fixed_order_reductions(test, device):
+    """Repeat a multi-chunk solve bitwise and match a float64 reference without float atomics."""
+    n = 3 * 1200 + 2
+    rng = np.random.default_rng(31)
+    diagonal = rng.uniform(1.0, 4.0, n)
+    off = rng.uniform(-0.2, 0.2, n - 1)
+    matrix = np.diag(diagonal) + np.diag(off, 1) + np.diag(off, -1)
+    rhs = rng.normal(size=n).astype(np.float32)
+    config = impl.MaskedPcgConfig(maximum_iterations=60, true_residual_interval=5, linear_tolerance=1e-6)
+    solutions = []
+    for _ in range(2):
+        plan = make_plan(device, matrix, rhs, nq=2, config=config)
+        result = solve(plan, graph=device.is_cuda)
+        test.assertEqual(result.status, impl.ProductionStatus.SUCCESS)
+        solutions.append(plan.y.numpy().copy())
+    np.testing.assert_array_equal(solutions[0], solutions[1])
+    np.testing.assert_allclose(solutions[0], np.linalg.solve(matrix, rhs), rtol=1e-4, atol=1e-5)
+
+
 class TestMonolithicPcgProduction(unittest.TestCase):
-    pass
+    def test_no_float_atomic_accumulation(self):
+        """Reduce PCG products and residual norms in a fixed order on every device."""
+        tree = ast.parse(Path(impl.__file__).with_name("pcg_production_kernels.py").read_text())
+        calls = [
+            node.func.attr
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "atomic_add"
+        ]
+        self.assertEqual(calls, [])
 
 
 for fn in (
@@ -505,5 +534,6 @@ for fn in (
     test_binding_rejections,
     test_one_numerical_path,
     test_no_stagnation_exit,
+    test_fixed_order_reductions,
 ):
     add_function_test(TestMonolithicPcgProduction, fn.__name__, fn, devices=get_test_devices())
