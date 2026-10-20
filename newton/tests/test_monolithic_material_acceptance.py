@@ -20,7 +20,7 @@ from scripts.monolithic_reference.material_scene import MaterialScene, load_frac
 class TestMaterialAcceptance(unittest.TestCase):
     def test_stiff_shell_force_corrections(self):
         """Resolve every row of a stiff precreased box below its physical force gate."""
-        case = MaterialScene("precreased-box", recipe=RECIPE_PATH.with_name("material_acceptance_v7.json"))
+        case = MaterialScene("precreased-box")
         case.state.joint_q.assign([0.00652])
         case.state.joint_qd.assign([0.012])
         case.solver.reset_state(case.state, dt=case.dt)
@@ -32,9 +32,10 @@ class TestMaterialAcceptance(unittest.TestCase):
             self.assertLessEqual(np.abs(residual).max(), gate)
 
     def test_retired_solver_options_rejected(self):
-        """Refuse recipes whose solver residual options were replaced by per-row convergence."""
-        with self.assertRaisesRegex(ValueError, "retired solver options"):
-            MaterialScene("cloth-press", recipe=RECIPE_PATH.with_name("material_acceptance_v6.json"))
+        """Refuse recipes whose solver tolerance options were replaced by per-row physical limits."""
+        for version in (6, 7):
+            with self.subTest(version=version), self.assertRaisesRegex(ValueError, "retired solver options"):
+                MaterialScene("cloth-press", recipe=RECIPE_PATH.with_name(f"material_acceptance_v{version}.json"))
 
     def test_cross_mode_evidence(self):
         """Reject an intermediate-frame drift and partial or mixed-source matrices."""

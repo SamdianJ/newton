@@ -15,7 +15,7 @@ import numpy as np
 import warp as wp
 
 from .material_acceptance import MaterialAcceptance
-from .material_recipes import RECIPE_PATH
+from .material_recipes import MATERIAL_RECIPE_PATH
 from .profiling import provenance
 
 
@@ -96,7 +96,7 @@ def run_case(name, args, source):
 def main():
     """Run every requested case; a filtered or short matrix remains PARTIAL."""
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--recipe", type=Path, default=RECIPE_PATH)
+    parser.add_argument("--recipe", type=Path, default=MATERIAL_RECIPE_PATH)
     parser.add_argument("--case", choices=("all", "cable-bend-twist", "cloth-press", "precreased-box"), default="all")
     parser.add_argument("--device", default="cpu")
     parser.add_argument("--pcg-mode", choices=("diagnostic", "production"), default="diagnostic")

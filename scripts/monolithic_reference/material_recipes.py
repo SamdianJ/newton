@@ -11,6 +11,8 @@ from pathlib import Path
 import numpy as np
 
 RECIPE_PATH = Path(__file__).parent / "fixtures/material_acceptance_v1.json"
+# The current coupled-scene recipe; older versions set retired solver options.
+MATERIAL_RECIPE_PATH = RECIPE_PATH.with_name("material_acceptance_v8.json")
 
 
 def build_case(name, *, recipe=RECIPE_PATH):

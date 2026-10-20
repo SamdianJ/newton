@@ -427,7 +427,9 @@ class TestArticulationContracts(unittest.TestCase):
         for name in a:
             np.testing.assert_array_equal(a[name], b[name])
         self.assertIn("publish_policy", a)
-        self.assertEqual(int(a["config_version"][0]), 4)
+        self.assertEqual(int(a["config_version"][0]), 5)
+        # The linear absolute tolerance option is retired; four iteration budgets remain.
+        self.assertEqual(a["iteration_policy"].size, 4)
         for name in ("use_cuda_graph", "pcg_mode", "contact_factor_capacity", "contact_candidate_capacity"):
             self.assertNotIn(name, a)
         changed = MonolithicConfig(friction_velocity_scale=0.01, publish_policy="last_accepted").identity_fields()

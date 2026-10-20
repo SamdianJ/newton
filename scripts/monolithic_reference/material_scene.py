@@ -9,7 +9,7 @@ from newton.solvers.experimental.monolithic import SolverMonolithic
 
 import newton
 
-from .material_recipes import RECIPE_PATH, build_case, shell_coefficients
+from .material_recipes import MATERIAL_RECIPE_PATH, build_case, shell_coefficients
 
 
 def load_fraction(step, common):
@@ -25,7 +25,7 @@ def load_fraction(step, common):
 class MaterialScene:
     """Keep scene construction and controls identical across device and restart paths."""
 
-    def __init__(self, name, *, recipe=RECIPE_PATH, device="cpu", pcg_mode="diagnostic", use_cuda_graph=False):
+    def __init__(self, name, *, recipe=MATERIAL_RECIPE_PATH, device="cpu", pcg_mode="diagnostic", use_cuda_graph=False):
         self.name = name
         self.options = {"recipe": recipe, "device": device, "pcg_mode": pcg_mode, "use_cuda_graph": use_cuda_graph}
         self.case = case = build_case(name, recipe=recipe)
@@ -105,9 +105,9 @@ class MaterialScene:
             builder.add_triangle(*face, tri_ke=material[1], tri_ka=material[0], tri_kd=0, tri_drag=0, tri_lift=0)
         self.model = builder.finalize(device=device)
         self.rest = self.model.particle_q.numpy().astype(float)
-        retired = {"joint_residual_tolerance", "cloth_position_tolerance"} & c.keys()
+        retired = {"joint_residual_tolerance", "cloth_position_tolerance", "linear_absolute_tolerance"} & c.keys()
         if retired:
-            raise ValueError(f"Recipe sets retired solver options {sorted(retired)}; use material_acceptance_v7.json")
+            raise ValueError(f"Recipe sets retired solver options {sorted(retired)}; use material_acceptance_v8.json")
         self.solver = SolverMonolithic(
             self.model,
             cloth_inputs=cloth,
@@ -129,7 +129,6 @@ class MaterialScene:
                     "line_search_max_iterations",
                     "linear_max_iterations",
                     "linear_tolerance",
-                    "linear_absolute_tolerance",
                 )
             },
         )

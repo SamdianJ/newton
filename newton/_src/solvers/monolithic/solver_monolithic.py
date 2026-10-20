@@ -143,7 +143,6 @@ class SolverMonolithic(SolverBase):
         line_search_max_iterations=8,
         linear_max_iterations=200,
         linear_tolerance=1e-4,
-        linear_absolute_tolerance=1e-6,
         pcg_mode=PCGMode.DIAGNOSTIC,
         use_cuda_graph=False,
         precision=Precision.FP64,
@@ -167,7 +166,6 @@ class SolverMonolithic(SolverBase):
             line_search_max_iterations=line_search_max_iterations,
             linear_max_iterations=linear_max_iterations,
             linear_tolerance=linear_tolerance,
-            linear_absolute_tolerance=linear_absolute_tolerance,
             pcg_mode=pcg_mode,
             use_cuda_graph=use_cuda_graph,
             precision=precision,
@@ -366,7 +364,7 @@ class SolverMonolithic(SolverBase):
         self._globalization = GLOBALIZATION
         self.newton_max_iterations, self.line_search_max_iterations = newton_max_iterations, line_search_max_iterations
         self.linear_max_iterations = linear_max_iterations
-        self.linear_tolerance, self.linear_absolute_tolerance = linear_tolerance, linear_absolute_tolerance
+        self.linear_tolerance = linear_tolerance
         self._use_cuda_graph = use_cuda_graph
         self._graphs = _SegmentGraphCache(device, enabled=use_cuda_graph)
         self._states._graphs = self._graphs

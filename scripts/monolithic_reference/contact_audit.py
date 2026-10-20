@@ -162,7 +162,6 @@ def verify_contract(left, right):
         "line_search_max_iterations",
         "linear_max_iterations",
         "linear_tolerance",
-        "linear_absolute_tolerance",
         "_globalization",
     )
     _exact({name: getattr(left, name) for name in policies}, {name: getattr(right, name) for name in policies})

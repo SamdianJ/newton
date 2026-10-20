@@ -309,7 +309,10 @@ def iterate(solver, dt):
             # give different accepted trajectories at unchanged outer gates.
             true_residual_interval=1 if self._linear.layout.rigid_ranges else 10,
             linear_tolerance=self.linear_tolerance,
-            linear_absolute_tolerance=self.linear_absolute_tolerance,
+            # An absolute term at the largest limit makes every group's target
+            # min(max(rtol |b_g|, atol), limit_g) its own limit: PCG stops where
+            # the posterior qualifies the direction, without oversolving.
+            linear_absolute_tolerance=float(max(limits.values())),
             residual_norm_limits=tuple(limits.get(name, 1.0) for name in ("global", "q", "x")),
             group_norm_limits=tuple(limits[name] for name, _ in blocks(self))
             if self._linear.layout.rigid_ranges or self._linear.layout.material_ranges

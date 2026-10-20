@@ -14,8 +14,9 @@ from .solver_types import MassMode, MaterialModel, PCGMode, Precision
 CONTACT_MODEL = "C-IE"
 GLOBALIZATION = "ArmijoOrResNorm"
 # Version 4 (P8b): per-row physical convergence replaces the scaled-norm goals and
-# the cable, cloth and joint residual tolerance options.
-CONFIG_VERSION = 4
+# the cable, cloth and joint residual tolerance options. Version 5: linear solves
+# stop at the physical limits, and the absolute linear tolerance option is removed.
+CONFIG_VERSION = 5
 
 
 def _number(value):
@@ -49,7 +50,6 @@ class MonolithicConfig:
     line_search_max_iterations: int = 8
     linear_max_iterations: int = 200
     linear_tolerance: float = 1e-4
-    linear_absolute_tolerance: float = 1e-6
     pcg_mode: PCGMode = PCGMode.DIAGNOSTIC
     use_cuda_graph: bool = False
     precision: Precision = Precision.FP64
@@ -90,9 +90,8 @@ class MonolithicConfig:
         for value in (self.newton_max_iterations, self.line_search_max_iterations, self.linear_max_iterations):
             if type(value) is not int or value <= 0:
                 raise ValueError("Iteration budgets must be positive integers")
-        for value in (self.linear_tolerance, self.linear_absolute_tolerance):
-            if not _number(value) or not math.isfinite(value) or value < 0:
-                raise ValueError("Invalid linear tolerance")
+        if not _number(self.linear_tolerance) or not math.isfinite(self.linear_tolerance) or self.linear_tolerance < 0:
+            raise ValueError("Invalid linear tolerance")
         if type(self.use_cuda_graph) is not bool or (self.use_cuda_graph and self.pcg_mode != PCGMode.PRODUCTION):
             raise ValueError("use_cuda_graph requires CUDA production PCG and a bool")
 
@@ -128,7 +127,6 @@ class MonolithicConfig:
                     self.line_search_max_iterations,
                     self.linear_max_iterations,
                     self.linear_tolerance,
-                    self.linear_absolute_tolerance,
                 ],
                 dtype=np.float64,
             ),
