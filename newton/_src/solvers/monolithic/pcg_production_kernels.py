@@ -257,6 +257,8 @@ REDUCTION_CHUNK = 256
 def _chunk_products(
     a: wp.array[Any],
     b: wp.array[Any],
+    chunk_start: wp.array[int],
+    chunk_end: wp.array[int],
     partials: wp.array[Any],
     state: wp.array[_DeviceResult],
     error: wp.array[int],
@@ -264,9 +266,8 @@ def _chunk_products(
     if state[0].enabled == 0:
         return
     c = wp.tid()
-    start = c * REDUCTION_CHUNK
     total = partials.dtype(0.0)
-    for i in range(start, wp.min(start + REDUCTION_CHUNK, a.shape[0])):
+    for i in range(chunk_start[c], chunk_end[c]):
         av, bv = a[i], b[i]
         if not wp.isfinite(av) or not wp.isfinite(bv):
             wp.atomic_max(error, 0, _NONFINITE)
@@ -276,12 +277,24 @@ def _chunk_products(
 
 
 @wp.kernel
-def _sum_products(partials: wp.array[Any], products: wp.array[Any], state: wp.array[_DeviceResult]):
+def _sum_products(
+    partials: wp.array[Any],
+    segment_chunks: wp.array[int],
+    segment_products: wp.array[Any],
+    products: wp.array[Any],
+    state: wp.array[_DeviceResult],
+):
+    """Sum each world's chunks in index order, then the worlds in world order."""
     if state[0].enabled == 0:
         return
+    for w in range(segment_products.shape[0]):
+        segment = products.dtype(0.0)
+        for c in range(segment_chunks[w], segment_chunks[w + 1]):
+            segment += partials[c]
+        segment_products[w] = segment
     total = products.dtype(0.0)
-    for c in range(partials.shape[0]):
-        total += partials[c]
+    for w in range(segment_products.shape[0]):
+        total += segment_products[w]
     products[0] = total
 
 

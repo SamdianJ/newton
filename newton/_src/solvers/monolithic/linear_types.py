@@ -4,6 +4,7 @@
 """Shared layouts, capacities, configuration and results for linear solves."""
 
 import enum
+import itertools
 from dataclasses import dataclass
 
 import numpy as np
@@ -131,6 +132,8 @@ class MonolithicLinearLayout:
     actor_ranges: tuple[tuple[str, int, int], ...] = ()
     rigid_ranges: tuple[tuple[int, int], ...] = ()
     material_ranges: tuple[tuple[str, int, int, int, int], ...] = ()
+    # World segment boundaries: world w owns scalar rows [world_segments[w], world_segments[w + 1]).
+    world_segments: tuple[int, ...] = ()
 
     def __post_init__(self):
         for value in (self.q_dof_count, self.dynamic_particle_count, self.q_scalar_offset, self.x_scalar_offset):
@@ -164,6 +167,23 @@ class MonolithicLinearLayout:
             cursor += count
         if cursor != self.scalar_dof_count:
             raise ValueError("Actor ranges must partition the scalar layout")
+        if not self.world_segments:
+            object.__setattr__(self, "world_segments", (0, self.scalar_dof_count))
+        object.__setattr__(self, "world_segments", tuple(int(value) for value in self.world_segments))
+        boundaries = {0, *(start + count for _, start, count in self.actor_ranges)}
+        segments = self.world_segments
+        if (
+            len(segments) < 2
+            or segments[0] != 0
+            or segments[-1] != self.scalar_dof_count
+            or (
+                any(end <= start for start, end in itertools.pairwise(segments))
+                if self.scalar_dof_count
+                else segments != (0, 0)
+            )
+            or not set(segments) <= boundaries
+        ):
+            raise ValueError("World segments must partition the scalar layout at actor boundaries")
         if sorted((start, count) for kind, start, count in self.actor_ranges if kind == "rigid") != sorted(
             (start, 6) for _, start in self.rigid_ranges
         ):
@@ -213,6 +233,10 @@ class MonolithicLinearLayout:
     @property
     def x_scalar_offset(self) -> int:
         return self.q_dof_count if self.tet_scalar_offset is None else self.tet_scalar_offset
+
+    @property
+    def world_count(self) -> int:
+        return len(self.world_segments) - 1
 
     @property
     def groups(self) -> tuple[tuple[str, int, int], ...]:

@@ -20,6 +20,7 @@ q and per-particle 3x3 Cholesky blocks. This module does not assemble or factor.
 
 import enum
 import hashlib
+import itertools
 import math
 import time
 from dataclasses import dataclass
@@ -288,8 +289,20 @@ class MaskedPcgPlan:
         for name in ("r", "z", "p", "ap", "true_r", "gap", "temporary", "delta_candidate"):
             setattr(self, name, wp.zeros(self.n, dtype=self.dtype, device=self.device))
         self.products = wp.zeros(1, dtype=self.dtype, device=self.device)
-        chunk_count = (self.n + REDUCTION_CHUNK - 1) // REDUCTION_CHUNK
-        self.product_partials = wp.zeros(chunk_count, dtype=self.dtype, device=self.device)
+        # Products reduce fixed chunks of each world segment, so a world's chunk
+        # tree does not depend on how many worlds precede or follow it.
+        segments = self.layout.world_segments
+        product_chunks, segment_chunks = [], [0]
+        for start, end in itertools.pairwise(segments):
+            product_chunks.extend((i, min(i + REDUCTION_CHUNK, end)) for i in range(start, end, REDUCTION_CHUNK))
+            segment_chunks.append(len(product_chunks))
+        product_chunks = np.asarray(product_chunks, dtype=np.int32).reshape(-1, 2)
+        self.product_start, self.product_end = (
+            wp.array(product_chunks[:, k], dtype=int, device=self.device) for k in range(2)
+        )
+        self.segment_chunks = wp.array(np.asarray(segment_chunks, dtype=np.int32), dtype=int, device=self.device)
+        self.product_partials = wp.zeros(len(product_chunks), dtype=self.dtype, device=self.device)
+        self.segment_products = wp.zeros(self.layout.world_count, dtype=self.dtype, device=self.device)
         # Residual norms reduce fixed chunks of each contiguous convergence group.
         chunks, group_chunks = [], [0]
         for group, (_, start, count) in enumerate(self.layout.groups[1:], 1):
@@ -313,10 +326,10 @@ class MaskedPcgPlan:
         self.condition = wp.zeros(1, dtype=int, device=self.device)
         self.residual_norm_limits = wp.full(self.group_count, float("inf"), dtype=float, device=self.device)
         self._conditional_graph_supported = self.device.is_cuda and wp.is_conditional_graph_supported()
-        # Fuse single-tile dots; retain the parallel reduction for larger systems.
+        # Fuse single-tile dots of one world; retain the chunk reduction otherwise.
         self._products_kernel = (
             _make_products_kernel(1 << (self.n - 1).bit_length(), self.dtype)
-            if self.device.is_cuda and self.n <= 2048
+            if self.device.is_cuda and self.n <= 2048 and self.layout.world_count == 1
             else None
         )
         self.graph = None
@@ -501,8 +514,14 @@ class MaskedPcgPlan:
             )
         else:
             partials = self.product_partials
-            self._launch(_chunk_products, partials.size, [a, b, partials, self.state, self.error])
-            self._launch(_sum_products, 1, [partials, self.products, self.state])
+            self._launch(
+                _chunk_products,
+                partials.size,
+                [a, b, self.product_start, self.product_end, partials, self.state, self.error],
+            )
+            self._launch(
+                _sum_products, 1, [partials, self.segment_chunks, self.segment_products, self.products, self.state]
+            )
 
     def _emit_direction(self, slot):
         if self._cloth_preconditioner is not None:

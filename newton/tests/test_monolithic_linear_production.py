@@ -12,7 +12,11 @@ import numpy as np
 import warp as wp
 
 from newton._src.solvers.monolithic import pcg_production as impl
-from newton._src.solvers.monolithic.linear_types import MonolithicLinearStatus, MonolithicPcgWarmStart
+from newton._src.solvers.monolithic.linear_types import (
+    MonolithicLinearLayout,
+    MonolithicLinearStatus,
+    MonolithicPcgWarmStart,
+)
 from newton.solvers.experimental.monolithic import SolverMonolithic
 from newton.tests import test_monolithic_linear_assembly as fixtures
 from newton.tests.monolithic_pcg_oracle import decide_restart, solve_fixed
@@ -506,6 +510,62 @@ def test_fixed_order_reductions(test, device):
     np.testing.assert_allclose(solutions[0], np.linalg.solve(matrix, rhs), rtol=1e-4, atol=1e-5)
 
 
+def _rigid_worlds(device, worlds, count):
+    """Plan an identity system of identical worlds, each with `count` six-dimensional rigid actors."""
+    n = 6 * count * worlds
+    starts = range(0, n, 6)
+    layout = MonolithicLinearLayout(
+        0,
+        0,
+        actor_ranges=tuple(("rigid", start, 6) for start in starts),
+        rigid_ranges=tuple(enumerate(starts)),
+        world_segments=tuple(range(0, n + 1, 6 * count)),
+    )
+    return impl.MaskedPcgPlan(
+        offsets=wp.array(np.arange(n + 1, dtype=np.int32), device=device),
+        columns=wp.array(np.arange(n, dtype=np.int32), device=device),
+        values=wp.ones(n, dtype=float, device=device),
+        scale=wp.ones(n, dtype=float, device=device),
+        q_cholesky=wp.zeros((0, 0), dtype=float, device=device),
+        x_cholesky=wp.zeros(0, dtype=wp.mat33, device=device),
+        rhs_hat=wp.ones(n, dtype=float, device=device),
+        y=wp.zeros(n, dtype=float, device=device),
+        layout=layout,
+        rigid_cholesky=wp.array(np.tile(np.eye(6, dtype=np.float32), (len(starts), 1, 1)), device=device),
+        rigid_rows=wp.array(np.add.outer(np.asarray(starts), np.arange(6)).astype(np.int32), device=device),
+    )
+
+
+def test_world_segment_products(test, device):
+    """Reduce each world's products over its own chunk tree, whatever the other worlds hold."""
+    count = 50  # 300 rows per world, so each world spans two chunks.
+    a, b = np.random.default_rng(5).normal(size=(2, 2 * 6 * count)).astype(np.float32)
+    plans = [_rigid_worlds(device, 2, count), _rigid_worlds(device, 1, count)]
+    test.assertEqual((plans[0].layout.world_count, plans[1].layout.world_count), (2, 1))
+    test.assertIsNone(plans[0]._products_kernel)
+    # A single-world plan may fuse its dot in one tile; compare the chunk trees.
+    plans[1]._products_kernel = None
+    for plan in plans:
+        wp.launch(impl._initialize_state, 1, [plan.state, plan.error, plan.scalars, 200], device=device)
+    plans[0]._emit_products(wp.array(a, device=device), wp.array(b, device=device))
+    worlds = plans[0].segment_products.numpy()
+    for w, part in enumerate((slice(0, 6 * count), slice(6 * count, None))):
+        plans[1]._emit_products(wp.array(a[part], device=device), wp.array(b[part], device=device))
+        test.assertEqual(plans[1].products.numpy()[0].tobytes(), worlds[w].tobytes())
+    test.assertEqual(plans[0].products.numpy()[0], np.float32(np.float32(0) + worlds[0] + worlds[1]))
+    test.assertEqual(int(plans[0].error.numpy()[0]), 0)
+
+
+def test_world_segment_layout(test, device):
+    """Default to one world and place every world boundary on an actor boundary."""
+    layout = MonolithicLinearLayout(2, 3)
+    test.assertEqual((layout.world_segments, layout.world_count), ((0, 11), 1))
+    test.assertEqual(MonolithicLinearLayout(2, 3, world_segments=[0, 2, 11]).world_segments, (0, 2, 11))
+    for segments in ((0, 5, 11), (0, 11, 11), (1, 11), (0, 10), (0,)):
+        with test.assertRaises(ValueError):
+            MonolithicLinearLayout(2, 3, world_segments=segments)
+
+
 class TestMonolithicPcgProduction(unittest.TestCase):
     def test_no_float_atomic_accumulation(self):
         """Reduce PCG products and residual norms in a fixed order on every device."""
@@ -535,5 +595,7 @@ for fn in (
     test_one_numerical_path,
     test_no_stagnation_exit,
     test_fixed_order_reductions,
+    test_world_segment_products,
+    test_world_segment_layout,
 ):
     add_function_test(TestMonolithicPcgProduction, fn.__name__, fn, devices=get_test_devices())
