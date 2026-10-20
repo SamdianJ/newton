@@ -15,7 +15,7 @@ from scripts.monolithic_reference.workload_scene import build_scene, compare_arr
 
 # These are numerical owners, not a recursively serialized object graph.
 OWNERS = ("_objective", "_kinematics", "_tet", "_contact", "_tet_assembly")
-SOLVER_ARRAYS = ("_frozen_force", "_frozen_gravity", "_complete_r", "_diagonal", "_tet_r32")
+SOLVER_ARRAYS = ("_frozen_force", "_frozen_gravity", "_complete_r", "_diagonal", "_tet_assembly_residual")
 HANDLES = {"table", "smooth_table"}
 TOPOLOGY = {
     "_tet.ids",

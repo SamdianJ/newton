@@ -54,7 +54,8 @@ def _oracle(f, device):
     return tuple(a.numpy()[0] for a in arrays[1:])
 
 
-def _setup(device, fixed=False, fixture=None):
+def _setup(device, fixed=False, fixture=None, dtype=wp.float32):
+    """Build one tet assembly in ``dtype``; positions and history are converted from the Newton state."""
     if fixture is None:
         fixture = build_tiny_cpu_fixture(device=device)
     model = fixture.model
@@ -67,19 +68,24 @@ def _setup(device, fixed=False, fixture=None):
     mapping[ids] = np.arange(len(ids))
     validate_tet_scope(model, dynamic_particle_ids=ids, particle_to_dynamic=mapping)
     pattern = build_tet_triplet_pattern(model.tet_indices.numpy(), mapping, x_dof_start=2)
-    workspace = create_tet_assembly_workspace(pattern, tet_count=model.tet_count, device=device)
+    workspace = create_tet_assembly_workspace(pattern, tet_count=model.tet_count, device=device, dtype=dtype)
+    vector, matrix = (wp.vec3d, wp.mat33d) if dtype == wp.float64 else (wp.vec3, wp.mat33)
     scatter = TetScatterBuffers(
-        wp.empty(len(pattern.ax_rows), dtype=wp.mat33, device=device),
-        wp.empty(len(pattern.global_rows), dtype=float, device=device),
+        wp.empty(len(pattern.ax_rows), dtype=matrix, device=device),
+        wp.empty(len(pattern.global_rows), dtype=dtype, device=device),
     )
+
+    def native(array):
+        return array if vector == wp.vec3 else wp.array(array.numpy(), dtype=vector, device=device)
+
     arguments = {
-        "candidate_particle_q": wp.clone(fixture.state.particle_q),
-        "particle_q_n": fixture.state.particle_q,
-        "particle_qd_n": fixture.state.particle_qd,
+        "candidate_particle_q": wp.clone(native(fixture.state.particle_q)),
+        "particle_q_n": native(fixture.state.particle_q),
+        "particle_qd_n": native(fixture.state.particle_qd),
         "frozen_particle_f": wp.clone(fixture.state.particle_f),
         "dynamic_particle_ids": wp.array(ids, dtype=int, device=device),
         "particle_to_dynamic": wp.array(mapping, dtype=int, device=device),
-        "residual_x": wp.empty(len(ids), dtype=wp.vec3, device=device),
+        "residual_x": wp.empty(len(ids), dtype=vector, device=device),
         "dt": 0.01,
         "min_det_f_guard": 0.05,
         "workspace": workspace,
@@ -187,6 +193,52 @@ def test_assembly_sign_psd_and_owner_parity(test, device):
     assemble_tet_residual_tangent(model, **args, scatter=scatter)
     np.testing.assert_array_equal(args["residual_x"].numpy(), residual)
     np.testing.assert_array_equal(_dense(pattern, scatter, 12)[0], owner)
+
+
+def test_native_tangent_oracle(test, device):
+    """Evaluate the production Kim tangent and residual to the accuracy of each precision."""
+    for dtype, tolerance in ((wp.float32, 2.0e-6), (wp.float64, 1.0e-13)):
+        with test.subTest(dtype=dtype.__name__):
+            fixture, pattern, scatter, args = _setup(device, dtype=dtype)
+            model = fixture.model
+            rest = fixture.state.particle_q.numpy().astype(np.float64)
+            deformation = np.array([[1.12, 0.07, -0.03], [0.02, 0.91, 0.08], [0.04, -0.02, 1.06]])
+            positions = (rest @ deformation.T).astype(args["candidate_particle_q"].numpy().dtype)
+            args["candidate_particle_q"].assign(positions)
+            assemble_tet_residual_tangent(model, **args, scatter=scatter)
+            test.assertEqual(args["workspace"].failure_flags.numpy()[0], TetEvaluationStatus.SUCCESS)
+            # Independent float64 oracle of the Gauss-Newton tangent V B^T (lambda_nh c c^T + mu I) B.
+            x = positions.astype(np.float64)
+            inverse_rest = model.tet_poses.numpy()[0].astype(np.float64)
+            f = np.column_stack([x[1] - x[0], x[2] - x[0], x[3] - x[0]]) @ inverse_rest
+            cofactor = np.column_stack(
+                [np.cross(f[:, 1], f[:, 2]), np.cross(f[:, 2], f[:, 0]), np.cross(f[:, 0], f[:, 1])]
+            )
+            mu, lam = model.tet_materials.numpy()[0, :2].astype(np.float64)
+            volume = 1.0 / (6.0 * np.linalg.det(inverse_rest))
+            c = cofactor.ravel(order="F")
+            material = volume * ((lam + mu) * np.outer(c, c) + mu * np.eye(9))
+            gradients = np.vstack((-inverse_rest.sum(axis=0), inverse_rest))
+            b = np.zeros((9, 12))
+            for node in range(4):
+                for axis in range(3):
+                    for column in range(3):
+                        b[3 * column + axis, 3 * node + axis] = gradients[node, column]
+            inertia = np.diag(np.repeat(model.particle_mass.numpy().astype(np.float64) / args["dt"] ** 2, 3))
+            expected = b.T @ material @ b + inertia
+            owner, scalar = _dense(pattern, scatter, 12)
+            np.testing.assert_array_equal(owner, scalar)
+            test.assertLess(np.linalg.norm(owner - expected) / np.linalg.norm(expected), tolerance)
+            j = np.linalg.det(f)
+            stress = volume * (mu * f + ((lam + mu) * (j - 1) - mu) * cofactor)
+            elastic = (b.T @ stress.ravel(order="F")).reshape(4, 3)
+            energy = volume * (0.5 * mu * (np.sum(f * f) - 3) - mu * (j - 1) + 0.5 * (lam + mu) * (j - 1) ** 2)
+            test.assertLess(abs(args["workspace"].tet_energy.numpy()[0] - energy) / energy, 1e3 * tolerance)
+            inertial = model.particle_mass.numpy()[:, None] * (
+                (x - rest) / args["dt"] ** 2 - model.gravity.numpy()[model.particle_world.numpy()]
+            )
+            actual = args["residual_x"].numpy().astype(np.float64)
+            test.assertLess(np.linalg.norm(actual - inertial - elastic) / np.linalg.norm(elastic), 1e3 * tolerance)
 
 
 def test_fixed_and_failures(test, device):
@@ -401,6 +453,7 @@ for device in get_test_devices():
     for test_function in (
         test_constitutive_derivatives,
         test_assembly_sign_psd_and_owner_parity,
+        test_native_tangent_oracle,
         test_fixed_and_failures,
         test_full_element_raw_derivative,
         test_guard_runtime_precision,

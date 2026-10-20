@@ -254,7 +254,7 @@ class SolverMonolithic(SolverBase):
             global_columns.append(pattern.global_columns)
             internal_rows, internal_columns = pattern.ax_rows, pattern.ax_columns
             self._tet_assembly = create_tet_assembly_workspace(
-                pattern, tet_count=model.tet_count, device=device, physics=self._tet.physics
+                pattern, tet_count=model.tet_count, device=device, physics=self._tet.physics, dtype=self._dtype
             )
         self._rigid_triplet_offset = sum(len(rows) for rows in global_rows)
         global_rows.append(np.repeat(self._rigid.rows_numpy, 6, axis=1).ravel())
@@ -418,7 +418,8 @@ class SolverMonolithic(SolverBase):
         for name in native:
             setattr(self, name, wp.zeros(n, dtype=self._dtype, device=device))
         self._post_lambda = wp.zeros(1, dtype=self._dtype, device=device)
-        self._tet_r32 = wp.zeros(layout.dynamic_particle_count, dtype=wp.vec3, device=device)
+        # The native objective owns the tet residual; assembly writes its copy to scratch.
+        self._tet_assembly_residual = wp.zeros(layout.dynamic_particle_count, dtype=self._states.vector, device=device)
         self._frozen_force = wp.zeros(model.particle_count, dtype=wp.vec3, device=device)
         self._frozen_gravity = wp.zeros_like(model.gravity)
         theta_count = 0 if self._materials is None else self._materials.theta_count

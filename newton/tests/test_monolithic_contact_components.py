@@ -407,11 +407,11 @@ def test_tet_tangent_and_domain(test, device):
         obj.evaluate(*inputs, force, model.gravity, dt=0.001)
         expected_residual = obj.residual.numpy().copy()
         pattern = build_tet_triplet_pattern(model.tet_indices.numpy(), obj.mapping.numpy(), x_dof_start=2)
-        workspace = create_tet_assembly_workspace(pattern, tet_count=model.tet_count, device=device)
+        workspace = create_tet_assembly_workspace(pattern, tet_count=model.tet_count, device=device, dtype=wp.float64)
         workspace.physics = obj.physics
         scatter = TetScatterBuffers(
-            wp.empty(len(pattern.ax_rows), dtype=wp.mat33, device=device),
-            wp.empty(len(pattern.global_rows), dtype=float, device=device),
+            wp.empty(len(pattern.ax_rows), dtype=wp.mat33d, device=device),
+            wp.empty(len(pattern.global_rows), dtype=wp.float64, device=device),
         )
         assemble_tet_residual_tangent(
             model,
@@ -421,7 +421,7 @@ def test_tet_tangent_and_domain(test, device):
             frozen_particle_f=force,
             dynamic_particle_ids=obj.ids,
             particle_to_dynamic=obj.mapping,
-            residual_x=wp.empty(obj.ids.size, dtype=wp.vec3, device=device),
+            residual_x=wp.empty(obj.ids.size, dtype=wp.vec3d, device=device),
             dt=0.001,
             min_det_f_guard=0.2,
             workspace=workspace,

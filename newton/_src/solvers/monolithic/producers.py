@@ -482,7 +482,7 @@ class TetProducer(_Producer):
             frozen_particle_f=solver._frozen_force,
             dynamic_particle_ids=solver._tet.ids,
             particle_to_dynamic=solver._tet.mapping,
-            residual_x=solver._tet_r32,
+            residual_x=solver._tet_assembly_residual,
             dt=float(dt),
             min_det_f_guard=solver._guard,
             workspace=solver._tet_assembly,
