@@ -4,10 +4,10 @@
 """Device-masked PCG kernels; storage and host dispatch live in pcg_production."""
 
 import functools
+from typing import Any
 
 import warp as wp
 
-from .bsr import _cable_csr_product
 from .pcg_common import block_drift, max_block_drift, residual_converged
 
 wp.set_module_options({"enable_backward": False})
@@ -82,7 +82,7 @@ def _phase_enabled(s: _DeviceResult, checkpoint: bool):
 
 
 @wp.kernel
-def _initialize_state(state: wp.array[_DeviceResult], error: wp.array[int], scalars: wp.array[float], slots: int):
+def _initialize_state(state: wp.array[_DeviceResult], error: wp.array[int], scalars: wp.array[Any], slots: int):
     s = _DeviceResult()
     s.status = _RUNNING
     s.enabled = 1
@@ -94,17 +94,18 @@ def _initialize_state(state: wp.array[_DeviceResult], error: wp.array[int], scal
     s.drifts = wp.vec3(wp.nan)
     state[0] = s
     error[0] = 0
-    scalars[0] = 0.0  # gamma = r.T z
-    scalars[1] = 0.0  # alpha
-    scalars[2] = 0.0  # beta
+    zero = scalars.dtype(0.0)
+    scalars[0] = zero  # gamma = r.T z
+    scalars[1] = zero  # alpha
+    scalars[2] = zero  # beta
 
 
 @wp.kernel
-def _initialize_vectors(y: wp.array[float], r: wp.array[float], zero_guess: wp.array[int]):
+def _initialize_vectors(y: wp.array[Any], r: wp.array[Any], zero_guess: wp.array[int]):
     i = wp.tid()
     if zero_guess[0] != 0:
-        y[i] = 0.0
-    r[i] = 0.0
+        y[i] = y.dtype(0.0)
+    r[i] = r.dtype(0.0)
 
 
 @wp.kernel
@@ -135,28 +136,21 @@ def _loop_condition(state: wp.array[_DeviceResult], condition: wp.array[int], li
 def _masked_scaled_csr_mv(
     offsets: wp.array[int],
     columns: wp.array[int],
-    values: wp.array[float],
-    scale: wp.array[float],
-    regularization: wp.array[float],
-    x: wp.array[float],
-    out: wp.array[float],
+    values: wp.array[Any],
+    scale: wp.array[Any],
+    regularization: wp.array[Any],
+    x: wp.array[Any],
+    out: wp.array[Any],
     state: wp.array[_DeviceResult],
     error: wp.array[int],
     checkpoint: bool,
-    cable: bool,
 ):
     # Scalar BSR(1x1) has the same row storage as CSR. Do not read matrix
     # entries at all when disabled; merely masking y updates would waste SpMV.
     if not _phase_enabled(state[0], checkpoint):
         return
     i = wp.tid()
-    if cable:
-        value = _cable_csr_product(offsets, columns, values, scale, x, i, regularization[0])
-        out[i] = value
-        if not wp.isfinite(value):
-            wp.atomic_max(error, 0, _NONFINITE)
-        return
-    total = float(0.0)
+    total = out.dtype(0.0)
     for k in range(offsets[i], offsets[i + 1]):
         j = columns[k]
         total += values[k] * (scale[j] * x[j])
@@ -168,11 +162,11 @@ def _masked_scaled_csr_mv(
 
 @wp.kernel
 def _masked_q_solve(
-    lower: wp.array2d[float],
+    lower: wp.array2d[Any],
     q_start: int,
-    r: wp.array[float],
-    temporary: wp.array[float],
-    z: wp.array[float],
+    r: wp.array[Any],
+    temporary: wp.array[Any],
+    z: wp.array[Any],
     state: wp.array[_DeviceResult],
     error: wp.array[int],
 ):
@@ -197,10 +191,10 @@ def _masked_q_solve(
 
 @wp.kernel
 def _masked_rigid_solve(
-    factor: wp.array3d[float],
+    factor: wp.array3d[Any],
     rows: wp.array2d[int],
-    r: wp.array[float],
-    z: wp.array[float],
+    r: wp.array[Any],
+    z: wp.array[Any],
     state: wp.array[_DeviceResult],
     error: wp.array[int],
 ):
@@ -224,10 +218,10 @@ def _masked_rigid_solve(
 
 @wp.kernel
 def _masked_x_solve(
-    lower_blocks: wp.array[wp.mat33],
+    lower_blocks: wp.array[Any],
     x_start: int,
-    r: wp.array[float],
-    z: wp.array[float],
+    r: wp.array[Any],
+    z: wp.array[Any],
     state: wp.array[_DeviceResult],
     error: wp.array[int],
 ):
@@ -236,7 +230,7 @@ def _masked_x_solve(
     particle = wp.tid()
     lower = lower_blocks[particle]
     base = x_start + 3 * particle
-    v = wp.vec3(0.0)
+    v = wp.vector(r[base], r[base + 1], r[base + 2])
     for i in range(3):
         value = r[base + i]
         for j in range(i):
@@ -261,9 +255,9 @@ REDUCTION_CHUNK = 256
 
 @wp.kernel
 def _chunk_products(
-    a: wp.array[float],
-    b: wp.array[float],
-    partials: wp.array[float],
+    a: wp.array[Any],
+    b: wp.array[Any],
+    partials: wp.array[Any],
     state: wp.array[_DeviceResult],
     error: wp.array[int],
 ):
@@ -271,7 +265,7 @@ def _chunk_products(
         return
     c = wp.tid()
     start = c * REDUCTION_CHUNK
-    total = float(0.0)
+    total = partials.dtype(0.0)
     for i in range(start, wp.min(start + REDUCTION_CHUNK, a.shape[0])):
         av, bv = a[i], b[i]
         if not wp.isfinite(av) or not wp.isfinite(bv):
@@ -282,28 +276,28 @@ def _chunk_products(
 
 
 @wp.kernel
-def _sum_products(partials: wp.array[float], products: wp.array[float], state: wp.array[_DeviceResult]):
+def _sum_products(partials: wp.array[Any], products: wp.array[Any], state: wp.array[_DeviceResult]):
     if state[0].enabled == 0:
         return
-    total = float(0.0)
+    total = products.dtype(0.0)
     for c in range(partials.shape[0]):
         total += partials[c]
     products[0] = total
 
 
 @functools.cache
-def _make_products_kernel(tile_size):
+def _make_products_kernel(tile_size, dtype):
     @wp.kernel(module="unique", enable_backward=False)
     def products_kernel(
-        a: wp.array[float],
-        b: wp.array[float],
-        products: wp.array[float],
+        a: wp.array[dtype],
+        b: wp.array[dtype],
+        products: wp.array[dtype],
         state: wp.array[_DeviceResult],
     ):
         if state[0].enabled == 0:
             return
         _, lane = wp.tid()
-        total = float(0.0)
+        total = dtype(0.0)
         for offset in range(0, a.shape[0], tile_size):
             av = wp.tile_load(a, shape=tile_size, offset=offset)
             bv = wp.tile_load(b, shape=tile_size, offset=offset)
@@ -318,8 +312,8 @@ def _make_products_kernel(tile_size):
 
 @wp.kernel
 def _alpha_guard(
-    products: wp.array[float],
-    scalars: wp.array[float],
+    products: wp.array[Any],
+    scalars: wp.array[Any],
     state: wp.array[_DeviceResult],
     error: wp.array[int],
     params: _Parameters,
@@ -335,9 +329,9 @@ def _alpha_guard(
         s = _failed(s, error[0], slot)
     elif not wp.isfinite(curvature):
         s = _failed(s, _NONFINITE, slot)
-    elif curvature < 0.0:
+    elif curvature < products.dtype(0.0):
         s = _failed(s, _NON_POSITIVE_CURVATURE, slot)
-    elif curvature == 0.0:
+    elif curvature == products.dtype(0.0):
         s = _failed(s, _NON_POSITIVE_CURVATURE, slot)
     else:
         alpha = scalars[0] / curvature  # gamma has already been validated.
@@ -350,11 +344,11 @@ def _alpha_guard(
 
 @wp.kernel
 def _masked_update(
-    y: wp.array[float],
-    r: wp.array[float],
-    p: wp.array[float],
-    ap: wp.array[float],
-    scalars: wp.array[float],
+    y: wp.array[Any],
+    r: wp.array[Any],
+    p: wp.array[Any],
+    ap: wp.array[Any],
+    scalars: wp.array[Any],
     state: wp.array[_DeviceResult],
     error: wp.array[int],
 ):
@@ -389,8 +383,8 @@ def _finish_update(state: wp.array[_DeviceResult], error: wp.array[int], slot: i
 
 @wp.kernel
 def _gamma_and_beta_guard(
-    products: wp.array[float],
-    scalars: wp.array[float],
+    products: wp.array[Any],
+    scalars: wp.array[Any],
     state: wp.array[_DeviceResult],
     error: wp.array[int],
     params: _Parameters,
@@ -406,9 +400,9 @@ def _gamma_and_beta_guard(
         s = _failed(s, error[0], slot)
     elif not wp.isfinite(value):
         s = _failed(s, _NONFINITE, slot)
-    elif value < 0.0:
+    elif value < products.dtype(0.0):
         s = _failed(s, _BAD_PRECONDITIONED_RESIDUAL, slot)
-    elif value == 0.0:
+    elif value == products.dtype(0.0):
         if s.recovering != 0:
             # Fresh nonconverged true residual, freshly preconditioned. A zero
             # dot here is not evidence of convergence (e.g. FP32 underflow).
@@ -417,7 +411,7 @@ def _gamma_and_beta_guard(
             s.enabled = 0
             s.pending_check = _BAD_PRECONDITIONED_RESIDUAL
     else:
-        beta = float(0.0)
+        beta = scalars.dtype(0.0)
         if s.restart == 0:
             beta = value / scalars[0]  # Old gamma is positive and finite by invariant.
         if not wp.isfinite(beta):
@@ -430,9 +424,9 @@ def _gamma_and_beta_guard(
 
 @wp.kernel
 def _masked_direction(
-    z: wp.array[float],
-    p: wp.array[float],
-    scalars: wp.array[float],
+    z: wp.array[Any],
+    p: wp.array[Any],
+    scalars: wp.array[Any],
     state: wp.array[_DeviceResult],
     error: wp.array[int],
 ):
@@ -459,8 +453,8 @@ def _finish_direction(state: wp.array[_DeviceResult], error: wp.array[int], slot
 
 @wp.kernel
 def _clear_norm_work(
-    maxima: wp.array[float],
-    sums: wp.array[float],
+    maxima: wp.array[Any],
+    sums: wp.array[Any],
     state: wp.array[_DeviceResult],
     initial: bool,
 ):
@@ -469,18 +463,18 @@ def _clear_norm_work(
     i = wp.tid()
     # Layout: true(g,q,x), gap(g,q,x), rhs(g,q,x). RHS norms are cached.
     if i < 2 * maxima.shape[0] / 3 or initial:
-        maxima[i] = 0.0
-        sums[i] = 0.0
+        maxima[i] = maxima.dtype(0.0)
+        sums[i] = sums.dtype(0.0)
 
 
 @wp.kernel
 def _residual_and_maxima(
-    rhs: wp.array[float],
-    ay: wp.array[float],
-    recursive: wp.array[float],
-    true_r: wp.array[float],
-    gap: wp.array[float],
-    maxima: wp.array[float],
+    rhs: wp.array[Any],
+    ay: wp.array[Any],
+    recursive: wp.array[Any],
+    true_r: wp.array[Any],
+    gap: wp.array[Any],
+    maxima: wp.array[Any],
     state: wp.array[_DeviceResult],
     error: wp.array[int],
     groups: wp.array[int],
@@ -492,7 +486,7 @@ def _residual_and_maxima(
     block = groups[i]
     group_count = maxima.shape[0] / 3
     value = rhs[i] - ay[i]
-    difference = float(0.0)
+    difference = rhs.dtype(0.0)
     if not initial:
         difference = recursive[i] - value
     if not wp.isfinite(value) or not wp.isfinite(difference) or not wp.isfinite(rhs[i]):
@@ -511,14 +505,14 @@ def _residual_and_maxima(
 
 @wp.kernel
 def _chunk_norm_sums(
-    rhs: wp.array[float],
-    true_r: wp.array[float],
-    gap: wp.array[float],
-    maxima: wp.array[float],
+    rhs: wp.array[Any],
+    true_r: wp.array[Any],
+    gap: wp.array[Any],
+    maxima: wp.array[Any],
     chunk_group: wp.array[int],
     chunk_start: wp.array[int],
     chunk_end: wp.array[int],
-    partials: wp.array2d[float],
+    partials: wp.array2d[Any],
     state: wp.array[_DeviceResult],
     error: wp.array[int],
     initial: bool,
@@ -528,19 +522,21 @@ def _chunk_norm_sums(
         return
     c = wp.tid()
     group_count = maxima.shape[0] / 3
+    zero = maxima.dtype(0.0)
     for k in range(2):
         part = int(0)
         if k == 1:
             part = chunk_group[c]
-        t, d, r = float(0.0), float(0.0), float(0.0)
+        # Fresh values: Warp loops would mutate an aliased zero in place.
+        t, d, r = maxima.dtype(0.0), maxima.dtype(0.0), maxima.dtype(0.0)
         for i in range(chunk_start[c], chunk_end[c]):
-            if maxima[part] > 0.0:
+            if maxima[part] > zero:
                 v = true_r[i] / maxima[part]
                 t += v * v
-            if maxima[group_count + part] > 0.0:
+            if maxima[group_count + part] > zero:
                 v = gap[i] / maxima[group_count + part]
                 d += v * v
-            if initial and maxima[2 * group_count + part] > 0.0:
+            if initial and maxima[2 * group_count + part] > zero:
                 v = rhs[i] / maxima[2 * group_count + part]
                 r += v * v
         partials[c, 3 * k] = t
@@ -550,9 +546,9 @@ def _chunk_norm_sums(
 
 @wp.kernel
 def _group_norm_sums(
-    partials: wp.array2d[float],
+    partials: wp.array2d[Any],
     group_chunks: wp.array[int],
-    sums: wp.array[float],
+    sums: wp.array[Any],
     state: wp.array[_DeviceResult],
     error: wp.array[int],
     initial: bool,
@@ -566,7 +562,7 @@ def _group_norm_sums(
     column, start, end = int(0), int(0), int(partials.shape[0])
     if g > 0:
         column, start, end = int(3), int(group_chunks[g - 1]), int(group_chunks[g])
-    t, d, r = float(0.0), float(0.0), float(0.0)
+    t, d, r = sums.dtype(0.0), sums.dtype(0.0), sums.dtype(0.0)
     for c in range(start, end):
         t += partials[c, column]
         d += partials[c, column + 1]
@@ -579,9 +575,9 @@ def _group_norm_sums(
 
 @wp.kernel
 def _finish_norms(
-    maxima: wp.array[float],
-    sums: wp.array[float],
-    norms: wp.array[float],
+    maxima: wp.array[Any],
+    sums: wp.array[Any],
+    norms: wp.array[Any],
     state: wp.array[_DeviceResult],
     error: wp.array[int],
     initial: bool,
@@ -598,7 +594,7 @@ def _finish_norms(
 
 @wp.kernel
 def _checkpoint_decision(
-    norms: wp.array[float],
+    norms: wp.array[Any],
     state: wp.array[_DeviceResult],
     error: wp.array[int],
     params: _Parameters,
@@ -622,12 +618,12 @@ def _checkpoint_decision(
     group_count = params.floors.shape[0]
     max_drift64 = max_block_drift(norms, group_count, params.floors)
     for k in range(group_count):
-        if not wp.isfinite(norms[k] / wp.max(norms[2 * group_count + k], params.floors[k])):
+        if not wp.isfinite(norms[k] / wp.max(norms[2 * group_count + k], norms.dtype(params.floors[k]))):
             valid = False
     for k in range(3):
         group = params.aliases[k]
         if group >= 0:
-            ratios[k] = norms[group] / wp.max(norms[2 * group_count + group], params.floors[group])
+            ratios[k] = float(norms[group] / wp.max(norms[2 * group_count + group], norms.dtype(params.floors[group])))
             drift64 = block_drift(norms[group_count + group], norms[group], params.floors[group])
             drifts[k] = float(wp.min(drift64, wp.float64(3.4028234663852886e38)))
     if not valid or not wp.isfinite(max_drift64):
@@ -671,8 +667,8 @@ def _checkpoint_decision(
 
 @wp.kernel
 def _replace_recursive(
-    true_r: wp.array[float],
-    r: wp.array[float],
+    true_r: wp.array[Any],
+    r: wp.array[Any],
     state: wp.array[_DeviceResult],
 ):
     s = state[0]
@@ -684,9 +680,9 @@ def _replace_recursive(
 
 @wp.kernel
 def _recover_candidate(
-    scale: wp.array[float],
-    y: wp.array[float],
-    candidate: wp.array[float],
+    scale: wp.array[Any],
+    y: wp.array[Any],
+    candidate: wp.array[Any],
     state: wp.array[_DeviceResult],
     error: wp.array[int],
 ):
@@ -717,7 +713,7 @@ def _finalize_result(state: wp.array[_DeviceResult], error: wp.array[int]):
 
 
 @wp.kernel
-def _publish_delta(candidate: wp.array[float], delta: wp.array[float], state: wp.array[_DeviceResult]):
+def _publish_delta(candidate: wp.array[Any], delta: wp.array[Any], state: wp.array[_DeviceResult]):
     if state[0].output_valid == 0:
         return
     i = wp.tid()

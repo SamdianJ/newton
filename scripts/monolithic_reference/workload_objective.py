@@ -167,7 +167,7 @@ def capture_output(run, boundary, result):
         arrays.update(
             energy=np.asarray([result[0], result[2]]),
             returned_residual=result[1].numpy().copy() if isinstance(result[1], wp.array) else result[1].copy(),
-            tangent=run._objective.tangent32.numpy().copy(),
+            tangent=run._objective.tangent.numpy().copy(),
             tet_parts=run._tet.parts.numpy().copy(),
             contact_energy=run._contact.energy.numpy().copy(),
         )

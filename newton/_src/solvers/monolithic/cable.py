@@ -53,7 +53,7 @@ def _edges(
     lengths: wp.array[Any],
     energy: wp.array[Any],
     residual: wp.array2d[Any],
-    matrix: wp.array3d[float],
+    matrix: wp.array3d[Any],
     flags: wp.array[int],
 ):
     i = wp.tid()
@@ -82,7 +82,7 @@ def _edges(
             other = t[b % 3]
             if b < 3:
                 other = -other
-            matrix[i, a, b] = float(stiffness * gradient * other)
+            matrix[i, a, b] = stiffness * gradient * other
 
 
 @wp.kernel
@@ -102,7 +102,7 @@ def _bend_twist(
     energy: wp.array[Any],
     jacobian: wp.array3d[Any],
     residual: wp.array2d[Any],
-    matrix: wp.array3d[float],
+    matrix: wp.array3d[Any],
     flags: wp.array[int],
 ):
     i = wp.tid()
@@ -196,14 +196,11 @@ def _bend_twist(
             jacobian[i, row, a] = ds[row]
     for a in range(11):
         for b in range(11):
-            matrix[i, a, b] = float(
-                (
-                    jacobian[i, 0, a] * (bending[0, 0] * jacobian[i, 0, b] + bending[0, 1] * jacobian[i, 1, b])
-                    + jacobian[i, 1, a] * (bending[1, 0] * jacobian[i, 0, b] + bending[1, 1] * jacobian[i, 1, b])
-                    + gj * jacobian[i, 2, a] * jacobian[i, 2, b]
-                )
-                / dual[i]
-            )
+            matrix[i, a, b] = (
+                jacobian[i, 0, a] * (bending[0, 0] * jacobian[i, 0, b] + bending[0, 1] * jacobian[i, 1, b])
+                + jacobian[i, 1, a] * (bending[1, 0] * jacobian[i, 0, b] + bending[1, 1] * jacobian[i, 1, b])
+                + gj * jacobian[i, 2, a] * jacobian[i, 2, b]
+            ) / dual[i]
 
 
 class CableObjective:
@@ -237,10 +234,10 @@ class CableObjective:
         self.stretch_energy = wp.zeros(ne, dtype=dtype, device=device)
         self.bend_twist_energy = wp.zeros(ni, dtype=self.vector, device=device)
         self.stretch_r = wp.zeros((ne, 6), dtype=dtype, device=device)
-        self.stretch_b = wp.zeros((ne, 6, 6), dtype=float, device=device)
+        self.stretch_b = wp.zeros((ne, 6, 6), dtype=dtype, device=device)
         self.jacobian = wp.zeros((ni, 3, 11), dtype=dtype, device=device)
         self.bend_twist_r = wp.zeros((ni, 11), dtype=dtype, device=device)
-        self.bend_twist_b = wp.zeros((ni, 11, 11), dtype=float, device=device)
+        self.bend_twist_b = wp.zeros((ni, 11, 11), dtype=dtype, device=device)
         self.flags = wp.zeros(1, dtype=int, device=device)
 
     def evaluate(self, positions, theta, anchor_positions, anchor_directors, anchor_twist):

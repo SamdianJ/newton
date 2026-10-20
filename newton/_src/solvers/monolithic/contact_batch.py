@@ -117,7 +117,7 @@ def _load_contact_chunk(
             for j in range(6):
                 candidates.pairs[i, axis, j] = candidates.pairs.dtype(0)
         for axis in range(3):
-            candidates.weights[i, axis] = 0.0
+            candidates.weights[i, axis] = candidates.weights.dtype(0)
         batch.sources[i] = all_samples.sources[key]
         batch.targets[i] = all_samples.targets[key]
         batch.faces[i] = all_samples.faces[key]
@@ -225,16 +225,16 @@ def _project_contact_column(
 ):
     candidates.columns[contact, local] = row
     candidates.residual[contact, local] = wp.dot(jacobian, residual)
-    candidates.factors[contact, 0, local] = float(wp.dot(jacobian, gradient))
-    candidates.factors[contact, 1, local] = float(wp.dot(jacobian, radial))
-    candidates.factors[contact, 2, local] = float(wp.dot(jacobian, transverse))
+    candidates.factors[contact, 0, local] = wp.dot(jacobian, gradient)
+    candidates.factors[contact, 1, local] = wp.dot(jacobian, radial)
+    candidates.factors[contact, 2, local] = wp.dot(jacobian, transverse)
     if legacy_tet:
-        # Preserve legacy bary * world-coordinate arithmetic, including FP32
-        # conversion after projection, rather than using an equivalent dot.
+        # Preserve legacy bary * world-coordinate arithmetic rather than using
+        # an equivalent dot.
         candidates.residual[contact, local] = bary * (rotation * residual)[axis]
-        candidates.factors[contact, 0, local] = float(bary * (rotation * gradient)[axis])
-        candidates.factors[contact, 1, local] = float(bary * (rotation * radial)[axis])
-        candidates.factors[contact, 2, local] = float(bary * (rotation * transverse)[axis])
+        candidates.factors[contact, 0, local] = bary * (rotation * gradient)[axis]
+        candidates.factors[contact, 1, local] = bary * (rotation * radial)[axis]
+        candidates.factors[contact, 2, local] = bary * (rotation * transverse)[axis]
 
 
 @wp.kernel
@@ -274,9 +274,9 @@ def _project_contact_chunk(
     if weights[i, 1] > type(weights[0, 0])(0.0) and wp.length(t) == type(weights[0, 0])(0.0):
         t = wp.normalize(wp.cross(n, axis))
     transverse = wp.cross(n, t)
-    candidates.weights[i, 0] = float(weights[i, 0])
-    candidates.weights[i, 1] = float(weights[i, 2])
-    candidates.weights[i, 2] = float(weights[i, 1])
+    candidates.weights[i, 0] = weights[i, 0]
+    candidates.weights[i, 1] = weights[i, 2]
+    candidates.weights[i, 2] = weights[i, 1]
     r = local_r[i]
     k = int(0)
     for end in range(2):

@@ -434,6 +434,7 @@ class TestMaterialContactDerivatives(unittest.TestCase):
                 solver._particle_mapping,
                 device=solver.model.device,
                 cable_row_order=np.concatenate([block.order for block in solver._cables]),
+                dtype=solver._dtype,
             )
             generation = MonolithicLinearGeneration(1, 1, c.evaluation_generation, 1)
             assembly = linear.begin_assembly(generation)

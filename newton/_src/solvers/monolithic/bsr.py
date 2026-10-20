@@ -8,61 +8,81 @@ from typing import Any
 
 import numpy as np
 import warp as wp
-import warp.sparse as sparse
 
 from .linear_types import MonolithicLinearGeneration, MonolithicLinearStatus
 
 
-@wp.struct
-class _MonolithicScalarTriplets:
-    rows: wp.array[int]
-    columns: wp.array[int]
-    values: wp.array[float]
-    count: wp.array[int]
-    status: wp.array[int]
-    capacity: int
-    row_count: int
-    column_count: int
-    active_token: wp.array[int]
-    token: int
+def _struct(name, fields):
+    return wp.struct(type(name, (), {"__annotations__": fields, "__module__": __name__, "__qualname__": name}))
 
 
-@wp.struct
-class _MonolithicMat33Triplets:
-    rows: wp.array[int]
-    columns: wp.array[int]
-    values: wp.array[wp.mat33]
-    count: wp.array[int]
-    status: wp.array[int]
-    capacity: int
-    row_count: int
-    column_count: int
-    active_token: wp.array[int]
-    token: int
+def _triplet_struct(name, value):
+    return _struct(
+        name,
+        {
+            "rows": wp.array[int],
+            "columns": wp.array[int],
+            "values": wp.array[value],
+            "count": wp.array[int],
+            "status": wp.array[int],
+            "capacity": int,
+            "row_count": int,
+            "column_count": int,
+            "active_token": wp.array[int],
+            "token": int,
+        },
+    )
 
 
-@wp.struct
-class _MonolithicContactFactors:
-    offsets: wp.array[int]
-    columns: wp.array[int]
-    values: wp.array[float]
-    local_indices: wp.array[int]
-    weights: wp.array[float]
-    kind: wp.array[int]
-    candidate_tid: wp.array[int]
-    count: wp.array[int]
-    status: wp.array[int]
-    capacity: int
-    scalar_dof_count: int
-    active_token: wp.array[int]
-    token: int
+def _factor_struct(name, value):
+    return _struct(
+        name,
+        {
+            "offsets": wp.array[int],
+            "columns": wp.array[int],
+            "values": wp.array[value],
+            "local_indices": wp.array[int],
+            "weights": wp.array[value],
+            "kind": wp.array[int],
+            "candidate_tid": wp.array[int],
+            "count": wp.array[int],
+            "status": wp.array[int],
+            "capacity": int,
+            "scalar_dof_count": int,
+            "active_token": wp.array[int],
+            "token": int,
+        },
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class AssemblyStructs:
+    """Assembly struct types whose values are stored in one scalar precision."""
+
+    scalar: Any
+    """Scalar COO triplets."""
+    mat33: Any
+    """Particle 3x3 block COO triplets."""
+    factors: Any
+    """Contact rank-one factors."""
+
+
+ASSEMBLY_STRUCTS = {
+    scalar: AssemblyStructs(
+        _triplet_struct(f"_ScalarTriplets{bits}", scalar),
+        _triplet_struct(f"_Mat33Triplets{bits}", matrix),
+        _factor_struct(f"_ContactFactors{bits}", scalar),
+    )
+    for scalar, matrix, bits in ((wp.float32, wp.mat33, 32), (wp.float64, wp.mat33d, 64))
+}
+"""Assembly structs keyed by the solver scalar type."""
 
 
 @wp.kernel
 def _pack_assembly_counts(
-    global_triplets: _MonolithicScalarTriplets,
-    internal_triplets: _MonolithicMat33Triplets,
-    factors: _MonolithicContactFactors,
+    global_triplets: Any,
+    internal_triplets: Any,
+    factors: Any,
     packet: wp.array[int],
 ):
     packet[0] = global_triplets.count[0]
@@ -83,7 +103,7 @@ def _pack_assembly_result(
 
 
 @wp.func
-def _append_monolithic_scalar_triplet(triplets: _MonolithicScalarTriplets, row: int, column: int, value: float):
+def _append_monolithic_scalar_triplet(triplets: Any, row: int, column: int, value: Any):
     if triplets.active_token[0] != triplets.token:
         return
     if row < 0 or row >= triplets.row_count or column < 0 or column >= triplets.column_count:
@@ -103,11 +123,11 @@ def _append_monolithic_scalar_triplet(triplets: _MonolithicScalarTriplets, row: 
 
 @wp.func
 def _accumulate_monolithic_actor_q_entry(
-    aq_actor_dense: wp.array2d[float],
-    global_triplets: _MonolithicScalarTriplets,
+    aq_actor_dense: wp.array2d[Any],
+    global_triplets: Any,
     q_row: int,
     q_column: int,
-    value: float,
+    value: Any,
 ):
     if global_triplets.active_token[0] != global_triplets.token:
         return
@@ -123,11 +143,11 @@ def _accumulate_monolithic_actor_q_entry(
 
 @wp.func
 def _accumulate_monolithic_internal_x_block(
-    ax_internal_triplets: _MonolithicMat33Triplets,
-    global_triplets: _MonolithicScalarTriplets,
+    ax_internal_triplets: Any,
+    global_triplets: Any,
     dynamic_particle_row: int,
     dynamic_particle_column: int,
-    value: wp.mat33,
+    value: Any,
     x_scalar_offset: int,
 ):
     if (
@@ -166,7 +186,7 @@ def _accumulate_monolithic_internal_x_block(
 
 
 @wp.func
-def _reserve_monolithic_contact_factor(factors: _MonolithicContactFactors) -> int:
+def _reserve_monolithic_contact_factor(factors: Any) -> int:
     if factors.active_token[0] != factors.token:
         return -1
     slot = wp.atomic_add(factors.count, 0, 1)
@@ -178,9 +198,9 @@ def _reserve_monolithic_contact_factor(factors: _MonolithicContactFactors) -> in
 
 @wp.func
 def _append_monolithic_contact_factor_triplets(
-    factors: _MonolithicContactFactors,
+    factors: Any,
     factor_index: int,
-    global_triplets: _MonolithicScalarTriplets,
+    global_triplets: Any,
 ):
     if factors.active_token[0] != factors.token or global_triplets.active_token[0] != global_triplets.token:
         return
@@ -188,7 +208,8 @@ def _append_monolithic_contact_factor_triplets(
         wp.atomic_max(factors.status, 0, 3)
         return
     weight = factors.weights[factor_index]
-    if not wp.isfinite(weight) or weight < 0.0:
+    zero = factors.weights.dtype(0.0)
+    if not wp.isfinite(weight) or weight < zero:
         wp.atomic_max(factors.status, 0, 8)
         return
     begin, end = factors.offsets[factor_index], factors.offsets[factor_index + 1]
@@ -202,7 +223,7 @@ def _append_monolithic_contact_factor_triplets(
         if not wp.isfinite(factors.values[i]):
             wp.atomic_max(factors.status, 0, 7)
             return
-    if weight == 0.0:
+    if weight == zero:
         return
     for i in range(begin, end):
         row, gi = factors.columns[i], factors.values[i]
@@ -214,10 +235,10 @@ def _append_monolithic_contact_factor_triplets(
 @dataclass(frozen=True, slots=True)
 class MonolithicLinearAssembly:
     generation: MonolithicLinearGeneration
-    aq_actor_dense: wp.array2d[float]
-    ax_internal_triplets: _MonolithicMat33Triplets
-    contact_factors: _MonolithicContactFactors
-    global_scalar_triplets: _MonolithicScalarTriplets
+    aq_actor_dense: wp.array2d[Any]
+    ax_internal_triplets: Any
+    contact_factors: Any
+    global_scalar_triplets: Any
 
 
 def _create_triplets(struct_type, capacity, size, dtype, device, active_token, token):
@@ -255,7 +276,7 @@ def _validate_bsr_finite(offsets: wp.array[int], values: wp.array[Any], status: 
 
 
 @wp.kernel
-def _validate_aq_finite(values: wp.array2d[float], status: wp.array[int]):
+def _validate_aq_finite(values: wp.array2d[Any], status: wp.array[int]):
     row, column = wp.tid()
     if not wp.isfinite(values[row, column]):
         wp.atomic_max(status, 0, 7)
@@ -263,34 +284,27 @@ def _validate_aq_finite(values: wp.array2d[float], status: wp.array[int]):
 
 @wp.kernel
 def _extract_scalar_diagonal(
-    offsets: wp.array[int], columns: wp.array[int], values: wp.array[float], diagonal: wp.array[float]
+    offsets: wp.array[int], columns: wp.array[int], values: wp.array[Any], diagonal: wp.array[Any]
 ):
     row = wp.tid()
-    value = float(0.0)
+    value = values.dtype(0.0)
     for index in range(offsets[row], offsets[row + 1]):
         if columns[index] == row:
             value = values[index]
     diagonal[row] = value
 
 
-@wp.kernel
-def _build_monolithic_symmetric_scaling(
-    matrix_diagonal: wp.array[float],
-    dynamic_diagonal: wp.array[float],
-    epsilon_d: float,
-    diagonal: wp.array[float],
-    scale: wp.array[float],
-    floor_count: wp.array[int],
-    status: wp.array[int],
+@wp.func
+def _diagonal_scale(
+    raw: Any, dynamic: Any, epsilon_d: Any, i: int, diagonal: Any, scale: Any, floor_count: Any, status: Any
 ):
-    i = wp.tid()
-    raw, dynamic = matrix_diagonal[i], dynamic_diagonal[i]
+    zero = type(raw)(0.0)
     floor = epsilon_d * dynamic
-    if not wp.isfinite(raw) or not wp.isfinite(dynamic) or not wp.isfinite(floor) or raw <= 0.0 or dynamic <= 0.0:
+    if not wp.isfinite(raw) or not wp.isfinite(dynamic) or not wp.isfinite(floor) or raw <= zero or dynamic <= zero:
         wp.atomic_max(status, 0, 10)
         return
     d = wp.max(raw, floor)
-    s = 1.0 / wp.sqrt(d)
+    s = type(raw)(1.0) / wp.sqrt(d)
     if not wp.isfinite(s):
         wp.atomic_max(status, 0, 10)
         return
@@ -301,15 +315,29 @@ def _build_monolithic_symmetric_scaling(
 
 
 @wp.kernel
+def _build_monolithic_symmetric_scaling(
+    matrix_diagonal: wp.array[Any],
+    dynamic_diagonal: wp.array[Any],
+    epsilon_d: Any,
+    diagonal: wp.array[Any],
+    scale: wp.array[Any],
+    floor_count: wp.array[int],
+    status: wp.array[int],
+):
+    i = wp.tid()
+    _diagonal_scale(matrix_diagonal[i], dynamic_diagonal[i], epsilon_d, i, diagonal, scale, floor_count, status)
+
+
+@wp.kernel
 def _build_mixed_scaling(
-    matrix_diagonal: wp.array[float],
-    dynamic_input: wp.array[float],
-    coordinate_scale: wp.array[float],
+    matrix_diagonal: wp.array[Any],
+    dynamic_input: wp.array[Any],
+    coordinate_scale: wp.array[Any],
     coordinate_mask: wp.array[wp.int32],
-    epsilon_d: float,
-    dynamic_diagonal: wp.array[float],
-    diagonal: wp.array[float],
-    scale: wp.array[float],
+    epsilon_d: Any,
+    dynamic_diagonal: wp.array[Any],
+    diagonal: wp.array[Any],
+    scale: wp.array[Any],
     floor_count: wp.array[int],
     status: wp.array[int],
 ):
@@ -317,118 +345,59 @@ def _build_mixed_scaling(
     if coordinate_mask[i] != 0:
         # The same explicit change of units as build_coordinate_scaling.
         s = coordinate_scale[i]
-        d = 1.0 / (s * s)
-        if not wp.isfinite(s) or s <= 0.0 or not wp.isfinite(d) or d <= 0.0:
+        zero = type(s)(0.0)
+        d = type(s)(1.0) / (s * s)
+        if not wp.isfinite(s) or s <= zero or not wp.isfinite(d) or d <= zero:
             wp.atomic_max(status, 0, 10)
             return
         dynamic_diagonal[i] = d
         diagonal[i] = d
         scale[i] = s
         return
-    raw, dynamic = matrix_diagonal[i], dynamic_input[i]
-    dynamic_diagonal[i] = dynamic
-    floor = epsilon_d * dynamic
-    if not wp.isfinite(raw) or not wp.isfinite(dynamic) or not wp.isfinite(floor) or raw <= 0.0 or dynamic <= 0.0:
-        wp.atomic_max(status, 0, 10)
-        return
-    d = wp.max(raw, floor)
-    s = 1.0 / wp.sqrt(d)
-    if not wp.isfinite(s):
-        wp.atomic_max(status, 0, 10)
-        return
-    diagonal[i] = d
-    scale[i] = s
-    if floor > raw:
-        wp.atomic_add(floor_count, 0, 1)
+    dynamic_diagonal[i] = dynamic_input[i]
+    _diagonal_scale(matrix_diagonal[i], dynamic_input[i], epsilon_d, i, diagonal, scale, floor_count, status)
 
 
 @wp.kernel
-def _scale_vector(scale: wp.array[float], x: wp.array[float], result: wp.array[float]):
-    i = wp.tid()
-    result[i] = scale[i] * x[i]
-
-
-@wp.kernel
-def _scaled_matvec_finish(
-    scale: wp.array[float],
-    kx: wp.array[float],
-    x: wp.array[float],
-    y: wp.array[float],
-    result: wp.array[float],
-    regularization: float,
+def _scaled_matvec(
+    offsets: wp.array[int],
+    columns: wp.array[int],
+    values: wp.array[Any],
+    scale: wp.array[Any],
+    x: wp.array[Any],
+    y: wp.array[Any],
+    z: wp.array[Any],
+    regularization: Any,
     alpha: float,
     beta: float,
 ):
+    # The same row product as the production PCG operator.
     i = wp.tid()
-    value = alpha * (scale[i] * kx[i] + regularization * x[i])
-    if beta != 0.0:
-        value += beta * y[i]
-    result[i] = value
-
-
-@wp.func
-def _cable_csr_product(
-    offsets: wp.array[int],
-    columns: wp.array[int],
-    values: wp.array[float],
-    scale: wp.array[float],
-    x: wp.array[float],
-    row: int,
-    regularization: float,
-):
-    # B and all PCG vectors remain FP32. Accumulate cancellation-prone rod
-    # stencil products before rounding once, as with the PCG dot reductions.
-    total = wp.float64(0.0)
-    for k in range(offsets[row], offsets[row + 1]):
+    total = z.dtype(0.0)
+    for k in range(offsets[i], offsets[i + 1]):
         j = columns[k]
-        total += wp.float64(values[k]) * wp.float64(scale[j]) * wp.float64(x[j])
-    return float(wp.float64(scale[row]) * total + wp.float64(regularization) * wp.float64(x[row]))
-
-
-@wp.kernel
-def _cable_scaled_matvec(
-    offsets: wp.array[int],
-    columns: wp.array[int],
-    values: wp.array[float],
-    scale: wp.array[float],
-    x: wp.array[float],
-    y: wp.array[float],
-    z: wp.array[float],
-    regularization: float,
-    alpha: float,
-    beta: float,
-):
-    i = wp.tid()
-    value = alpha * _cable_csr_product(offsets, columns, values, scale, x, i, regularization)
+        total += values[k] * (scale[j] * x[j])
+    value = z.dtype(alpha) * (scale[i] * total + regularization * x[i])
     if beta != 0.0:
-        value += beta * y[i]
+        value += z.dtype(beta) * y[i]
     z[i] = value
 
 
 def _monolithic_scaled_matvec(workspace, x, y, z, alpha, beta) -> None:
     if not workspace._scaling_valid or workspace.layout != workspace._layout_identity:
         raise ValueError("Scaled operator requires current valid scaling")
-    if workspace.layout.material_ranges:
-        b = workspace.k_global_scalar_bsr
-        wp.launch(
-            _cable_scaled_matvec,
-            x.size,
-            [b.offsets, b.columns, b.values, workspace.scale, x, y, z, workspace._lambda, alpha, beta],
-            device=workspace.device,
-        )
-        return
-    wp.launch(_scale_vector, x.size, [workspace.scale, x, workspace._scaled_x], device=workspace.device)
-    sparse.bsr_mv(workspace.k_global_scalar_bsr, workspace._scaled_x, workspace._k_scaled)
+    workspace._require_precision(x, y, z)
+    b = workspace.k_global_scalar_bsr
     wp.launch(
-        _scaled_matvec_finish,
+        _scaled_matvec,
         x.size,
-        [workspace.scale, workspace._k_scaled, x, y, z, workspace._lambda, alpha, beta],
+        [b.offsets, b.columns, b.values, workspace.scale, x, y, z, workspace.dtype(workspace._lambda), alpha, beta],
         device=workspace.device,
     )
 
 
 def build_scaling(
-    self, dynamic_diagonal: wp.array[float], *, epsilon_d: float, generation: MonolithicLinearGeneration
+    self, dynamic_diagonal: wp.array, *, epsilon_d: float, generation: MonolithicLinearGeneration
 ) -> MonolithicLinearStatus:
     """Freeze D and S for the current unregularized assembly."""
     if not self._current(generation):
@@ -467,8 +436,8 @@ def build_scaling(
 
 def build_mixed_scaling(
     self,
-    dynamic_diagonal: wp.array[float],
-    coordinate_scale: wp.array[float],
+    dynamic_diagonal: wp.array,
+    coordinate_scale: wp.array,
     coordinate_mask: wp.array[wp.int32],
     *,
     epsilon_d: float,
@@ -537,7 +506,7 @@ def _build_mixed_scaling_device(self, dynamic_diagonal, coordinate_scale, coordi
             dynamic_diagonal,
             coordinate_scale,
             coordinate_mask,
-            epsilon_d,
+            self.dtype(epsilon_d),
             self.dynamic_diagonal,
             self.diagonal,
             self.scale,
@@ -565,7 +534,7 @@ def _build_scaling_device(self, dynamic_diagonal, epsilon_d):
         [
             self._matrix_diagonal,
             self.dynamic_diagonal,
-            epsilon_d,
+            self.dtype(epsilon_d),
             self.diagonal,
             self.scale,
             self.floor_count,

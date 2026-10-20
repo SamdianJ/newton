@@ -3,6 +3,8 @@
 
 """Per-vertex cloth blocks; all inter-vertex terms remain in the global matrix."""
 
+from typing import Any
+
 import warp as wp
 
 
@@ -10,17 +12,17 @@ import warp as wp
 def _factor(
     offsets: wp.array[int],
     columns: wp.array[int],
-    values: wp.array[float],
+    values: wp.array[Any],
     rows: wp.array[int],
-    scale: wp.array[float],
-    regularization: float,
-    tolerance: float,
-    factors: wp.array[wp.mat33],
+    scale: wp.array[Any],
+    regularization: Any,
+    tolerance: Any,
+    factors: wp.array[Any],
     status: wp.array[int],
 ):
     p = wp.tid()
     start = rows[p]
-    matrix, lower = wp.mat33(0.0), wp.mat33(0.0)
+    matrix, lower = factors.dtype(), factors.dtype()
     for i in range(3):
         row = start + i
         for k in range(offsets[row], offsets[row + 1]):
@@ -49,16 +51,16 @@ def _factor(
 @wp.kernel
 def _apply(
     rows: wp.array[int],
-    factors: wp.array[wp.mat33],
-    rhs: wp.array[float],
-    result: wp.array[float],
+    factors: wp.array[Any],
+    rhs: wp.array[Any],
+    result: wp.array[Any],
     active: wp.array[int],
 ):
     p = wp.tid()
     if active[0] == 0:
         return
     start, lower = rows[p], factors[p]
-    x = wp.vec3(0.0)
+    x = wp.vector(rhs[start], rhs[start + 1], rhs[start + 2])
     for i in range(3):
         value = rhs[start + i]
         for j in range(i):
@@ -77,7 +79,7 @@ def _apply(
 class ClothPreconditioner:
     """Bind fixed cloth row maps and numerical storage to PCG generations."""
 
-    def __init__(self, layout, *, device):
+    def __init__(self, layout, *, device, dtype=wp.float32):
         self.device = wp.get_device(device)
         rows = [
             row
@@ -86,7 +88,9 @@ class ClothPreconditioner:
             for row in range(start, start + xyz, 3)
         ]
         self.rows = wp.array(rows, dtype=int, device=device)
-        self.factors = wp.zeros(len(rows), dtype=wp.mat33, device=device)
+        self.dtype = dtype
+        matrix = wp.mat33d if dtype == wp.float64 else wp.mat33
+        self.factors = wp.zeros(len(rows), dtype=matrix, device=device)
         self.active = wp.ones(1, dtype=int, device=device)
 
     def buffers(self):
@@ -109,8 +113,8 @@ class ClothPreconditioner:
                 b.values,
                 self.rows,
                 workspace.scale,
-                workspace._lambda,
-                tolerance,
+                self.dtype(workspace._lambda),
+                self.dtype(tolerance),
                 self.factors,
                 workspace._status,
             ],

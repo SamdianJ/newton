@@ -14,7 +14,6 @@ import numpy as np
 import warp as wp
 
 from . import state_checks
-from .bsr import _MonolithicScalarTriplets
 from .contact import ContactObjective
 from .contact_batch import _ContactBatch
 from .contact_pool import _CONTACT_WORKERS
@@ -23,9 +22,7 @@ from .segment_graph import _SegmentGraphCache
 
 
 @wp.kernel
-def _reserve_pool_triplets(
-    records: Any, flags: wp.array[int], triplets: _MonolithicScalarTriplets, base: wp.array[int]
-):
+def _reserve_pool_triplets(records: Any, flags: wp.array[int], triplets: Any, base: wp.array[int]):
     base[0] = -1
     if triplets.active_token[0] != triplets.token:
         triplets.status[0] = 2
@@ -41,7 +38,7 @@ def _reserve_pool_triplets(
 
 
 @wp.kernel
-def _copy_pool_triplets(records: Any, triplets: _MonolithicScalarTriplets, base: wp.array[int], workers: int):
+def _copy_pool_triplets(records: Any, triplets: Any, base: wp.array[int], workers: int):
     i = wp.tid()
     if base[0] < 0 or triplets.status[0] != 0:
         return
@@ -184,6 +181,8 @@ class _PooledContactObjective(ContactObjective):
         triplets = assembly.global_scalar_triplets
         if triplets.row_count != self.layout.scalar_dof_count or triplets.values.device != self.model.device:
             raise ValueError("Contact assembly requires the matching linear layout")
+        if triplets.values.dtype != self.pool.records.triplet_values.dtype:
+            raise ValueError("Contact assembly requires a linear workspace in the contact precision")
         # Exactly one reservation and append per assembly invocation. Capture
         # warmup/replay may only derive from the complete immutable pool.
         wp.launch(

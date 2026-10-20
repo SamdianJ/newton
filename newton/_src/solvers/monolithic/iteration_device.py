@@ -17,15 +17,15 @@ wp.set_module_options({"fuse_fp": False})
 def measure_terms(
     r: wp.array[Any],
     reference: wp.array[Any],
-    scale: wp.array[float],
+    scale: wp.array[Any],
     nq: int,
     terms: wp.array2d[Any],
-    rhs: wp.array[float],
+    rhs: wp.array[Any],
 ):
     i = wp.tid()
-    s = type(r[0])(scale[i])
+    s = scale[i]
     a, b = s * r[i], s * reference[i]
-    rhs[i] = float(-a)
+    rhs[i] = -a
     for block in range(3):
         active = block == 0 or (block == 1 and i < nq) or (block == 2 and i >= nq)
         aa, bb, rr = type(r[0])(0.0), type(r[0])(0.0), type(r[0])(0.0)
@@ -41,14 +41,14 @@ def assessment_terms(
     residual: wp.array[Any],
     reference: wp.array[Any],
     tau: wp.array[Any],
-    scale: wp.array[float],
+    scale: wp.array[Any],
     nq: int,
     terms: wp.array2d[Any],
     minimum: wp.array[Any],
 ):
     i = wp.tid()
     a, b = residual[i] / tau[i], reference[i] / tau[i]
-    scaled = type(tau[0])(scale[i]) * tau[i]
+    scaled = scale[i] * tau[i]
     for block in range(3):
         aa, bb = type(a)(0.0), type(a)(0.0)
         if block == 0 or (block == 1 and i < nq) or (block == 2 and i >= nq):
@@ -98,14 +98,14 @@ def effective_displacement(
 def trial_terms(
     r: wp.array[Any],
     trial: wp.array[Any],
-    scale: wp.array[float],
-    direction: wp.array[float],
+    scale: wp.array[Any],
+    direction: wp.array[Any],
     effective: wp.array[Any],
     nq: int,
     terms: wp.array2d[Any],
 ):
     i = wp.tid()
-    s, d, e = type(r[0])(scale[i]), type(r[0])(direction[i]), effective[i]
+    s, d, e = scale[i], direction[i], effective[i]
     scaled = s * trial[i]
     step = e / s
     terms[0, i] = r[i] * e

@@ -183,7 +183,7 @@ def _row_tolerance(
 def _rounding(
     offsets: wp.array[int],
     columns: wp.array[int],
-    values: wp.array[float],
+    values: wp.array[Any],
     coordinates: wp.array[Any],
     contributions: wp.array[Any],
     magnitude: wp.array[Any],

@@ -60,16 +60,16 @@ def _residual(
 def _tangent(
     entries: wp.array[int],
     mass: wp.array[Any],
-    matrix: wp.array3d[float],
+    matrix: wp.array3d[Any],
     dt: Any,
     offset: int,
-    output: wp.array[float],
+    output: wp.array[Any],
 ):
     i = wp.tid()
     entry = entries[i]
-    value = float(0.0)
+    value = output.dtype(0.0)
     if entry < 0:
-        value = float(mass[-entry - 1] / (dt * dt))
+        value = mass[-entry - 1] / (dt * dt)
     else:
         value = matrix[entry // 324, (entry % 324) // 18, entry % 18]
     output[offset + i] = value

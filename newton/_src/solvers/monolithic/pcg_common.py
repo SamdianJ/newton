@@ -2,6 +2,8 @@
 # SPDX-License-Identifier: Apache-2.0
 """Shared layout groups, residual acceptance and gap policies."""
 
+from typing import Any
+
 import numpy as np
 import warp as wp
 
@@ -42,11 +44,13 @@ def group_policy(layout, config, *, require_limits=True):
 
 @wp.func
 def residual_converged(
-    norms: wp.array[float], rhs_offset: int, floors: wp.array[float], rtol: float, atol: float, limits: wp.array[float]
+    norms: wp.array[Any], rhs_offset: int, floors: wp.array[float], rtol: float, atol: float, limits: wp.array[float]
 ):
     accepted = bool(True)
     for k in range(floors.shape[0]):
-        target = wp.max(wp.float64(rtol) * wp.float64(wp.max(norms[rhs_offset + k], floors[k])), wp.float64(atol))
+        target = wp.max(
+            wp.float64(rtol) * wp.max(wp.float64(norms[rhs_offset + k]), wp.float64(floors[k])), wp.float64(atol)
+        )
         target = wp.min(target, wp.float64(limits[k]))
         if not wp.isfinite(norms[k]) or wp.float64(norms[k]) > target:
             accepted = False
@@ -54,12 +58,12 @@ def residual_converged(
 
 
 @wp.func
-def block_drift(gap: float, true_norm: float, floor: float):
-    return wp.float64(gap) / wp.float64(wp.max(true_norm, floor))
+def block_drift(gap: Any, true_norm: Any, floor: float):
+    return wp.float64(gap) / wp.max(wp.float64(true_norm), wp.float64(floor))
 
 
 @wp.func
-def max_block_drift(norms: wp.array[float], gap_offset: int, floors: wp.array[float]):
+def max_block_drift(norms: wp.array[Any], gap_offset: int, floors: wp.array[float]):
     drift = wp.float64(0.0)
     for k in range(floors.shape[0]):
         if not wp.isfinite(norms[gap_offset + k]) or not wp.isfinite(norms[k]):

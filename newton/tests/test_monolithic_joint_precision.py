@@ -65,7 +65,6 @@ def test_components(test, device):
                 test.assertEqual(q.dtype, dtype)
                 for a in (k.com, k.rotations, k.jt, k.jw, obj.predicted_r, obj.residual, obj.tangent):
                     test.assertEqual(a.numpy().dtype, host)
-                test.assertEqual(obj.tangent32.dtype, wp.float32)
                 history = getattr(state, owner.namespace)
                 for name in (
                     "joint_v",

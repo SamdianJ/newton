@@ -43,7 +43,7 @@ def test_stream_order(test, device):
         assign_contacts(full, data)
         full.evaluate()
         baseline = tuple(owner.result.numpy().tobytes() for owner in (full.energy, full.residual, full.force))
-        matrix = _FixedScalarBsrReduction(4, full.triplet_capacity, device, use_cuda_graph=device.is_cuda)
+        matrix = _FixedScalarBsrReduction(4, full.triplet_capacity, device, use_cuda_graph=device.is_cuda, dtype=dtype)
 
         def matrix_bits(records, matrix):
             status = wp.zeros(1, dtype=int, device=device)

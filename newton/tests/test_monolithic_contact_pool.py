@@ -6,6 +6,7 @@
 import math
 import unittest
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import patch
 
 import numpy as np
@@ -13,16 +14,17 @@ import warp as wp
 from warp import sparse
 
 from newton._src.solvers.monolithic.bsr import (
+    ASSEMBLY_STRUCTS,
     _append_monolithic_contact_factor_triplets,
     _create_triplets,
-    _MonolithicContactFactors,
-    _MonolithicScalarTriplets,
 )
 from newton._src.solvers.monolithic.bsr_reduction import _FixedScalarBsrReduction, _ScalarBsrReduction
 from newton._src.solvers.monolithic.contact_pool import _ContactPool, _ContactRows
 from newton.tests.test_monolithic_linear_assembly import _dense_bsr
 from newton.tests.test_monolithic_linear_reduction import _reference
 from newton.tests.unittest_utils import add_function_test, get_test_devices
+
+_FP32 = ASSEMBLY_STRUCTS[wp.float32]
 
 
 def row_inputs(rows, identities, local_ids, values, device, dtype):
@@ -293,8 +295,8 @@ def contact_payload(dtype):
         "support_counts": [3, 0, 2, 1, 2],
         "columns": np.zeros((5, 3), np.int32),
         "residual": np.zeros((5, 3), dtype),
-        "weights": np.zeros((5, 3), np.float32),
-        "factors": np.zeros((5, 3, 3), np.float32),
+        "weights": np.zeros((5, 3), dtype),
+        "factors": np.zeros((5, 3, 3), dtype),
         "energy": np.zeros((5, 2), dtype),
         "force_counts": np.zeros(5, np.int32),
         "force_rows": np.zeros((5, 15), np.int32),
@@ -389,8 +391,9 @@ def check_admitted(test, pool, data, *, stable_order=True):
             g = data["factors"][i, component, :k]
             np.testing.assert_array_equal(stored["factor_values"][begin:end], g)
             test.assertEqual(stored["factor_weights"][factor], data["weights"][i, component])
-            # Independent FP64 scatter of the operator's FP32 multiply order.
-            values = (np.float32(data["weights"][i, component] * g[:, None]) * g[None, :]).astype(np.float64)
+            # Independent FP64 scatter of the operator's native multiply order.
+            native = data["weights"].dtype.type
+            values = (native(data["weights"][i, component] * g[:, None]) * g[None, :]).astype(np.float64)
             for a in range(k):
                 np.add.at(expected_b[columns[a]], columns, values[a])
         supports += k
@@ -478,7 +481,7 @@ def test_invalid_contact_payload(test, device):
             ("weights", (4, 0), -1),
             ("weights", (4, 0), np.inf),
             ("factors", (4, 0, 0), np.inf),
-            ("factors", (4, 0, 0), np.finfo(np.float32).max),
+            ("factors", (4, 0, 0), np.finfo(np.float64).max),
             ("residual", (4, 0), np.nan),
             ("energy", (4, 0), np.inf),
             ("force_counts", (4,), 16),
@@ -530,7 +533,7 @@ def test_force_and_dense_operator(test, device):
         a.support_counts.assign([15])
         a.columns.assign(np.arange(15)[None])
         a.residual.assign((j.T @ local_r)[None].astype(native))
-        a.factors.assign((directions @ j)[None].astype(np.float32))
+        a.factors.assign((directions @ j)[None].astype(native))
         a.weights.assign([[7, 3, 5]])
         a.energy.assign([[0.5, 0.125]])
         forces = np.r_[(-bary[:, None] * local_r).ravel(), local_r, np.cross(point - center, local_r)]
@@ -562,8 +565,8 @@ def test_force_and_dense_operator(test, device):
             count=record.triplet_count,
             status=wp.zeros(1, dtype=int, device=device),
         )
-        matrix = sparse.bsr_zeros(15, 15, wp.float32, device=device)
-        reduction = _ScalarBsrReduction(pool.triplet_capacity, device, use_cuda_graph=device.is_cuda)
+        matrix = sparse.bsr_zeros(15, 15, dtype, device=device)
+        reduction = _ScalarBsrReduction(pool.triplet_capacity, device, use_cuda_graph=device.is_cuda, dtype=dtype)
         reduction.build(matrix, triplets, count, layout_identity=("contact-pool", 15), graphs=None)
         test.assertEqual(int(triplets.status.numpy()[0]), 0)
         reference = _reference(
@@ -573,7 +576,7 @@ def test_force_and_dense_operator(test, device):
             15,
         )
         np.testing.assert_array_equal(_dense_bsr(matrix), reference)
-        fixed = _FixedScalarBsrReduction(15, pool.triplet_capacity, device, use_cuda_graph=device.is_cuda)
+        fixed = _FixedScalarBsrReduction(15, pool.triplet_capacity, device, use_cuda_graph=device.is_cuda, dtype=dtype)
         fixed.build(triplets, layout_identity=("contact-pool", 15))
         test.assertEqual(int(triplets.status.numpy()[0]), 0)
         np.testing.assert_array_equal(_dense_bsr(fixed.matrix), reference)
@@ -780,18 +783,23 @@ def test_pool_invalid_scratch(test, device):
 
 
 @wp.kernel
-def _legacy_pool_triplets(factors: _MonolithicContactFactors, triplets: _MonolithicScalarTriplets):
+def _legacy_pool_triplets(factors: Any, triplets: Any):
     _append_monolithic_contact_factor_triplets(factors, wp.tid(), triplets)
 
 
 def test_pool_zero_weight_b_policy(test, device):
     """Skip zero-weight factors while preserving zero products in positive factors' B tree."""
-    pool = _ContactPool(1, 0, 3, 3, 1, 3, wp.float64, device, use_cuda_graph=device.is_cuda)
+    for dtype, native in ((wp.float32, np.float32), (wp.float64, np.float64)):
+        _zero_weight_b_policy(test, device, dtype, native)
+
+
+def _zero_weight_b_policy(test, device, dtype, native):
+    pool = _ContactPool(1, 0, 3, 3, 1, 3, dtype, device, use_cuda_graph=device.is_cuda)
     a = pool.candidates
     a.count.assign([3])
     a.identities.assign([0, 1, 2])
     a.support_counts.fill_(1)
-    factors = np.zeros((3, 3, 1), np.float32)
+    factors = np.zeros((3, 3, 1), native)
     factors[:, 0, 0] = 1
     a.factors.assign(factors)
     a.weights.assign([[2**24, 1, 0], [1, 1, 0], [1, 1, 0]])
@@ -800,8 +808,9 @@ def test_pool_zero_weight_b_policy(test, device):
     np.testing.assert_array_equal(pool.records.accepted.numpy(), [1, 1, 1])
     record = pool.records
     token = wp.ones(1, dtype=int, device=device)
-    legacy = _create_triplets(_MonolithicScalarTriplets, 9, 1, float, device, token, 1)
-    factor = _MonolithicContactFactors()
+    structs = ASSEMBLY_STRUCTS[dtype]
+    legacy = _create_triplets(structs.scalar, 9, 1, dtype, device, token, 1)
+    factor = structs.factors()
     for name, values in (
         ("offsets", record.factor_offsets),
         ("columns", record.factor_columns),
@@ -817,10 +826,10 @@ def test_pool_zero_weight_b_policy(test, device):
         setattr(factor, name, values)
     factor.capacity, factor.scalar_dof_count, factor.token = 9, 1, 1
     wp.launch(_legacy_pool_triplets, 9, [factor, legacy], device=device)
-    old_matrix = sparse.bsr_zeros(1, 1, wp.float32, device=device)
-    old = _ScalarBsrReduction(9, device, use_cuda_graph=device.is_cuda)
+    old_matrix = sparse.bsr_zeros(1, 1, dtype, device=device)
+    old = _ScalarBsrReduction(9, device, use_cuda_graph=device.is_cuda, dtype=dtype)
     old.build(old_matrix, legacy, int(legacy.count.numpy()[0]), layout_identity="zero-weight", graphs=None)
-    new = _FixedScalarBsrReduction(1, pool.triplet_capacity, device, use_cuda_graph=device.is_cuda)
+    new = _FixedScalarBsrReduction(1, pool.triplet_capacity, device, use_cuda_graph=device.is_cuda, dtype=dtype)
     new.build(
         SimpleNamespace(
             rows=record.triplet_rows,
@@ -830,10 +839,9 @@ def test_pool_zero_weight_b_policy(test, device):
             status=wp.zeros(1, dtype=int, device=device),
         )
     )
-    test.assertEqual(old_matrix.values.numpy()[0], np.float32(2**24))
-    np.testing.assert_array_equal(
-        new.matrix.values.numpy()[:1].view(np.uint32), old_matrix.values.numpy()[:1].view(np.uint32)
-    )
+    # FP32 absorbs both unit terms into 2**24; FP64 keeps them.
+    test.assertEqual(old_matrix.values.numpy()[0], native(2**24) if native == np.float32 else native(2**24 + 2))
+    np.testing.assert_array_equal(new.matrix.values.numpy()[:1], old_matrix.values.numpy()[:1])
     test.assertEqual(int(record.triplet_count.numpy()[0]), int(legacy.count.numpy()[0]))
     test.assertEqual(int(record.triplet_count.numpy()[0]), 6)
     test.assertEqual(int(record.factor_count.numpy()[0]), 9)

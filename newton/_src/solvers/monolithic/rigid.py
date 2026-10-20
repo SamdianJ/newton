@@ -139,7 +139,7 @@ def _terms(
     energy: wp.array[Any],
     residual: wp.array2d[Any],
     absolute: wp.array2d[Any],
-    b: wp.array3d[float],
+    b: wp.array3d[Any],
     diagonal: wp.array2d[Any],
 ):
     i = wp.tid()
@@ -178,7 +178,7 @@ def _terms(
                     value = mass[i] / (h * h)
                 elif j >= 3 and k >= 3:
                     value = projected[j - 3, k - 3]
-                b[i, j, k] = float(value)
+                b[i, j, k] = value
 
 
 @wp.kernel
@@ -189,17 +189,17 @@ def _scatter_residual(rows: wp.array2d[int], local: wp.array2d[Any], out: wp.arr
 
 @wp.kernel
 def _scatter_tangent(
-    b: wp.array3d[float],
+    b: wp.array3d[Any],
     rows: wp.array2d[int],
     diagonal: wp.array2d[Any],
     offset: int,
-    values: wp.array[float],
-    out_diagonal: wp.array[float],
+    values: wp.array[Any],
+    out_diagonal: wp.array[Any],
 ):
     i, j, k = wp.tid()
     values[offset + 36 * i + 6 * j + k] = b[i, j, k]
     if j == k:
-        out_diagonal[rows[i, j]] = float(diagonal[i, j])
+        out_diagonal[rows[i, j]] = diagonal[i, j]
 
 
 class RigidObjective:
@@ -264,7 +264,7 @@ class RigidObjective:
         self.energy = wp.zeros(self.count, dtype=dtype, device=self.device)
         self.residual = wp.zeros((self.count, 6), dtype=dtype, device=self.device)
         self.absolute = wp.zeros((self.count, 6), dtype=dtype, device=self.device)
-        self.tangent = wp.zeros((self.count, 6, 6), dtype=float, device=self.device)
+        self.tangent = wp.zeros((self.count, 6, 6), dtype=dtype, device=self.device)
         self.diagonal = wp.zeros((self.count, 6), dtype=dtype, device=self.device)
         self.mirror_q = wp.zeros((self.count, 7), dtype=dtype, device=self.device)
         self.mirror_v = wp.zeros((self.count, 6), dtype=dtype, device=self.device)

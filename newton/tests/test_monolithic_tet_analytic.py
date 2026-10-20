@@ -92,9 +92,6 @@ class TestTetBenchmarkSmoke(unittest.TestCase):
             case.step()
         self.assertLess(case.interior_error(), 0.1 * before)
 
-    # P8b PR-01 resolves the beam's small load, which the mixed FP32 PCG cannot yet
-    # solve at lambda=0 on this quasi-static step (P8-N2); PR-02 removes this marker.
-    @unittest.expectedFailure
     def test_cantilever_bends_downward(self):
         case = TetBenchmark("cantilever", cells=(10, 1, 1))
         for _ in range(3):

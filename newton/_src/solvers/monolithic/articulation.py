@@ -607,7 +607,6 @@ def _reduced_variation(
     residual: wp.array[Any],
     absolute: wp.array[Any],
     tangent: wp.array2d[Any],
-    tangent32: wp.array2d[float],
 ):
     i, j = wp.tid()
     b = type(h)(0.0)
@@ -622,7 +621,6 @@ def _reduced_variation(
             r += wp.dot(jt[link, i], gt[link]) + wp.dot(jw[link, i], gr[link])
             magnitude += wp.dot(abs3(jt[link, i]), gta[link]) + wp.dot(abs3(jw[link, i]), gra[link])
     tangent[i, j] = b
-    tangent32[i, j] = float(b)
     if i == j:
         residual[i] = r
         absolute[i] = magnitude
@@ -681,7 +679,6 @@ class ArticulationObjective:
             setattr(self, name, wp.zeros(b, dtype=k.matrix, device=device))
         self.link_energy = wp.zeros(b, dtype=k.dtype, device=device)
         self.tangent = wp.zeros((n, n), dtype=k.dtype, device=device)
-        self.tangent32 = wp.zeros((n, n), dtype=wp.float32, device=device)
 
     def evaluate(self, q, h, *, build_tangent=True):
         """Evaluate without reading derived FP32 body outputs or changing history."""
@@ -770,7 +767,6 @@ class ArticulationObjective:
                 self.residual,
                 self.absolute,
                 self.tangent,
-                self.tangent32,
             ],
             device=k.device,
         )

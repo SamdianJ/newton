@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 The Newton Developers
 # SPDX-License-Identifier: Apache-2.0
 
-"""Native FP64/FP32 tet E/r from one formula source; B/PCG remain FP32."""
+"""Native FP64/FP32 tet E/r from one formula source; the projected tangent is still evaluated in FP32."""
 
 import math
 from typing import Any

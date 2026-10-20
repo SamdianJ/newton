@@ -228,7 +228,7 @@ def test_modes_integration(test, device):
                 workspace.factor_actor_preconditioner(generation=generation, pivot_tolerance=0),
                 MonolithicLinearStatus.SUCCESS,
             )
-            rhs = wp.array(np.linspace(0.1, 1, len(oracle.raw_matrix)).astype(np.float32), device=device)
+            rhs = wp.array(np.linspace(0.1, 1, len(oracle.raw_matrix)), dtype=workspace.dtype, device=device)
             solution = wp.zeros_like(rhs)
             result = workspace.solve_pcg(
                 rhs,

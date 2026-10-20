@@ -114,9 +114,9 @@ def _project_surface(
     if weights[i, 1] > type(weights[0, 0])(0.0) and wp.length(t) == type(weights[0, 0])(0.0):
         t = wp.normalize(wp.cross(n, axis))
     transverse = wp.cross(n, t)
-    candidates.weights[i, 0] = float(weights[i, 0])
-    candidates.weights[i, 1] = float(weights[i, 2])
-    candidates.weights[i, 2] = float(weights[i, 1])
+    candidates.weights[i, 0] = weights[i, 0]
+    candidates.weights[i, 1] = weights[i, 2]
+    candidates.weights[i, 2] = weights[i, 1]
     r, k = local_r[i], int(0)
     world = rotation * r
     for j in range(7):

@@ -116,6 +116,7 @@ def batch_matrix(batch):
         batch.pool.triplet_capacity,
         batch.device,
         use_cuda_graph=batch.device.is_cuda,
+        dtype=records.triplet_values.dtype,
     )
     status = wp.zeros(1, dtype=int, device=batch.device)
     builder.build(

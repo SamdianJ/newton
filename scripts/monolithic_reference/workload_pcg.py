@@ -110,8 +110,12 @@ def validate_pcg(arrays, metadata=None):
             raise ValueError("PCG rigid rows differ from actor layout")
     elif "rigid_rows" in arrays or "rigid_cholesky" in arrays:
         raise ValueError("Unexpected rigid PCG fields")
+    # Every value array uses the captured workspace precision; group limits stay FP32.
+    native = arrays["values"].dtype if "values" in arrays else None
+    if native not in (np.float32, np.float64):
+        raise ValueError("Invalid PCG shape/dtype: values")
     for name, shape in shapes.items():
-        dtype = np.int32 if name == "rigid_rows" else np.float32
+        dtype = np.int32 if name == "rigid_rows" else np.float32 if name == "limits" else native
         if name not in arrays or arrays[name].shape != shape or arrays[name].dtype != dtype:
             raise ValueError(f"Invalid PCG shape/dtype: {name}")
     for name, value in arrays.items():
@@ -139,9 +143,11 @@ def replay_pcg(arrays, metadata, expected, expected_result, *, device, repeat=5)
     if layout.rigid_ranges or layout.q_scalar_offset != 0 or layout.x_scalar_offset != layout.q_dof_count:
         if metadata.get("adapter") != "actor-pcg/1" or metadata.get("source_hashes") != provenance()["source_hashes"]:
             raise ValueError("Mixed PCG adapter or source identity differs")
-    types = {"offsets": wp.int32, "columns": wp.int32, "x_cholesky": wp.mat33, "rigid_rows": wp.int32}
+    scalar = wp.float64 if arrays["values"].dtype == np.float64 else wp.float32
+    matrix = wp.mat33d if scalar == wp.float64 else wp.mat33
+    types = {"offsets": wp.int32, "columns": wp.int32, "x_cholesky": matrix, "rigid_rows": wp.int32}
     buffers = {
-        name: wp.array(value, dtype=types.get(name, wp.float32), device=device)
+        name: wp.array(value, dtype=types.get(name, scalar), device=device)
         for name, value in arrays.items()
         if name != "limits"
     }

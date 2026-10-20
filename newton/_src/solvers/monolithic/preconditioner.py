@@ -3,6 +3,8 @@
 
 """Actor block assembly, Cholesky factors and preconditioner application."""
 
+from typing import Any
+
 import numpy as np
 import warp as wp
 
@@ -13,15 +15,15 @@ from .linear_types import MonolithicLinearGeneration, MonolithicLinearStatus
 def _assemble_rigid_preconditioner(
     offsets: wp.array[int],
     columns: wp.array[int],
-    values: wp.array[float],
+    values: wp.array[Any],
     rows: wp.array2d[int],
-    scale: wp.array[float],
-    regularization: float,
-    result: wp.array3d[float],
+    scale: wp.array[Any],
+    regularization: Any,
+    result: wp.array3d[Any],
 ):
     body, i, j = wp.tid()
     row, column = rows[body, i], rows[body, j]
-    value = float(0.0)
+    value = result.dtype(0.0)
     for k in range(offsets[row], offsets[row + 1]):
         if columns[k] == column:
             value = values[k] * scale[row] * scale[column]
@@ -31,9 +33,7 @@ def _assemble_rigid_preconditioner(
 
 
 @wp.kernel
-def _factor_rigid_cholesky(
-    matrix: wp.array3d[float], factor: wp.array3d[float], tolerance: float, status: wp.array[int]
-):
+def _factor_rigid_cholesky(matrix: wp.array3d[Any], factor: wp.array3d[Any], tolerance: Any, status: wp.array[int]):
     body = wp.tid()
     for i in range(6):
         for j in range(i + 1):
@@ -53,9 +53,7 @@ def _factor_rigid_cholesky(
 
 
 @wp.kernel
-def _apply_rigid_preconditioner(
-    factor: wp.array3d[float], rows: wp.array2d[int], x: wp.array[float], out: wp.array[float]
-):
+def _apply_rigid_preconditioner(factor: wp.array3d[Any], rows: wp.array2d[int], x: wp.array[Any], out: wp.array[Any]):
     body = wp.tid()
     for i in range(6):
         value = x[rows[body, i]]
@@ -74,15 +72,15 @@ def _apply_rigid_preconditioner(
 def _assemble_monolithic_q_preconditioner(
     offsets: wp.array[int],
     columns: wp.array[int],
-    values: wp.array[float],
+    values: wp.array[Any],
     q_start: int,
-    scale: wp.array[float],
-    regularization: float,
-    result: wp.array2d[float],
+    scale: wp.array[Any],
+    regularization: Any,
+    result: wp.array2d[Any],
 ):
     i, j = wp.tid()
     row, column = q_start + i, q_start + j
-    value = float(0.0)
+    value = result.dtype(0.0)
     for index in range(offsets[row], offsets[row + 1]):
         if columns[index] == column:
             value = values[index]
@@ -96,15 +94,15 @@ def _assemble_monolithic_q_preconditioner(
 def _assemble_monolithic_x_preconditioner(
     offsets: wp.array[int],
     columns: wp.array[int],
-    values: wp.array[float],
+    values: wp.array[Any],
     x_start: int,
-    scale: wp.array[float],
-    regularization: float,
-    result: wp.array[wp.mat33],
+    scale: wp.array[Any],
+    regularization: Any,
+    result: wp.array[Any],
 ):
     particle = wp.tid()
     base = x_start + 3 * particle
-    block = wp.mat33(0.0)
+    block = result.dtype()
     for i in range(3):
         row = base + i
         for index in range(offsets[row], offsets[row + 1]):
@@ -117,9 +115,9 @@ def _assemble_monolithic_x_preconditioner(
 
 @wp.kernel
 def _factor_monolithic_q_cholesky(
-    matrix: wp.array2d[float],
-    factor: wp.array2d[float],
-    tolerance: float,
+    matrix: wp.array2d[Any],
+    factor: wp.array2d[Any],
+    tolerance: Any,
     status: wp.array[int],
 ):
     for i in range(matrix.shape[0]):
@@ -141,13 +139,13 @@ def _factor_monolithic_q_cholesky(
 
 @wp.kernel
 def _factor_monolithic_x_cholesky(
-    matrix: wp.array[wp.mat33],
-    factor: wp.array[wp.mat33],
-    tolerance: float,
+    matrix: wp.array[Any],
+    factor: wp.array[Any],
+    tolerance: Any,
     status: wp.array[int],
 ):
     particle = wp.tid()
-    a, lower = matrix[particle], wp.mat33(0.0)
+    a, lower = matrix[particle], factor.dtype()
     for i in range(3):
         for j in range(i + 1):
             value = a[i, j]
@@ -167,7 +165,7 @@ def _factor_monolithic_x_cholesky(
 
 
 @wp.kernel
-def _apply_q_preconditioner(factor: wp.array2d[float], q_start: int, x: wp.array[float], temporary: wp.array[float]):
+def _apply_q_preconditioner(factor: wp.array2d[Any], q_start: int, x: wp.array[Any], temporary: wp.array[Any]):
     n = factor.shape[0]
     for i in range(n):
         value = x[q_start + i]
@@ -184,15 +182,15 @@ def _apply_q_preconditioner(factor: wp.array2d[float], q_start: int, x: wp.array
 
 @wp.kernel
 def _apply_x_preconditioner(
-    factor: wp.array[wp.mat33],
+    factor: wp.array[Any],
     x_start: int,
-    x: wp.array[float],
-    temporary: wp.array[float],
+    x: wp.array[Any],
+    temporary: wp.array[Any],
 ):
     particle = wp.tid()
     lower = factor[particle]
     base = x_start + 3 * particle
-    result = wp.vec3(0.0)
+    result = wp.vector(x[base], x[base + 1], x[base + 2])
     for i in range(3):
         value = x[base + i]
         for j in range(i):
@@ -209,17 +207,18 @@ def _apply_x_preconditioner(
 
 
 @wp.kernel
-def _combine_vectors(x: wp.array[float], y: wp.array[float], z: wp.array[float], alpha: float, beta: float):
+def _combine_vectors(x: wp.array[Any], y: wp.array[Any], z: wp.array[Any], alpha: float, beta: float):
     i = wp.tid()
-    value = alpha * x[i]
+    value = z.dtype(alpha) * x[i]
     if beta != 0.0:
-        value += beta * y[i]
+        value += z.dtype(beta) * y[i]
     z[i] = value
 
 
 def _monolithic_preconditioner_matvec(workspace, x, y, z, alpha, beta) -> None:
     if not workspace._factor_is_current() or workspace.layout != workspace._layout_identity:
         raise ValueError("Preconditioner must be refactored for current scaling and lambda")
+    workspace._require_precision(x, y, z)
     wp.launch(
         _apply_q_preconditioner,
         1,
@@ -301,6 +300,7 @@ def factor_actor_preconditioner(
 def _factor_actor_device(self, pivot_tolerance):
     self._status.zero_()
     matrix = self.k_global_scalar_bsr
+    regularization, tolerance = self.dtype(self._lambda), self.dtype(pivot_tolerance)
     if self._cloth_preconditioner is not None:
         self._cloth_preconditioner.factor(self, pivot_tolerance)
     if self._cable_preconditioner is not None:
@@ -314,7 +314,7 @@ def _factor_actor_device(self, pivot_tolerance):
             matrix.values,
             self.rigid_rows,
             self.scale,
-            self._lambda,
+            regularization,
             self._rigid_preconditioner,
         ],
         device=self.device,
@@ -322,7 +322,7 @@ def _factor_actor_device(self, pivot_tolerance):
     wp.launch(
         _factor_rigid_cholesky,
         len(self.layout.rigid_ranges),
-        [self._rigid_preconditioner, self._rigid_cholesky, pivot_tolerance, self._status],
+        [self._rigid_preconditioner, self._rigid_cholesky, tolerance, self._status],
         device=self.device,
     )
     wp.launch(
@@ -334,7 +334,7 @@ def _factor_actor_device(self, pivot_tolerance):
             matrix.values,
             self.layout.q_scalar_offset,
             self.scale,
-            self._lambda,
+            regularization,
             self._q_preconditioner,
         ],
         device=self.device,
@@ -349,7 +349,7 @@ def _factor_actor_device(self, pivot_tolerance):
                 matrix.values,
                 self.layout.x_scalar_offset,
                 self.scale,
-                self._lambda,
+                regularization,
                 self._x_preconditioner,
             ],
             device=self.device,
@@ -357,7 +357,7 @@ def _factor_actor_device(self, pivot_tolerance):
     wp.launch(
         _factor_monolithic_q_cholesky,
         1,
-        [self._q_preconditioner, self._q_cholesky, pivot_tolerance, self._status],
+        [self._q_preconditioner, self._q_cholesky, tolerance, self._status],
         device=self.device,
     )
     if self._study_soft is not None:
@@ -366,6 +366,6 @@ def _factor_actor_device(self, pivot_tolerance):
         wp.launch(
             _factor_monolithic_x_cholesky,
             self.layout.dynamic_particle_count,
-            [self._x_preconditioner, self._x_cholesky, pivot_tolerance, self._status],
+            [self._x_preconditioner, self._x_cholesky, tolerance, self._status],
             device=self.device,
         )

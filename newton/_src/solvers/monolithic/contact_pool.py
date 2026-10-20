@@ -343,8 +343,8 @@ def _pool_types(dtype):
         support_counts: wp.array[int]
         columns: wp.array2d[int]
         residual: wp.array2d[dtype]
-        weights: wp.array2d[float]
-        factors: wp.array3d[float]
+        weights: wp.array2d[dtype]
+        factors: wp.array3d[dtype]
         energy: wp.array2d[dtype]
         force_counts: wp.array[int]
         force_rows: wp.array2d[int]
@@ -381,15 +381,15 @@ def _pool_types(dtype):
         factor_offsets: wp.array[int]
         factor_columns: wp.array[int]
         factor_local: wp.array[int]
-        factor_values: wp.array[float]
-        factor_weights: wp.array[float]
+        factor_values: wp.array[dtype]
+        factor_weights: wp.array[dtype]
         factor_kind: wp.array[int]
         factor_contact: wp.array[int]
         triplet_count: wp.array[int]
         triplet_offsets: wp.array[int]
         triplet_rows: wp.array[int]
         triplet_columns: wp.array[int]
-        triplet_values: wp.array[float]
+        triplet_values: wp.array[dtype]
         pairs: wp.array3d[dtype]
 
     return Candidates, Records
@@ -431,22 +431,23 @@ def _validate_contacts(candidates: Any, records: Any, row_count: int, force_row_
         if not wp.isfinite(residual_value):
             wp.atomic_or(records.flags, 0, 4)
         nonzero = nonzero or residual_value != type(residual_value)(0)
+    zero = candidates.weights.dtype(0)
     for component in range(3):
         weight = candidates.weights[i, component]
-        if not wp.isfinite(weight) or weight < 0.0:
+        if not wp.isfinite(weight) or weight < zero:
             wp.atomic_or(records.flags, 0, 4)
-        maximum = float(0)
+        maximum = candidates.weights.dtype(0)
         for j in range(k):
-            factor_value = candidates.factors[i, component, j] + 0.0
+            factor_value = candidates.factors[i, component, j] + zero
             if not wp.isfinite(factor_value):
                 wp.atomic_or(records.flags, 0, 4)
             maximum = wp.max(maximum, wp.abs(factor_value))
-        # Monotonic FP32 absolute products bound every (weight*gi)*gj without
+        # Monotonic absolute products bound every (weight*gi)*gj without
         # quadratic validation. Keep the original left-associated arithmetic.
         bound = (weight * maximum) * maximum
         if not wp.isfinite(bound):
             wp.atomic_or(records.flags, 0, 4)
-        nonzero = nonzero or (weight > 0.0 and maximum != 0.0)
+        nonzero = nonzero or (weight > zero and maximum != zero)
     for j in range(f):
         force_row = candidates.force_rows[i, j] + 0
         force_value = candidates.forces[i, j] + candidates.forces.dtype(0)
@@ -487,7 +488,7 @@ def _reserve_contacts(
             selected[index] = 1
             components = int(0)
             for axis in range(3):
-                if candidates.weights[i, axis] > 0.0:
+                if candidates.weights[i, axis] > candidates.weights.dtype(0):
                     components += 1
             # Retain zero products within positive factors, but preserve the
             # original omission of entire zero-weight factors from B's tree.
@@ -597,7 +598,7 @@ def _write_contact_triplets(records: Any, workers: int):
         remaining = local // (k * k)
         component = int(0)
         for axis in range(3):
-            if records.factor_weights[3 * lo + axis] > 0.0:
+            if records.factor_weights[3 * lo + axis] > records.factor_weights.dtype(0):
                 if remaining == 0:
                     component = axis
                 remaining -= 1
@@ -797,8 +798,8 @@ class _ContactPool:
             "support_counts": ((b,), wp.int32),
             "columns": ((b, k), wp.int32),
             "residual": ((b, k), dtype),
-            "weights": ((b, 3), wp.float32),
-            "factors": ((b, 3, k), wp.float32),
+            "weights": ((b, 3), dtype),
+            "factors": ((b, 3, k), dtype),
             "energy": ((b, 2), dtype),
             "force_counts": ((b,), wp.int32),
             "force_rows": ((b, f), wp.int32),
@@ -829,14 +830,14 @@ class _ContactPool:
                 "factor_offsets": ((3 * n + 1,), wp.int32),
                 "factor_columns": ((3 * r,), wp.int32),
                 "factor_local": ((3 * r,), wp.int32),
-                "factor_values": ((3 * r,), wp.float32),
-                "factor_weights": ((3 * n,), wp.float32),
+                "factor_values": ((3 * r,), dtype),
+                "factor_weights": ((3 * n,), dtype),
                 "factor_kind": ((3 * n,), wp.int32),
                 "factor_contact": ((3 * n,), wp.int32),
                 "triplet_offsets": ((n + 1,), wp.int32),
                 "triplet_rows": ((t,), wp.int32),
                 "triplet_columns": ((t,), wp.int32),
-                "triplet_values": ((t,), wp.float32),
+                "triplet_values": ((t,), dtype),
                 "pairs": ((n, 2, 6), dtype),
             }
         )

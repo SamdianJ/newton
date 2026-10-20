@@ -80,7 +80,7 @@ def _kernels(dtype):
         build_tangent: bool,
         energy: wp.array2d[dtype],
         residual: wp.array2d[dtype],
-        tangent: wp.array3d[float],
+        tangent: wp.array3d[dtype],
         flags: wp.array[int],
     ):
         face = wp.tid()
@@ -229,14 +229,14 @@ def _kernels(dtype):
                                 va += vectors[row, k] * mapping[row, a]
                                 vb += vectors[row, k] * mapping[row, bcol]
                             value += wp.max(h[k, k], dtype(0.0)) * va * vb
-                    tangent[face, a, bcol] = float(area * value)
-                    tangent[face, bcol, a] = float(area * value)
+                    tangent[face, a, bcol] = area * value
+                    tangent[face, bcol, a] = area * value
 
     return evaluate
 
 
 class ClothObjective:
-    """Own per-face native residuals and full FP32 shell tangents."""
+    """Own per-face native residuals and full shell tangents."""
 
     def __init__(self, positions, stencils, materials, *, dtype=wp.float64, device):
         self.dtype, self.device = dtype, wp.get_device(device)
@@ -267,7 +267,7 @@ class ClothObjective:
         self.materials = wp.array(materials, dtype=dtype, device=device)
         self.energy = wp.zeros((count, 2), dtype=dtype, device=device)
         self.residual = wp.zeros((count, 18), dtype=dtype, device=device)
-        self.tangent = wp.zeros((count, 18, 18), dtype=float, device=device)
+        self.tangent = wp.zeros((count, 18, 18), dtype=dtype, device=device)
         self.flags = wp.zeros(1, dtype=int, device=device)
         self.kernel = _kernels(dtype)
 

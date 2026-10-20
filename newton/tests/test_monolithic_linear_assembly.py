@@ -12,13 +12,11 @@ import warp as wp
 import warp.sparse as sparse
 
 from newton._src.solvers.monolithic.bsr import (
+    ASSEMBLY_STRUCTS,
     _accumulate_monolithic_actor_q_entry,
     _accumulate_monolithic_internal_x_block,
     _append_monolithic_contact_factor_triplets,
     _append_monolithic_scalar_triplet,
-    _MonolithicContactFactors,
-    _MonolithicMat33Triplets,
-    _MonolithicScalarTriplets,
     _reserve_monolithic_contact_factor,
 )
 from newton._src.solvers.monolithic.linear import MonolithicLinearWorkspace
@@ -34,9 +32,11 @@ from newton.tests.monolithic_test_utils import build_tiny_cpu_fixture
 from newton.tests.unittest_utils import add_function_test, get_test_devices
 from scripts.monolithic_reference.linear_reference import _DiagonalInverse
 
+_FP32 = ASSEMBLY_STRUCTS[wp.float32]
+
 
 @wp.kernel
-def _owners(aq: wp.array2d[float], ax: _MonolithicMat33Triplets, triplets: _MonolithicScalarTriplets):
+def _owners(aq: wp.array2d[float], ax: _FP32.mat33, triplets: _FP32.scalar):
     for i in range(2):
         _accumulate_monolithic_actor_q_entry(aq, triplets, i, i, 2.0)
         _accumulate_monolithic_actor_q_entry(aq, triplets, i, i, 3.0)
@@ -50,7 +50,7 @@ def _owners(aq: wp.array2d[float], ax: _MonolithicMat33Triplets, triplets: _Mono
 
 
 @wp.kernel
-def _contact(factors: _MonolithicContactFactors, triplets: _MonolithicScalarTriplets):
+def _contact(factors: _FP32.factors, triplets: _FP32.scalar):
     slot = _reserve_monolithic_contact_factor(factors)
     if slot < 0:
         return
@@ -67,7 +67,7 @@ def _contact(factors: _MonolithicContactFactors, triplets: _MonolithicScalarTrip
 
 
 @wp.kernel
-def _append(triplets: _MonolithicScalarTriplets, row: int, value: float):
+def _append(triplets: _FP32.scalar, row: int, value: float):
     _append_monolithic_scalar_triplet(triplets, row, 0, value)
 
 
@@ -261,9 +261,7 @@ def test_capacity_and_invalid_contributions(test, device):
 
 
 @wp.kernel
-def _fixture_diagonal(
-    aq: wp.array2d[float], ax: _MonolithicMat33Triplets, triplets: _MonolithicScalarTriplets, masses: wp.array[float]
-):
+def _fixture_diagonal(aq: wp.array2d[float], ax: _FP32.mat33, triplets: _FP32.scalar, masses: wp.array[float]):
     for i in range(2):
         _accumulate_monolithic_actor_q_entry(aq, triplets, i, i, float(i + 1))
     for i in range(4):
@@ -271,9 +269,7 @@ def _fixture_diagonal(
 
 
 @wp.kernel
-def _masked_contact(
-    factors: _MonolithicContactFactors, triplets: _MonolithicScalarTriplets, weight: float, column: int
-):
+def _masked_contact(factors: _FP32.factors, triplets: _FP32.scalar, weight: float, column: int):
     slot = _reserve_monolithic_contact_factor(factors)
     if slot < 0:
         return
@@ -353,8 +349,8 @@ def test_shared_fixture_layout(test, device):
 @wp.kernel
 def _overflow_reduction(
     aq: wp.array2d[float],
-    ax: _MonolithicMat33Triplets,
-    triplets: _MonolithicScalarTriplets,
+    ax: _FP32.mat33,
+    triplets: _FP32.scalar,
     q_count: int,
     x_count: int,
     owner_scatter: bool,
@@ -621,9 +617,9 @@ def _ready_system(device, *, contact=True, heterogeneous=False, pcg_mode="diagno
 @wp.kernel
 def _rescale_system(
     aq: wp.array2d[float],
-    ax: _MonolithicMat33Triplets,
-    factors: _MonolithicContactFactors,
-    triplets: _MonolithicScalarTriplets,
+    ax: _FP32.mat33,
+    factors: _FP32.factors,
+    triplets: _FP32.scalar,
     scale: wp.array[float],
 ):
     for i in range(2):
@@ -732,9 +728,7 @@ def test_lambda_and_warm_start(test, device):
 
 
 @wp.kernel
-def _two_block_matrix(
-    aq: wp.array2d[float], ax: _MonolithicMat33Triplets, triplets: _MonolithicScalarTriplets, cross: float
-):
+def _two_block_matrix(aq: wp.array2d[float], ax: _FP32.mat33, triplets: _FP32.scalar, cross: float):
     _accumulate_monolithic_actor_q_entry(aq, triplets, 0, 0, 1.0)
     _accumulate_monolithic_internal_x_block(ax, triplets, 0, 0, wp.diag(wp.vec3(1.0)), 1)
     _append_monolithic_scalar_triplet(triplets, 0, 1, cross)

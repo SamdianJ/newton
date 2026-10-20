@@ -61,7 +61,7 @@ def identity_workspace(device, mode, graph, *, mixed=False):
     w = run._linear
     n = run._delta.size
     rows = wp.array(np.arange(n, dtype=np.int32), device=device)
-    w.k_global_scalar_bsr = sparse.bsr_from_triplets(n, n, rows, rows, wp.ones(n, dtype=float, device=device))
+    w.k_global_scalar_bsr = sparse.bsr_from_triplets(n, n, rows, rows, wp.ones(n, dtype=w.dtype, device=device))
     w.scale.fill_(1)
     w._factor_valid = False
     w.set_regularization(0.0, generation=run._generation)
@@ -71,17 +71,19 @@ def identity_workspace(device, mode, graph, *, mixed=False):
     return run
 
 
-def qualify(run, residual, limits, *, budget=20, regularization=0.0):
+def qualify(run, residual, limits, *, budget=20, regularization=0.0, pcg_limit=None):
     from newton._src.solvers.monolithic.iteration import solve_direction  # noqa: PLC0415
 
     run._linear.set_regularization(regularization, generation=run._generation)
     run._require_linear(run._linear.factor_actor_preconditioner(generation=run._generation, pivot_tolerance=0.0))
     scale = run._linear.scale.numpy().astype(np.float64)
-    run._rhs.assign((-scale * residual).astype(np.float32))
+    run._rhs.assign((-scale * residual).astype(run._numpy_dtype))
+    # PCG targets are capped by the qualification limits unless a test loosens both.
+    solve = limits if pcg_limit is None else dict.fromkeys(limits, pcg_limit)
     config = replace(
-        pcg_config(budget),
-        residual_norm_limits=tuple(limits[name] for name in ("global", "q", "x")),
-        group_norm_limits=tuple(limits[name] for name, _ in blocks(run)),
+        pcg_config(budget, **({} if pcg_limit is None else {"linear_absolute_tolerance": pcg_limit})),
+        residual_norm_limits=tuple(solve[name] for name in ("global", "q", "x")),
+        group_norm_limits=tuple(solve[name] for name, _ in blocks(run)),
     )
     if run._device_iteration:
         run._accepted_r.assign(residual)
@@ -89,48 +91,41 @@ def qualify(run, residual, limits, *, budget=20, regularization=0.0):
     return solve_direction(run, residual, scale, limits, config, iteration=0, retry=0, regularization=regularization)
 
 
-def test_native_correction(test, device):
-    """Correct a native/internal boundary disagreement without tightening the initial solve."""
+def test_single_posterior(test, device):
+    """Qualify each direction by one true-residual check and never append a correction solve."""
     for mode, graph in modes(device):
         for mixed in (False, True):
             run = identity_workspace(device, mode, graph, mixed=mixed)
-            parts = dict(blocks(run))
-            target = next(name for name in parts if name.startswith("rigid_") and name.endswith("_t")) if mixed else "q"
-            gate = float(np.float32(1e-12 if mixed else 1e-7))
-            limits = dict.fromkeys(parts, 1.0)
-            limits[target] = gate
-            residual = np.zeros(run._delta.size)
-            residual[parts[target].start] = gate * (1 + 1e-9)
-            original_rhs = (-residual).astype(np.float32)
+            residual = np.linspace(-0.5, 0.5, run._delta.size)
+            limits = dict.fromkeys(dict(blocks(run)), 1e-12)
             test.assertTrue(qualify(run, residual, limits))
+            np.testing.assert_array_equal(run._delta.numpy(), -residual.astype(run._numpy_dtype))
+            # A PCG stopped short of the limits fails its posterior instead of being corrected.
+            test.assertFalse(qualify(run, residual, limits, pcg_limit=1e30))
+            attempts = run._variational["linear_direction_attempts"]
             rows = run._variational["linear_postchecks"]
+            test.assertEqual([a["failure_reason"] for a in attempts], [None, "direction_posterior"])
+            test.assertEqual(attempts[-1]["iterations"], 0)
             test.assertEqual(len(rows), 2)
-            test.assertGreater(rows[0]["blocks"][target]["residual"], gate)
-            test.assertLessEqual(rows[0]["blocks"][target]["internal_residual"], gate)
-            test.assertTrue(all(v["residual"] <= v["limit"] for v in rows[-1]["blocks"].values()))
-            test.assertEqual(rows[-1]["correction"], 1)
-            test.assertLessEqual(rows[-1]["total_iterations"], 20)
-            np.testing.assert_array_equal(run._rhs.numpy(), original_rhs)
-            first = run._delta.numpy().copy()
-            test.assertTrue(qualify(run, residual, limits))
-            np.testing.assert_array_equal(first, run._delta.numpy())
+            test.assertGreater(rows[-1]["blocks"]["global"]["residual"], rows[-1]["blocks"]["global"]["limit"])
+            np.testing.assert_array_equal(run._delta.numpy(), 0)
 
 
-def test_precision_floor_and_budget(test, device):
-    """Report unrepresentable directions and consume one shared iteration budget."""
+def test_linear_failure(test, device):
+    """Report an exhausted iteration budget as a linear failure, before any posterior."""
     for mode, graph in modes(device):
-        for budget, reason in ((1, "direction_accuracy_budget_exhausted"), (20, "direction_precision_unreachable")):
-            run = identity_workspace(device, mode, graph)
-            residual = np.zeros(run._delta.size)
-            residual[0] = -1.0 - 2**-25
-            limits = {name: 1e-9 for name, _ in blocks(run)}
-            regularization = 1.0 if budget == 20 else 0.0
-            test.assertFalse(qualify(run, residual, limits, budget=budget, regularization=regularization))
-            attempt = run._variational["linear_direction_attempts"][-1]
-            test.assertEqual(attempt["failure_reason"], reason)
-            test.assertLessEqual(sum(p["iterations"] for p in attempt["passes"]), budget)
-            test.assertEqual(run._delta.numpy()[0], 1.0 / (1 + regularization))
-            test.assertTrue(np.isfinite(run._delta.numpy()).all())
+        model = scene(device, contact=False)
+        run = solver(model, mode=mode, graph=graph)
+        state = run.create_state(dt=0.001)
+        run.step(state, state, model.control(), dt=0.001)
+        run._variational["linear_postchecks"] = []
+        run._variational["linear_direction_attempts"] = []
+        residual = np.linspace(0.2, -0.1, run._delta.size)
+        test.assertFalse(qualify(run, residual, dict.fromkeys(dict(blocks(run)), 1e-30), budget=1))
+        attempt = run._variational["linear_direction_attempts"][-1]
+        test.assertEqual(attempt["failure_reason"], run.Status.LINEAR_MAX_ITERATIONS.value)
+        test.assertEqual(attempt["iterations"], 1)
+        test.assertEqual(run._variational["linear_postchecks"], [])
 
 
 def test_regularized_trial_and_final_gate(test, device):
@@ -160,7 +155,7 @@ def test_regularized_trial_and_final_gate(test, device):
 
 
 def test_regularized_posterior(test, device):
-    """Check recovered FP32 directions and actual FP32 lambda in native precision."""
+    """Check directions and the actual lambda in the solver precision."""
     for precision in ("fp64", "fp32"):
         model = scene(device)
         run = solver(model, precision=precision, mode="production", graph=device.is_cuda)
@@ -170,10 +165,10 @@ def test_regularized_posterior(test, device):
         scale = run._linear.scale.numpy().astype(np.float64)
         residual = np.linspace(0.2, -0.1, len(matrix)).astype(run._numpy_dtype)
         for requested in (0.0, 1.234567891):
-            actual = float(np.float32(requested))
+            actual = float(run._numpy_dtype(requested))
             run._linear.set_regularization(requested, generation=run._generation)
             a = scale[:, None] * matrix * scale[None, :] + actual * np.eye(len(matrix))
-            delta = (scale * np.linalg.solve(a, -scale * residual)).astype(np.float32)
+            delta = (scale * np.linalg.solve(a, -scale * residual)).astype(run._numpy_dtype)
             run._delta.assign(delta)
             error = run._physical_linear_error(None, delta, residual, scale)
             original = scale * (matrix @ delta.astype(float) + residual)
@@ -193,17 +188,17 @@ def test_extreme_scale_and_lambda_updates(test, device):
     state = run.create_state(dt=0.001)
     run.step(state, state, model.control(), dt=0.001)
     matrix = run._linear.densify_for_test(generation=run._generation).raw_matrix.astype(float)
-    direction = np.linspace(-0.3, 0.7, len(matrix)).astype(np.float32)
+    direction = np.linspace(-0.3, 0.7, len(matrix)).astype(run._numpy_dtype)
     residual = np.linspace(0.2, -0.1, len(matrix))
     run._delta.assign(direction)
-    run._linear.scale.assign(np.geomspace(1e-8, 1e8, len(matrix)).astype(np.float32))
+    run._linear.scale.assign(np.geomspace(1e-8, 1e8, len(matrix)).astype(run._numpy_dtype))
     scale = run._linear.scale.numpy().astype(float)
     captures = None
     for requested in (0.0, 1.234567891, 1e-50, 0.1):
         run._linear.set_regularization(requested, generation=run._generation)
         actual = run._physical_linear_error(None, direction, residual, scale)
         original = scale * (matrix @ direction.astype(float) + residual)
-        term = float(np.float32(requested)) * direction.astype(float) / scale
+        term = float(run._numpy_dtype(requested)) * direction.astype(float) / scale
         magnitude = abs(scale) * (abs(matrix) @ abs(direction.astype(float)) + abs(residual)) + abs(term)
         test.assertTrue(np.all(abs(actual - original - term) <= 64 * np.finfo(float).eps * magnitude))
         if device.is_cuda:
@@ -220,8 +215,8 @@ class TestDirection(unittest.TestCase):
 add_function_test(TestDirection, "test_regularized_posterior", test_regularized_posterior, devices=get_test_devices())
 for _test in (
     test_default_regularization_schedule,
-    test_native_correction,
-    test_precision_floor_and_budget,
+    test_single_posterior,
+    test_linear_failure,
     test_regularized_trial_and_final_gate,
     test_extreme_scale_and_lambda_updates,
 ):

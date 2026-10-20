@@ -223,7 +223,7 @@ def test_objective(test, device):
         # trial kernel using its effective stored displacement.
         base = wp.array(q, dtype=wp.float64, device=device)
         trial, velocity = wp.empty_like(base), wp.empty_like(base)
-        frozen_b = objective.tangent32.numpy().copy()
+        frozen_b = objective.tangent.numpy().copy()
         for eps in (1e-5, 3e-6):
             for i in range(3):
                 direction = wp.array(np.eye(3)[i], dtype=wp.float32, device=device)
@@ -251,7 +251,7 @@ def test_objective(test, device):
                     coordinates.append(float(trial.numpy()[i]))
                 derivative = (energies[1] - energies[0]) / (coordinates[1] - coordinates[0])
                 np.testing.assert_allclose(derivative, g[i], rtol=5e-3, atol=1e-7)
-                np.testing.assert_array_equal(objective.tangent32.numpy(), frozen_b)
+                np.testing.assert_array_equal(objective.tangent.numpy(), frozen_b)
 
 
 def test_scalar_switches(test, device):

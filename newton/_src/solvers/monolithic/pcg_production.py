@@ -215,12 +215,15 @@ class MaskedPcgPlan:
         self._study_signature = None if _study_soft is None else _study_soft.signature()
         self._study_active = None if _study_soft is None else wp.zeros(1, dtype=int, device=self.device)
         self.n = y.size
+        # Every bound and owned float array uses the solution's precision.
+        self.dtype = y.dtype
+        self.matrix_type = wp.mat33d if self.dtype == wp.float64 else wp.mat33
         self.nq = q_cholesky.shape[0]
         self.nx = x_cholesky.size
         self.layout = layout or MonolithicLinearLayout(self.nq, self.nx)
         count = len(self.layout.rigid_ranges)
         self.rigid_cholesky = (
-            wp.zeros((0, 6, 6), dtype=float, device=self.device) if rigid_cholesky is None else rigid_cholesky
+            wp.zeros((0, 6, 6), dtype=self.dtype, device=self.device) if rigid_cholesky is None else rigid_cholesky
         )
         self.rigid_rows = wp.zeros((0, 6), dtype=int, device=self.device) if rigid_rows is None else rigid_rows
         if (self.layout.q_dof_count, self.layout.dynamic_particle_count) != (self.nq, self.nx):
@@ -251,14 +254,14 @@ class MaskedPcgPlan:
         expected = (
             (offsets, wp.int32, (self.n + 1,)),
             (columns, wp.int32, (columns.size,)),
-            (values, wp.float32, (values.size,)),
-            (scale, wp.float32, (self.n,)),
-            (q_cholesky, wp.float32, (self.nq, self.nq)),
-            (x_cholesky, wp.mat33, (self.nx,)),
-            (self.rigid_cholesky, wp.float32, (count, 6, 6)),
+            (values, self.dtype, (values.size,)),
+            (scale, self.dtype, (self.n,)),
+            (q_cholesky, self.dtype, (self.nq, self.nq)),
+            (x_cholesky, self.matrix_type, (self.nx,)),
+            (self.rigid_cholesky, self.dtype, (count, 6, 6)),
             (self.rigid_rows, wp.int32, (count, 6)),
-            (rhs_hat, wp.float32, (self.n,)),
-            (y, wp.float32, (self.n,)),
+            (rhs_hat, self.dtype, (self.n,)),
+            (y, self.dtype, (self.n,)),
         )
         for a, dtype, shape in expected:
             if a.dtype != dtype or a.shape != shape:
@@ -268,25 +271,25 @@ class MaskedPcgPlan:
         self.offsets, self.columns, self.values = offsets, columns, values
         self.scale, self.q_cholesky, self.x_cholesky = scale, q_cholesky, x_cholesky
         self.rhs, self.y = rhs_hat, y
-        self.delta = wp.zeros(self.n, dtype=float, device=self.device) if delta is None else delta
+        self.delta = wp.zeros(self.n, dtype=self.dtype, device=self.device) if delta is None else delta
         if (
             not isinstance(self.delta, wp.array)
             or self.delta.device != self.device
-            or self.delta.dtype != wp.float32
+            or self.delta.dtype != self.dtype
             or self.delta.shape != (self.n,)
             or not self.delta.is_contiguous
         ):
-            raise ValueError("delta must be a contiguous same-device float32 vector")
+            raise ValueError("delta must be a contiguous same-device vector in the solution precision")
         for out in (self.y, self.delta):
             for other in (*arrays[:-1], self.delta if out is self.y else self.y):
                 if _overlap(out, other):
                     raise ValueError("Outputs must not overlap each other or bound input storage")
         self._binding_signature = tuple(map(_signature, (*arrays, self.delta)))
         for name in ("r", "z", "p", "ap", "true_r", "gap", "temporary", "delta_candidate"):
-            setattr(self, name, wp.zeros(self.n, dtype=float, device=self.device))
-        self.products = wp.zeros(1, dtype=float, device=self.device)
+            setattr(self, name, wp.zeros(self.n, dtype=self.dtype, device=self.device))
+        self.products = wp.zeros(1, dtype=self.dtype, device=self.device)
         chunk_count = (self.n + REDUCTION_CHUNK - 1) // REDUCTION_CHUNK
-        self.product_partials = wp.zeros(chunk_count, dtype=float, device=self.device)
+        self.product_partials = wp.zeros(chunk_count, dtype=self.dtype, device=self.device)
         # Residual norms reduce fixed chunks of each contiguous convergence group.
         chunks, group_chunks = [], [0]
         for group, (_, start, count) in enumerate(self.layout.groups[1:], 1):
@@ -298,21 +301,23 @@ class MaskedPcgPlan:
             wp.array(chunks[:, k], dtype=int, device=self.device) for k in range(3)
         )
         self.group_chunks = wp.array(np.asarray(group_chunks, dtype=np.int32), dtype=int, device=self.device)
-        self.norm_partials = wp.zeros((len(chunks), 6), dtype=float, device=self.device)
-        self.scalars = wp.zeros(3, dtype=float, device=self.device)
-        self.maxima = wp.zeros(3 * self.group_count, dtype=float, device=self.device)
-        self.sums = wp.zeros(3 * self.group_count, dtype=float, device=self.device)
-        self.norms = wp.zeros(3 * self.group_count, dtype=float, device=self.device)
+        self.norm_partials = wp.zeros((len(chunks), 6), dtype=self.dtype, device=self.device)
+        self.scalars = wp.zeros(3, dtype=self.dtype, device=self.device)
+        self.maxima = wp.zeros(3 * self.group_count, dtype=self.dtype, device=self.device)
+        self.sums = wp.zeros(3 * self.group_count, dtype=self.dtype, device=self.device)
+        self.norms = wp.zeros(3 * self.group_count, dtype=self.dtype, device=self.device)
         self.error = wp.zeros(1, dtype=int, device=self.device)
         self.state = wp.zeros(1, dtype=_DeviceResult, device=self.device)
-        self.regularization = wp.zeros(1, dtype=float, device=self.device)
+        self.regularization = wp.zeros(1, dtype=self.dtype, device=self.device)
         self.zero_guess = wp.ones(1, dtype=int, device=self.device)
         self.condition = wp.zeros(1, dtype=int, device=self.device)
         self.residual_norm_limits = wp.full(self.group_count, float("inf"), dtype=float, device=self.device)
         self._conditional_graph_supported = self.device.is_cuda and wp.is_conditional_graph_supported()
         # Fuse single-tile dots; retain the parallel reduction for larger systems.
         self._products_kernel = (
-            _make_products_kernel(1 << (self.n - 1).bit_length()) if self.device.is_cuda and self.n <= 2048 else None
+            _make_products_kernel(1 << (self.n - 1).bit_length(), self.dtype)
+            if self.device.is_cuda and self.n <= 2048
+            else None
         )
         self.graph = None
         self._workspace = None
@@ -482,7 +487,6 @@ class MaskedPcgPlan:
                 self.state,
                 self.error,
                 checkpoint,
-                bool(self.layout.material_ranges),
             ],
         )
 

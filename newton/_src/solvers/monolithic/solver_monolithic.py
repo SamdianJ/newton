@@ -394,6 +394,7 @@ class SolverMonolithic(SolverBase):
             cable_row_order=np.concatenate([c.order for c in self._cables])
             if self._cables
             else np.empty(0, dtype=np.int32),
+            dtype=self._dtype,
         )
         self._linear._set_fixed_triplet_pattern(
             global_rows=global_rows,
@@ -403,10 +404,11 @@ class SolverMonolithic(SolverBase):
         )
         self._linear._enable_fixed_bsr_storage()
         n = layout.scalar_dof_count
-        for name in ("_rhs", "_y", "_delta", "_diagonal", "_correction_rhs", "_correction_delta", "_direction_base"):
-            setattr(self, name, wp.zeros(n, dtype=float, device=device))
         native = (
-            "_native_delta",
+            "_rhs",
+            "_y",
+            "_delta",
+            "_diagonal",
             "_complete_r",
             "_complete_a",
             "_coordinates",
@@ -417,8 +419,7 @@ class SolverMonolithic(SolverBase):
         )
         for name in native:
             setattr(self, name, wp.zeros(n, dtype=self._dtype, device=device))
-        self._post_lambda = wp.zeros(1, dtype=float, device=device)
-        self._direction_status = wp.zeros(1, dtype=int, device=device)
+        self._post_lambda = wp.zeros(1, dtype=self._dtype, device=device)
         self._tet_r32 = wp.zeros(layout.dynamic_particle_count, dtype=wp.vec3, device=device)
         self._frozen_force = wp.zeros(model.particle_count, dtype=wp.vec3, device=device)
         self._frozen_gravity = wp.zeros_like(model.gravity)
@@ -434,14 +435,12 @@ class SolverMonolithic(SolverBase):
         # Graph-captured E/r requires every producer to evaluate without host reads.
         self._capturable = all(p.capturable for p in self._producers)
         coordinate = [p for p in self._producers if p.scale_policy == "coordinate"]
-        # Coordinate rows select native direction accumulation and goal-normalized merit (until P8b).
-        self._native_direction = self._material_blocks = bool(coordinate)
-        scale, mask = np.ones(n, dtype=np.float32), np.zeros(n, dtype=np.int32)
+        scale, mask = np.ones(n, dtype=self._numpy_dtype), np.zeros(n, dtype=np.int32)
         for producer in coordinate:
             mask[producer.rows] = 1
             producer.scale(self, None, scale)
         self._coordinate_rows = bool(mask.any())
-        self._coordinate_scale = wp.array(scale, dtype=float, device=device)
+        self._coordinate_scale = wp.array(scale, dtype=self._dtype, device=device)
         self._coordinate_mask = wp.array(mask, dtype=wp.int32, device=device)
         k = self._kinematics
         revolute = k.types.numpy()[k.dof_joint.numpy()] == int(JointType.REVOLUTE)
@@ -1101,9 +1100,8 @@ class SolverMonolithic(SolverBase):
             return None
 
     def _take_trial(self, alpha, dt):
-        direction = self._native_delta if self._native_direction else self._delta
         for producer in self._producers:
-            producer.candidate(self, self._accepted, self._trial, direction, alpha, dt)
+            producer.candidate(self, self._accepted, self._trial, self._delta, alpha, dt)
 
     def _effective_displacement(self, *, device_result=False):
         if device_result:
@@ -1200,7 +1198,7 @@ class SolverMonolithic(SolverBase):
             b.offsets,
             b.columns,
             b.values,
-            self._native_delta if self._native_direction else self._delta,
+            self._delta,
             self._post_r,
             self._linear.scale,
             self._post_lambda,
@@ -1219,43 +1217,15 @@ class SolverMonolithic(SolverBase):
         )
         return self._post_error if device_result else self._post_error.numpy().copy()
 
-    def _accumulate_direction(self, correction):
-        """Accumulate FP32 corrections in native precision, then select the null representative."""
-        before = self._native_delta.numpy().copy()
-        delta = (
-            (before + self._correction_delta.numpy()) if correction else self._delta.numpy().astype(self._numpy_dtype)
-        )
+    def _project_gauges(self):
+        """Remove each pinned cable's common angle, a null mode of its operator, from the direction."""
+        if not self._assembly_gauges:
+            return
+        delta = self._delta.numpy()
         for cable in self._assembly_gauges:
             rows = cable.rows_host[3 * cable.ids.size :]
             delta[rows] -= delta[rows].mean(dtype=np.float64)
-        if not np.isfinite(delta).all():
-            raise _StepFailure(self.Status.NONFINITE, "Nonfinite corrected material direction")
-        self._native_delta.assign(delta)
-        return not np.array_equal(before, delta) if correction else True
-
-    def _prepare_direction_correction(self):
-        wp.launch(
-            kernels.direction_correction_rhs,
-            self._post_error.size,
-            [self._post_error, self._correction_rhs],
-            device=self.model.device,
-        )
-
-    def _combine_direction_correction(self):
-        # A saved base makes warmup/capture/replay overwrite-only, rather than
-        # adding the same correction twice on the first graph invocation.
-        wp.copy(self._direction_base, self._delta)
-        buffers = [self._direction_base, self._correction_delta, self._delta, self._direction_status]
-
-        def execute():
-            self._direction_status.zero_()
-            wp.launch(kernels.combine_direction, self._delta.size, buffers, device=self.model.device)
-
-        self._graphs.run("coupled_direction_correction", (), buffers, execute)
-        status = self._direction_status.numpy()[0]
-        if status == 2:
-            raise _StepFailure(self.Status.NONFINITE, "Nonfinite corrected direction")
-        return status == 1
+        self._delta.assign(delta)
 
     def _validate_final(self, dt, status):
         device = self._device_iteration

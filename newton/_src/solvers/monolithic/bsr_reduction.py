@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 The Newton Developers
 # SPDX-License-Identifier: Apache-2.0
 
-"""Fixed FP32 duplicate reduction for the monolithic scalar operator."""
+"""Fixed-order duplicate reduction for the monolithic scalar operator in its native precision."""
 
 from itertools import pairwise
 from typing import Any
@@ -16,15 +16,20 @@ from .linear_types import MonolithicLinearStatus
 from .segment_graph import _SegmentGraphCache
 
 
+def _value_bits(dtype):
+    """Return the unsigned integer type holding the bit pattern of ``dtype`` values."""
+    return wp.uint64 if dtype == wp.float64 else wp.uint32
+
+
 @wp.kernel
-def _topology_rows(rows: wp.array[int], values: wp.array[float], masked: wp.array[int]):
+def _topology_rows(rows: wp.array[int], values: wp.array[Any], masked: wp.array[int]):
     i = wp.tid()
     # Preserve Warp's zero-input pruning without performing its value reduction.
-    masked[i] = wp.where(values[i] == 0.0, -1, rows[i])
+    masked[i] = wp.where(values[i] == values.dtype(0.0), -1, rows[i])
 
 
 @wp.kernel
-def _value_keys(bits: wp.array[wp.uint32], keys: wp.array[wp.uint32], indices: wp.array[int]):
+def _value_keys(bits: wp.array[Any], keys: wp.array[Any], indices: wp.array[int]):
     i = wp.tid()
     keys[i] = bits[i]
     indices[i] = i
@@ -54,12 +59,12 @@ def _lower_bound(keys: wp.array[wp.uint64], key: wp.uint64, count: int):
 
 @wp.kernel
 def _gather(
-    values: wp.array[float],
+    values: wp.array[Any],
     indices: wp.array[int],
     keys: wp.array[wp.uint64],
     count: int,
     starts: wp.array[int],
-    work: wp.array[float],
+    work: wp.array[Any],
 ):
     i = wp.tid()
     starts[i] = _lower_bound(keys, keys[i], count)
@@ -67,7 +72,7 @@ def _gather(
 
 
 @wp.kernel
-def _pair_level(keys: wp.array[wp.uint64], starts: wp.array[int], work: wp.array[float], stride: int, count: int):
+def _pair_level(keys: wp.array[wp.uint64], starts: wp.array[int], work: wp.array[Any], stride: int, count: int):
     i = wp.tid()
     if (i - starts[i]) % (2 * stride) == 0:
         right = i + stride
@@ -80,12 +85,12 @@ def _pair_level(keys: wp.array[wp.uint64], starts: wp.array[int], work: wp.array
 @wp.kernel
 def _write_bsr(
     keys: wp.array[wp.uint64],
-    work: wp.array[float],
+    work: wp.array[Any],
     count: int,
     size: int,
     offsets: wp.array[int],
     columns: wp.array[int],
-    values: wp.array[float],
+    values: wp.array[Any],
     status: wp.array[int],
 ):
     row = wp.tid()
@@ -105,15 +110,16 @@ def _write_bsr(
 class _ScalarBsrReduction:
     """Own scratch for validated scalar triplets; leave generation guards to the workspace."""
 
-    def __init__(self, capacity, device, *, use_cuda_graph):
+    def __init__(self, capacity, device, *, use_cuda_graph, dtype=wp.float32):
         self.device = device
         capacity = max(1, capacity)
+        self.bits_type = _value_bits(dtype)
         self.rows = wp.empty(capacity, dtype=int, device=device)
-        self.bits = wp.empty(2 * capacity, dtype=wp.uint32, device=device)
+        self.bits = wp.empty(2 * capacity, dtype=self.bits_type, device=device)
         self.keys = wp.empty(2 * capacity, dtype=wp.uint64, device=device)
         self.indices = wp.empty(2 * capacity, dtype=int, device=device)
         self.starts = wp.empty(capacity, dtype=int, device=device)
-        self.work = wp.empty(capacity, dtype=float, device=device)
+        self.work = wp.empty(capacity, dtype=dtype, device=device)
         self.graphs = _SegmentGraphCache(device, enabled=use_cuda_graph)
 
     def build(self, matrix, triplets, count, *, layout_identity, graphs):
@@ -147,9 +153,11 @@ class _ScalarBsrReduction:
         )
 
     def _reduce(self, matrix, triplets, count):
-        wp.launch(_value_keys, count, [triplets.values.view(wp.uint32), self.bits, self.indices], device=self.device)
+        wp.launch(
+            _value_keys, count, [triplets.values.view(self.bits_type), self.bits, self.indices], device=self.device
+        )
         # Stable least-significant-key-first sorts reproduce (row, column, bits)
-        # without squeezing the coordinate key and 32 value bits into one word.
+        # without squeezing the coordinate key and the value bits into one word.
         radix_sort_pairs(self.bits, self.indices, count)
         wp.launch(
             _position_keys,
@@ -195,8 +203,8 @@ def _fixed_bsr_begin(
 def _fixed_bsr_value_keys(
     rows: wp.array[int],
     columns: wp.array[int],
-    values: wp.array[float],
-    bits: wp.array[wp.uint32],
+    values: wp.array[Any],
+    bits: wp.array[Any],
     count: wp.array[int],
     size: int,
     keys: wp.array[wp.uint64],
@@ -253,9 +261,9 @@ def _fixed_bsr_position_keys(
 def _fixed_bsr_work(
     keys: wp.array[wp.uint64],
     indices: wp.array[int],
-    values: wp.array[float],
+    values: wp.array[Any],
     starts: wp.array[int],
-    work: wp.array[float],
+    work: wp.array[Any],
     live: wp.array[int],
     count: wp.array[int],
     workers: int,
@@ -264,13 +272,14 @@ def _fixed_bsr_work(
     n = count[0]
     if n < 0 or n > keys.shape[0] // 2:
         return
+    zero = values.dtype(0.0)
     while i < n:
         first = i
-        value = float(0)
+        value = values.dtype(0.0)
         if keys[i] != wp.uint64(0) - wp.uint64(1):
             first = _lower_bound(keys, keys[i], n)
             value = values[indices[i]]
-            if value != 0.0:
+            if value != zero:
                 wp.atomic_or(live, first, 1)
         starts[i] = first
         work[i] = value
@@ -281,7 +290,7 @@ def _fixed_bsr_work(
 def _fixed_bsr_pair(
     keys: wp.array[wp.uint64],
     starts: wp.array[int],
-    work: wp.array[float],
+    work: wp.array[Any],
     count: wp.array[int],
     stride: int,
     workers: int,
@@ -375,11 +384,11 @@ def _fixed_bsr_entries(
     keys: wp.array[wp.uint64],
     starts: wp.array[int],
     live: wp.array[int],
-    work: wp.array[float],
+    work: wp.array[Any],
     prefix: wp.array[int],
     size: int,
     columns: wp.array[int],
-    values: wp.array[float],
+    values: wp.array[Any],
     count: wp.array[int],
     workers: int,
 ):
@@ -407,7 +416,7 @@ def _fixed_bsr_publish_status(status: wp.array[int], incoming: wp.array[int]):
 
 
 class _FixedScalarBsrReduction:
-    """Build a fixed-capacity scalar matrix with the existing FP32 value tree.
+    """Build a fixed-capacity scalar matrix with a fixed-order value tree.
 
     Device effective counts change contents, not graph bindings or allocation.
     All input zeros remain in the tree; only zero-only coordinates are pruned.
@@ -419,7 +428,7 @@ class _FixedScalarBsrReduction:
 
     MAX_WORKERS = _CONTACT_WORKERS
 
-    def __init__(self, size, capacity, device, *, use_cuda_graph):
+    def __init__(self, size, capacity, device, *, use_cuda_graph, dtype=wp.float32):
         for name, value, maximum in (("size", size, 2**31 - 2), ("capacity", capacity, 2**30 - 1)):
             if (
                 isinstance(value, (bool, np.bool_))
@@ -430,19 +439,19 @@ class _FixedScalarBsrReduction:
         size, capacity = int(size), int(capacity)
         output_capacity = min(capacity, size * size)
         p = 1 << capacity.bit_length()  # Always has a terminal prefix[capacity].
-        byte_count = 36 * capacity + 4 * p + 8 + 4 * (size + 1) + 8 * output_capacity
+        scalar_bytes = wp.types.type_size_in_bytes(dtype)
+        byte_count = (32 + scalar_bytes) * capacity + 4 * p + 8 + 4 * (size + 1) + (4 + scalar_bytes) * output_capacity
         if byte_count >= 2**63:
             raise ValueError("Fixed scalar BSR byte capacity exceeds int64")
         self.size, self.capacity, self.output_capacity = size, capacity, output_capacity
+        self.dtype, self.bits_type = dtype, _value_bits(dtype)
         self.device = wp.get_device(device)
         self._spec = {"keys": (2 * capacity, wp.uint64), "indices": (2 * capacity, wp.int32)}
         self._spec.update(dict.fromkeys(("starts", "live"), (capacity, wp.int32)))
-        self._spec.update(
-            work=(capacity, wp.float32), prefix=(p, wp.int32), scan_size=(1, wp.int32), status=(1, wp.int32)
-        )
+        self._spec.update(work=(capacity, dtype), prefix=(p, wp.int32), scan_size=(1, wp.int32), status=(1, wp.int32))
         for name, (length, scalar) in self._spec.items():
             setattr(self, name, wp.zeros(length, dtype=scalar, device=self.device))
-        self.matrix = sparse.bsr_zeros(size, size, wp.float32, device=self.device, nnz_capacity=output_capacity)
+        self.matrix = sparse.bsr_zeros(size, size, dtype, device=self.device, nnz_capacity=output_capacity)
         # Construction also establishes Warp's fixed pinned nnz readback/event.
         self.matrix.notify_nnz_changed(nnz=output_capacity, nnz_capacity=output_capacity)
         self.payload_bytes = byte_count
@@ -472,12 +481,12 @@ class _FixedScalarBsrReduction:
             *self._spec.values(),
             (self.size + 1, wp.int32),
             (self.output_capacity, wp.int32),
-            (self.output_capacity, wp.float32),
+            (self.output_capacity, self.dtype),
         ]
         for name, spec in (
             ("rows", (self.capacity, wp.int32)),
             ("columns", (self.capacity, wp.int32)),
-            ("values", (self.capacity, wp.float32)),
+            ("values", (self.capacity, self.dtype)),
             ("count", (1, wp.int32)),
             ("status", (1, wp.int32)),
         ):
@@ -522,7 +531,7 @@ class _FixedScalarBsrReduction:
                     rows,
                     triplets.columns,
                     triplets.values,
-                    triplets.values.view(wp.uint32),
+                    triplets.values.view(self.bits_type),
                     triplets.count,
                     self.size,
                     keys,
@@ -533,8 +542,10 @@ class _FixedScalarBsrReduction:
                 ],
                 device=self.device,
             )
-            # One extra bit separates every uint32 value bit pattern from padding.
-            radix_sort_pairs(keys, indices, n, end_bit=33)
+            # FP32: one extra bit separates every uint32 value bit pattern from
+            # padding. FP64: the all-ones padding key is a NaN pattern, which the
+            # finiteness check already rejects.
+            radix_sort_pairs(keys, indices, n, end_bit=33 if self.bits_type == wp.uint32 else 64)
             wp.launch(
                 _fixed_bsr_position_keys,
                 workers,
@@ -628,7 +639,7 @@ def _fixed_internal_begin(count: wp.array[int], incoming: wp.array[int], status:
 def _fixed_internal_validate(
     rows: wp.array[int],
     columns: wp.array[int],
-    values: wp.array[wp.mat33],
+    values: wp.array[Any],
     count: wp.array[int],
     expected_rows: wp.array[int],
     expected_columns: wp.array[int],
@@ -647,23 +658,23 @@ def _fixed_internal_validate(
             value = values[i][row, column]
             if not wp.isfinite(value):
                 wp.atomic_max(status, 0, int(MonolithicLinearStatus.NONFINITE_CONTRIBUTION))
-            nonzero = nonzero or value != 0.0
+            nonzero = nonzero or value != type(value)(0.0)
     if nonzero:
         active[i] = 1
 
 
 @wp.kernel
 def _fixed_internal_values(
-    inputs: wp.array[wp.mat33],
+    inputs: wp.array[Any],
     indices: wp.array[int],
     offsets: wp.array[int],
     active: wp.array[int],
     live: wp.array[int],
-    work: wp.array3d[float],
+    work: wp.array3d[Any],
     status: wp.array[int],
 ):
     group, row, column = wp.tid()
-    value = float(0)
+    value = work.dtype(0.0)
     found = int(0)
     for slot in range(offsets[group], offsets[group + 1]):
         source = indices[slot]
@@ -703,9 +714,9 @@ def _fixed_internal_entries(
     live: wp.array[int],
     prefix: wp.array[int],
     columns: wp.array[int],
-    work: wp.array[wp.mat33],
+    work: wp.array[Any],
     out_columns: wp.array[int],
-    out_values: wp.array[wp.mat33],
+    out_values: wp.array[Any],
 ):
     i = wp.tid()
     if live[i] != 0:
@@ -715,7 +726,7 @@ def _fixed_internal_entries(
 
 
 @wp.kernel
-def _fixed_internal_finite(offsets: wp.array[int], values: wp.array[wp.mat33], status: wp.array[int]):
+def _fixed_internal_finite(offsets: wp.array[int], values: wp.array[Any], status: wp.array[int]):
     row = wp.tid()
     for entry in range(offsets[row], offsets[row + 1]):
         for i in range(3):
@@ -734,7 +745,7 @@ class _FixedInternalBsrReduction:
     This component is only for the complete static tet owner pattern, not contact.
     """
 
-    def __init__(self, size, rows, columns, device, *, use_cuda_graph):
+    def __init__(self, size, rows, columns, device, *, use_cuda_graph, dtype=wp.float32):
         if isinstance(size, (bool, np.bool_)) or not isinstance(size, (int, np.integer)) or not 0 <= size <= 2**31 - 2:
             raise ValueError("Invalid fixed internal BSR size")
         rows, columns = np.asarray(rows), np.asarray(columns)
@@ -764,10 +775,20 @@ class _FixedInternalBsrReduction:
         groups = len(starts)
         row_groups = np.r_[0, np.cumsum(np.bincount(group_rows, minlength=size))].astype(np.int32)
         p = 1 << groups.bit_length()
+        self.dtype = dtype
+        self.block_type = wp.mat33d if dtype == wp.float64 else wp.mat33
+        block_bytes = wp.types.type_size_in_bytes(self.block_type)
         self.device = wp.get_device(device)
         self.size, self.capacity, self.group_count = int(size), capacity, groups
         self.output_capacity = groups if self.device.is_cuda else capacity
-        byte_count = 16 * capacity + 48 * groups + 8 * (int(size) + 1) + 4 * p + 8 + 40 * self.output_capacity
+        byte_count = (
+            16 * capacity
+            + (12 + block_bytes) * groups
+            + 8 * (int(size) + 1)
+            + 4 * p
+            + 8
+            + (4 + block_bytes) * self.output_capacity
+        )
         if byte_count >= 2**63:
             raise ValueError("Fixed internal BSR byte capacity exceeds int64")
         self._spec = dict.fromkeys(("expected_rows", "expected_columns", "indices", "active"), (capacity, wp.int32))
@@ -775,7 +796,7 @@ class _FixedInternalBsrReduction:
         self._spec.update(
             group_offsets=(groups + 1, wp.int32),
             row_groups=(int(size) + 1, wp.int32),
-            work=(groups, wp.mat33),
+            work=(groups, self.block_type),
             prefix=(p, wp.int32),
             status=(1, wp.int32),
         )
@@ -790,7 +811,9 @@ class _FixedInternalBsrReduction:
             ("row_groups", row_groups),
         ):
             getattr(self, name).assign(data)
-        self.matrix = sparse.bsr_zeros(size, size, wp.mat33, device=self.device, nnz_capacity=self.output_capacity)
+        self.matrix = sparse.bsr_zeros(
+            size, size, self.block_type, device=self.device, nnz_capacity=self.output_capacity
+        )
         self.matrix.notify_nnz_changed(nnz=self.output_capacity, nnz_capacity=self.output_capacity)
         self.graphs = _SegmentGraphCache(self.device, enabled=use_cuda_graph and self.device.is_cuda)
         self.payload_bytes = byte_count
@@ -812,12 +835,12 @@ class _FixedInternalBsrReduction:
             *self._spec.values(),
             (self.size + 1, wp.int32),
             (self.output_capacity, wp.int32),
-            (self.output_capacity, wp.mat33),
+            (self.output_capacity, self.block_type),
         ]
         for name, scalar, length in (
             ("rows", wp.int32, self.capacity),
             ("columns", wp.int32, self.capacity),
-            ("values", wp.mat33, self.capacity),
+            ("values", self.block_type, self.capacity),
             ("count", wp.int32, 1),
             ("status", wp.int32, 1),
         ):
@@ -889,7 +912,7 @@ class _FixedInternalBsrReduction:
                         wp.array(
                             ptr=self.work.ptr,
                             capacity=self.work.capacity,
-                            dtype=wp.float32,
+                            dtype=self.dtype,
                             shape=(self.group_count, 3, 3),
                             device=self.device,
                         ),

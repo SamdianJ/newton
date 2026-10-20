@@ -260,8 +260,9 @@ def test_contact_linear_blocks(test, device):
             *run._layout.indices("tet").reshape(-1, 3),
         ):
             blocks[np.ix_(rows, rows)] = matrix[np.ix_(rows, rows)]
-        rhs_host = np.linspace(-0.2, 0.3, len(matrix)).astype(np.float32)
-        rhs, out = wp.array(rhs_host, device=device), wp.zeros(len(matrix), dtype=float, device=device)
+        rhs_host = np.linspace(-0.2, 0.3, len(matrix)).astype(run._numpy_dtype)
+        rhs = wp.array(rhs_host, dtype=linear.dtype, device=device)
+        out = wp.zeros(len(matrix), dtype=linear.dtype, device=device)
         linear.preconditioner.matvec(rhs, out, out, 1.0, 0.0)
         np.testing.assert_allclose(out.numpy(), np.linalg.solve(blocks, rhs_host), atol=1e-6, rtol=1e-5)
         linear.operator.matvec(rhs, out, out, 1.0, 0.0)

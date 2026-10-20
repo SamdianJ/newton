@@ -3,6 +3,8 @@
 
 """Per-cable band Cholesky in vertex/edge order; the global operator stays coupled."""
 
+from typing import Any
+
 import numpy as np
 import warp as wp
 
@@ -11,15 +13,15 @@ import warp as wp
 def _factor(
     offsets: wp.array[int],
     columns: wp.array[int],
-    values: wp.array[float],
-    scale: wp.array[float],
+    values: wp.array[Any],
+    scale: wp.array[Any],
     rows: wp.array[int],
     inverse: wp.array[int],
     spans: wp.array2d[int],
     gauge_rows: wp.array[int],
-    regularization: float,
-    tolerance: float,
-    factor: wp.array2d[float],
+    regularization: Any,
+    tolerance: Any,
+    factor: wp.array2d[Any],
     status: wp.array[int],
 ):
     actor = wp.tid()
@@ -27,14 +29,14 @@ def _factor(
     for i in range(start, end):
         row = rows[i]
         for distance in range(11):
-            factor[i, distance] = float(0.0)
+            factor[i, distance] = factor.dtype(0.0)
         for slot in range(offsets[row], offsets[row + 1]):
             column = columns[slot]
             j = inverse[column]
             if j >= start and j <= i:
                 if i - j <= 10:
                     factor[i, i - j] = values[slot] * scale[row] * scale[column]
-                elif values[slot] != 0.0:
+                elif values[slot] != values.dtype(0.0):
                     wp.atomic_max(status, 0, 1)
                     return
         factor[i, 0] += regularization
@@ -42,7 +44,7 @@ def _factor(
         # The physical matrix/residual are unchanged; the delivered theta increment
         # is projected to zero mean by the common-angle constraint.
         if row == gauge_rows[actor]:
-            factor[i, 0] += float(1.0)
+            factor[i, 0] += factor.dtype(1.0)
         for j in range(wp.max(start, i - 10), i + 1):
             value = factor[i, i - j]
             for k in range(wp.max(start, i - 10), j):
@@ -63,9 +65,9 @@ def _factor(
 def _apply(
     rows: wp.array[int],
     spans: wp.array2d[int],
-    factor: wp.array2d[float],
-    rhs: wp.array[float],
-    result: wp.array[float],
+    factor: wp.array2d[Any],
+    rhs: wp.array[Any],
+    result: wp.array[Any],
     active: wp.array[int],
 ):
     actor = wp.tid()
@@ -88,7 +90,7 @@ def _apply(
 class CablePreconditioner:
     """Own fixed band storage and an authenticated per-actor scalar permutation."""
 
-    def __init__(self, layout, order, *, device):
+    def __init__(self, layout, order, *, device, dtype=wp.float32):
         expected, spans = [], []
         count = 0
         for kind, _, start, xyz, theta in layout.material_ranges:
@@ -110,7 +112,8 @@ class CablePreconditioner:
         self.inverse = wp.array(inverse, dtype=int, device=device)
         self.spans = wp.array(np.asarray(spans, dtype=np.int32).reshape(-1, 2), dtype=int, device=device)
         self.gauge_rows = wp.full(len(spans), -1, dtype=int, device=device)
-        self.factor_values = wp.zeros((count, 11), dtype=float, device=device)
+        self.dtype = dtype
+        self.factor_values = wp.zeros((count, 11), dtype=dtype, device=device)
         self.active = wp.ones(1, dtype=int, device=device)
 
     def buffers(self):
@@ -136,8 +139,8 @@ class CablePreconditioner:
                 self.inverse,
                 self.spans,
                 self.gauge_rows,
-                workspace._lambda,
-                tolerance,
+                self.dtype(workspace._lambda),
+                self.dtype(tolerance),
                 self.factor_values,
                 workspace._status,
             ],

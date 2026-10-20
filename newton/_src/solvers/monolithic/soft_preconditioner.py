@@ -187,6 +187,8 @@ class _BlockPreconditioner:
     """
 
     def __init__(self, workspace, hierarchy):
+        if workspace.dtype != wp.float32:
+            raise ValueError("The research block preconditioner supports FP32 workspaces only")
         self.device = workspace.device
         self.x_start = workspace.layout.x_scalar_offset
         self.nx = workspace.layout.dynamic_particle_count

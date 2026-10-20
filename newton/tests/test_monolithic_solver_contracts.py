@@ -310,7 +310,7 @@ def test_nonfinite_tangent(test, device):
     def overflow(*args, **kwargs):
         evaluate(*args, **kwargs)
         if kwargs.get("build_tangent", True):
-            solver._objective.tangent32.fill_(float("inf"))
+            solver._objective.tangent.fill_(float("inf"))
 
     with patch.object(solver._objective, "evaluate", side_effect=overflow):
         solver.step(state, state, model.control(), dt=0.001)

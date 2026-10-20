@@ -404,7 +404,7 @@ def test_contact_transactions(test, device):
         build = reduction.build
 
         def overflow_reduction(triplets, build=build, **kwargs):
-            triplets.values.fill_(np.finfo(np.float32).max)
+            triplets.values.fill_(np.finfo(wp.dtype_to_numpy(triplets.values.dtype)).max)
             return build(triplets, **kwargs)
 
         with patch.object(reduction, "build", overflow_reduction):

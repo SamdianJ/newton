@@ -83,15 +83,15 @@ def _scatter_tangent(
     b: wp.array[int],
     mass: wp.array[Any],
     dt: Any,
-    stretch: wp.array3d[float],
-    bend: wp.array3d[float],
+    stretch: wp.array3d[Any],
+    bend: wp.array3d[Any],
     offset: int,
-    output: wp.array[float],
+    output: wp.array[Any],
 ):
     i = wp.tid()
-    value = float(0.0)
+    value = output.dtype(0.0)
     if kind[i] == 0:
-        value = float(mass[element[i]] / (dt * dt))
+        value = mass[element[i]] / (dt * dt)
     elif kind[i] == 1:
         value = stretch[element[i], a[i], b[i]]
     else:

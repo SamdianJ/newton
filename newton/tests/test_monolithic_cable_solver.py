@@ -192,7 +192,7 @@ class TestMonolithicCableSolver(unittest.TestCase):
             np.testing.assert_array_equal(values, before[name], err_msg=name)
 
     def test_slender_cantilever_direction(self):
-        """Qualify corrected native directions despite FP32 slender-beam conditioning."""
+        """Qualify slender-beam directions by one true-residual check per solve."""
         case = CableBenchmark(
             "cantilever",
             segments=128,

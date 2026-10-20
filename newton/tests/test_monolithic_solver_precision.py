@@ -54,7 +54,7 @@ class TestSolverPrecision(unittest.TestCase):
                             saved = forces.particle_force.copy()
                             run.reset_state(output, dt=0.001)
                             np.testing.assert_array_equal(saved, forces.particle_force)
-                            self.assertEqual(run._linear.scale.dtype, wp.float32)
+                            self.assertEqual(run._linear.scale.numpy().dtype, native)
                 if graph:
                     for run in runs:
                         segment = run._graphs.summary()["segments"]["coupled_objective_owners"]

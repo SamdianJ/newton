@@ -117,7 +117,7 @@ def dynamic_diagonal(
     dt: Any,
     q_start: int,
     x_start: int,
-    out: wp.array[float],
+    out: wp.array[Any],
 ):
     i = wp.tid()
     value = type(dt)(0.0)
@@ -135,18 +135,18 @@ def dynamic_diagonal(
         value = type(dt)(particle_mass[ids[(i - x_start) / 3]])
     else:
         return
-    out[i] = float(value / (dt * dt))
+    out[i] = value / (dt * dt)
 
 
 @wp.kernel
 def sparse_posterior(
     offsets: wp.array[int],
     columns: wp.array[int],
-    values: wp.array[float],
+    values: wp.array[Any],
     direction: wp.array[Any],
     residual: wp.array[Any],
-    scale: wp.array[float],
-    regularization: wp.array[float],
+    scale: wp.array[Any],
+    regularization: wp.array[Any],
     original: wp.array[Any],
     regularization_term: wp.array[Any],
     error: wp.array[Any],
@@ -154,38 +154,17 @@ def sparse_posterior(
     row = wp.tid()
     value = residual[row]
     for j in range(offsets[row], offsets[row + 1]):
-        value += type(residual[0])(values[j]) * type(residual[0])(direction[columns[j]])
-    original[row] = type(residual[0])(scale[row]) * value
-    term = type(residual[0])(0.0)
-    if regularization[0] != 0.0:
-        term = type(residual[0])(regularization[0]) * (
-            type(residual[0])(direction[row]) / type(residual[0])(scale[row])
-        )
+        value += values[j] * direction[columns[j]]
+    original[row] = scale[row] * value
+    term = residual.dtype(0.0)
+    if regularization[0] != term:
+        term = regularization[0] * (direction[row] / scale[row])
     regularization_term[row] = term
     error[row] = original[row] + term
 
 
 @wp.kernel
-def direction_correction_rhs(error: wp.array[Any], rhs: wp.array[float]):
-    i = wp.tid()
-    rhs[i] = float(-error[i])
-
-
-@wp.kernel
-def combine_direction(
-    base: wp.array[float], correction: wp.array[float], direction: wp.array[float], status: wp.array[int]
-):
-    i = wp.tid()
-    value = base[i] + correction[i]
-    direction[i] = value
-    if not wp.isfinite(value):
-        wp.atomic_max(status, 0, 2)
-    elif value != base[i]:
-        wp.atomic_max(status, 0, 1)
-
-
-@wp.kernel
-def _scatter(matrix: wp.array2d[float], actor: wp.array2d[float], values: wp.array[float], diagonal: wp.array[float]):
+def _scatter(matrix: wp.array2d[Any], actor: wp.array2d[Any], values: wp.array[Any], diagonal: wp.array[Any]):
     i, j = wp.tid()
     actor[i, j] = matrix[i, j]
     values[i * matrix.shape[0] + j] = matrix[i, j]

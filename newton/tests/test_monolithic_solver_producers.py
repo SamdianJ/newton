@@ -48,7 +48,6 @@ class TestSolverProducers(unittest.TestCase):
         solver = contact_solver(contact_scene("cpu", "chain"))
         self.assert_partition(solver, ["articulation", "rigid", "tet", "contact"])
         self.assertTrue(solver._capturable)
-        self.assertFalse(solver._native_direction)
 
     def test_material_scene_producers(self):
         names = ["articulation", "rigid", "tet", "cloth_0", "cable_0", "cable_1", "contact"]
@@ -59,7 +58,6 @@ class TestSolverProducers(unittest.TestCase):
         _, solver = material_scene(mechanical=True, rigid=True, tet=True, cloth=True, cables=2, shape_radius=0.5)
         self.assert_partition(solver, names)
         self.assertFalse(solver._capturable)
-        self.assertTrue(solver._native_direction)
         policies = {p.name: (p.capturable, p.scale_policy) for p in solver._producers}
         self.assertEqual(policies["cloth_0"], (False, "coordinate"))
         self.assertEqual(policies["cable_1"], (False, "coordinate"))

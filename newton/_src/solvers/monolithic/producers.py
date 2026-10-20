@@ -275,7 +275,7 @@ class ArticulationProducer(_Producer):
             kernels._scatter,
             (nq, nq),
             [
-                solver._objective.tangent32,
+                solver._objective.tangent,
                 assembly.aq_actor_dense,
                 assembly.global_scalar_triplets.values,
                 solver._diagonal,

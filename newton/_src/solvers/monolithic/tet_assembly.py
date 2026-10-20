@@ -44,8 +44,10 @@ class TetAssemblyWorkspace:
 
 @dataclass(frozen=True, slots=True)
 class TetScatterBuffers:
-    ax_values: wp.array[wp.mat33]
-    global_values: wp.array[float]
+    ax_values: wp.array
+    """Owner 3x3 blocks, ``mat33`` or ``mat33d`` matching ``global_values``."""
+    global_values: wp.array
+    """Global scalar triplet values in the linear workspace precision."""
 
 
 def build_tet_triplet_pattern(
@@ -88,11 +90,13 @@ def create_tet_assembly_workspace(
 
 
 @wp.func
-def _scatter_internal_block(slot: int, block: wp.mat33, ax_values: wp.array[wp.mat33], global_values: wp.array[float]):
-    ax_values[slot] = block
+def _scatter_internal_block(slot: int, block: wp.mat33, ax_values: wp.array[Any], global_values: wp.array[Any]):
+    # The projected element tangent is evaluated in FP32 until the material
+    # chain is precision generic; storage follows the linear workspace.
+    ax_values[slot] = ax_values.dtype(block)
     for row in range(3):
         for col in range(3):
-            global_values[9 * slot + 3 * row + col] = block[row, col]
+            global_values[9 * slot + 3 * row + col] = global_values.dtype(block[row, col])
 
 
 @wp.kernel
@@ -129,8 +133,8 @@ def _assemble_inertia_tangent(
     inv_dt_sq: float,
     particle_mass: wp.array[float],
     dynamic_particle_ids: wp.array[int],
-    ax_values: wp.array[wp.mat33],
-    global_values: wp.array[float],
+    ax_values: wp.array[Any],
+    global_values: wp.array[Any],
 ):
     index = wp.tid()
     _scatter_internal_block(
@@ -245,8 +249,8 @@ def _assemble_elastic_residual_tangent(
     particle_to_dynamic: wp.array[int],
     elastic_block_slots: wp.array2d[int],
     residual_x: wp.array[wp.vec3],
-    ax_values: wp.array[wp.mat33],
-    global_values: wp.array[float],
+    ax_values: wp.array[Any],
+    global_values: wp.array[Any],
     tet_energy: wp.array[float],
     min_det_f: wp.array[float],
     failure_flags: wp.array[int],
@@ -315,7 +319,7 @@ def _check_residual_finite(residual: wp.array[wp.vec3], failure_flags: wp.array[
 
 
 @wp.kernel
-def _check_scatter_finite(values: wp.array[float], failure_flags: wp.array[int]):
+def _check_scatter_finite(values: wp.array[Any], failure_flags: wp.array[int]):
     if not wp.isfinite(values[wp.tid()]):
         wp.atomic_max(failure_flags, 0, 2)
 
@@ -412,8 +416,7 @@ def assemble_tet_residual_tangent(
 ) -> None:
     """Write exact residual and identical projected/inertial owner and global blocks."""
     if (
-        scatter.ax_values.dtype != wp.mat33
-        or scatter.global_values.dtype != wp.float32
+        (scatter.ax_values.dtype, scatter.global_values.dtype) not in ((wp.mat33, wp.float32), (wp.mat33d, wp.float64))
         or scatter.ax_values.ndim != 1
         or scatter.global_values.ndim != 1
         or scatter.ax_values.device != model.device
@@ -421,7 +424,7 @@ def assemble_tet_residual_tangent(
         or scatter.global_values.size != 9 * scatter.ax_values.size
         or scatter.ax_values.size < dynamic_particle_ids.size
     ):
-        raise ValueError("tet scatter requires matching mat33/scalar slices on the model device")
+        raise ValueError("tet scatter requires matching block/scalar slices of one precision on the model device")
     physics = workspace.physics
     mode = int(physics is not None and physics.material_model == "smith_log_stabilized")
     poses = physics.poses if physics is not None else model.tet_poses
