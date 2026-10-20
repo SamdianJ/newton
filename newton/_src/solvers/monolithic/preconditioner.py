@@ -231,9 +231,7 @@ def _monolithic_preconditioner_matvec(workspace, x, y, z, alpha, beta) -> None:
         [workspace._rigid_cholesky, workspace.rigid_rows, x, workspace._preconditioned],
         device=workspace.device,
     )
-    if workspace._study_soft is not None:
-        workspace._study_soft.apply(x, workspace._preconditioned)
-    elif workspace.layout.dynamic_particle_count:
+    if workspace.layout.dynamic_particle_count:
         wp.launch(
             _apply_x_preconditioner,
             workspace.layout.dynamic_particle_count,
@@ -256,7 +254,7 @@ def factor_actor_preconditioner(
     if not np.isfinite(pivot_tolerance) or pivot_tolerance < 0:
         return MonolithicLinearStatus.INVALID_ARGUMENT
     self.factor_setup_count += 1
-    if self._segment_graphs is None or self._study_soft is not None:
+    if self._segment_graphs is None:
         self._factor_actor_device(pivot_tolerance)
     else:
         matrix = self.k_global_scalar_bsr
@@ -339,7 +337,7 @@ def _factor_actor_device(self, pivot_tolerance):
         ],
         device=self.device,
     )
-    if self.layout.dynamic_particle_count and self._study_soft is None:
+    if self.layout.dynamic_particle_count:
         wp.launch(
             _assemble_monolithic_x_preconditioner,
             self.layout.dynamic_particle_count,
@@ -360,9 +358,7 @@ def _factor_actor_device(self, pivot_tolerance):
         [self._q_preconditioner, self._q_cholesky, tolerance, self._status],
         device=self.device,
     )
-    if self._study_soft is not None:
-        self._study_soft.factor(self, pivot_tolerance)
-    elif self.layout.dynamic_particle_count:
+    if self.layout.dynamic_particle_count:
         wp.launch(
             _factor_monolithic_x_cholesky,
             self.layout.dynamic_particle_count,

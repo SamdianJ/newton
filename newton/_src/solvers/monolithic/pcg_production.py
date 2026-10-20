@@ -38,6 +38,7 @@ from .linear_types import (
 from .pcg_common import group_data, group_policy
 from .pcg_production_kernels import (
     REDUCTION_CHUNK,
+    _active_mask,
     _alpha_guard,
     _begin_slot,
     _checkpoint_decision,
@@ -66,7 +67,6 @@ from .pcg_production_kernels import (
     _recover_candidate,
     _replace_recursive,
     _residual_and_maxima,
-    _study_mask,
     _sum_products,
 )
 
@@ -193,7 +193,6 @@ class MaskedPcgPlan:
         y,
         delta=None,
         config: MaskedPcgConfig | None = None,
-        _study_soft=None,
         layout=None,
         rigid_cholesky=None,
         rigid_rows=None,
@@ -206,15 +205,12 @@ class MaskedPcgPlan:
         self.device = wp.get_device(y.device)
         if self.device.is_capturing:
             raise RuntimeError("Construct/bind the plan outside graph capture")
-        self._study_soft = _study_soft
         self._cloth_preconditioner = cloth_preconditioner
         self._cloth_signature = None if cloth_preconditioner is None else cloth_preconditioner.signature()
         self._cloth_active = None if cloth_preconditioner is None else wp.zeros(1, dtype=int, device=self.device)
         self._cable_preconditioner = cable_preconditioner
         self._cable_signature = None if cable_preconditioner is None else cable_preconditioner.signature()
         self._cable_active = None if cable_preconditioner is None else wp.zeros(1, dtype=int, device=self.device)
-        self._study_signature = None if _study_soft is None else _study_soft.signature()
-        self._study_active = None if _study_soft is None else wp.zeros(1, dtype=int, device=self.device)
         self.n = y.size
         # Every bound and owned float array uses the solution's precision.
         self.dtype = y.dtype
@@ -374,7 +370,6 @@ class MaskedPcgPlan:
             y=y,
             delta=delta,
             config=config,
-            _study_soft=workspace._study_soft,
             layout=workspace.layout,
             rigid_cholesky=workspace._rigid_cholesky,
             rigid_rows=workspace.rigid_rows,
@@ -403,8 +398,6 @@ class MaskedPcgPlan:
             raise ValueError("Cloth preconditioner storage changed")
         if self._cable_preconditioner is not None and self._cable_signature != self._cable_preconditioner.signature():
             raise ValueError("Cable factor storage changed; construct a new PCG plan")
-        if self._study_soft is not None:
-            self._study_soft.validate()
         arrays = tuple(value for value in vars(self).values() if isinstance(value, wp.array))
         if (
             self._stream_id() != self._stream
@@ -448,8 +441,6 @@ class MaskedPcgPlan:
             and (self._cloth_preconditioner is None or self._cloth_signature == self._cloth_preconditioner.signature())
             and self._cable_preconditioner is workspace._cable_preconditioner
             and (self._cable_preconditioner is None or self._cable_signature == self._cable_preconditioner.signature())
-            and self._study_soft is workspace._study_soft
-            and (self._study_soft is None or self._study_signature == self._study_soft.signature())
             and self._stream == self._stream_id()
             and self.layout == workspace.layout
             and config == self.config
@@ -525,10 +516,10 @@ class MaskedPcgPlan:
 
     def _emit_direction(self, slot):
         if self._cloth_preconditioner is not None:
-            self._launch(_study_mask, 1, [self.state, self._cloth_active])
+            self._launch(_active_mask, 1, [self.state, self._cloth_active])
             self._cloth_preconditioner.apply(self.r, self.z, active=self._cloth_active)
         if self._cable_preconditioner is not None:
-            self._launch(_study_mask, 1, [self.state, self._cable_active])
+            self._launch(_active_mask, 1, [self.state, self._cable_active])
             self._cable_preconditioner.apply(self.r, self.z, active=self._cable_active)
         if len(self.layout.rigid_ranges):
             self._launch(
@@ -542,10 +533,7 @@ class MaskedPcgPlan:
                 1,
                 [self.q_cholesky, self.layout.q_scalar_offset, self.r, self.temporary, self.z, self.state, self.error],
             )
-        if self._study_soft is not None:
-            self._launch(_study_mask, 1, [self.state, self._study_active])
-            self._study_soft.apply(self.r, self.z, active=self._study_active, error=self.error)
-        elif self.nx:
+        if self.nx:
             self._launch(
                 _masked_x_solve,
                 self.nx,

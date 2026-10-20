@@ -734,5 +734,5 @@ def _publish_delta(candidate: wp.array[Any], delta: wp.array[Any], state: wp.arr
 
 
 @wp.kernel
-def _study_mask(state: wp.array[_DeviceResult], active: wp.array[int]):
+def _active_mask(state: wp.array[_DeviceResult], active: wp.array[int]):
     active[0] = state[0].enabled

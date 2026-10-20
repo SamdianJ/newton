@@ -19,8 +19,8 @@ from scripts.monolithic_reference.workload_scene import compare_arrays
 
 def pcg_input(workspace, rhs, y, *, config, warm_start, delta, **kwargs):
     """Capture live inputs before the production adapter mutates its outputs."""
-    if workspace.pcg_mode != "production" or workspace._study_soft is not None or delta is None:
-        raise ValueError("Only ordinary production PCG with explicit delta is supported")
+    if workspace.pcg_mode != "production" or delta is None:
+        raise ValueError("Only production PCG with explicit delta is supported")
     layout = workspace.layout
     matrix = workspace.k_global_scalar_bsr
     offsets = matrix.offsets.numpy().copy()

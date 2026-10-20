@@ -217,7 +217,6 @@ class MonolithicLinearWorkspace:
         self.rigid_rows = wp.array(rigid_rows, dtype=int, device=device)
         self._rigid_preconditioner = wp.zeros((len(layout.rigid_ranges), 6, 6), dtype=dtype, device=device)
         self._rigid_cholesky = wp.zeros_like(self._rigid_preconditioner)
-        self._study_soft = None  # Private PR8F research entry; no public solver option.
         self._scaling_valid = False
         self._factor_valid = False
         self._factor_binding = None
