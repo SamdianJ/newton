@@ -190,7 +190,7 @@ def _scatter(matrix: wp.array2d[Any], actor: wp.array2d[Any], values: wp.array[A
 
 @wp.kernel
 def _coordinate_trial(
-    q: wp.array[Any],
+    accepted_step: wp.array[Any],
     direction: wp.array[Any],
     q_start: int,
     alpha: Any,
@@ -200,10 +200,13 @@ def _coordinate_trial(
     dofs: wp.array[int],
     out: wp.array[Any],
     vout: wp.array[Any],
+    step: wp.array[Any],
 ):
     i = wp.tid()
-    out[coords[i]] = q[coords[i]] + alpha * type(h)(direction[q_start + i])
-    vout[dofs[i]] = (out[coords[i]] - qn[i]) / h
+    # Advance the exact step; coordinates and rates are formed from it once.
+    step[i] = accepted_step[i] + alpha * type(h)(direction[q_start + i])
+    out[coords[i]] = qn[i] + step[i]
+    vout[dofs[i]] = step[i] / h
 
 
 @wp.kernel
@@ -215,7 +218,9 @@ def _coordinate_predictor(
     dofs: wp.array[int],
     out: wp.array[Any],
     vout: wp.array[Any],
+    step: wp.array[Any],
 ):
     i = wp.tid()
-    out[coords[i]] = q[i] + h * v[i]
-    vout[dofs[i]] = (out[coords[i]] - q[i]) / h
+    step[i] = h * v[i]
+    out[coords[i]] = q[i] + step[i]
+    vout[dofs[i]] = step[i] / h

@@ -3,6 +3,7 @@
 
 """Native coupled arithmetic, immutable precision and checkpoint transactions."""
 
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -158,6 +159,38 @@ class TestSolverPrecision(unittest.TestCase):
                 field.data.coefficients.zero_()
                 with self.assertRaisesRegex(ValueError, "coefficients changed"):
                     native.validate_identity()
+
+    def test_far_steps_in_float32(self):
+        """Resolve rigid and joint steps that are small next to their coordinates."""
+        case = (
+            Path(__file__).resolve().parents[2] / "scripts/monolithic_reference/fixtures/rigid_dynamics_short_v1.json"
+        )
+        spec = {**json.loads(case.read_text())["rigids"][0], "origin": [1000.0, -700.0, 400.0]}
+        spec.update(velocity=[0.0, 0.0, 0.0], omega=[0.0, 0.0, 0.05])
+        for name, rigid_specs, q in (("rigid", [spec], None), ("joint", [], [0.3, 100.0])):
+            model = scene("cpu", contact=False, rigid_specs=rigid_specs)
+            velocities, iterations = [], []
+            for precision in ("fp64", "fp32"):
+                run = solver(model, precision=precision)
+                state = run.create_state(dt=0.001)
+                if q is not None:
+                    state.joint_q.assign(q)
+                    run.reset_state(state, dt=0.001)
+                counts = []
+                for _ in range(5):
+                    output = run._states.copy(state)
+                    run.step(state, output, model.control(), dt=0.001)
+                    self.assertTrue(run.last_stats.converged, run.last_stats)
+                    counts.append(run.last_stats.nonlinear_iterations)
+                    state.assign(output)
+                velocities.append(state.joint_qd.numpy().astype(float))
+                iterations.append(counts)
+            with self.subTest(name):
+                # A 1 mm/s fall at 1 km is below the FP32 position spacing; the
+                # step increments still resolve it to rounding.
+                reference, single = velocities
+                self.assertLess(np.abs(single - reference).max(), 1e-4 * np.abs(reference).max())
+                self.assertEqual(iterations[1], iterations[0])
 
 
 if __name__ == "__main__":

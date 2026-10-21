@@ -66,7 +66,10 @@ def test_final_residual_gate(test, device):
     def changed_candidate(dt):
         status = iterate(dt)
         test.assertEqual(status, solver.Status.SUCCESS)
-        solver._accepted.joint_q.fill_(0.001)
+        # Move the authoritative step and its published coordinates together.
+        step = solver._joint_step(solver._accepted)
+        step.fill_(0.001)
+        solver._accepted.joint_q.assign(solver._objective.qn.numpy() + step.numpy())
         return status
 
     with patch.object(solver, "_iterate_articulation", side_effect=changed_candidate):

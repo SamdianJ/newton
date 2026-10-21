@@ -17,7 +17,7 @@ from newton._src.solvers.monolithic.articulation import (
     ArticulationObjective,
     _joint_variation,
 )
-from newton._src.solvers.monolithic.articulation_state import ArticulationState, _predict, _recover_history
+from newton._src.solvers.monolithic.articulation_state import ArticulationState, _predict, _recover_step
 from newton._src.solvers.monolithic.coupled_kernels import _coordinate_trial
 from newton.solvers.experimental.monolithic import SolverMonolithic
 from newton.tests.monolithic_test_utils import add_contact_free_tet
@@ -90,28 +90,25 @@ def test_state_history(test, device):
             getattr(copy._monolithic_articulation, name).numpy(), getattr(history, name).numpy()
         )
     k.evaluate(first.joint_q)
-    old_t, old_r = wp.clone(k.com), wp.clone(k.rotations)
+    old_t, old_r = k.com.numpy(), k.rotations.numpy()
     new_q = first.joint_q.numpy() + first.joint_qd.numpy() * 0.001
     copy.joint_q.assign(new_q)
     with test.assertRaisesRegex(ValueError, "explicitly reset"):
         states.validate(copy)
     k.evaluate(copy.joint_q)
+    # Recover the rates from the step increments c - c_n and R R_n^T - I.
+    steps = [
+        wp.array(k.com.numpy() - old_t, dtype=wp.vec3d, device=device),
+        wp.array(k.rotations.numpy() @ old_r.transpose(0, 2, 1) - np.eye(3), dtype=wp.mat33d, device=device),
+    ]
     wp.launch(
-        _recover_history,
+        _recover_step,
         k.bodies,
-        [
-            old_t,
-            old_r,
-            k.com,
-            k.rotations,
-            wp.float64(0.001),
-            history.link_v_com,
-            history.link_omega,
-            history.link_vsym,
-        ],
+        [*steps, wp.float64(0.001), history.link_v_com, history.link_omega, history.link_vsym],
         device=device,
     )
     predicted_t, predicted_r = wp.empty_like(k.com), wp.empty_like(k.rotations)
+    step_t, step_r = wp.empty_like(k.com), wp.empty_like(k.rotations)
     wp.launch(
         _predict,
         k.bodies,
@@ -124,11 +121,14 @@ def test_state_history(test, device):
             wp.float64(0.001),
             predicted_t,
             predicted_r,
+            step_t,
+            step_r,
         ],
         device=device,
     )
-    np.testing.assert_allclose(predicted_t.numpy(), 2 * k.com.numpy() - old_t.numpy(), atol=2e-15, rtol=2e-14)
-    np.testing.assert_allclose(predicted_r.numpy(), 2 * k.rotations.numpy() - old_r.numpy(), atol=2e-15, rtol=2e-14)
+    np.testing.assert_allclose(predicted_t.numpy(), 2 * k.com.numpy() - old_t, atol=2e-15, rtol=2e-14)
+    np.testing.assert_allclose(predicted_r.numpy(), 2 * k.rotations.numpy() - old_r, atol=2e-15, rtol=2e-14)
+    np.testing.assert_allclose(step_t.numpy(), k.com.numpy() - old_t, atol=2e-15, rtol=2e-14)
     # Initialization is explicitly different from continuation.
     states.reset(copy, dt=0.002)
     states.validate(copy)
@@ -166,7 +166,7 @@ def test_objective(test, device):
     h = 0.01
     qn = np.array([0.252, -0.26, 0.02])
     vn = np.array([0.1, -0.2, 0.03])
-    objective.qn.assign(qn)
+    objective.begin(wp.array(qn, dtype=wp.float64, device=device))
     objective.vn.assign(vn)
     objective.qt.assign([0.3, -0.3, 0.05])
     objective.vt.assign([0.1, -0.1, 0.02])
@@ -174,9 +174,10 @@ def test_objective(test, device):
     t, r, jt, jr, _, _ = oracle.evaluate(qn)
     tp = t + h * np.einsum("bni,n->bi", jt, vn)
     rp = r + h * np.einsum("bnij,n->bij", jr, vn)
-    objective.tn.assign(t)
     objective.predicted_t.assign(tp)
     objective.predicted_r.assign(rp)
+    objective.step_t.assign(tp - t)
+    objective.step_r.assign((rp - r) @ r.transpose(0, 2, 1))
     force = np.tile([0.2, -0.1, -9.81], (3, 1))
     objective.force.assign(force)
     array = wp.empty(3, dtype=wp.float64, device=device)
@@ -221,8 +222,8 @@ def test_objective(test, device):
                 np.testing.assert_allclose((plus[1] - minus[1]) / (2 * eps), exact[:, i], rtol=5e-5, atol=1e-6)
         # Differentiate the production energy through the real mixed-precision
         # trial kernel using its effective stored displacement.
-        base = wp.array(q, dtype=wp.float64, device=device)
-        trial, velocity = wp.empty_like(base), wp.empty_like(base)
+        base = wp.array(q - qn, dtype=wp.float64, device=device)
+        trial, velocity, step = wp.empty_like(base), wp.empty_like(base), wp.empty_like(base)
         frozen_b = objective.tangent.numpy().copy()
         for eps in (1e-5, 3e-6):
             for i in range(3):
@@ -243,12 +244,13 @@ def test_objective(test, device):
                             k.dof_map,
                             trial,
                             velocity,
+                            step,
                         ],
                         device=device,
                     )
-                    objective.evaluate(trial, h, build_tangent=False)
+                    objective.evaluate(trial, h, build_tangent=False, step=step)
                     energies.append(float(objective.link_energy.numpy().sum() + objective.joint_energy.numpy().sum()))
-                    coordinates.append(float(trial.numpy()[i]))
+                    coordinates.append(float(step.numpy()[i]))
                 derivative = (energies[1] - energies[0]) / (coordinates[1] - coordinates[0])
                 np.testing.assert_allclose(derivative, g[i], rtol=5e-3, atol=1e-7)
                 np.testing.assert_array_equal(objective.tangent.numpy(), frozen_b)
@@ -266,7 +268,7 @@ def test_scalar_switches(test, device):
     parameters = wp.array(params, dtype=wp.float64, device=device)
 
     def evaluate(value):
-        q.fill_(value)
+        q.fill_(value - qn.numpy()[0])
         wp.launch(
             _joint_variation,
             1,

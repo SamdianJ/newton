@@ -373,8 +373,6 @@ class SolverMonolithic(SolverBase):
         self._original = self._accepted = self._trial = None
         self._step_generation = self._assembly_sequence = 0
         self._last_stats = self.Stats(self.Status.NOT_RUN)
-        self._old_joint_t = wp.empty_like(self._kinematics.joint_translations)
-        self._old_joint_r = wp.empty_like(self._kinematics.joint_rotations)
 
         self._linear = MonolithicLinearWorkspace(
             layout,
@@ -426,12 +424,15 @@ class SolverMonolithic(SolverBase):
         theta_count = 0 if self._materials is None else self._materials.theta_count
         self._cable_target_x = wp.array(model.particle_q.numpy(), dtype=self._states.vector, device=device)
         self._cable_target_theta = wp.zeros(theta_count, dtype=self._dtype, device=device)
-        # Exact step increments x - x_n and theta - theta_n of the internal
-        # states, keyed by state; other states derive them into shared scratch.
+        # Exact step increments of the internal states, keyed by state: particle
+        # x - x_n, cable theta - theta_n, joint q - q_n, and rigid COM c - c_n and
+        # rotation q q_n^-1. Other states derive them into shared scratch.
         self._steps = {}
         self._external_steps = (
             wp.zeros(model.particle_count, dtype=self._states.vector, device=device),
             wp.zeros(theta_count, dtype=self._dtype, device=device),
+            self._objective.step,
+            *self._rigid.external_steps,
         )
         self._cable_torque = wp.zeros_like(self._cable_target_theta)
         self._temporary_gauges = []
@@ -721,6 +722,7 @@ class SolverMonolithic(SolverBase):
             state.assign(state_in)
             for increment in self._steps[id(state)]:
                 increment.zero_()
+            self._steps[id(state)][4].fill_(wp.quat_identity(self._dtype))
         self._prepare_step(state_in, state_out, dt)
         self._step_generation += 1
         self._metrics = {
@@ -748,6 +750,7 @@ class SolverMonolithic(SolverBase):
             else:
                 wp.copy(self._accepted.joint_q, obj.qn)
                 self._accepted.joint_qd.zero_()
+                self._joint_step(self._accepted).zero_()
         failure = None
         status = self.Status.NONFINITE
         published = False
@@ -877,11 +880,14 @@ class SolverMonolithic(SolverBase):
         if not self._capturable:
             return self._evaluate_eager(state, dt, build_tangent=build_tangent)
         k, contact, tet = self._kinematics, self._contact, self._tet
+        joint_step, rigid_steps = self._joint_step(state), self._rigid_steps(state)
         local_q = k.gather_q(state)
         buffers = [
             state.joint_q,
             state.particle_q,
             self._displacement(state),
+            joint_step,
+            *rigid_steps,
             self._original.particle_q,
             self._original.particle_qd,
             self._frozen_force,
@@ -898,8 +904,8 @@ class SolverMonolithic(SolverBase):
             buffers.extend(value for value in vars(owner).values() if isinstance(value, wp.array))
 
         def evaluate_owners():
-            self._objective.evaluate(local_q, dt, build_tangent=build_tangent)
-            self._rigid.evaluate(state, dt, build_tangent)
+            self._objective.evaluate(local_q, dt, build_tangent=build_tangent, step=joint_step)
+            self._rigid.evaluate(state, rigid_steps, dt, build_tangent)
             tet.evaluate(
                 state.particle_q,
                 self._original.particle_q,
@@ -1156,6 +1162,25 @@ class SolverMonolithic(SolverBase):
             )
         return increment
 
+    def _joint_step(self, state):
+        """Return the native local joint increment ``q - q_n`` of a state."""
+        steps = self._steps.get(id(state))
+        if steps is not None:
+            return steps[2]
+        k, obj = self._kinematics, self._objective
+        if k.count:
+            wp.launch(
+                kernels.step_displacement, k.count, [k.gather_q(state), obj.qn, obj.step], device=self.model.device
+            )
+        return obj.step
+
+    def _rigid_steps(self, state):
+        """Return the native rigid COM and rotation increments of a state."""
+        steps = self._steps.get(id(state))
+        if steps is not None:
+            return steps[3:]
+        return self._rigid.derive_steps(state)
+
     def _take_trial(self, alpha, dt):
         for producer in self._producers:
             producer.candidate(self, self._accepted, self._trial, self._delta, alpha, dt)
@@ -1166,8 +1191,8 @@ class SolverMonolithic(SolverBase):
                 iteration_device.effective_displacement,
                 self._effective_device.size,
                 [
-                    self._trial.joint_q,
-                    self._accepted.joint_q,
+                    self._joint_step(self._trial),
+                    self._joint_step(self._accepted),
                     self._displacement(self._trial),
                     self._displacement(self._accepted),
                     self._tet.ids,

@@ -116,7 +116,7 @@ def test_rigid_mapping_and_terms(test, device):
         apply_wrench(run, state, control)
         run._rigid.prepare(state, control, 0.001)
         run._rigid.torque.zero_()
-        run._rigid.evaluate(state, 0.001, True)
+        run._rigid.evaluate(state, run._rigid.derive_steps(state), 0.001, True)
         for i, actor in enumerate(run._rigid.actors):
             c, r = history.rigid_com.numpy()[i], run._rigid.rotations.numpy()[i]
             cp, rp = run._rigid.predicted_t.numpy()[i], run._rigid.predicted_r.numpy()[i]
@@ -346,8 +346,8 @@ def test_rigid_failures_and_reset(test, device):
     original, previous = snapshot(state), snapshot(output)
     evaluate = run._rigid.evaluate
 
-    def nonfinite_tangent(candidate, dt, tangent):
-        evaluate(candidate, dt, tangent)
+    def nonfinite_tangent(candidate, steps, dt, tangent):
+        evaluate(candidate, steps, dt, tangent)
         if tangent:
             run._rigid.tangent.fill_(float("nan"))
 
@@ -433,8 +433,11 @@ def test_rigid_count_and_trial(test, device):
         if count:
             trial = run._states.copy(state)
             direction = wp.full(run._layout.scalar_dof_count, 0.1, dtype=float, device=device)
-            run._rigid.trial(state, trial, direction, 1)
-            run._rigid.trial(state, trial, direction, 0.5)
+            run._rigid.prepare(state, run.model.control(), 0.001)
+            source = tuple(wp.clone(a) for a in run._rigid.derive_steps(state))
+            target = tuple(wp.empty_like(a) for a in source)
+            run._rigid.trial(source, trial, target, direction, 1)
+            run._rigid.trial(source, trial, target, direction, 0.5)
             for i in range(count):
                 base = transform(np.r_[np.zeros(3), saved["history.rigid_rotation"][i]])[:3, :3]
                 got = transform(np.r_[np.zeros(3), trial._monolithic_coupled.rigid_rotation.numpy()[i]])[:3, :3]

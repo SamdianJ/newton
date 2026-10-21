@@ -11,7 +11,7 @@ import warp as wp
 from ...sim import JointType
 from . import coupled_kernels as kernels
 from . import iteration_device
-from .articulation_state import _predict, _recover_history
+from .articulation_state import _predict, _recover_step
 from .rigid import _scatter_residual, _scatter_tangent
 from .solver_types import _StepFailure
 from .state_checks import scalar_view
@@ -113,12 +113,17 @@ def _particle_coordinates(x: wp.array[Any], ids: wp.array[int], start: int, outp
 
 
 @wp.kernel
-def _rigid_coordinates(com: wp.array[Any], rows: wp.array2d[int], output: wp.array[Any]):
+def _rigid_coordinates(
+    com: wp.array[Any], rotation: wp.array[Any], absolute: bool, rows: wp.array2d[int], output: wp.array[Any]
+):
     i, j = wp.tid()
-    # Rotation coordinates are orthonormal matrix entries of unit magnitude.
+    # Absolute rotations are orthonormal matrices with entries of unit magnitude.
     value = type(output[0])(1.0)
     if j < 3:
         value = type(output[0])(wp.abs(com[i][j]))
+    elif not absolute:
+        # A rotation step q q_n^-1 near identity turns by about twice its vector part.
+        value = type(output[0])(2.0) * type(output[0])(wp.abs(rotation[i][j - 3]))
     output[rows[i, j]] = value
 
 
@@ -209,12 +214,7 @@ class ArticulationProducer(_Producer):
 
     def begin_step(self, solver, state_in):
         k, obj, device = solver._kinematics, solver._objective, solver.model.device
-        k.evaluate(k.gather_q(state_in))
-        wp.copy(obj.tn, k.com)
-        wp.copy(obj.rn, k.rotations)
-        wp.copy(solver._old_joint_t, k.joint_translations)
-        wp.copy(solver._old_joint_r, k.joint_rotations)
-        wp.copy(obj.qn, k.gather_q(state_in))
+        obj.begin(k.gather_q(state_in))
         wp.copy(obj.vn, k.gather_qd(state_in))
         history = getattr(state_in, solver._states.namespace)
         dt = solver._dtype(solver._dt)
@@ -230,6 +230,8 @@ class ArticulationProducer(_Producer):
                 dt,
                 obj.predicted_t,
                 obj.predicted_r,
+                obj.step_t,
+                obj.step_r,
             ],
             device=device,
         )
@@ -239,7 +241,16 @@ class ArticulationProducer(_Producer):
         wp.launch(
             kernels._coordinate_predictor,
             k.count,
-            [obj.qn, obj.vn, dt, k.coord_map, k.dof_map, accepted.joint_q, accepted.joint_qd],
+            [
+                obj.qn,
+                obj.vn,
+                dt,
+                k.coord_map,
+                k.dof_map,
+                accepted.joint_q,
+                accepted.joint_qd,
+                solver._joint_step(accepted),
+            ],
             device=device,
         )
 
@@ -249,7 +260,7 @@ class ArticulationProducer(_Producer):
             kernels._coordinate_trial,
             k.count,
             [
-                accepted.joint_q,
+                solver._joint_step(accepted),
                 direction,
                 solver._layout.q_scalar_offset,
                 solver._dtype(alpha),
@@ -259,13 +270,15 @@ class ArticulationProducer(_Producer):
                 k.dof_map,
                 trial.joint_q,
                 trial.joint_qd,
+                solver._joint_step(trial),
             ],
             device=solver.model.device,
         )
 
     def evaluate(self, solver, state, dt, residual, *, build_tangent):
         k, obj = solver._kinematics, solver._objective
-        obj.evaluate(k.gather_q(state), dt, build_tangent=build_tangent)
+        step = solver._joint_step(state)
+        obj.evaluate(k.gather_q(state), dt, build_tangent=build_tangent, step=step)
         wp.launch(
             _scatter_values,
             k.count,
@@ -285,9 +298,8 @@ class ArticulationProducer(_Producer):
         )
 
     def coordinates(self, solver, state, out, *, absolute=False):
-        # Joint terms read the absolute coordinates.
         k = solver._kinematics
-        q = k.gather_q(state)
+        q = k.gather_q(state) if absolute else solver._joint_step(state)
         wp.launch(_write_absolute, k.count, [q, solver._layout.q_scalar_offset, out], device=solver.model.device)
 
     def assemble(self, solver, assembly, dt):
@@ -305,8 +317,7 @@ class ArticulationProducer(_Producer):
         )
 
     def displacement(self, solver, accepted, trial, out):
-        coords = list(solver._articulation_actor.coord_indices)
-        out[self.rows] = trial.joint_q.numpy()[coords] - accepted.joint_q.numpy()[coords]
+        out[self.rows] = solver._joint_step(trial).numpy() - solver._joint_step(accepted).numpy()
 
     def domain(self, solver, accepted, candidate):
         return iteration_device.domain(solver, candidate, int(JointType.REVOLUTE))
@@ -315,20 +326,20 @@ class ArticulationProducer(_Producer):
         k, obj, device = solver._kinematics, solver._objective, solver.model.device
         final = getattr(state, solver._states.namespace)
         dt = solver._dtype(solver._dt)
+        q = k.gather_q(state)
+        k.evaluate_step(q, solver._joint_step(state), obj.rn, obj.axes_n)
         wp.launch(
-            _recover_history,
+            _recover_step,
             k.bodies,
-            [obj.tn, obj.rn, k.com, k.rotations, dt, final.link_v_com, final.link_omega, final.link_vsym],
+            [k.com_steps, k.rotation_steps, dt, final.link_v_com, final.link_omega, final.link_vsym],
             device=device,
         )
         wp.launch(
-            _recover_history,
+            _recover_step,
             k.joints,
             [
-                solver._old_joint_t,
-                solver._old_joint_r,
-                k.joint_translations,
-                k.joint_rotations,
+                k.joint_translation_steps,
+                k.joint_rotation_steps,
                 dt,
                 final.joint_v,
                 final.joint_omega,
@@ -336,7 +347,7 @@ class ArticulationProducer(_Producer):
             ],
             device=device,
         )
-        k.evaluate(k.gather_q(state), state=state)
+        k.evaluate(q, state=state)
 
 
 class RigidProducer(_Producer):
@@ -348,14 +359,16 @@ class RigidProducer(_Producer):
         super().__init__("rigid", solver._rigid.rows_numpy.ravel())
 
     def begin_step(self, solver, state_in):
+        # The predictor moves the COM by h v and keeps the step-start rotation.
         wp.copy(solver._accepted._monolithic_coupled.rigid_com, solver._rigid.predicted_t)
+        wp.copy(solver._rigid_steps(solver._accepted)[0], solver._rigid.step_t)
 
     def candidate(self, solver, accepted, trial, direction, alpha, dt):
-        solver._rigid.trial(accepted, trial, direction, alpha)
+        solver._rigid.trial(solver._rigid_steps(accepted), trial, solver._rigid_steps(trial), direction, alpha)
 
     def evaluate(self, solver, state, dt, residual, *, build_tangent):
         rigid = solver._rigid
-        rigid.evaluate(state, dt, build_tangent)
+        rigid.evaluate(state, solver._rigid_steps(state), dt, build_tangent)
         wp.launch(
             _scatter_residual, (rigid.count, 6), [rigid.rows, rigid.residual, residual], device=solver.model.device
         )
@@ -370,11 +383,13 @@ class RigidProducer(_Producer):
             )
 
     def coordinates(self, solver, state, out, *, absolute=False):
-        # Rigid terms read the absolute coordinates.
         rigid = solver._rigid
         if rigid.count:
-            com = state._monolithic_coupled.rigid_com
-            wp.launch(_rigid_coordinates, (rigid.count, 6), [com, rigid.rows, out], device=solver.model.device)
+            if absolute:
+                inputs = [state._monolithic_coupled.rigid_com, state._monolithic_coupled.rigid_rotation, absolute]
+            else:
+                inputs = [*solver._rigid_steps(state), absolute]
+            wp.launch(_rigid_coordinates, (rigid.count, 6), [*inputs, rigid.rows, out], device=solver.model.device)
 
     def assemble(self, solver, assembly, dt):
         rigid = solver._rigid
@@ -394,10 +409,9 @@ class RigidProducer(_Producer):
 
     def displacement(self, solver, accepted, trial, out):
         rows = solver._rigid.rows_numpy
-        a, b = accepted._monolithic_coupled, trial._monolithic_coupled
-        out[rows[:, :3]] = b.rigid_com.numpy() - a.rigid_com.numpy()
+        (ta, qa), (tb, qb) = ((t.numpy(), q.numpy()) for t, q in map(solver._rigid_steps, (accepted, trial)))
+        out[rows[:, :3]] = tb - ta
         # Each trial is exactly the left Exp(alpha*delta) retraction within the local domain.
-        qa, qb = a.rigid_rotation.numpy(), b.rigid_rotation.numpy()
         vector = qb[:, 3:] * -qa[:, :3] + qa[:, 3:] * qb[:, :3] + np.cross(qb[:, :3], -qa[:, :3])
         scalar = np.sum(qb * qa, axis=1)
         vector *= np.where(scalar < 0, -1, 1)[:, None]
@@ -409,7 +423,7 @@ class RigidProducer(_Producer):
         return solver._rigid.domain(candidate)
 
     def publish(self, solver, state):
-        solver._rigid.recover(state, solver._dt)
+        solver._rigid.recover(state, solver._rigid_steps(state), solver._dt)
 
 
 class TetProducer(_Producer):

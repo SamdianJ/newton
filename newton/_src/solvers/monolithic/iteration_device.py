@@ -77,17 +77,17 @@ def norm_terms(r: wp.array[Any], nq: int, terms: wp.array2d[Any]):
 
 @wp.kernel
 def effective_displacement(
-    q: wp.array[Any],
-    accepted_q: wp.array[Any],
+    q_step: wp.array[Any],
+    accepted_q_step: wp.array[Any],
     x: wp.array[Any],
     accepted_x: wp.array[Any],
     ids: wp.array[int],
     out: wp.array[Any],
 ):
     i = wp.tid()
-    nq = q.shape[0]
+    nq = q_step.shape[0]
     if i < nq:
-        out[i] = q[i] - accepted_q[i]
+        out[i] = q_step[i] - accepted_q_step[i]
     else:
         j = (i - nq) / 3
         axis = (i - nq) % 3

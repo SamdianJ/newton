@@ -64,6 +64,68 @@ def _forward(
         com[child] = wp.transform_point(pose, local_com[child])
 
 
+@wp.func
+def _axis_rotation_step(axis: Any, angle: Any):
+    """Return ``Rot(axis, angle) - I`` without cancellation for small angles."""
+    k = wp.skew(axis)
+    half = wp.sin(angle * type(angle)(0.5))
+    return wp.sin(angle) * k + type(angle)(2.0) * half * half * (k * k)
+
+
+@wp.kernel
+def _forward_step(
+    types: wp.array[int],
+    parents: wp.array[int],
+    children: wp.array[int],
+    starts: wp.array[int],
+    axes: wp.array[Any],
+    xp: wp.array[Any],
+    xc: wp.array[Any],
+    local_com: wp.array[Any],
+    q: wp.array[Any],
+    step: wp.array[Any],
+    rn: wp.array[Any],
+    axes_n: wp.array[Any],
+    rotation_steps: wp.array[Any],
+    translation_steps: wp.array[Any],
+    com_steps: wp.array[Any],
+    joint_rotation_steps: wp.array[Any],
+    joint_translation_steps: wp.array[Any],
+):
+    # Advance every link from its step-start pose by the joint increments, in
+    # parent-before-child order: R = (I + E) R_n and t = t_n + d. Each update is
+    # a sum of increment-size terms, so it keeps the increment's precision.
+    zero = type(axes[0])(0.0)
+    for j in range(types.shape[0]):
+        parent_e = wp.matrix(dtype=type(step[0]), shape=(3, 3))
+        parent_d = zero
+        parent_rn = wp.identity(n=3, dtype=type(step[0]))
+        if parents[j] >= 0:
+            parent_e = rotation_steps[parents[j]]
+            parent_d = translation_steps[parents[j]]
+            parent_rn = rn[parents[j]]
+        world = wp.matrix(dtype=type(step[0]), shape=(3, 3))
+        local = wp.matrix(dtype=type(step[0]), shape=(3, 3))
+        slide, linear = zero, zero
+        if types[j] != JointType.FIXED:
+            i = starts[j]
+            if types[j] == JointType.REVOLUTE:
+                world = _axis_rotation_step(axes_n[j], step[i])
+                local = _axis_rotation_step(axes[i], step[i])
+            else:
+                slide = axes[i] * step[i]
+                linear = parent_e * (axes_n[j] * q[i]) + axes_n[j] * step[i]
+        child = children[j]
+        e = parent_e + world + parent_e * world
+        d = parent_d + parent_e * (parent_rn * wp.transform_get_translation(xp[j])) + linear
+        d -= e * (rn[child] * wp.transform_get_translation(xc[j]))
+        rotation_steps[child] = e
+        translation_steps[child] = d
+        com_steps[child] = d + e * (rn[child] * local_com[child])
+        joint_rotation_steps[j] = local
+        joint_translation_steps[j] = slide
+
+
 @wp.kernel
 def _jacobians(
     ancestors: wp.array2d[int],
@@ -126,6 +188,12 @@ def _configuration_digest(fields):
             digest.update(struct.pack("<Q", len(part)))
             digest.update(part)
     return digest.digest()
+
+
+@wp.kernel
+def _difference(a: wp.array[Any], b: wp.array[Any], out: wp.array[Any]):
+    i = wp.tid()
+    out[i] = a[i] - b[i]
 
 
 @wp.kernel
@@ -325,6 +393,12 @@ class _TreeKinematics:
         self.pivots = wp.zeros(self.joints, dtype=self.vector, device=self.device)
         self.joint_rotations = wp.zeros(self.joints, dtype=self.matrix, device=self.device)
         self.joint_translations = wp.zeros(self.joints, dtype=self.vector, device=self.device)
+        # Link and joint motion increments from the step-start pose.
+        self.rotation_steps = wp.zeros(self.bodies, dtype=self.matrix, device=self.device)
+        self.translation_steps = wp.zeros(self.bodies, dtype=self.vector, device=self.device)
+        self.com_steps = wp.zeros(self.bodies, dtype=self.vector, device=self.device)
+        self.joint_rotation_steps = wp.zeros(self.joints, dtype=self.matrix, device=self.device)
+        self.joint_translation_steps = wp.zeros(self.joints, dtype=self.vector, device=self.device)
         self.jt = wp.zeros((self.bodies, self.count), dtype=self.vector, device=self.device)
         self.jw = wp.zeros_like(self.jt)
         coord_ids = list(range(model.joint_coord_count)) if actor is None else list(actor.coord_indices)
@@ -428,6 +502,35 @@ class _TreeKinematics:
                 device=self.device,
             )
 
+    def evaluate_step(self, q, step, rn, axes_n):
+        """Evaluate link and joint motion increments from step-start rotations and world axes."""
+        if not self.joints:
+            return
+        wp.launch(
+            _forward_step,
+            1,
+            [
+                self.types,
+                self.parents,
+                self.children,
+                self.starts,
+                self.axes,
+                self.xp,
+                self.xc,
+                self.local_com,
+                q,
+                step,
+                rn,
+                axes_n,
+                self.rotation_steps,
+                self.translation_steps,
+                self.com_steps,
+                self.joint_rotation_steps,
+                self.joint_translation_steps,
+            ],
+            device=self.device,
+        )
+
 
 class ArticulationKinematics(_TreeKinematics):
     """Retain the q-only entrance contract while sharing supported-tree FK."""
@@ -487,7 +590,7 @@ def _limit_variation(d: Any, dn: Any, ke: Any, kd: Any, width: Any, h: Any):
 
 @wp.kernel
 def _joint_variation(
-    q: wp.array[Any],
+    step: wp.array[Any],
     qn: wp.array[Any],
     vn: wp.array[Any],
     params: wp.array2d[Any],
@@ -503,7 +606,8 @@ def _joint_variation(
     tangent: wp.array[Any],
 ):
     i = wp.tid()
-    delta = q[i] - qn[i]
+    # Terms read the exact step; offsets from the step start are fixed in a step.
+    delta = step[i]
     v = delta / h
     inertial = delta - h * vn[i]
     e = (
@@ -517,7 +621,7 @@ def _joint_variation(
     kp, kd, effort = params[i, 0], params[i, 1], params[i, 2]
     a = kp + kd / h
     if a > type(h)(0.0):
-        u = kp * (q[i] - qt[i]) + kd * (v - vt[i])
+        u = kp * ((qn[i] - qt[i]) + delta) + kd * (v - vt[i])
         r += wp.clamp(u, -effort, effort)
         magnitude += wp.abs(wp.clamp(u, -effort, effort))
         if wp.abs(u) < effort:
@@ -531,9 +635,8 @@ def _joint_variation(
         if side == 1:
             sign = type(h)(-1.0)
             bound = params[i, 3]
-        el, rl, bl = _limit_variation(
-            sign * (q[i] - bound), sign * (qn[i] - bound), params[i, 5], params[i, 6], params[i, 7], h
-        )
+        dn = sign * (qn[i] - bound)
+        el, rl, bl = _limit_variation(dn + sign * delta, dn, params[i, 5], params[i, 6], params[i, 7], h)
         e += el
         r += sign * rl
         magnitude += wp.abs(rl)
@@ -554,10 +657,12 @@ def _joint_variation(
 
 @wp.kernel
 def _link_variation(
-    t: wp.array[Any],
+    com_step: wp.array[Any],
+    rotation_step: wp.array[Any],
     r: wp.array[Any],
-    tn: wp.array[Any],
-    predicted_t: wp.array[Any],
+    rn: wp.array[Any],
+    step_t: wp.array[Any],
+    step_r: wp.array[Any],
     predicted_r: wp.array[Any],
     mass: wp.array[Any],
     second: wp.array[Any],
@@ -572,19 +677,21 @@ def _link_variation(
     build_tangent: bool,
 ):
     b = wp.tid()
-    dt, dr = t[b] - predicted_t[b], r[b] - predicted_r[b]
+    # Differences from the prediction are formed between increments.
+    dt = com_step[b] - step_t[b]
+    dr = (rotation_step[b] - step_r[b]) * rn[b]
     rs = dr * second[b]
-    energy[b] = (mass[b] * wp.dot(dt, dt) + _inner(rs, dr)) / (type(h)(2.0) * h * h) - wp.dot(force[b], t[b] - tn[b])
+    energy[b] = (mass[b] * wp.dot(dt, dt) + _inner(rs, dr)) / (type(h)(2.0) * h * h) - wp.dot(force[b], com_step[b])
     translation_gradient[b] = mass[b] * dt / (h * h) - force[b]
     translation_absolute[b] = abs3(mass[b] * dt / (h * h)) + abs3(force[b])
     a = rs * wp.transpose(r[b]) / (h * h)
-    rotation_gradient[b] = type(t[0])(a[2, 1] - a[1, 2], a[0, 2] - a[2, 0], a[1, 0] - a[0, 1])
+    rotation_gradient[b] = type(dt)(a[2, 1] - a[1, 2], a[0, 2] - a[2, 0], a[1, 0] - a[0, 1])
     rotation_absolute[b] = axial_absolute(a)
     if build_tangent:
         c = r[b] * second[b] * wp.transpose(predicted_r[b])
         local = (wp.identity(n=3, dtype=type(h)) * wp.trace(c) - (c + wp.transpose(c)) * type(h)(0.5)) / (h * h)
         vectors, values = wp.eig3(local)
-        positive = type(t[0])(
+        positive = type(dt)(
             wp.max(values[0], type(h)(0.0)), wp.max(values[1], type(h)(0.0)), wp.max(values[2], type(h)(0.0))
         )
         rotation_tangent[b] = vectors * wp.diag(positive) * wp.transpose(vectors)
@@ -673,23 +780,44 @@ class ArticulationObjective:
             "absolute",
         ):
             setattr(self, name, wp.zeros(n, dtype=k.dtype, device=device))
-        for name in ("tn", "predicted_t", "force", "gt", "gr", "gta", "gra"):
+        # Step-start link poses and world joint axes, and the exact predicted
+        # increments step_t = h v and step_r with R_p = (I + step_r) R_n.
+        for name in ("tn", "predicted_t", "step_t", "force", "gt", "gr", "gta", "gra"):
             setattr(self, name, wp.zeros(b, dtype=k.vector, device=device))
-        for name in ("rn", "predicted_r", "kr"):
+        for name in ("rn", "predicted_r", "step_r", "kr"):
             setattr(self, name, wp.zeros(b, dtype=k.matrix, device=device))
+        self.axes_n = wp.zeros(k.joints, dtype=k.vector, device=device)
+        self.step = wp.zeros(n, dtype=k.dtype, device=device)
         self.link_energy = wp.zeros(b, dtype=k.dtype, device=device)
         self.tangent = wp.zeros((n, n), dtype=k.dtype, device=device)
 
-    def evaluate(self, q, h, *, build_tangent=True):
-        """Evaluate without reading derived FP32 body outputs or changing history."""
+    def begin(self, qn):
+        """Freeze the step-start coordinates, link poses and world joint axes at ``qn``."""
+        k = self.k
+        k.evaluate(qn)
+        wp.copy(self.qn, qn)
+        wp.copy(self.tn, k.com)
+        wp.copy(self.rn, k.rotations)
+        wp.copy(self.axes_n, k.world_axes)
+
+    def evaluate(self, q, h, *, build_tangent=True, step=None):
+        """Evaluate without reading derived FP32 body outputs or changing history.
+
+        ``step`` is the exact increment ``q - qn``; without it the increment is
+        derived from the rounded coordinates.
+        """
         k = self.k
         h = k.timestep(h)
+        if step is None:
+            step = self.step
+            wp.launch(_difference, k.count, [q, self.qn, step], device=k.device)
         k.evaluate(q)
+        k.evaluate_step(q, step, self.rn, self.axes_n)
         wp.launch(
             _joint_variation,
             k.count,
             [
-                q,
+                step,
                 self.qn,
                 self.vn,
                 self.params,
@@ -710,10 +838,12 @@ class ArticulationObjective:
             _link_variation,
             k.bodies,
             [
-                k.com,
+                k.com_steps,
+                k.rotation_steps,
                 k.rotations,
-                self.tn,
-                self.predicted_t,
+                self.rn,
+                self.step_t,
+                self.step_r,
                 self.predicted_r,
                 k.mass,
                 k.second,

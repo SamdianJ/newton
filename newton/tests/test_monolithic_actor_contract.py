@@ -37,11 +37,14 @@ def test_link_inertia_reference(test, device):
     wp.launch(
         _link_variation,
         1,
+        # Step from the origin pose: increments equal poses minus identity.
         [
             vector(com),
+            matrix(rot - np.eye(3)),
             matrix(rot),
+            matrix(np.eye(3)),
             vector(predicted_com),
-            vector(predicted_com),
+            matrix(predicted_rot - np.eye(3)),
             matrix(predicted_rot),
             wp.array([mass], dtype=wp.float64, device=device),
             matrix(second),
