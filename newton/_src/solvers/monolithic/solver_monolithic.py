@@ -408,7 +408,6 @@ class SolverMonolithic(SolverBase):
             "_complete_r",
             "_complete_a",
             "_coordinates",
-            "_absolute_coordinates",
             "_post_r",
             "_post_error",
             "_post_original",

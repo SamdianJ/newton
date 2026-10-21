@@ -312,6 +312,7 @@ def _project_contact_chunk(
     candidates.weights[i, 0] = weights[i, 0]
     candidates.weights[i, 1] = weights[i, 2]
     candidates.weights[i, 2] = weights[i, 1]
+    candidates.rounding[i] = geometry.rounding[i]
     r = local_r[i]
     k = int(0)
     for end in range(2):
@@ -634,6 +635,7 @@ class _ContactBatch:
         for name in ("y", "slip", "gradient", "soft_normal"):
             setattr(geometry, name, wp.zeros(count, dtype=self.vector, device=self.device))
         geometry.distance = wp.zeros(count, dtype=self.dtype, device=self.device)
+        geometry.rounding = wp.zeros(count, dtype=self.dtype, device=self.device)
         geometry.uncertified = wp.zeros(count, dtype=int, device=self.device)
         geometry.rotation = wp.zeros(count if rotation else 0, dtype=self.matrix, device=self.device)
         geometry.jacobian_q = wp.empty((count, 0), dtype=self.vector, device=self.device)
@@ -879,7 +881,7 @@ class _ContactBatch:
                 )
                 yield mode
 
-    def _query(self, state):
+    def _query(self, state, begin):
         c, s, t = self.contact, self.samples, self.support
         x, poses, com, jt, jw, rigid_com, rigid_rotation = state[:7]
         surface = self._empty_vector if self.material_surface is None else self.material_surface.point_steps
@@ -896,6 +898,8 @@ class _ContactBatch:
                 rigid_rotation,
                 *state[7:],
                 surface,
+                self._start_chunk.y,
+                not begin,
                 t.com,
                 t.kinds,
                 t.indices,
@@ -943,7 +947,15 @@ class _ContactBatch:
             ],
             device=self.device,
         )
-        self._query(state)
+        if not begin:
+            # The query forms each local point from its step-start point.
+            wp.launch(
+                _copy_contact_geometry,
+                self.batch_capacity,
+                [self.start, self._start_chunk, out.identities, out.count, False],
+                device=self.device,
+            )
+        self._query(state, begin)
         if begin:
             wp.launch(
                 _validate_start,
@@ -968,12 +980,6 @@ class _ContactBatch:
                 device=self.device,
             )
             return
-        wp.launch(
-            _copy_contact_geometry,
-            self.batch_capacity,
-            [self.start, self._start_chunk, out.identities, out.count, False],
-            device=self.device,
-        )
         self.weights.zero_()
         self.local_r.zero_()
         self.omitted.zero_()

@@ -42,7 +42,7 @@ class Producer(Protocol):
 
     def magnitude(self, solver: Any, out: Any) -> None: ...
 
-    def coordinates(self, solver: Any, state: Any, out: Any, *, absolute: bool = False) -> None: ...
+    def coordinates(self, solver: Any, state: Any, out: Any) -> None: ...
 
     def assemble(self, solver: Any, assembly: Any, dt: float) -> None: ...
 
@@ -113,17 +113,12 @@ def _particle_coordinates(x: wp.array[Any], ids: wp.array[int], start: int, outp
 
 
 @wp.kernel
-def _rigid_coordinates(
-    com: wp.array[Any], rotation: wp.array[Any], absolute: bool, rows: wp.array2d[int], output: wp.array[Any]
-):
+def _rigid_coordinates(com: wp.array[Any], rotation: wp.array[Any], rows: wp.array2d[int], output: wp.array[Any]):
     i, j = wp.tid()
-    # Absolute rotations are orthonormal matrices with entries of unit magnitude.
-    value = type(output[0])(1.0)
+    # A rotation step q q_n^-1 near identity turns by about twice its vector part.
+    value = type(output[0])(2.0) * type(output[0])(wp.abs(rotation[i][j % 3]))
     if j < 3:
         value = type(output[0])(wp.abs(com[i][j]))
-    elif not absolute:
-        # A rotation step q q_n^-1 near identity turns by about twice its vector part.
-        value = type(output[0])(2.0) * type(output[0])(wp.abs(rotation[i][j - 3]))
     output[rows[i, j]] = value
 
 
@@ -145,14 +140,16 @@ def _raise_coordinates(
     count: wp.array[int],
     supports: wp.array[int],
     columns: wp.array[int],
-    values: wp.array[Any],
+    rounding: wp.array[Any],
     output: wp.array[Any],
 ):
-    i = wp.tid()
-    # Each contact has three factors over its supports.
-    if i < 3 * supports[count[0]]:
-        column = columns[i]
-        wp.atomic_max(output, column, values[column])
+    contact = wp.tid()
+    if contact >= count[0]:
+        return
+    begin, end = supports[contact], supports[contact + 1]
+    # Every factor of a contact shares its support columns; read the first.
+    for j in range(end - begin):
+        wp.atomic_max(output, columns[3 * begin + j], rounding[contact])
 
 
 class _Producer:
@@ -179,12 +176,11 @@ class _Producer:
     def magnitude(self, solver, out):
         """Add the absolute contributions summed into this producer's last residual rows."""
 
-    def coordinates(self, solver, state, out, *, absolute=False):
+    def coordinates(self, solver, state, out):
         """Write the magnitude of each owned row's coordinate as this producer's terms read it.
 
-        Terms formed from the step increment write its magnitude; with
-        ``absolute``, write the magnitude of the absolute coordinate instead,
-        for terms that still read absolute positions.
+        Terms are formed from the exact step increments, so each row's
+        coordinate is its increment.
         """
 
     def assemble(self, solver, assembly, dt):
@@ -297,9 +293,9 @@ class ArticulationProducer(_Producer):
             device=solver.model.device,
         )
 
-    def coordinates(self, solver, state, out, *, absolute=False):
+    def coordinates(self, solver, state, out):
         k = solver._kinematics
-        q = k.gather_q(state) if absolute else solver._joint_step(state)
+        q = solver._joint_step(state)
         wp.launch(_write_absolute, k.count, [q, solver._layout.q_scalar_offset, out], device=solver.model.device)
 
     def assemble(self, solver, assembly, dt):
@@ -382,14 +378,11 @@ class RigidProducer(_Producer):
                 _scatter_residual, (rigid.count, 6), [rigid.rows, rigid.absolute, out], device=solver.model.device
             )
 
-    def coordinates(self, solver, state, out, *, absolute=False):
+    def coordinates(self, solver, state, out):
         rigid = solver._rigid
         if rigid.count:
-            if absolute:
-                inputs = [state._monolithic_coupled.rigid_com, state._monolithic_coupled.rigid_rotation, absolute]
-            else:
-                inputs = [*solver._rigid_steps(state), absolute]
-            wp.launch(_rigid_coordinates, (rigid.count, 6), [*inputs, rigid.rows, out], device=solver.model.device)
+            steps = solver._rigid_steps(state)
+            wp.launch(_rigid_coordinates, (rigid.count, 6), [*steps, rigid.rows, out], device=solver.model.device)
 
     def assemble(self, solver, assembly, dt):
         rigid = solver._rigid
@@ -498,11 +491,11 @@ class TetProducer(_Producer):
             _add_offset, absolute.size, [absolute, solver._layout.x_scalar_offset, out], device=solver.model.device
         )
 
-    def coordinates(self, solver, state, out, *, absolute=False):
+    def coordinates(self, solver, state, out):
         # Tet terms read the exact step displacement, so its rounding, not that
         # of the absolute position, bounds how closely a row can be resolved.
         ids = solver._tet.ids
-        x = state.particle_q if absolute else solver._displacement(state)
+        x = solver._displacement(state)
         wp.launch(
             _particle_coordinates,
             3 * ids.size,
@@ -561,20 +554,20 @@ class _MaterialProducer(_Producer):
         block = self.block
         wp.launch(_add_rows, block.absolute.size, [block.absolute, block.rows, out], device=solver.model.device)
 
-    def theta(self, solver, state, *, absolute=False):
-        """Return this object's angle increments or angles; cloth has none."""
+    def theta(self, solver, state):
+        """Return this object's angle increments; cloth has none."""
         return wp.zeros(0, dtype=state.particle_q.dtype._wp_scalar_type_, device=state.particle_q.device)
 
-    def coordinates(self, solver, state, out, *, absolute=False):
+    def coordinates(self, solver, state, out):
         # Shell and rod terms read the exact step increments, so their rounding,
         # not that of the absolute coordinates, bounds how closely a row can be
         # resolved.
         block = self.block
-        x = state.particle_q if absolute else solver._displacement(state)
+        x = solver._displacement(state)
         wp.launch(
             _material_coordinates,
             block.rows.size,
-            [x, block.ids, self.theta(solver, state, absolute=absolute), block.rows, out],
+            [x, block.ids, self.theta(solver, state), block.rows, out],
             device=solver.model.device,
         )
 
@@ -681,9 +674,9 @@ class CableProducer(_MaterialProducer):
         theta = solver._theta_step(state).numpy()[list(self.block.actor.theta_indices)]
         return np.r_[super().local(solver, state), theta]
 
-    def theta(self, solver, state, *, absolute=False):
+    def theta(self, solver, state):
         start = self.block.theta_offset
-        theta = state._monolithic_coupled.cable_theta if absolute else solver._theta_step(state)
+        theta = solver._theta_step(state)
         return theta[start : start + self.block.objective.lengths.size]
 
 
@@ -768,22 +761,16 @@ class ContactProducer(_Producer):
         residual = solver._contact.residual
         wp.launch(_add_absolute, residual.size, [residual, out], device=solver.model.device)
 
-    def coordinates(self, solver, state, out, *, absolute=False):
-        # Contact gaps are formed from absolute positions, so every coordinate a
-        # contact factor reads is resolved only to the rounding of its absolute
-        # value. Raising (not adding) keeps the result independent of order.
-        if absolute:
-            return
-        values = solver._absolute_coordinates
-        values.zero_()
-        for producer in solver._producers:
-            if producer is not self:
-                producer.coordinates(solver, state, values, absolute=True)
+    def coordinates(self, solver, state, out):
+        # A contact's gap reads its local point, the step-start point plus the
+        # slip. Raise each coordinate it reads to the size whose rounding moves
+        # the gap as much as rounding that point. Raising (not adding) keeps
+        # the result independent of order.
         records = solver._contact.pool.records
         wp.launch(
             _raise_coordinates,
-            records.factor_columns.size,
-            [records.count, records.support_offsets, records.factor_columns, values, out],
+            records.rounding.size,
+            [records.count, records.support_offsets, records.factor_columns, records.rounding, out],
             device=solver.model.device,
         )
 

@@ -21,6 +21,36 @@ from scripts.monolithic_reference.build_smooth_sdf import build_coefficients
 from scripts.monolithic_reference.smooth_sdf_oracle import evaluate
 
 
+def far_slide_model(offset):
+    """Build a tet sliding at 5 mm/s on a ground plane ``offset`` m from the origin."""
+    builder = newton.ModelBuilder(gravity=(0, 0, -9.81))
+    builder.add_ground_plane()
+    # The solver requires an articulation; this one has no shapes.
+    root = builder.add_link(mass=1.0, inertia=wp.mat33(0.01, 0, 0, 0, 0.01, 0, 0, 0, 0.01))
+    builder.add_articulation([builder.add_joint_revolute(-1, root, axis=(0, 1, 0))])
+    builder.add_soft_mesh(
+        pos=(offset, 0.0, 0.0008),
+        rot=wp.quat_identity(),
+        scale=1.0,
+        vel=(0.005, 0, 0),
+        vertices=[(0, 0, 0), (0.04, 0, 0), (0, 0.03, 0), (0, 0, 0.02)],
+        indices=[0, 1, 2, 3],
+        density=1000,
+        k_mu=10000 / 2.6,
+        k_lambda=10000 * 0.3 / (1.3 * 0.4),
+        k_damp=0,
+        particle_radius=0.001,
+        tri_ke=0,
+        tri_ka=0,
+        tri_kd=0,
+        tri_drag=0,
+        tri_lift=0,
+        edge_ke=0,
+        edge_kd=0,
+    )
+    return builder.finalize(device="cpu")
+
+
 class TestSolverPrecision(unittest.TestCase):
     def test_native_step_and_graph(self):
         for device in ("cpu", "cuda:0"):
@@ -195,32 +225,7 @@ class TestSolverPrecision(unittest.TestCase):
 
     def test_far_friction_in_float32(self):
         """Resolve frictional slip of a tet sliding on a ground plane 100 m from the origin."""
-        builder = newton.ModelBuilder(gravity=(0, 0, -9.81))
-        builder.add_ground_plane()
-        # The solver requires an articulation; this one has no shapes.
-        root = builder.add_link(mass=1.0, inertia=wp.mat33(0.01, 0, 0, 0, 0.01, 0, 0, 0, 0.01))
-        builder.add_articulation([builder.add_joint_revolute(-1, root, axis=(0, 1, 0))])
-        builder.add_soft_mesh(
-            pos=(100.0, 0.0, 0.0008),
-            rot=wp.quat_identity(),
-            scale=1.0,
-            vel=(0.005, 0, 0),
-            vertices=[(0, 0, 0), (0.04, 0, 0), (0, 0.03, 0), (0, 0, 0.02)],
-            indices=[0, 1, 2, 3],
-            density=1000,
-            k_mu=10000 / 2.6,
-            k_lambda=10000 * 0.3 / (1.3 * 0.4),
-            k_damp=0,
-            particle_radius=0.001,
-            tri_ke=0,
-            tri_ka=0,
-            tri_kd=0,
-            tri_drag=0,
-            tri_lift=0,
-            edge_ke=0,
-            edge_kd=0,
-        )
-        model = builder.finalize(device="cpu")
+        model = far_slide_model(100.0)
         velocities = []
         for precision in ("fp64", "fp32"):
             run = solver(model, precision=precision)
@@ -236,6 +241,30 @@ class TestSolverPrecision(unittest.TestCase):
                     velocities.append(state.particle_qd.numpy().astype(float))
         reference, single = velocities
         self.assertLess(np.abs(single - reference).max(), 1e-3 * np.abs(reference).max())
+
+    def test_far_contact_converges_in_float32(self):
+        """Converge far contact to FP32 arithmetic, not to the rounding of world positions."""
+        model = far_slide_model(100.0)
+        runs = [solver(model, precision=p) for p in ("fp64", "fp32")]
+        states = [run.create_state(dt=0.001) for run in runs]
+        for step in range(5):
+            for run, state in zip(runs, states, strict=True):
+                output = run._states.copy(state)
+                run.step(state, output, model.control(), dt=0.001)
+                self.assertTrue(run.last_stats.converged, (run.precision, step, run.last_stats.status))
+                state.assign(output)
+            # Store the reference positions as FP32 does, so the comparison
+            # isolates the solver arithmetic from the storage of positions.
+            reference = states[0]
+            velocity = reference.particle_qd.numpy()
+            reference.particle_q.assign(reference.particle_q.numpy().astype(np.float32).astype(np.float64))
+            runs[0].reset_state(reference, dt=0.001)
+            reference.particle_qd.assign(velocity)
+            runs[0].reset_state(reference, dt=0.001)
+            single = states[1].particle_qd.numpy().astype(float)
+            # Accepting a step at the rounding of 100 m coordinates leaves
+            # velocity errors of several percent.
+            self.assertLess(np.abs(single - velocity).max(), 1e-3 * np.abs(velocity).max(), step)
 
 
 if __name__ == "__main__":

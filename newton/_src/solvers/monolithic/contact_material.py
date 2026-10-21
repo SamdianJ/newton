@@ -132,6 +132,7 @@ def _project_surface(
     candidates.weights[i, 0] = weights[i, 0]
     candidates.weights[i, 1] = weights[i, 2]
     candidates.weights[i, 2] = weights[i, 1]
+    candidates.rounding[i] = geometry.rounding[i]
     r, k = local_r[i], int(0)
     world = rotation * r
     for j in range(7):

@@ -346,6 +346,7 @@ def _pool_types(dtype):
         weights: wp.array2d[dtype]
         factors: wp.array3d[dtype]
         energy: wp.array2d[dtype]
+        rounding: wp.array[dtype]
         force_counts: wp.array[int]
         force_rows: wp.array2d[int]
         forces: wp.array2d[dtype]
@@ -385,6 +386,7 @@ def _pool_types(dtype):
         factor_weights: wp.array[dtype]
         factor_kind: wp.array[int]
         factor_contact: wp.array[int]
+        rounding: wp.array[dtype]
         triplet_count: wp.array[int]
         triplet_offsets: wp.array[int]
         triplet_rows: wp.array[int]
@@ -544,6 +546,14 @@ def _write_contacts(
     records.source_slots[contact] = i
     records.support_offsets[contact] = r_begin
     records.triplet_offsets[contact] = offset[2]
+    # The coordinate size whose rounding moves the gap by the rounding of its
+    # local point: that length over the largest gap derivative of a support.
+    largest = candidates.rounding.dtype(0)
+    for j in range(k):
+        largest = wp.max(largest, wp.abs(candidates.factors[i, 0, j]))
+    records.rounding[contact] = candidates.rounding.dtype(0)
+    if largest > candidates.rounding.dtype(0):
+        records.rounding[contact] = candidates.rounding[i] / largest
     for component in range(3):
         factor = 3 * contact + component
         begin = 3 * r_begin + component * k
@@ -801,6 +811,7 @@ class _ContactPool:
             "weights": ((b, 3), dtype),
             "factors": ((b, 3, k), dtype),
             "energy": ((b, 2), dtype),
+            "rounding": ((b,), dtype),
             "force_counts": ((b,), wp.int32),
             "force_rows": ((b, f), wp.int32),
             "forces": ((b, f), dtype),
@@ -834,6 +845,7 @@ class _ContactPool:
                 "factor_weights": ((3 * n,), dtype),
                 "factor_kind": ((3 * n,), wp.int32),
                 "factor_contact": ((3 * n,), wp.int32),
+                "rounding": ((n,), dtype),
                 "triplet_offsets": ((n + 1,), wp.int32),
                 "triplet_rows": ((t,), wp.int32),
                 "triplet_columns": ((t,), wp.int32),

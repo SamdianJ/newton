@@ -42,6 +42,8 @@ def _geometry_type(dtype):
         y: wp.array[vector]
         # Target-local slip y - y_n formed from the step increments.
         slip: wp.array[vector]
+        # Length by which rounding the local point y can move the gap.
+        rounding: wp.array[dtype]
         gradient: wp.array[vector]
         distance: wp.array[dtype]
         rotation: wp.array[matrix]

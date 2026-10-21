@@ -115,6 +115,8 @@ def _actor_geometry(
     rigid_steps: wp.array[Any],
     rigid_rotation_steps: wp.array[Any],
     surface_steps: wp.array[Any],
+    start_y: wp.array[Any],
+    incremental: bool,
     body_com: wp.array[Any],
     kinds: wp.array[int],
     indices: wp.array[int],
@@ -195,7 +197,6 @@ def _actor_geometry(
         return
     rotation = wp.quat_to_matrix(q)
     relative = point - wp.transform_get_translation(target_pose)
-    y = wp.transpose(rotation) * relative
     target_origin, e = _body_step(
         bodies[target],
         kinds,
@@ -215,6 +216,12 @@ def _actor_geometry(
     # difference of increments and E multiplies only the relative position.
     step = point_step - target_step
     slip = wp.transpose(rotation) * (step + e * step - e * relative)
+    # After the step start the local point is the step-start point plus the
+    # slip, so the gap reads the increments; absolute positions round only y_n,
+    # which is fixed within the step.
+    y = wp.transpose(rotation) * relative
+    if incremental:
+        y = start_y[key] + slip
     d, g = _shape64(types[target], scales[target], y, sdf_indices[target], table)
     out.uncertified[key] = 0
     if types[target] == GeoType.MESH and smooth_table.shape[0] > 0:
@@ -235,6 +242,7 @@ def _actor_geometry(
     world_points[key] = point
     out.y[key] = y
     out.slip[key] = slip
+    out.rounding[key] = wp.abs(g[0] * y[0]) + wp.abs(g[1] * y[1]) + wp.abs(g[2] * y[2])
     out.gradient[key] = g
     out.distance[key] = d
     out.rotation[key] = rotation
