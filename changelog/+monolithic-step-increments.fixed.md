@@ -1,0 +1,1 @@
+Fix false convergence and stalls of experimental `SolverMonolithic` FP32 tet, cloth and cable steps: each step now advances exact particle and cable-angle increments from the step start instead of absolute coordinates, and tet, cloth-membrane and cable-stretch terms are evaluated without cancellation near rest.

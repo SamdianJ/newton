@@ -19,6 +19,14 @@ wp.set_module_options({"enable_backward": False})
 
 
 @wp.func
+def _rotate(angle: Any, increment: Any):
+    """Return the cosine and sine of ``angle + increment``."""
+    c, s = wp.cos(angle), wp.sin(angle)
+    dc, ds = wp.cos(increment), wp.sin(increment)
+    return c * dc - s * ds, s * dc + c * ds
+
+
+@wp.func
 def _transport(a: Any, b: Any, d: Any):
     v = wp.cross(a, b)
     first = wp.cross(v, d)
@@ -42,8 +50,14 @@ def _transport_differential(a: Any, b: Any, d: Any, da: Any, db: Any, dd: Any):
 
 
 @wp.kernel
+def _difference(x: wp.array[Any], anchor: wp.array[Any], out: wp.array[Any]):
+    i = wp.tid()
+    out[i] = x[i] - anchor[i]
+
+
+@wp.kernel
 def _edges(
-    x: wp.array[Any],
+    step: wp.array[Any],
     anchor_x: wp.array[Any],
     anchor_d: wp.array[Any],
     lengths0: wp.array[Any],
@@ -57,13 +71,15 @@ def _edges(
     flags: wp.array[int],
 ):
     i = wp.tid()
-    edge = x[i + 1] - x[i]
+    anchor_edge = anchor_x[i + 1] - anchor_x[i]
+    change = step[i + 1] - step[i]
+    edge = anchor_edge + change
     length = wp.length(edge)
     if not wp.isfinite(length) or length <= type(ea)(1e-8) * lengths0[i]:
         wp.atomic_max(flags, 0, 1)
         return
     t = edge / length
-    old_t = wp.normalize(anchor_x[i + 1] - anchor_x[i])
+    old_t = wp.normalize(anchor_edge)
     if type(ea)(1.0) + wp.dot(old_t, t) <= type(ea)(1e-10):
         wp.atomic_max(flags, 0, 1)
         return
@@ -71,7 +87,12 @@ def _edges(
     director[i] = _transport(old_t, t, anchor_d[i])
     lengths[i] = length
     stiffness = ea / lengths0[i]
-    extension = length - lengths0[i]
+    # |e| - L0 = (|e|^2 - L0^2) / (|e| + L0) with |e|^2 formed from the
+    # step-start edge, fixed within the step, plus the size of the change.
+    squares = (wp.dot(anchor_edge, anchor_edge) - lengths0[i] * lengths0[i]) + (
+        type(ea)(2.0) * wp.dot(anchor_edge, change) + wp.dot(change, change)
+    )
+    extension = squares / (length + lengths0[i])
     energy[i] = type(ea)(0.5) * stiffness * extension * extension
     for a in range(6):
         gradient = t[a % 3]
@@ -87,7 +108,8 @@ def _edges(
 
 @wp.kernel
 def _bend_twist(
-    theta: wp.array[Any],
+    anchor_theta: wp.array[Any],
+    theta_step: wp.array[Any],
     anchor_x: wp.array[Any],
     anchor_d: wp.array[Any],
     anchor_phi: wp.array[Any],
@@ -125,8 +147,10 @@ def _bend_twist(
         wp.atomic_max(flags, 0, 1)
         return
     phi_out[i] = phi
-    c0, s0 = wp.cos(theta[i]), wp.sin(theta[i])
-    c1, s1 = wp.cos(theta[i + 1]), wp.sin(theta[i + 1])
+    # Angle addition keeps the step-start angle's rounding a fixed bias of the
+    # step; the increment enters exactly however large the accumulated angle.
+    c0, s0 = _rotate(anchor_theta[i], theta_step[i])
+    c1, s1 = _rotate(anchor_theta[i + 1], theta_step[i + 1])
     perpendicular0, perpendicular1 = wp.cross(t0, d0), wp.cross(t1, d1)
     m10, m11 = c0 * d0 + s0 * perpendicular0, c1 * d1 + s1 * perpendicular1
     m20, m21 = -s0 * d0 + c0 * perpendicular0, -s1 * d1 + c1 * perpendicular1
@@ -134,7 +158,7 @@ def _bend_twist(
         type(t0)(
             type(gj)(0.5) * wp.dot(kb, m20 + m21),
             -type(gj)(0.5) * wp.dot(kb, m10 + m11),
-            theta[i + 1] - theta[i] + phi,
+            (anchor_theta[i + 1] - anchor_theta[i]) + (theta_step[i + 1] - theta_step[i]) + phi,
         )
         - rest_strain[i]
     )
@@ -239,15 +263,29 @@ class CableObjective:
         self.bend_twist_r = wp.zeros((ni, 11), dtype=dtype, device=device)
         self.bend_twist_b = wp.zeros((ni, 11, 11), dtype=dtype, device=device)
         self.flags = wp.zeros(1, dtype=int, device=device)
+        self._step = self._theta_step = None
 
     def evaluate(self, positions, theta, anchor_positions, anchor_directors, anchor_twist):
         """Overwrite element terms and candidate frames, leaving all anchors unchanged."""
+        if self._step is None or self._step.size != positions.size:
+            self._step = wp.zeros_like(positions)
+            self._theta_step = wp.zeros_like(theta)
+        wp.launch(_difference, positions.size, [positions, anchor_positions, self._step], device=self.device)
+        self._theta_step.zero_()
+        self.evaluate_step(self._step, theta, self._theta_step, anchor_positions, anchor_directors, anchor_twist)
+
+    def evaluate_step(self, step, anchor_theta, theta_step, anchor_positions, anchor_directors, anchor_twist):
+        """Evaluate the configuration ``anchor + step`` from its exact increments.
+
+        Edges and twist are formed as anchor differences plus step differences,
+        so a small step is not added to large absolute coordinates or angles.
+        """
         self.flags.zero_()
         wp.launch(
             _edges,
             self.lengths.size,
             [
-                positions,
+                step,
                 anchor_positions,
                 anchor_directors,
                 self.lengths0,
@@ -266,7 +304,8 @@ class CableObjective:
             _bend_twist,
             self.phi.size,
             [
-                theta,
+                anchor_theta,
+                theta_step,
                 anchor_positions,
                 anchor_directors,
                 anchor_twist,
@@ -287,19 +326,29 @@ class CableObjective:
             device=self.device,
         )
 
-    def evaluate_host(self, positions, theta, frame):
-        """Return dense diagnostic E/r/B for component validation, never for stepping."""
+    def evaluate_host(self, positions, theta, frame, *, step=None, theta_step=None):
+        """Return dense diagnostic E/r/B for component validation, never for stepping.
+
+        With ``step`` and ``theta_step``, ``positions`` and ``theta`` are the
+        step-start values and the configuration is formed from the increments.
+        """
 
         def array(value, dtype):
             return wp.array(value, dtype=dtype, device=self.device)
 
-        self.evaluate(
-            array(positions, self.vector),
-            array(theta, self.dtype),
+        anchors = (
             array(frame.positions, self.vector),
             array(frame.directors, self.vector),
             array(frame.reference_twist, self.dtype),
         )
+        if step is None:
+            self.evaluate(array(positions, self.vector), array(theta, self.dtype), *anchors)
+        else:
+            if not np.array_equal(np.asarray(positions), np.asarray(frame.positions)):
+                raise ValueError("A cable step starts from the committed frame positions")
+            self.evaluate_step(
+                array(step, self.vector), array(theta, self.dtype), array(theta_step, self.dtype), *anchors
+            )
         if self.flags.numpy()[0]:
             raise ValueError("Invalid cable candidate geometry or frame chart")
         count = len(positions) * 3 + len(theta)

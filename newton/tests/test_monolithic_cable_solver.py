@@ -170,13 +170,20 @@ class TestMonolithicCableSolver(unittest.TestCase):
         state = solver.create_state(dt=0.01)
         solver.step(state, state, solver.create_control(), dt=0.01)
         accepted, trial = solver._accepted, solver._trial
+        start = solver._original.particle_q.numpy()
+
+        def place(target, x):
+            # The solver advances positions only through their step displacement.
+            target.particle_q.assign(x)
+            solver._displacement(target).assign(x - start)
+
         x = state.particle_q.numpy().copy()
         x[1] = x[0] + [0, 1, 0]
         x[2] = x[1] + [1, 0, 0]
-        accepted.particle_q.assign(x)
+        place(accepted, x)
         x[1] = x[0] + [0, -1, 0]
         x[2] = x[1] + [1, 0, 0]
-        trial.particle_q.assign(x)
+        place(trial, x)
         self.assertFalse(solver._domain(trial))
 
     def test_permanent_gauge_checks_omitted_torque(self):

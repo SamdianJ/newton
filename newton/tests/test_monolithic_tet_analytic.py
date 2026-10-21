@@ -11,6 +11,7 @@ from pathlib import Path
 
 import numpy as np
 
+from newton.solvers.experimental.monolithic import SolverMonolithic
 from scripts.monolithic_reference.tet_analytic import (
     fixed_free_frequency,
     homogeneous_traction,
@@ -103,6 +104,19 @@ class TestTetBenchmarkSmoke(unittest.TestCase):
         for _ in range(5):
             case.step()
         self.assertGreater(case.history[-1][0], 0.0)
+
+    def test_vibration_velocity_in_float32(self):
+        velocities = []
+        for precision in (SolverMonolithic.Precision.FP64, SolverMonolithic.Precision.FP32):
+            case = TetBenchmark("axial_vibration", cells=(10, 1, 1), mass_mode="lumped", precision=precision)
+            for _ in range(5):
+                case.step()
+                # The inertial prediction leaves unbalanced elastic forces; a
+                # converged step must have taken at least one Newton update.
+                self.assertGreater(case.solver.last_stats.nonlinear_iterations, 0)
+            velocities.append(case.state.particle_qd.numpy().astype(float))
+        reference, single = velocities
+        self.assertLess(np.abs(single - reference).max(), 0.01 * np.abs(reference).max())
 
 
 class TestTetMatrix(unittest.TestCase):

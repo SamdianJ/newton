@@ -16,9 +16,14 @@ from .tet_material import _evaluate_energy_stress
 
 
 @wp.kernel
+def _difference(x: wp.array[Any], xn: wp.array[Any], displacement: wp.array[Any]):
+    i = wp.tid()
+    displacement[i] = x[i] - xn[i]
+
+
+@wp.kernel
 def _particles(
-    x: wp.array[Any],
-    xn: wp.array[Any],
+    dx: wp.array[Any],
     vn: wp.array[Any],
     forces: wp.array[wp.vec3],
     gravity: wp.array[wp.vec3],
@@ -38,9 +43,9 @@ def _particles(
     world = worlds[p]
     if world < 0:
         world = gravity.shape[0] - 1
-    displacement = x[p] - xn[p]
+    displacement = dx[p]
     delta = displacement - dt * vn[p]
-    applied = type(dt)(row_mass[p]) * type(x[0])(gravity[world]) + type(x[0])(forces[p])
+    applied = type(dt)(row_mass[p]) * type(dx[0])(gravity[world]) + type(dx[0])(forces[p])
     r = -applied
     magnitude = abs3(applied)
     inertia = type(dt)(0.0)
@@ -59,8 +64,8 @@ def _particles(
 
 @wp.kernel
 def _elements(
-    x: wp.array[Any],
     xn: wp.array[Any],
+    dx: wp.array[Any],
     vn: wp.array[Any],
     indices: wp.array2d[int],
     poses: wp.array[wp.mat33],
@@ -79,8 +84,14 @@ def _elements(
 ):
     e = wp.tid()
     pose = wp.matrix(poses[e], shape=(3, 3), dtype=type(dt))
-    origin = x[indices[e, 0]]
-    f = wp.matrix_from_cols(x[indices[e, 1]] - origin, x[indices[e, 2]] - origin, x[indices[e, 3]] - origin) * pose
+    # Displacement gradient h = F - I from the step-start edges plus the step
+    # displacement: within a step it carries neither the rounding of absolute
+    # candidate positions nor a cancellation against the identity.
+    n0, n1, n2, n3 = indices[e, 0], indices[e, 1], indices[e, 2], indices[e, 3]
+    start = wp.matrix_from_cols(xn[n1] - xn[n0], xn[n2] - xn[n0], xn[n3] - xn[n0]) * pose
+    step = wp.matrix_from_cols(dx[n1] - dx[n0], dx[n2] - dx[n0], dx[n3] - dx[n0]) * pose
+    h = (start - wp.identity(n=3, dtype=type(dt))) + step
+    f = start + step
     det = wp.determinant(f)
     if not wp.isfinite(det):
         wp.atomic_max(flags, 0, 2)
@@ -90,29 +101,29 @@ def _elements(
         wp.atomic_max(flags, 0, 1)
         return
     volume = type(dt)(1.0) / (type(dt)(6.0) * wp.determinant(pose))
-    energy, stress = _evaluate_energy_stress(f, volume, type(dt)(materials[e, 0]), type(dt)(materials[e, 1]), material)
+    energy, stress = _evaluate_energy_stress(h, volume, type(dt)(materials[e, 0]), type(dt)(materials[e, 1]), material)
     if not wp.isfinite(energy) or not wp.isfinite(wp.ddot(stress, stress)):
         wp.atomic_max(flags, 0, 2)
         return
     inertia = type(dt)(0.0)
     for a in range(4):
         ia = indices[e, a]
-        gradient = type(x[0])(0.0)
+        gradient = type(dx[0])(0.0)
         if a == 0:
-            gradient = -type(x[0])(
+            gradient = -type(dx[0])(
                 pose[0, 0] + pose[1, 0] + pose[2, 0],
                 pose[0, 1] + pose[1, 1] + pose[2, 1],
                 pose[0, 2] + pose[1, 2] + pose[2, 2],
             )
         else:
-            gradient = type(x[0])(pose[a - 1, 0], pose[a - 1, 1], pose[a - 1, 2])
+            gradient = type(dx[0])(pose[a - 1, 0], pose[a - 1, 1], pose[a - 1, 2])
         r = stress * gradient
         magnitude = abs3(r)
-        da = x[ia] - xn[ia] - dt * vn[ia]
+        da = dx[ia] - dt * vn[ia]
         if consistent:
             for b in range(4):
                 ib = indices[e, b]
-                db = x[ib] - xn[ib] - dt * vn[ib]
+                db = dx[ib] - dt * vn[ib]
                 weight = type(dt)(coefficients[e])
                 if a == b:
                     weight *= type(dt)(2.0)
@@ -174,9 +185,15 @@ class TetObjective:
         self.parts = wp.zeros(3, dtype=self.dtype, device=model.device)
         self.min_det_f = wp.zeros(1, dtype=self.dtype, device=model.device)
         self.flags = wp.zeros(1, dtype=int, device=model.device)
+        self._difference = wp.zeros(model.particle_count, dtype=self.vector, device=model.device)
 
-    def evaluate(self, x, xn, vn, forces, gravity, *, dt, min_det_f_guard=0.2):
-        """Evaluate directly in the selected dtype, without promoting a rounded residual."""
+    def evaluate(self, x, xn, vn, forces, gravity, *, dt, min_det_f_guard=0.2, displacement=None):
+        """Evaluate directly in the selected dtype, without promoting a rounded residual.
+
+        Inertia and element edges use the step displacement ``x - xn``. A caller
+        that tracks it exactly passes ``displacement``; otherwise it is formed
+        from the rounded candidate positions ``x``.
+        """
         if not math.isfinite(dt) or dt <= 0 or not math.isfinite(min_det_f_guard) or min_det_f_guard <= 0:
             raise ValueError("dt and detF guard must be finite and positive")
         native = np.float64 if self.dtype == wp.float64 else np.float32
@@ -184,9 +201,11 @@ class TetObjective:
             dt, min_det_f_guard = native(dt), native(min_det_f_guard)
         if not np.isfinite([dt, min_det_f_guard]).all() or dt <= 0 or min_det_f_guard <= 0:
             raise ValueError("dt and detF guard must be representable and positive in the selected dtype")
+        derived = displacement is None
         for value, dtype, shape in (
             (x, self.vector, (self.model.particle_count,)),
             (xn, self.vector, (self.model.particle_count,)),
+            (self._difference if derived else displacement, self.vector, (self.model.particle_count,)),
             (vn, self.vector, (self.model.particle_count,)),
             (forces, wp.vec3, (self.model.particle_count,)),
             (gravity, wp.vec3, self.model.gravity.shape),
@@ -197,6 +216,9 @@ class TetObjective:
                 self.model.device,
             ):
                 raise ValueError("Incompatible native tet inputs")
+        if derived:
+            displacement = self._difference
+            wp.launch(_difference, x.size, [x, xn, displacement], device=self.model.device)
         physics = self.physics
         self.flags.zero_()
         self.parts.zero_()
@@ -213,8 +235,7 @@ class TetObjective:
             _particles,
             self.ids.size,
             [
-                x,
-                xn,
+                displacement,
                 vn,
                 forces,
                 gravity,
@@ -235,8 +256,8 @@ class TetObjective:
             _elements,
             self.model.tet_count,
             [
-                x,
                 xn,
+                displacement,
                 vn,
                 physics.indices,
                 physics.poses,

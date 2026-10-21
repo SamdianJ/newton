@@ -410,6 +410,7 @@ class SolverMonolithic(SolverBase):
             "_complete_r",
             "_complete_a",
             "_coordinates",
+            "_absolute_coordinates",
             "_post_r",
             "_post_error",
             "_post_original",
@@ -425,6 +426,13 @@ class SolverMonolithic(SolverBase):
         theta_count = 0 if self._materials is None else self._materials.theta_count
         self._cable_target_x = wp.array(model.particle_q.numpy(), dtype=self._states.vector, device=device)
         self._cable_target_theta = wp.zeros(theta_count, dtype=self._dtype, device=device)
+        # Exact step increments x - x_n and theta - theta_n of the internal
+        # states, keyed by state; other states derive them into shared scratch.
+        self._steps = {}
+        self._external_steps = (
+            wp.zeros(model.particle_count, dtype=self._states.vector, device=device),
+            wp.zeros(theta_count, dtype=self._dtype, device=device),
+        )
         self._cable_torque = wp.zeros_like(self._cable_target_theta)
         self._temporary_gauges = []
         self._assembly_gauges = ()
@@ -704,8 +712,15 @@ class SolverMonolithic(SolverBase):
             self._original = self._states.copy(state_in)
             self._accepted = self._states.copy(state_in)
             self._trial = self._states.copy(state_in)
+            # The mapping follows the state objects when accepted/trial swap.
+            self._steps = {
+                id(state): tuple(wp.zeros_like(a) for a in self._external_steps)
+                for state in (self._original, self._accepted, self._trial)
+            }
         for state in (self._original, self._accepted, self._trial):
             state.assign(state_in)
+            for increment in self._steps[id(state)]:
+                increment.zero_()
         self._prepare_step(state_in, state_out, dt)
         self._step_generation += 1
         self._metrics = {
@@ -726,6 +741,10 @@ class SolverMonolithic(SolverBase):
         if not self._domain(self._accepted):
             if self._rigid.count:
                 self._accepted.assign(self._original)
+                for target, source in zip(
+                    self._steps[id(self._accepted)], self._steps[id(self._original)], strict=True
+                ):
+                    wp.copy(target, source)
             else:
                 wp.copy(self._accepted.joint_q, obj.qn)
                 self._accepted.joint_qd.zero_()
@@ -862,6 +881,7 @@ class SolverMonolithic(SolverBase):
         buffers = [
             state.joint_q,
             state.particle_q,
+            self._displacement(state),
             self._original.particle_q,
             self._original.particle_qd,
             self._frozen_force,
@@ -888,6 +908,7 @@ class SolverMonolithic(SolverBase):
                 self._frozen_gravity,
                 dt=dt,
                 min_det_f_guard=self._guard,
+                displacement=self._displacement(state),
             )
 
         def evaluate_contact():
@@ -1098,6 +1119,43 @@ class SolverMonolithic(SolverBase):
             self._variational["trials"].append({"accepted": False, "domain_failure": str(error)})
             return None
 
+    def _displacement(self, state):
+        """Return the native step displacement ``x - x_n`` of a state's particles.
+
+        Internal states carry it exactly. Any other state, such as a diagnostic
+        copy, derives it once from its rounded positions.
+        """
+        steps = self._steps.get(id(state))
+        if steps is not None:
+            return steps[0]
+        displacement = self._external_steps[0]
+        wp.launch(
+            kernels.step_displacement,
+            displacement.size,
+            [state.particle_q, self._original.particle_q, displacement],
+            device=self.model.device,
+        )
+        return displacement
+
+    def _theta_step(self, state):
+        """Return the native cable angle increment ``theta - theta_n`` of a state."""
+        steps = self._steps.get(id(state))
+        if steps is not None:
+            return steps[1]
+        increment = self._external_steps[1]
+        if increment.size:
+            wp.launch(
+                kernels.step_displacement,
+                increment.size,
+                [
+                    state._monolithic_coupled.cable_theta,
+                    self._original._monolithic_coupled.cable_theta,
+                    increment,
+                ],
+                device=self.model.device,
+            )
+        return increment
+
     def _take_trial(self, alpha, dt):
         for producer in self._producers:
             producer.candidate(self, self._accepted, self._trial, self._delta, alpha, dt)
@@ -1110,8 +1168,8 @@ class SolverMonolithic(SolverBase):
                 [
                     self._trial.joint_q,
                     self._accepted.joint_q,
-                    self._trial.particle_q,
-                    self._accepted.particle_q,
+                    self._displacement(self._trial),
+                    self._displacement(self._accepted),
                     self._tet.ids,
                     self._effective_device,
                 ],

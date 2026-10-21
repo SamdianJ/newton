@@ -89,6 +89,43 @@ class TestClothObjective(unittest.TestCase):
             with self.assertRaises(ValueError):
                 obj.evaluate_host(x)
 
+    def test_far_step_in_float32(self):
+        """Resolve a small FP32 step of a stencil far from the origin from its exact displacement."""
+        material = (-15.0, 40.0, 0.02, 0.07)
+        rest = folded_stencil(0.4)
+        # At 1 km, FP32 positions round at 6e-5 m, comparable to this step.
+        offset = np.array([1000.0, -700.0, 400.0])
+        start = (rest + offset).astype(np.float32).astype(float)
+        step = (1e-4 * np.sin(np.arange(18).reshape(6, 3) * [1.3, 2.1, 2.9])).astype(np.float32).astype(float)
+        exact = start + step
+        boundary = (False, False, False)
+        obj = ClothObjective(rest, np.arange(6)[None, :], [material], dtype=wp.float32, device="cpu")
+        energy, residual, _ = obj.evaluate_host(start, step)
+        expected = np.sum(shell_energy(rest, exact, material, boundary=boundary))
+        np.testing.assert_allclose(energy[0].sum(), expected, rtol=2e-3)
+        expected = shell_residual(rest, exact, material, boundary=boundary)
+        np.testing.assert_allclose(residual[0].reshape(6, 3), expected, atol=2e-3 * np.abs(expected).max())
+
+    def test_near_rest_noise_in_float32(self):
+        """Keep FP32 membrane forces near rest free of unit-size cancellation noise."""
+        material = (30.0, 40.0, 0.02, 0.07)
+        rest = folded_stencil(0.4)
+        start = rest.astype(np.float32).astype(float)
+        step = (1e-6 * np.sin(np.arange(18).reshape(6, 3) * [1.3, 2.1, 2.9])).astype(np.float32).astype(float)
+        boundary = (False, False, False)
+        obj = ClothObjective(rest, np.arange(6)[None, :], [material], dtype=wp.float32, device="cpu")
+        base = obj.evaluate_host(start, step)[1][0].copy()
+        expected = shell_residual(rest, start + step, material, boundary=boundary).ravel()
+        rng = np.random.default_rng(1)
+        noise = 0.0
+        for _ in range(20):
+            jittered = (step + 1e-9 * rng.standard_normal(step.shape)).astype(np.float32).astype(float)
+            change = obj.evaluate_host(start, jittered)[1][0] - base
+            exact = shell_residual(rest, start + jittered, material, boundary=boundary).ravel() - expected
+            noise = max(noise, np.abs(change - exact).max())
+        # Forces formed as differences of unit-size terms vary by ~mu eps32 here.
+        self.assertLess(noise, 0.05 * material[1] * np.finfo(np.float32).eps)
+
 
 if __name__ == "__main__":
     unittest.main()

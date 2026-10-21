@@ -87,18 +87,33 @@ class TestClothSolver(unittest.TestCase):
         state = solver.create_state(dt=0.01)
         solver.step(state, state, solver.create_control(), dt=0.01)
         original = state.particle_q.numpy().copy()
+        start = solver._original.particle_q.numpy()
+
+        def place(x):
+            # The solver advances positions only through their step displacement.
+            solver._trial.particle_q.assign(x)
+            solver._displacement(solver._trial).assign(x - start)
+
         x = original.copy()
         x[1:3] *= -1
-        solver._trial.particle_q.assign(x)
+        place(x)
         self.assertFalse(solver._domain(solver._trial))
         x = original.copy()
         x[:, 2] += 0.1
-        solver._trial.particle_q.assign(x)
+        place(x)
         self.assertTrue(solver._domain(solver._trial))
         # Predictor fallback must not read a failed solve's stale direction.
         solver._delta.fill_(float("nan"))
-        solver._cloths[0].candidate(solver._original, solver._original, solver._trial, solver._delta, 0.0, 0.01)
-        np.testing.assert_array_equal(solver._trial.particle_q.numpy(), solver._original.particle_q.numpy())
+        solver._cloths[0].candidate(
+            solver._displacement(solver._original),
+            solver._original,
+            solver._trial,
+            solver._displacement(solver._trial),
+            solver._delta,
+            0.0,
+            0.01,
+        )
+        np.testing.assert_array_equal(solver._trial.particle_q.numpy(), start)
 
     def test_prescribed_object_and_gravity(self):
         """A fully prescribed shell has no fake rows while another object accelerates."""

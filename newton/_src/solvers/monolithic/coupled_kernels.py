@@ -63,7 +63,7 @@ def combine(q: wp.array[Any], x: wp.array[Any], contact: wp.array[Any], q_start:
 
 @wp.kernel
 def particle_trial(
-    x: wp.array[Any],
+    accepted: wp.array[Any],
     xn: wp.array[Any],
     mapping: wp.array[int],
     direction: wp.array[Any],
@@ -72,19 +72,30 @@ def particle_trial(
     dt: Any,
     out: wp.array[Any],
     velocity: wp.array[Any],
+    displacement: wp.array[Any],
 ):
+    """Advance the step displacement of dynamic tet particles; positions are formed once from it."""
     i = wp.tid()
     j = mapping[i]
     out[i] = xn[i]
-    velocity[i] = type(x[0])(0.0)
+    velocity[i] = type(xn[0])(0.0)
+    displacement[i] = type(xn[0])(0.0)
     if j >= 0:
-        delta = type(x[0])(
+        delta = type(xn[0])(
             type(dt)(direction[x_start + 3 * j]),
             type(dt)(direction[x_start + 3 * j + 1]),
             type(dt)(direction[x_start + 3 * j + 2]),
         )
-        out[i] = x[i] + alpha * delta
-        velocity[i] = (out[i] - xn[i]) / dt
+        step = accepted[i] + alpha * delta
+        displacement[i] = step
+        out[i] = xn[i] + step
+        velocity[i] = step / dt
+
+
+@wp.kernel
+def step_displacement(x: wp.array[Any], xn: wp.array[Any], out: wp.array[Any]):
+    i = wp.tid()
+    out[i] = x[i] - xn[i]
 
 
 @wp.kernel
@@ -95,13 +106,18 @@ def particle_predict(
     dt: Any,
     out: wp.array[Any],
     velocity: wp.array[Any],
+    displacement: wp.array[Any],
 ):
+    """Predict the step displacement dt v_n of dynamic tet particles."""
     i = wp.tid()
     out[i] = xn[i]
     velocity[i] = type(xn[0])(0.0)
+    displacement[i] = type(xn[0])(0.0)
     if mapping[i] >= 0:
-        out[i] = xn[i] + dt * vn[i]
-        velocity[i] = (out[i] - xn[i]) / dt
+        step = dt * vn[i]
+        displacement[i] = step
+        out[i] = xn[i] + step
+        velocity[i] = step / dt
 
 
 @wp.kernel

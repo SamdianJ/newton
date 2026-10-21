@@ -197,24 +197,64 @@ def _shape_gradient(inverse_rest: Any, node: int):
 
 
 @wp.func
-def _evaluate_energy_stress(f: Any, volume: Any, mu: Any, lam: Any, material: int):
-    ic = wp.ddot(f, f)
-    d = wp.determinant(f) - type(volume)(1.0)
-    cof = wp.matrix_from_cols(wp.cross(f[:, 1], f[:, 2]), wp.cross(f[:, 2], f[:, 0]), wp.cross(f[:, 0], f[:, 1]))
-    a = mu
-    s = (lam + mu) * d - mu
-    energy = type(volume)(0.5) * mu * (ic - type(volume)(3.0)) - mu * d + type(volume)(0.5) * (lam + mu) * d * d
+def _log_excess(y: Any):
+    """Return ``y - log(1 + y)`` without cancellation for small ``y``."""
+    if wp.abs(y) >= type(y)(0.25):
+        return y - wp.log(type(y)(1.0) + y)
+    # Alternating series y^2/2 - y^3/3 + ...; 40 terms reach FP64 roundoff at |y| < 0.25.
+    total = type(y)(0.0)
+    power = y * y
+    sign = type(y)(1.0)
+    for k in range(2, 42):
+        total += sign * power / type(y)(k)
+        power *= y
+        sign = -sign
+    return total
+
+
+@wp.func
+def _evaluate_energy_stress(h: Any, volume: Any, mu: Any, lam: Any, material: int):
+    """Evaluate energy and first Piola stress from the displacement gradient ``h = F - I``.
+
+    Every term is formed from ``h`` directly, so a strain near rest is not the
+    difference of terms of the size of the moduli: with ``cof(I + h) = I + c1``
+    and ``det(I + h) - 1 = d``,
+
+    - Kim: ``P = mu (h - c1) + (lambda + mu) d (I + c1)``,
+      ``psi = mu (|h|^2/2 - i2 - det h) + (lambda + mu) d^2 / 2``;
+    - Smith: ``P = mu (h - c1) + delta_a (I + h) + lambda_hat d (I + c1)``, with
+      ``a = mu + delta_a``, and the energy's logarithm through ``y - log(1 + y)``.
+    """
+    half = type(volume)(0.5)
+    identity = wp.identity(n=3, dtype=type(volume))
+    trace = h[0, 0] + h[1, 1] + h[2, 2]
+    # Second invariant (tr(h)^2 - tr(h h)) / 2 and det(h): the higher terms of det(I + h).
+    hh = h * h
+    i2 = half * (trace * trace - (hh[0, 0] + hh[1, 1] + hh[2, 2]))
+    d = trace + i2 + wp.determinant(h)
+    c1 = (
+        trace * identity
+        - wp.transpose(h)
+        + wp.matrix_from_cols(wp.cross(h[:, 1], h[:, 2]), wp.cross(h[:, 2], h[:, 0]), wp.cross(h[:, 0], h[:, 1]))
+    )
+    norm = wp.ddot(h, h)
+    # |F|^2 / 2 - det F + const without the O(1) terms: |h|^2/2 - i2 - det(h).
+    shear = half * norm - i2 - wp.determinant(h)
+    energy = mu * shear + half * (lam + mu) * d * d
+    stress = mu * (h - c1) + (lam + mu) * d * (identity + c1)
     if material == 1:
         mh = type(volume)(4.0) * mu / type(volume)(3.0)
         lh = lam + type(volume)(5.0) * mu / type(volume)(6.0)
-        a = mh * (type(volume)(1.0) - type(volume)(1.0) / (ic + type(volume)(1.0)))
-        s = lh * d - mu
+        excess = type(volume)(2.0) * trace + norm  # I_C - 3
+        delta_a = mh * excess / (type(volume)(4.0) * (excess + type(volume)(4.0)))
+        stress = mu * (h - c1) + delta_a * (identity + h) + lh * d * (identity + c1)
+        # mh/2 (I_C - 3 - log((I_C + 1)/4)) - mu d with mh = 4 mu / 3.
         energy = (
-            type(volume)(0.5) * mh * (ic - type(volume)(3.0) - wp.log((ic + type(volume)(1.0)) / type(volume)(4.0)))
-            + type(volume)(0.5) * lh * d * d
-            - mu * d
+            mu * shear
+            + type(volume)(2.0) / type(volume)(3.0) * mu * _log_excess(excess / type(volume)(4.0))
+            + half * lh * d * d
         )
-    return volume * energy, volume * (a * f + s * cof)
+    return volume * energy, volume * stress
 
 
 @wp.func
@@ -260,7 +300,9 @@ def _elastic_state(
         valid = False
     mu = type(min_det_f_guard)(tet_materials[tet, 0])
     lam = type(min_det_f_guard)(tet_materials[tet, 1])
-    energy, stress = _evaluate_energy_stress(f, rest_volume, mu, lam, material_model)
+    energy, stress = _evaluate_energy_stress(
+        f - wp.identity(n=3, dtype=type(min_det_f_guard)), rest_volume, mu, lam, material_model
+    )
     _e, _s, projected = _evaluate_stable_neo_hookean(f, rest_volume, mu, lam, tangent)
     if material_model == 1:
         _e, _s, projected = _evaluate_smith(f, rest_volume, mu, lam, tangent)

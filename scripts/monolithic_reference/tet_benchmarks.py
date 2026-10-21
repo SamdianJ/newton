@@ -37,6 +37,7 @@ class TetBenchmark:
         device="cpu",
         pcg_mode="diagnostic",
         use_cuda_graph=False,
+        precision=SolverMonolithic.Precision.FP64,
     ):
         if kind not in KINDS or (kind == "patch") != (case is not None):
             raise ValueError("Unknown tet benchmark or patch case")
@@ -102,6 +103,7 @@ class TetBenchmark:
             newton_max_iterations=r["newton_max_iterations"],
             pcg_mode=SolverMonolithic.PCGMode(pcg_mode),
             use_cuda_graph=use_cuda_graph,
+            precision=precision,
             **options,
         )
         source = self.model.state()

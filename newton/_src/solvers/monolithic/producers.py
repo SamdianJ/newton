@@ -42,7 +42,7 @@ class Producer(Protocol):
 
     def magnitude(self, solver: Any, out: Any) -> None: ...
 
-    def coordinates(self, solver: Any, state: Any, out: Any) -> None: ...
+    def coordinates(self, solver: Any, state: Any, out: Any, *, absolute: bool = False) -> None: ...
 
     def assemble(self, solver: Any, assembly: Any, dt: float) -> None: ...
 
@@ -135,6 +135,21 @@ def _material_coordinates(
             output[rows[r]] = wp.abs(theta[r - 3 * nv])
 
 
+@wp.kernel
+def _raise_coordinates(
+    count: wp.array[int],
+    supports: wp.array[int],
+    columns: wp.array[int],
+    values: wp.array[Any],
+    output: wp.array[Any],
+):
+    i = wp.tid()
+    # Each contact has three factors over its supports.
+    if i < 3 * supports[count[0]]:
+        column = columns[i]
+        wp.atomic_max(output, column, values[column])
+
+
 class _Producer:
     """Name, owned rows, declared policies and default no-op step methods."""
 
@@ -159,8 +174,13 @@ class _Producer:
     def magnitude(self, solver, out):
         """Add the absolute contributions summed into this producer's last residual rows."""
 
-    def coordinates(self, solver, state, out):
-        """Write the magnitude of each owned row's coordinate in ``state``."""
+    def coordinates(self, solver, state, out, *, absolute=False):
+        """Write the magnitude of each owned row's coordinate as this producer's terms read it.
+
+        Terms formed from the step increment write its magnitude; with
+        ``absolute``, write the magnitude of the absolute coordinate instead,
+        for terms that still read absolute positions.
+        """
 
     def assemble(self, solver, assembly, dt):
         """Write this producer's tangent into its fixed triplet slots."""
@@ -264,7 +284,8 @@ class ArticulationProducer(_Producer):
             device=solver.model.device,
         )
 
-    def coordinates(self, solver, state, out):
+    def coordinates(self, solver, state, out, *, absolute=False):
+        # Joint terms read the absolute coordinates.
         k = solver._kinematics
         q = k.gather_q(state)
         wp.launch(_write_absolute, k.count, [q, solver._layout.q_scalar_offset, out], device=solver.model.device)
@@ -348,7 +369,8 @@ class RigidProducer(_Producer):
                 _scatter_residual, (rigid.count, 6), [rigid.rows, rigid.absolute, out], device=solver.model.device
             )
 
-    def coordinates(self, solver, state, out):
+    def coordinates(self, solver, state, out, *, absolute=False):
+        # Rigid terms read the absolute coordinates.
         rigid = solver._rigid
         if rigid.count:
             com = state._monolithic_coupled.rigid_com
@@ -408,6 +430,7 @@ class TetProducer(_Producer):
                 solver._dtype(solver._dt),
                 accepted.particle_q,
                 accepted.particle_qd,
+                solver._displacement(accepted),
             ],
             device=solver.model.device,
         )
@@ -417,7 +440,7 @@ class TetProducer(_Producer):
             kernels.particle_trial,
             solver.model.particle_count,
             [
-                accepted.particle_q,
+                solver._displacement(accepted),
                 solver._original.particle_q,
                 solver._tet.mapping,
                 direction,
@@ -426,6 +449,7 @@ class TetProducer(_Producer):
                 solver._dtype(dt),
                 trial.particle_q,
                 trial.particle_qd,
+                solver._displacement(trial),
             ],
             device=solver.model.device,
         )
@@ -440,6 +464,7 @@ class TetProducer(_Producer):
             solver._frozen_gravity,
             dt=dt,
             min_det_f_guard=solver._guard,
+            displacement=solver._displacement(state),
         )
         if tet.flags.numpy()[0]:
             raise _StepFailure(solver.Status.TET_INVERSION, "Invalid tet candidate")
@@ -459,12 +484,15 @@ class TetProducer(_Producer):
             _add_offset, absolute.size, [absolute, solver._layout.x_scalar_offset, out], device=solver.model.device
         )
 
-    def coordinates(self, solver, state, out):
+    def coordinates(self, solver, state, out, *, absolute=False):
+        # Tet terms read the exact step displacement, so its rounding, not that
+        # of the absolute position, bounds how closely a row can be resolved.
         ids = solver._tet.ids
+        x = state.particle_q if absolute else solver._displacement(state)
         wp.launch(
             _particle_coordinates,
             3 * ids.size,
-            [state.particle_q, ids, solver._layout.x_scalar_offset, out],
+            [x, ids, solver._layout.x_scalar_offset, out],
             device=solver.model.device,
         )
 
@@ -494,7 +522,8 @@ class TetProducer(_Producer):
 
     def displacement(self, solver, accepted, trial, out):
         ids = solver._dynamic_ids_host
-        out[self.rows] = (trial.particle_q.numpy()[ids] - accepted.particle_q.numpy()[ids]).ravel()
+        trial_step, accepted_step = solver._displacement(trial).numpy(), solver._displacement(accepted).numpy()
+        out[self.rows] = (trial_step[ids] - accepted_step[ids]).ravel()
 
 
 class _MaterialProducer(_Producer):
@@ -518,29 +547,34 @@ class _MaterialProducer(_Producer):
         block = self.block
         wp.launch(_add_rows, block.absolute.size, [block.absolute, block.rows, out], device=solver.model.device)
 
-    def theta(self, state):
-        """Return this object's angle coordinates; cloth has none."""
+    def theta(self, solver, state, *, absolute=False):
+        """Return this object's angle increments or angles; cloth has none."""
         return wp.zeros(0, dtype=state.particle_q.dtype._wp_scalar_type_, device=state.particle_q.device)
 
-    def coordinates(self, solver, state, out):
+    def coordinates(self, solver, state, out, *, absolute=False):
+        # Shell and rod terms read the exact step increments, so their rounding,
+        # not that of the absolute coordinates, bounds how closely a row can be
+        # resolved.
         block = self.block
+        x = state.particle_q if absolute else solver._displacement(state)
         wp.launch(
             _material_coordinates,
             block.rows.size,
-            [state.particle_q, block.ids, self.theta(state), block.rows, out],
+            [x, block.ids, self.theta(solver, state, absolute=absolute), block.rows, out],
             device=solver.model.device,
         )
 
     def displacement(self, solver, accepted, trial, out):
-        local = self.local(trial) - self.local(accepted)
+        local = self.local(solver, trial) - self.local(solver, accepted)
         free = self.block.rows_host >= 0
         out[self.block.rows_host[free]] = local[free]
 
-    def local(self, state):
-        return state.particle_q.numpy()[list(self.block.actor.particle_indices), :].ravel()
+    def local(self, solver, state):
+        """Return this object's step increments in local row order."""
+        return solver._displacement(state).numpy()[list(self.block.actor.particle_indices), :].ravel()
 
     def domain(self, solver, accepted, candidate):
-        return self.block.path_valid(accepted, candidate)
+        return self.block.path_valid(solver._original, solver._displacement(accepted), solver._displacement(candidate))
 
 
 class ClothProducer(_MaterialProducer):
@@ -551,18 +585,23 @@ class ClothProducer(_MaterialProducer):
 
     def begin_step(self, solver, state_in):
         cloth, original, accepted = self.block, solver._original, solver._accepted
+        start, step = solver._displacement(original), solver._displacement(accepted)
         cloth.begin_step(original, solver._frozen_force)
-        cloth.candidate(original, original, accepted, solver._delta, 0.0, solver._dt, predict=True)
-        if not cloth.path_valid(original, accepted):
+        cloth.candidate(start, original, accepted, step, solver._delta, 0.0, solver._dt, predict=True)
+        if not cloth.path_valid(original, start, step):
             # An inertial guess is optional; retain the valid input chart.
-            cloth.candidate(original, original, accepted, solver._delta, 0.0, solver._dt)
+            cloth.candidate(start, original, accepted, step, solver._delta, 0.0, solver._dt)
 
     def candidate(self, solver, accepted, trial, direction, alpha, dt):
-        self.block.candidate(accepted, solver._original, trial, direction, alpha, dt)
+        self.block.candidate(
+            solver._displacement(accepted), solver._original, trial, solver._displacement(trial), direction, alpha, dt
+        )
 
     def evaluate(self, solver, state, dt, residual, *, build_tangent):
         try:
-            return self.block.evaluate(state, self.gravity(solver), dt, residual, build_tangent=build_tangent)
+            return self.block.evaluate(
+                solver._displacement(state), self.gravity(solver), dt, residual, build_tangent=build_tangent
+            )
         except ValueError as error:
             raise _StepFailure(solver.Status.NONFINITE, str(error)) from error
 
@@ -576,9 +615,10 @@ class CableProducer(_MaterialProducer):
     def begin_step(self, solver, state_in):
         self.block.begin_step(solver._original, solver._frozen_force)
         self.block.candidate(
-            solver._original,
+            self.steps(solver, solver._original),
             solver._original,
             solver._accepted,
+            self.steps(solver, solver._accepted),
             solver._delta,
             solver._cable_target_x,
             solver._cable_target_theta,
@@ -589,13 +629,28 @@ class CableProducer(_MaterialProducer):
 
     def candidate(self, solver, accepted, trial, direction, alpha, dt):
         self.block.candidate(
-            accepted, solver._original, trial, direction, solver._cable_target_x, solver._cable_target_theta, alpha, dt
+            self.steps(solver, accepted),
+            solver._original,
+            trial,
+            self.steps(solver, trial),
+            direction,
+            solver._cable_target_x,
+            solver._cable_target_theta,
+            alpha,
+            dt,
         )
 
     def evaluate(self, solver, state, dt, residual, *, build_tangent):
         try:
             return self.block.evaluate(
-                state, solver._original, solver._cable_torque, self.gravity(solver), dt, residual
+                state,
+                solver._displacement(state),
+                solver._theta_step(state),
+                solver._original,
+                solver._cable_torque,
+                self.gravity(solver),
+                dt,
+                residual,
             )
         except ValueError as error:
             raise _StepFailure(solver.Status.NONFINITE, str(error)) from error
@@ -604,13 +659,18 @@ class CableProducer(_MaterialProducer):
         rows = self.block.rows_host[3 * self.block.ids.size :]
         coordinate[rows[rows >= 0]] = 1 / float(self.block.reference["length_scale"])
 
-    def local(self, state):
-        theta = state._monolithic_coupled.cable_theta.numpy()[list(self.block.actor.theta_indices)]
-        return np.r_[super().local(state), theta]
+    @staticmethod
+    def steps(solver, state):
+        return solver._displacement(state), solver._theta_step(state)
 
-    def theta(self, state):
+    def local(self, solver, state):
+        theta = solver._theta_step(state).numpy()[list(self.block.actor.theta_indices)]
+        return np.r_[super().local(solver, state), theta]
+
+    def theta(self, solver, state, *, absolute=False):
         start = self.block.theta_offset
-        return state._monolithic_coupled.cable_theta[start : start + self.block.objective.lengths.size]
+        theta = state._monolithic_coupled.cable_theta if absolute else solver._theta_step(state)
+        return theta[start : start + self.block.objective.lengths.size]
 
 
 class ContactProducer(_Producer):
@@ -692,6 +752,25 @@ class ContactProducer(_Producer):
     def magnitude(self, solver, out):
         residual = solver._contact.residual
         wp.launch(_add_absolute, residual.size, [residual, out], device=solver.model.device)
+
+    def coordinates(self, solver, state, out, *, absolute=False):
+        # Contact gaps are formed from absolute positions, so every coordinate a
+        # contact factor reads is resolved only to the rounding of its absolute
+        # value. Raising (not adding) keeps the result independent of order.
+        if absolute:
+            return
+        values = solver._absolute_coordinates
+        values.zero_()
+        for producer in solver._producers:
+            if producer is not self:
+                producer.coordinates(solver, state, values, absolute=True)
+        records = solver._contact.pool.records
+        wp.launch(
+            _raise_coordinates,
+            records.factor_columns.size,
+            [records.count, records.support_offsets, records.factor_columns, values, out],
+            device=solver.model.device,
+        )
 
     def assemble(self, solver, assembly, dt):
         solver._contact.assemble_tangent(assembly)

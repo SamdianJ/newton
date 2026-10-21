@@ -66,6 +66,49 @@ def test_native_objective(test, device):
             test.assertEqual(int(obj.flags.numpy()[0]), 2)
 
 
+def test_near_rest_displacement(test, device):
+    """Resolve a near-rest FP32 step from its stored displacement, not from rounded positions."""
+    model = build_model(device)
+    initial = model.particle_q.numpy().astype(np.float32)
+    free = model.particle_inv_mass.numpy() > 0
+    # At a 1e-5 strain, FP32 positions resolve the step only to ~0.3% and an
+    # energy formed from F loses the O(strain^2) elastic part entirely.
+    step = (1e-5 * initial @ np.array([[1.0, 0.4, 0], [0.2, -0.7, 0.3], [0, 0.1, 0.5]]).T).astype(np.float32)
+    step[~free] = 0.0
+    for smith in (False, True):
+        with test.subTest(smith=smith):
+            obj = TetObjective(
+                model,
+                material_model="smith_log_stabilized" if smith else "kim_stable_no_log",
+                mass_mode="lumped",
+                dtype=wp.float32,
+            )
+            xn = wp.array(initial, dtype=wp.vec3, device=device)
+            x = wp.array(initial + step, dtype=wp.vec3, device=device)
+            displacement = wp.array(step, dtype=wp.vec3, device=device)
+            vn, forces = wp.zeros_like(xn), wp.zeros_like(xn)
+            obj.evaluate(x, xn, vn, forces, model.gravity, dt=0.01, displacement=displacement)
+            test.assertEqual(int(obj.flags.numpy()[0]), 0)
+            exact = initial.astype(np.float64) + step.astype(np.float64)
+            parts, residual, _ = TetOracle(model, obj.physics).evaluate(
+                exact,
+                initial.astype(np.float64),
+                np.zeros_like(exact),
+                np.zeros(3),
+                np.zeros_like(exact),
+                float(np.float32(0.01)),
+            )
+            # Inertia comes from the stored step and is exact to rounding. The elastic
+            # part keeps an absolute strain floor of order eps32 (the FP32 product
+            # Dx_n pose - I), about 5e-8 here, i.e. 0.5% of this strain.
+            energy = obj.parts.numpy()
+            np.testing.assert_allclose(energy[0], parts[0], rtol=1e-6)
+            np.testing.assert_allclose(energy[1], parts[1], rtol=2e-2)
+            test.assertEqual(energy[2], sum(parts[2:]))
+            scale = np.abs(residual).max()
+            np.testing.assert_allclose(obj.residual.numpy().ravel(), residual, rtol=0, atol=1e-2 * scale)
+
+
 def test_input_rejection(test, device):
     """Reject mixed coordinates and unrepresentable native timesteps before changing scratch."""
     model = build_model(device)
@@ -111,6 +154,7 @@ class TestTetPrecision(unittest.TestCase):
 
 for _device in get_test_devices():
     add_function_test(TestTetPrecision, "test_native_objective", test_native_objective, devices=[_device])
+    add_function_test(TestTetPrecision, "test_near_rest_displacement", test_near_rest_displacement, devices=[_device])
     add_function_test(TestTetPrecision, "test_input_rejection", test_input_rejection, devices=[_device])
     if _device.is_cuda:
         add_function_test(TestTetPrecision, "test_graph_replay", test_graph_replay, devices=[_device])

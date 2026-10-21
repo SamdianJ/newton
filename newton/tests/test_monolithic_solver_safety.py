@@ -82,11 +82,15 @@ def test_native_trials(test, device):
         original = snapshot(run._original)
         direction = np.linspace(-0.3, 0.7, 14, dtype=np.float32) * np.float32(1e-5)
         run._delta.assign(direction)
-        q, x = run._accepted.joint_q.numpy(), run._accepted.particle_q.numpy()
+        q, step = run._accepted.joint_q.numpy(), run._displacement(run._accepted).numpy()
+        start = run._original.particle_q.numpy()
         for alpha in (1.0, 0.5, 0.125):
             run._take_trial(alpha, run._dt)
             effective = run._effective_displacement()
-            actual = np.r_[run._trial.joint_q.numpy() - q, (run._trial.particle_q.numpy() - x).ravel()]
+            # Particles advance their exact step; positions are formed from it once.
+            trial_step = run._displacement(run._trial).numpy()
+            np.testing.assert_array_equal(run._trial.particle_q.numpy(), start + trial_step)
+            actual = np.r_[run._trial.joint_q.numpy() - q, (trial_step - step).ravel()]
             np.testing.assert_array_equal(effective, actual)
             test.assertEqual(effective.dtype, run._numpy_dtype)
             e, r, _ = run._evaluate(run._trial, run._dt)
