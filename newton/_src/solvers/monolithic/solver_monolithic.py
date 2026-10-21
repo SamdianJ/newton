@@ -881,6 +881,7 @@ class SolverMonolithic(SolverBase):
             return self._evaluate_eager(state, dt, build_tangent=build_tangent)
         k, contact, tet = self._kinematics, self._contact, self._tet
         joint_step, rigid_steps = self._joint_step(state), self._rigid_steps(state)
+        contact_steps = self._contact_steps(state)
         local_q = k.gather_q(state)
         buffers = [
             state.joint_q,
@@ -927,6 +928,7 @@ class SolverMonolithic(SolverBase):
                 dt=dt,
                 rigid_com=rigid_history.rigid_com,
                 rigid_rotation=rigid_history.rigid_rotation,
+                steps=contact_steps,
             )
 
         def evaluate_result():
@@ -1180,6 +1182,15 @@ class SolverMonolithic(SolverBase):
         if steps is not None:
             return steps[3:]
         return self._rigid.derive_steps(state)
+
+    def _contact_steps(self, state):
+        """Return the particle, link and rigid increments contact forms its slip from.
+
+        Link increments are those of the articulation's last evaluation, which
+        precedes contact evaluation.
+        """
+        k = self._kinematics
+        return (self._displacement(state), k.translation_steps, k.rotation_steps, *self._rigid_steps(state))
 
     def _take_trial(self, alpha, dt):
         for producer in self._producers:

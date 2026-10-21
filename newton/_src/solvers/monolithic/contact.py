@@ -40,6 +40,8 @@ def _geometry_type(dtype):
     @wp.struct
     class Geometry:
         y: wp.array[vector]
+        # Target-local slip y - y_n formed from the step increments.
+        slip: wp.array[vector]
         gradient: wp.array[vector]
         distance: wp.array[dtype]
         rotation: wp.array[matrix]
@@ -157,7 +159,7 @@ def _law(
             gap = current.distance[key] - radius - margins[shape]
     output_key = key + key_offset
     g = current.gradient[key]
-    u = current.y[key] - start.y[key]
+    u = current.slip[key]
     en, load_normal, curvature = _penalty64(gap, k, smoothing)
     direction = g
     # C-IE: friction load from the gap linearized about the frozen start point.

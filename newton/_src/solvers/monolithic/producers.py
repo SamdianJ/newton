@@ -702,7 +702,7 @@ class ContactProducer(_Producer):
         history = state_in._monolithic_coupled
         surface = contact._batch.material_surface
         if surface is not None:
-            surface.update(state_in, begin=True)
+            surface.update(state_in, solver._displacement(solver._original), begin=True)
         contact.begin_step(
             state_in.particle_q,
             k.poses,
@@ -721,7 +721,7 @@ class ContactProducer(_Producer):
         surface = contact._batch.material_surface
         if surface is not None:
             try:
-                surface.update(state)
+                surface.update(state, solver._displacement(state))
             except ValueError as error:
                 raise _StepFailure(solver.Status.NONFINITE, str(error)) from error
         contact.evaluate(
@@ -733,6 +733,7 @@ class ContactProducer(_Producer):
             dt=dt,
             rigid_com=history.rigid_com,
             rigid_rotation=history.rigid_rotation,
+            steps=solver._contact_steps(state),
         )
         diagnostics = {} if reference_mode else contact.evaluation_diagnostics()
         if not reference_mode:

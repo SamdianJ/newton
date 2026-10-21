@@ -204,7 +204,7 @@ class RobotContactRecorder:
             gap = b.current.distance.numpy()[:n] - b.samples.gaps.numpy()[:n]
             penetration = max(penetration, float(np.maximum(-gap, 0).max(initial=0)))
             normal = b.normal.numpy()[:n]
-            slide = b.current.y.numpy()[:n] - b._start_chunk.y.numpy()[:n]
+            slide = b.current.slip.numpy()[:n]
             slip = slide - np.einsum("ni,ni->n", normal, slide)[:, None] * normal
             friction = b.weights.numpy()[:n, 1, None] * slip
             gradient = b.current.gradient.numpy()[:n]

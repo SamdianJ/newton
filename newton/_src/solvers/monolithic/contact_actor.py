@@ -12,6 +12,7 @@ from ...geometry import GeoType
 from ...geometry.sdf_texture import TextureSDFData
 from .contact import _failure
 from .contact_geometry import _shape64
+from .rigid import _rotation_step
 from .smooth_sdf import smooth_query
 
 
@@ -34,6 +35,33 @@ def _body_pose(
         else:
             result = poses[local]
     return result
+
+
+@wp.func
+def _body_step(
+    body: int,
+    kinds: wp.array[int],
+    indices: wp.array[int],
+    body_com: wp.array[Any],
+    rotation: Any,
+    link_translation_steps: wp.array[Any],
+    link_rotation_steps: wp.array[Any],
+    rigid_steps: wp.array[Any],
+    rigid_rotation_steps: wp.array[Any],
+):
+    """Return the body frame origin step and ``E`` with ``R = (I + E) R_n``."""
+    zero = type(body_com[0])(0.0)
+    translation, e = zero, wp.outer(zero, zero)
+    if body >= 0:
+        local = indices[body]
+        if kinds[body] == 1:
+            # The origin is c - R c_local, and R - R_n = -E^T R.
+            e = _rotation_step(rigid_rotation_steps[local])
+            translation = rigid_steps[local] + wp.transpose(e) * (rotation * body_com[body])
+        else:
+            translation = link_translation_steps[local]
+            e = link_rotation_steps[local]
+    return translation, e
 
 
 @wp.func
@@ -81,6 +109,12 @@ def _actor_geometry(
     jw: wp.array2d[Any],
     rigid_com: wp.array[Any],
     rigid_rotation: wp.array[Any],
+    x_steps: wp.array[Any],
+    link_translation_steps: wp.array[Any],
+    link_rotation_steps: wp.array[Any],
+    rigid_steps: wp.array[Any],
+    rigid_rotation_steps: wp.array[Any],
+    surface_steps: wp.array[Any],
     body_com: wp.array[Any],
     kinds: wp.array[int],
     indices: wp.array[int],
@@ -114,9 +148,12 @@ def _actor_geometry(
         return
     source, target = source_shapes[key], target_shapes[key]
     point, normal = type(x[0])(0.0), type(x[0])(0.0)
+    # The point's step from the step start, from increments only.
+    point_step = type(x[0])(0.0)
     if source == -3:
         point = local_points[key] + type(point)(0.0)
         normal = local_normals[key] + type(normal)(0.0)
+        point_step = surface_steps[faces[key]]
     elif source < 0:
         face, quadrature = faces[key], slots[key] % 3
         for node in range(3):
@@ -124,28 +161,60 @@ def _actor_geometry(
             if node == quadrature:
                 bary = type(x[0][0])(2.0) / type(x[0][0])(3.0)
             point += bary * x[triangles[face, node]]
+            point_step += bary * x_steps[triangles[face, node]]
         normal = wp.cross(x[triangles[face, 1]] - x[triangles[face, 0]], x[triangles[face, 2]] - x[triangles[face, 0]])
         if source == -2:
             normal *= local_normals[key][2]
     else:
-        pose = (
-            _body_pose(bodies[source], kinds, indices, body_com, poses, rigid_com, rigid_rotation) * transforms[source]
-        )
+        source_body = _body_pose(bodies[source], kinds, indices, body_com, poses, rigid_com, rigid_rotation)
+        pose = source_body * transforms[source]
         point = wp.transform_point(pose, local_points[key])
         normal = wp.transform_vector(pose, local_normals[key])
+        origin, e = _body_step(
+            bodies[source],
+            kinds,
+            indices,
+            body_com,
+            wp.quat_to_matrix(wp.transform_get_rotation(source_body)),
+            link_translation_steps,
+            link_rotation_steps,
+            rigid_steps,
+            rigid_rotation_steps,
+        )
+        # A body point o + R w moves by the origin step and (R - R_n) w = -E^T R w.
+        point_step = origin - wp.transpose(e) * (point - wp.transform_get_translation(source_body))
     length = wp.length(normal)
     if not wp.isfinite(length) or length <= type(x[0][0])(0.0):
         _failure(flags, key + key_offset, 2)
         return
-    target_pose = (
-        _body_pose(bodies[target], kinds, indices, body_com, poses, rigid_com, rigid_rotation) * transforms[target]
-    )
+    target_body = _body_pose(bodies[target], kinds, indices, body_com, poses, rigid_com, rigid_rotation)
+    target_pose = target_body * transforms[target]
     q = wp.transform_get_rotation(target_pose)
     if not wp.isfinite(wp.length(q)) or wp.abs(wp.length(q) - type(x[0][0])(1.0)) > quaternion_tolerance:
         _failure(flags, key + key_offset, 2)
         return
     rotation = wp.quat_to_matrix(q)
-    y = wp.transpose(rotation) * (point - wp.transform_get_translation(target_pose))
+    relative = point - wp.transform_get_translation(target_pose)
+    y = wp.transpose(rotation) * relative
+    target_origin, e = _body_step(
+        bodies[target],
+        kinds,
+        indices,
+        body_com,
+        wp.quat_to_matrix(wp.transform_get_rotation(target_body)),
+        link_translation_steps,
+        link_rotation_steps,
+        rigid_steps,
+        rigid_rotation_steps,
+    )
+    # The shape frame origin moves with its body; its rotation step is the body's.
+    target_step = target_origin - wp.transpose(e) * (
+        wp.transform_get_translation(target_pose) - wp.transform_get_translation(target_body)
+    )
+    # y - y_n = R^T ((I + E)(dp - dt) - E (p - t)): the relative step is a
+    # difference of increments and E multiplies only the relative position.
+    step = point_step - target_step
+    slip = wp.transpose(rotation) * (step + e * step - e * relative)
     d, g = _shape64(types[target], scales[target], y, sdf_indices[target], table)
     out.uncertified[key] = 0
     if types[target] == GeoType.MESH and smooth_table.shape[0] > 0:
@@ -165,6 +234,7 @@ def _actor_geometry(
         return
     world_points[key] = point
     out.y[key] = y
+    out.slip[key] = slip
     out.gradient[key] = g
     out.distance[key] = d
     out.rotation[key] = rotation

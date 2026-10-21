@@ -80,7 +80,7 @@ def measure(run, state):
         n = int(batch.pool.candidates.count.numpy()[0])
         gaps.append(batch.current.distance.numpy()[:n] - batch.samples.gaps.numpy()[:n])
         normal = batch.normal.numpy()[:n]
-        slide = batch.current.y.numpy()[:n] - batch._start_chunk.y.numpy()[:n]
+        slide = batch.current.slip.numpy()[:n]
         slip = slide - np.einsum("ni,ni->n", normal, slide)[:, None] * normal
         friction = batch.weights.numpy()[:n, 1, None] * slip
         gradient = batch.current.gradient.numpy()[:n]

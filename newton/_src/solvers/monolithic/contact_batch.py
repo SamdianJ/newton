@@ -129,6 +129,40 @@ def _load_contact_chunk(
 
 
 @wp.kernel
+def _derive_contact_steps(
+    x: wp.array[Any],
+    poses: wp.array[Any],
+    rigid_com: wp.array[Any],
+    rigid_rotation: wp.array[Any],
+    start_x: wp.array[Any],
+    start_poses: wp.array[Any],
+    start_rigid_com: wp.array[Any],
+    start_rigid_rotation: wp.array[Any],
+    x_steps: wp.array[Any],
+    link_translation_steps: wp.array[Any],
+    link_rotation_steps: wp.array[Any],
+    rigid_steps: wp.array[Any],
+    rigid_rotation_steps: wp.array[Any],
+):
+    i = wp.tid()
+    if i < x.shape[0]:
+        x_steps[i] = x[i] - start_x[i]
+    if i < poses.shape[0]:
+        link_translation_steps[i] = wp.transform_get_translation(poses[i]) - wp.transform_get_translation(
+            start_poses[i]
+        )
+        r = wp.quat_to_matrix(wp.transform_get_rotation(poses[i]))
+        rn = wp.quat_to_matrix(wp.transform_get_rotation(start_poses[i]))
+        link_rotation_steps[i] = r * wp.transpose(rn) - wp.identity(n=3, dtype=type(r[0, 0]))
+    if i < rigid_com.shape[0]:
+        rigid_steps[i] = rigid_com[i] - start_rigid_com[i]
+        q = rigid_rotation[i] * wp.quat_inverse(start_rigid_rotation[i])
+        if q[3] < type(q[3])(0.0):
+            q = -q
+        rigid_rotation_steps[i] = q
+
+
+@wp.kernel
 def _copy_contact_geometry(source: Any, target: Any, ids: wp.array[wp.uint64], count: wp.array[int], store: bool):
     i = wp.tid()
     if i < count[0]:
@@ -136,6 +170,7 @@ def _copy_contact_geometry(source: Any, target: Any, ids: wp.array[wp.uint64], c
         if not store:
             a, b = b, a
         target.y[b] = source.y[a]
+        target.slip[b] = source.slip[a]
         target.gradient[b] = source.gradient[a]
         target.soft_normal[b] = source.soft_normal[a]
         target.distance[b] = source.distance[a]
@@ -570,6 +605,20 @@ class _ContactBatch:
         self._empty_rotation = wp.empty(0, dtype=wp.quatd if self.dtype == wp.float64 else wp.quat, device=self.device)
         self._key_ids = wp.array(np.arange(batch_capacity, dtype=np.int32), dtype=int, device=self.device)
         self._empty_ids = wp.empty(0, dtype=wp.uint64, device=self.device)
+        # Step-start poses, and step increments derived from them for callers
+        # that do not supply exact increments.
+        nr, nb, n = self.rigid_count, contact.body_count, contact.model.particle_count
+        self._start_x = wp.zeros(n, dtype=self.vector, device=self.device)
+        self._start_poses = wp.zeros(nb, dtype=contact.transform, device=self.device)
+        self._start_rigid_com = wp.zeros(nr, dtype=self.vector, device=self.device)
+        self._start_rigid_rotation = wp.zeros(nr, dtype=self._empty_rotation.dtype, device=self.device)
+        self._derived_steps = (
+            wp.zeros(n, dtype=self.vector, device=self.device),
+            wp.zeros(nb, dtype=self.vector, device=self.device),
+            wp.zeros(nb, dtype=self.matrix, device=self.device),
+            wp.zeros(nr, dtype=self.vector, device=self.device),
+            wp.zeros(nr, dtype=self._empty_rotation.dtype, device=self.device),
+        )
         self.graphs = _SegmentGraphCache(self.device, enabled=use_cuda_graph and self.device.is_cuda)
         self._started = False
         self.material_surface = None
@@ -582,7 +631,7 @@ class _ContactBatch:
 
     def _geometry(self, count, *, rotation):
         geometry = _geometry_type(self.dtype)()
-        for name in ("y", "gradient", "soft_normal"):
+        for name in ("y", "slip", "gradient", "soft_normal"):
             setattr(geometry, name, wp.zeros(count, dtype=self.vector, device=self.device))
         geometry.distance = wp.zeros(count, dtype=self.dtype, device=self.device)
         geometry.uncertified = wp.zeros(count, dtype=int, device=self.device)
@@ -624,7 +673,7 @@ class _ContactBatch:
         self.reference_residual = wp.zeros(self.pool.row_count, dtype=self.dtype, device=self.device)
         self.reference_energy = wp.zeros(2, dtype=self.dtype, device=self.device)
 
-    def evaluate_reference(self, x, poses, com, jt, jw, *, dt, rigid_com=None, rigid_rotation=None):
+    def evaluate_reference(self, x, poses, com, jt, jw, *, dt, rigid_com=None, rigid_rotation=None, steps=None):
         """Stream every sample into a native residual without capacity truncation or tangent storage."""
         if not self._started or not np.isfinite(dt) or dt <= 0:
             raise ValueError("Freeze a physical step before its full reference")
@@ -636,7 +685,7 @@ class _ContactBatch:
             or (self.contact.parameters[1] > 0 and (not np.isfinite(falloff) or falloff <= 0))
         ):
             raise ValueError("Invalid native contact displacement scale")
-        state = self._state(x, poses, com, jt, jw, rigid_com, rigid_rotation)
+        state = self._state(x, poses, com, jt, jw, rigid_com, rigid_rotation, steps)
         self.reference_rows._validate_inputs(*self.reference_inputs)
         self.graphs.run(
             "contact_reference",
@@ -685,12 +734,27 @@ class _ContactBatch:
                 device=self.device,
             )
 
-    def _state(self, x, poses, com, jt, jw, rigid_com, rigid_rotation):
+    def _state(self, x, poses, com, jt, jw, rigid_com, rigid_rotation, steps=None):
+        """Validate a contact state; append its step increments.
+
+        ``steps`` holds the exact particle, link origin, link rotation ``E``,
+        rigid COM and rigid rotation increments from the step start. Without
+        them the increments are derived from the step-start poses.
+        """
         c = self.contact
         nr = self.rigid_count
         if nr == 0:
             rigid_com, rigid_rotation = self._empty_vector, self._empty_rotation
-        for a, dtype, shape in (
+        provided = steps is not None
+        if provided:
+            steps = tuple(steps)
+            if len(steps) != 5:
+                raise ValueError("Invalid native contact batch steps")
+            if nr == 0:
+                steps = (*steps[:3], self._empty_vector, self._empty_rotation)
+        else:
+            steps = self._derived_steps
+        checks = [
             (x, self.vector, (c.model.particle_count,)),
             (poses, c.transform, (c.body_count,)),
             (com, self.vector, (c.body_count,)),
@@ -698,10 +762,19 @@ class _ContactBatch:
             (jw, self.vector, (c.body_count, c.nq)),
             (rigid_com, self.vector, (nr,)),
             (rigid_rotation, self._empty_rotation.dtype, (nr,)),
-        ):
+        ]
+        if provided:
+            checks += [
+                (steps[0], self.vector, (c.model.particle_count,)),
+                (steps[1], self.vector, (c.body_count,)),
+                (steps[2], self.matrix, (c.body_count,)),
+                (steps[3], self.vector, (nr,)),
+                (steps[4], self._empty_rotation.dtype, (nr,)),
+            ]
+        for a, dtype, shape in checks:
             if not isinstance(a, wp.array) or (a.dtype, a.shape, a.device) != (dtype, shape, self.device):
                 raise ValueError("Invalid native contact batch state")
-        state = x, poses, com, jt, jw, rigid_com, rigid_rotation
+        state = tuple(a for a, _, _ in checks)
         owned = self.buffers()[: -len(self.METADATA_ARRAYS)]
         bindings = tuple((a.ptr, a.shape, a.strides, a.dtype) for a in owned if a.size)
         if bindings != self._storage_bindings:
@@ -713,7 +786,49 @@ class _ContactBatch:
                 begin, end = _storage_interval(a)
                 if any(begin < hi and lo < end for lo, hi in intervals):
                     raise ValueError("Native contact state aliases producer storage")
+        if not provided:
+            state = (*state, *steps)
+            self._derive(state)
         return state
+
+    def _snapshot(self, state):
+        """Freeze the step-start poses; the start is its own zero step."""
+        x, poses, _, _, _, rigid_com, rigid_rotation = state[:7]
+        for target, source in zip(
+            (self._start_x, self._start_poses, self._start_rigid_com, self._start_rigid_rotation),
+            (x, poses, rigid_com, rigid_rotation),
+            strict=True,
+        ):
+            if target.size:
+                wp.copy(target, source)
+        for step in self._derived_steps:
+            step.zero_()
+        if self._derived_steps[4].size:
+            self._derived_steps[4].fill_(wp.quat_identity(self.dtype))
+        return (*state[:7], *self._derived_steps)
+
+    def _derive(self, state):
+        """Derive step increments of a state from its rounded poses."""
+        x, poses, _, _, _, rigid_com, rigid_rotation = state[:7]
+        steps = self._derived_steps
+        size = max(x.size, poses.size, rigid_com.size)
+        if size:
+            wp.launch(
+                _derive_contact_steps,
+                size,
+                [
+                    x,
+                    poses,
+                    rigid_com,
+                    rigid_rotation,
+                    self._start_x,
+                    self._start_poses,
+                    self._start_rigid_com,
+                    self._start_rigid_rotation,
+                    *steps,
+                ],
+                device=self.device,
+            )
 
     def _chunks(self, selection=None):
         if selection is not None:
@@ -766,7 +881,8 @@ class _ContactBatch:
 
     def _query(self, state):
         c, s, t = self.contact, self.samples, self.support
-        x, poses, com, jt, jw, rigid_com, rigid_rotation = state
+        x, poses, com, jt, jw, rigid_com, rigid_rotation = state[:7]
+        surface = self._empty_vector if self.material_surface is None else self.material_surface.point_steps
         wp.launch(
             _actor_geometry,
             self.batch_capacity,
@@ -778,6 +894,8 @@ class _ContactBatch:
                 jw,
                 rigid_com,
                 rigid_rotation,
+                *state[7:],
+                surface,
                 t.com,
                 t.kinds,
                 t.indices,
@@ -924,7 +1042,7 @@ class _ContactBatch:
             self.material_surface.project(state)
 
     def begin_step(self, x, poses, com, jt, jw, *, rigid_com=None, rigid_rotation=None):
-        state = self._state(x, poses, com, jt, jw, rigid_com, rigid_rotation)
+        state = self._snapshot(self._state(x, poses, com, jt, jw, rigid_com, rigid_rotation))
         self.graphs.run("contact_start", (), (*self.buffers(), *state), partial(self._begin_step, state))
         self._started = True
 
@@ -939,7 +1057,7 @@ class _ContactBatch:
                 device=self.device,
             )
 
-    def evaluate(self, x, poses, com, jt, jw, *, dt, rigid_com=None, rigid_rotation=None, selection=None):
+    def evaluate(self, x, poses, com, jt, jw, *, dt, rigid_com=None, rigid_rotation=None, steps=None, selection=None):
         if not self._started or not math.isfinite(dt) or dt <= 0:
             raise ValueError("Freeze a physical step and use positive finite dt")
         dt = self.contact.numpy_dtype(dt)
@@ -950,7 +1068,7 @@ class _ContactBatch:
             or (self.contact.parameters[1] > 0 and (not np.isfinite(falloff) or falloff <= 0))
         ):
             raise ValueError("Invalid native contact displacement scale")
-        state = self._state(x, poses, com, jt, jw, rigid_com, rigid_rotation)
+        state = self._state(x, poses, com, jt, jw, rigid_com, rigid_rotation, steps)
         bindings = ()
         if selection is not None:
             if selection.batch is not self:

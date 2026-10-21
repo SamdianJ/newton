@@ -12,6 +12,7 @@ from unittest.mock import patch
 import numpy as np
 import warp as wp
 
+import newton
 from newton._src.solvers.monolithic.smooth_sdf import SmoothSDF, SmoothSDFSet, sample_smooth
 from newton.solvers.experimental.monolithic import SolverMonolithic
 from newton.tests.test_monolithic_sdf_fields import grid
@@ -191,6 +192,50 @@ class TestSolverPrecision(unittest.TestCase):
                 reference, single = velocities
                 self.assertLess(np.abs(single - reference).max(), 1e-4 * np.abs(reference).max())
                 self.assertEqual(iterations[1], iterations[0])
+
+    def test_far_friction_in_float32(self):
+        """Resolve frictional slip of a tet sliding on a ground plane 100 m from the origin."""
+        builder = newton.ModelBuilder(gravity=(0, 0, -9.81))
+        builder.add_ground_plane()
+        # The solver requires an articulation; this one has no shapes.
+        root = builder.add_link(mass=1.0, inertia=wp.mat33(0.01, 0, 0, 0, 0.01, 0, 0, 0, 0.01))
+        builder.add_articulation([builder.add_joint_revolute(-1, root, axis=(0, 1, 0))])
+        builder.add_soft_mesh(
+            pos=(100.0, 0.0, 0.0008),
+            rot=wp.quat_identity(),
+            scale=1.0,
+            vel=(0.005, 0, 0),
+            vertices=[(0, 0, 0), (0.04, 0, 0), (0, 0.03, 0), (0, 0, 0.02)],
+            indices=[0, 1, 2, 3],
+            density=1000,
+            k_mu=10000 / 2.6,
+            k_lambda=10000 * 0.3 / (1.3 * 0.4),
+            k_damp=0,
+            particle_radius=0.001,
+            tri_ke=0,
+            tri_ka=0,
+            tri_kd=0,
+            tri_drag=0,
+            tri_lift=0,
+            edge_ke=0,
+            edge_kd=0,
+        )
+        model = builder.finalize(device="cpu")
+        velocities = []
+        for precision in ("fp64", "fp32"):
+            run = solver(model, precision=precision)
+            state = run.create_state(dt=0.001)
+            for step in range(3):
+                output = run._states.copy(state)
+                run.step(state, output, model.control(), dt=0.001)
+                # Slip within the friction falloff (1e-5 m) is far below the
+                # FP32 spacing of a 100 m coordinate; increments resolve it.
+                self.assertTrue(run.last_stats.converged, (precision, step, run.last_stats.status))
+                state.assign(output)
+                if step == 0:
+                    velocities.append(state.particle_qd.numpy().astype(float))
+        reference, single = velocities
+        self.assertLess(np.abs(single - reference).max(), 1e-3 * np.abs(reference).max())
 
 
 if __name__ == "__main__":
