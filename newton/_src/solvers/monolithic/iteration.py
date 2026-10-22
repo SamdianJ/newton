@@ -11,6 +11,7 @@ import warp as wp
 
 from . import iteration_device
 from .linear_types import MonolithicPcgConfig, MonolithicPcgWarmStart
+from .pcg_common import LINEAR_ROUNDING_CAP, linear_rounding
 from .solver_types import _StepFailure
 
 
@@ -206,6 +207,16 @@ def solve_direction(solver, residual, scale, limits, pcg, *, iteration, retry, r
     direction = self._delta if self._device_iteration else self._delta.numpy().astype(native)
     error = self._physical_linear_error(None, direction, residual, scale, device_result=self._device_iteration)
     errors = direction_norms(self, error)
+    # The stored direction resolves its residual only to the rounding of
+    # |A| |y|; in FP32 an ill-conditioned limit can lie below it.
+    magnitude = self._post_magnitude if self._device_iteration else self._post_magnitude.numpy()
+    rhs = direction_norms(self, self._rhs if self._device_iteration else self._rhs.numpy())
+    rounding = linear_rounding(native)
+    floors = {
+        name: native(min(rounding * value, LINEAR_ROUNDING_CAP * rhs[name]))
+        for name, value in direction_norms(self, magnitude).items()
+    }
+    limits = {name: max(limits[name], floors[name]) for name in limits}
     if native(regularization) == 0:
         originals, terms = errors, dict.fromkeys(errors, 0.0)
     else:
@@ -220,6 +231,7 @@ def solve_direction(solver, residual, scale, limits, pcg, *, iteration, retry, r
         name: {
             "residual": errors[name],
             "limit": limits[name],
+            "rounding_floor": floors[name],
             "original_residual": originals[name],
             "regularization_term": terms[name],
             "internal_residual": internal[index],

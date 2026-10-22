@@ -35,7 +35,7 @@ from .linear_types import (
     MonolithicPcgConfig,
     MonolithicPcgWarmStart,
 )
-from .pcg_common import group_data, group_policy
+from .pcg_common import group_data, group_policy, linear_rounding
 from .pcg_production_kernels import (
     REDUCTION_CHUNK,
     _active_mask,
@@ -59,6 +59,7 @@ from .pcg_production_kernels import (
     _masked_direction,
     _masked_q_solve,
     _masked_rigid_solve,
+    _masked_scaled_abs_mv,
     _masked_scaled_csr_mv,
     _masked_update,
     _masked_x_solve,
@@ -282,7 +283,7 @@ class MaskedPcgPlan:
                 if _overlap(out, other):
                     raise ValueError("Outputs must not overlap each other or bound input storage")
         self._binding_signature = tuple(map(_signature, (*arrays, self.delta)))
-        for name in ("r", "z", "p", "ap", "true_r", "gap", "temporary", "delta_candidate"):
+        for name in ("r", "z", "p", "ap", "magnitude", "true_r", "gap", "temporary", "delta_candidate"):
             setattr(self, name, wp.zeros(self.n, dtype=self.dtype, device=self.device))
         self.products = wp.zeros(1, dtype=self.dtype, device=self.device)
         # Products reduce fixed chunks of each world segment, so a world's chunk
@@ -310,11 +311,12 @@ class MaskedPcgPlan:
             wp.array(chunks[:, k], dtype=int, device=self.device) for k in range(3)
         )
         self.group_chunks = wp.array(np.asarray(group_chunks, dtype=np.int32), dtype=int, device=self.device)
-        self.norm_partials = wp.zeros((len(chunks), 6), dtype=self.dtype, device=self.device)
+        self.norm_partials = wp.zeros((len(chunks), 8), dtype=self.dtype, device=self.device)
         self.scalars = wp.zeros(3, dtype=self.dtype, device=self.device)
-        self.maxima = wp.zeros(3 * self.group_count, dtype=self.dtype, device=self.device)
-        self.sums = wp.zeros(3 * self.group_count, dtype=self.dtype, device=self.device)
-        self.norms = wp.zeros(3 * self.group_count, dtype=self.dtype, device=self.device)
+        # Per group: true residual, residual gap, rhs and |A| |y| norms.
+        self.maxima = wp.zeros(4 * self.group_count, dtype=self.dtype, device=self.device)
+        self.sums = wp.zeros(4 * self.group_count, dtype=self.dtype, device=self.device)
+        self.norms = wp.zeros(4 * self.group_count, dtype=self.dtype, device=self.device)
         self.error = wp.zeros(1, dtype=int, device=self.device)
         self.state = wp.zeros(1, dtype=_DeviceResult, device=self.device)
         self.regularization = wp.zeros(1, dtype=self.dtype, device=self.device)
@@ -353,6 +355,7 @@ class MaskedPcgPlan:
         self.params.aliases = self.compat_groups
         self.params.replacement_threshold = float(c.residual_replacement_threshold)
         self.params.residual_norm_limits = self.residual_norm_limits
+        self.params.rounding = linear_rounding(self.dtype)
 
     @classmethod
     def from_workspace(cls, workspace, rhs_hat, y, *, config, delta=None):
@@ -493,6 +496,21 @@ class MaskedPcgPlan:
                 checkpoint,
             ],
         )
+        if checkpoint:
+            self._launch(
+                _masked_scaled_abs_mv,
+                self.n,
+                [
+                    self.offsets,
+                    self.columns,
+                    self.values,
+                    self.scale,
+                    self.regularization,
+                    x,
+                    self.magnitude,
+                    self.state,
+                ],
+            )
 
     def _emit_products(self, a, b):
         if self._products_kernel is not None:
@@ -546,13 +564,14 @@ class MaskedPcgPlan:
 
     def _emit_checkpoint(self, slot, *, initial=False, final=False):
         self._emit_matvec(self.y, checkpoint=True)
-        self._launch(_clear_norm_work, 3 * self.group_count, [self.maxima, self.sums, self.state, initial])
+        self._launch(_clear_norm_work, 4 * self.group_count, [self.maxima, self.sums, self.state, initial])
         self._launch(
             _residual_and_maxima,
             self.n,
             [
                 self.rhs,
                 self.ap,
+                self.magnitude,
                 self.r,
                 self.true_r,
                 self.gap,
@@ -570,6 +589,7 @@ class MaskedPcgPlan:
                 self.rhs,
                 self.true_r,
                 self.gap,
+                self.magnitude,
                 self.maxima,
                 self.chunk_group,
                 self.chunk_start,
@@ -586,7 +606,7 @@ class MaskedPcgPlan:
             [self.norm_partials, self.group_chunks, self.sums, self.state, self.error, initial],
         )
         self._launch(
-            _finish_norms, 3 * self.group_count, [self.maxima, self.sums, self.norms, self.state, self.error, initial]
+            _finish_norms, 4 * self.group_count, [self.maxima, self.sums, self.norms, self.state, self.error, initial]
         )
         self._launch(_checkpoint_decision, 1, [self.norms, self.state, self.error, self.params, slot, initial, final])
         self._launch(_replace_recursive, self.n, [self.true_r, self.r, self.state])

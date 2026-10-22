@@ -164,7 +164,7 @@ def test_gap_recovery_and_block_gate(test, device):
     decision = wp.zeros(1, dtype=int, device=device)
     for gap, expected in ((0.124, False), (0.125, True), (0.126, True)):
         wp.launch(impl._initialize_state, 1, [plan.state, plan.error, plan.scalars, 11], device=device)
-        plan.norms.assign(np.asarray([100, 1, 100, 0.01, gap, 0.01, 100, 1, 100], dtype=np.float32))
+        plan.norms.assign(np.asarray([100, 1, 100, 0.01, gap, 0.01, 100, 1, 100, 0, 0, 0], dtype=np.float32))
         plan.params.replacement_threshold = 0.125
         wp.launch(
             impl._checkpoint_decision,
@@ -188,7 +188,7 @@ def test_gap_recovery_and_block_gate(test, device):
         [plan.products, plan.scalars, plan.state, plan.error, plan.params, 1],
         device=device,
     )
-    plan.norms.assign(np.asarray([1, 1, 0, 0, 0, 0, 1, 1, 0], dtype=np.float32))
+    plan.norms.assign(np.asarray([1, 1, 0, 0, 0, 0, 1, 1, 0, 0, 0, 0], dtype=np.float32))
     wp.launch(
         impl._checkpoint_decision, 1, [plan.norms, plan.state, plan.error, plan.params, 5, False, False], device=device
     )
@@ -206,7 +206,7 @@ def test_gap_recovery_and_block_gate(test, device):
     test.assertEqual(plan.state.numpy()[0]["status"], 15)
     # Global passes but a small unresolved q block vetoes success.
     wp.launch(impl._initialize_state, 1, [plan.state, plan.error, plan.scalars, 11], device=device)
-    plan.norms.assign(np.asarray([1e-5, 1e-5, 0, 0, 0, 0, 1e5, 1e-5, 1e5], dtype=np.float32))
+    plan.norms.assign(np.asarray([1e-5, 1e-5, 0, 0, 0, 0, 1e5, 1e-5, 1e5, 0, 0, 0], dtype=np.float32))
     wp.launch(
         impl._checkpoint_decision, 1, [plan.norms, plan.state, plan.error, plan.params, 11, False, True], device=device
     )

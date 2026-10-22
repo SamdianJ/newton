@@ -410,6 +410,7 @@ class SolverMonolithic(SolverBase):
             "_coordinates",
             "_post_r",
             "_post_error",
+            "_post_magnitude",
             "_post_original",
             "_post_regularization",
         )
@@ -1297,6 +1298,7 @@ class SolverMonolithic(SolverBase):
             self._post_original,
             self._post_regularization,
             self._post_error,
+            self._post_magnitude,
         ]
         self._graphs.run(
             "coupled_posterior",

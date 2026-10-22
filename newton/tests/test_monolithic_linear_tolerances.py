@@ -49,20 +49,27 @@ def test_block_acceptance(test, device):
     """Require every block to pass either its relative or absolute bound."""
     plan = make_plan(device, np.eye(4), [1, 0, 0, 0])
     unbounded = (float("inf"),) * 3
-    for norms, rhs, limits, expected in (
-        ((5e-7, 3e-7, 4e-7), (5e-7, 3e-7, 4e-7), unbounded, True),
-        ((1e-5, 0, 1e-5), (1, 0, 1), unbounded, True),
-        ((2e-6, 2e-6, 0), (10, 2e-6, 10), unbounded, False),
-        ((2e-6, 0, 2e-6), (10, 10, 2e-6), unbounded, False),
-        ((5e-7, 3e-7, 4e-7), (5e-7, 3e-7, 4e-7), (1e-7, 1e-6, 1e-6), False),
-        ((5e-7, 3e-7, 4e-7), (5e-7, 3e-7, 4e-7), (1e-6, 1e-7, 1e-6), False),
-        ((5e-7, 3e-7, 4e-7), (5e-7, 3e-7, 4e-7), (1e-6, 1e-6, 1e-7), False),
-        ((1e-5, 0, 1e-5), (1, 0, 1), (1e-6, 1e-6, 1e-6), False),
+    # A block whose |A| |y| rounding exceeds its target accepts at that rounding.
+    floor = 1e-3 / plan.params.rounding
+    zero = (0, 0, 0)
+    for norms, rhs, limits, magnitude, expected in (
+        ((5e-7, 3e-7, 4e-7), (5e-7, 3e-7, 4e-7), unbounded, zero, True),
+        ((1e-5, 0, 1e-5), (1, 0, 1), unbounded, zero, True),
+        ((2e-6, 2e-6, 0), (10, 2e-6, 10), unbounded, zero, False),
+        ((2e-6, 0, 2e-6), (10, 10, 2e-6), unbounded, zero, False),
+        ((5e-7, 3e-7, 4e-7), (5e-7, 3e-7, 4e-7), (1e-7, 1e-6, 1e-6), zero, False),
+        ((5e-7, 3e-7, 4e-7), (5e-7, 3e-7, 4e-7), (1e-6, 1e-7, 1e-6), zero, False),
+        ((5e-7, 3e-7, 4e-7), (5e-7, 3e-7, 4e-7), (1e-6, 1e-6, 1e-7), zero, False),
+        ((1e-5, 0, 1e-5), (1, 0, 1), (1e-6, 1e-6, 1e-6), zero, False),
+        ((1e-3, 1e-3, 1e-3), (1, 1, 1), (1e-6, 1e-6, 1e-6), (1.01 * floor,) * 3, True),
+        ((1e-3, 1e-3, 1e-3), (1, 1, 1), (1e-6, 1e-6, 1e-6), (1.01 * floor, 1.01 * floor, 0.99 * floor), False),
+        # The rounding floor never accepts more than a fixed fraction of the rhs.
+        ((2e-2, 2e-2, 2e-2), (1, 1, 1), (1e-6, 1e-6, 1e-6), (1e6 * floor,) * 3, False),
     ):
-        with test.subTest(norms=norms, rhs=rhs, limits=limits):
+        with test.subTest(norms=norms, rhs=rhs, limits=limits, magnitude=magnitude):
             plan.residual_norm_limits.assign(np.asarray(limits, dtype=np.float32))
             plan._launch(pcg_production_kernels._initialize_state, 1, [plan.state, plan.error, plan.scalars, 11])
-            plan.norms.assign(np.array([*norms, 0, 0, 0, *rhs], dtype=np.float32))
+            plan.norms.assign(np.array([*norms, 0, 0, 0, *rhs, *magnitude], dtype=np.float32))
             plan._launch(
                 pcg_production_kernels._checkpoint_decision,
                 1,

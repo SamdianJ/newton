@@ -38,6 +38,7 @@ class _Parameters:
     aliases: wp.array[int]
     replacement_threshold: wp.float64
     residual_norm_limits: wp.array[float]
+    rounding: float
 
 
 @wp.struct
@@ -465,6 +466,29 @@ def _finish_direction(state: wp.array[_DeviceResult], error: wp.array[int], slot
 
 
 @wp.kernel
+def _masked_scaled_abs_mv(
+    offsets: wp.array[int],
+    columns: wp.array[int],
+    values: wp.array[Any],
+    scale: wp.array[Any],
+    regularization: wp.array[Any],
+    x: wp.array[Any],
+    out: wp.array[Any],
+    state: wp.array[_DeviceResult],
+):
+    # |A| |y| at a checkpoint, whose rounding bounds the attainable residual. A
+    # separate pass keeps the residual product's arithmetic unchanged.
+    if not _phase_enabled(state[0], True):
+        return
+    i = wp.tid()
+    total = out.dtype(0.0)
+    for k in range(offsets[i], offsets[i + 1]):
+        j = columns[k]
+        total += wp.abs(values[k] * (scale[j] * x[j]))
+    out[i] = scale[i] * total + wp.abs(regularization[0] * x[i])
+
+
+@wp.kernel
 def _clear_norm_work(
     maxima: wp.array[Any],
     sums: wp.array[Any],
@@ -474,8 +498,9 @@ def _clear_norm_work(
     if state[0].status != _RUNNING:
         return
     i = wp.tid()
-    # Layout: true(g,q,x), gap(g,q,x), rhs(g,q,x). RHS norms are cached.
-    if i < 2 * maxima.shape[0] / 3 or initial:
+    # Layout: true, gap, rhs and |A| |y| per group. RHS norms are cached.
+    group_count = maxima.shape[0] / 4
+    if i < 2 * group_count or i >= 3 * group_count or initial:
         maxima[i] = maxima.dtype(0.0)
         sums[i] = sums.dtype(0.0)
 
@@ -484,6 +509,7 @@ def _clear_norm_work(
 def _residual_and_maxima(
     rhs: wp.array[Any],
     ay: wp.array[Any],
+    magnitude: wp.array[Any],
     recursive: wp.array[Any],
     true_r: wp.array[Any],
     gap: wp.array[Any],
@@ -497,7 +523,7 @@ def _residual_and_maxima(
         return  # A pending checkpoint must still run even though enabled=0.
     i = wp.tid()
     block = groups[i]
-    group_count = maxima.shape[0] / 3
+    group_count = maxima.shape[0] / 4
     value = rhs[i] - ay[i]
     difference = rhs.dtype(0.0)
     if not initial:
@@ -514,6 +540,8 @@ def _residual_and_maxima(
     if initial:
         wp.atomic_max(maxima, 2 * group_count, wp.abs(rhs[i]))
         wp.atomic_max(maxima, 2 * group_count + block, wp.abs(rhs[i]))
+    wp.atomic_max(maxima, 3 * group_count, magnitude[i])
+    wp.atomic_max(maxima, 3 * group_count + block, magnitude[i])
 
 
 @wp.kernel
@@ -521,6 +549,7 @@ def _chunk_norm_sums(
     rhs: wp.array[Any],
     true_r: wp.array[Any],
     gap: wp.array[Any],
+    magnitude: wp.array[Any],
     maxima: wp.array[Any],
     chunk_group: wp.array[int],
     chunk_start: wp.array[int],
@@ -534,14 +563,14 @@ def _chunk_norm_sums(
     if state[0].status != _RUNNING or error[0] != 0:
         return
     c = wp.tid()
-    group_count = maxima.shape[0] / 3
+    group_count = maxima.shape[0] / 4
     zero = maxima.dtype(0.0)
     for k in range(2):
         part = int(0)
         if k == 1:
             part = chunk_group[c]
         # Fresh values: Warp loops would mutate an aliased zero in place.
-        t, d, r = maxima.dtype(0.0), maxima.dtype(0.0), maxima.dtype(0.0)
+        t, d, r, a = maxima.dtype(0.0), maxima.dtype(0.0), maxima.dtype(0.0), maxima.dtype(0.0)
         for i in range(chunk_start[c], chunk_end[c]):
             if maxima[part] > zero:
                 v = true_r[i] / maxima[part]
@@ -552,9 +581,13 @@ def _chunk_norm_sums(
             if initial and maxima[2 * group_count + part] > zero:
                 v = rhs[i] / maxima[2 * group_count + part]
                 r += v * v
-        partials[c, 3 * k] = t
-        partials[c, 3 * k + 1] = d
-        partials[c, 3 * k + 2] = r
+            if maxima[3 * group_count + part] > zero:
+                v = magnitude[i] / maxima[3 * group_count + part]
+                a += v * v
+        partials[c, 4 * k] = t
+        partials[c, 4 * k + 1] = d
+        partials[c, 4 * k + 2] = r
+        partials[c, 4 * k + 3] = a
 
 
 @wp.kernel
@@ -570,20 +603,22 @@ def _group_norm_sums(
     if state[0].status != _RUNNING or error[0] != 0:
         return
     g = wp.tid()
-    group_count = sums.shape[0] / 3
+    group_count = sums.shape[0] / 4
     # group_chunks[g - 1] .. group_chunks[g] are the chunks of actor group g >= 1.
     column, start, end = int(0), int(0), int(partials.shape[0])
     if g > 0:
-        column, start, end = int(3), int(group_chunks[g - 1]), int(group_chunks[g])
-    t, d, r = sums.dtype(0.0), sums.dtype(0.0), sums.dtype(0.0)
+        column, start, end = int(4), int(group_chunks[g - 1]), int(group_chunks[g])
+    t, d, r, a = sums.dtype(0.0), sums.dtype(0.0), sums.dtype(0.0), sums.dtype(0.0)
     for c in range(start, end):
         t += partials[c, column]
         d += partials[c, column + 1]
         r += partials[c, column + 2]
+        a += partials[c, column + 3]
     sums[g] = t
     sums[group_count + g] = d
     if initial:
         sums[2 * group_count + g] = r
+    sums[3 * group_count + g] = a
 
 
 @wp.kernel
@@ -598,7 +633,8 @@ def _finish_norms(
     if state[0].status != _RUNNING or error[0] != 0:
         return
     i = wp.tid()
-    if i < 2 * norms.shape[0] / 3 or initial:
+    group_count = norms.shape[0] / 4
+    if i < 2 * group_count or i >= 3 * group_count or initial:
         value = maxima[i] * wp.sqrt(sums[i])
         norms[i] = value
         if not wp.isfinite(value):
@@ -653,6 +689,8 @@ def _checkpoint_decision(
         params.tolerance,
         params.absolute_tolerance,
         params.residual_norm_limits,
+        3 * group_count,
+        params.rounding,
     ):
         s.status = _SUCCESS
         s.enabled = 0

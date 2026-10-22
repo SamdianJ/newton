@@ -7,6 +7,32 @@ from typing import Any
 import numpy as np
 import warp as wp
 
+LINEAR_ROUNDING_MULTIPLIER = 4.0
+"""Multiplier ``c`` of the attainable linear residual ``c eps |A| |y|`` in the solver precision.
+
+A direction ``y`` stored in a precision with unit ``eps`` leaves a residual of
+up to about ``eps |A| |y|`` even when it is the exact solution; finite-precision
+PCG reaches about that floor. The value matches the nonlinear rounding
+multiplier and covers the measured FP32 floors of ill-conditioned tet systems.
+"""
+
+
+LINEAR_ROUNDING_CAP = 1e-2
+"""Largest residual, relative to a block's right-hand side, that the rounding floor may accept.
+
+Inexact Newton needs a direction whose residual is a fixed fraction of the
+right-hand side. A nearly singular block can return a huge ``y`` whose
+``|A| |y|`` rounding would excuse any residual; such a block still fails.
+"""
+
+_ROUNDING_CAP = wp.constant(LINEAR_ROUNDING_CAP)
+
+
+def linear_rounding(dtype):
+    """Return ``c eps`` of the attainable linear residual for a native dtype."""
+    native = np.float64 if dtype in (wp.float64, np.float64) else np.float32
+    return LINEAR_ROUNDING_MULTIPLIER * float(np.finfo(native).eps)
+
 
 def group_data(layout):
     """Build row membership and compatibility views from the active layout."""
@@ -44,7 +70,14 @@ def group_policy(layout, config, *, require_limits=True):
 
 @wp.func
 def residual_converged(
-    norms: wp.array[Any], rhs_offset: int, floors: wp.array[float], rtol: float, atol: float, limits: wp.array[float]
+    norms: wp.array[Any],
+    rhs_offset: int,
+    floors: wp.array[float],
+    rtol: float,
+    atol: float,
+    limits: wp.array[float],
+    rounding_offset: int,
+    rounding: float,
 ):
     accepted = bool(True)
     for k in range(floors.shape[0]):
@@ -52,6 +85,13 @@ def residual_converged(
             wp.float64(rtol) * wp.max(wp.float64(norms[rhs_offset + k]), wp.float64(floors[k])), wp.float64(atol)
         )
         target = wp.min(target, wp.float64(limits[k]))
+        # No stored solution resolves its residual below the rounding of |A| |y|,
+        # which may relax the target to at most a fixed fraction of the rhs.
+        floor = wp.min(
+            wp.float64(rounding) * wp.float64(norms[rounding_offset + k]),
+            wp.float64(_ROUNDING_CAP) * wp.float64(norms[rhs_offset + k]),
+        )
+        target = wp.max(target, floor)
         if not wp.isfinite(norms[k]) or wp.float64(norms[k]) > target:
             accepted = False
     return accepted

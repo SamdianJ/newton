@@ -166,17 +166,23 @@ def sparse_posterior(
     original: wp.array[Any],
     regularization_term: wp.array[Any],
     error: wp.array[Any],
+    magnitude: wp.array[Any],
 ):
     row = wp.tid()
     value = residual[row]
     for j in range(offsets[row], offsets[row + 1]):
         value += values[j] * direction[columns[j]]
+    absolute = residual.dtype(0.0)
+    for j in range(offsets[row], offsets[row + 1]):
+        absolute += wp.abs(values[j] * direction[columns[j]])
     original[row] = scale[row] * value
     term = residual.dtype(0.0)
     if regularization[0] != term:
         term = regularization[0] * (direction[row] / scale[row])
     regularization_term[row] = term
     error[row] = original[row] + term
+    # |A| |y| of the scaled operator, whose rounding bounds the attainable error.
+    magnitude[row] = scale[row] * absolute + wp.abs(term)
 
 
 @wp.kernel

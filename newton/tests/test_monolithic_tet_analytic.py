@@ -105,6 +105,14 @@ class TestTetBenchmarkSmoke(unittest.TestCase):
             case.step()
         self.assertGreater(case.history[-1][0], 0.0)
 
+    def test_cantilever_converges_in_float32(self):
+        # The slender beam's PCG system has a condition number near 1e4, so FP32
+        # resolves its directions only to about 1e-3 of the right-hand side.
+        case = TetBenchmark("cantilever", cells=(10, 1, 1), precision=SolverMonolithic.Precision.FP32)
+        for _ in range(3):
+            case.step()
+        self.assertLess(case.history[-1][2], 0.0)
+
     def test_vibration_velocity_in_float32(self):
         velocities = []
         for precision in (SolverMonolithic.Precision.FP64, SolverMonolithic.Precision.FP32):
