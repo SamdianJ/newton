@@ -122,6 +122,22 @@ class TestSceneRunner(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "exact ten"):
                     reference_binding(select_cases("full")[0])
 
+    def test_current_cases_bind_to_historical_index(self):
+        """Bind the current cases to the ten-recording historical index, not to its full size."""
+        current = [f"{c['id']}--fp64" for c in select_cases("full")]
+        historical = [f"retired-{i}--fp64" for i in range(10 - len(current))]
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            rows = [{"case": name, "retained_path": "../outside"} for name in current + historical]
+            (root / "references.json").write_text(json.dumps(rows))
+            with patch("scripts.monolithic_reference.run_regression.ASSET_ROOT", root):
+                # The index passes; the entry then fails on its location.
+                with self.assertRaisesRegex(ValueError, "outside retained directory"):
+                    reference_binding(select_cases("full")[0])
+                (root / "references.json").write_text(json.dumps([*rows[1:], {"case": "retired-x--fp64"}]))
+                with self.assertRaisesRegex(ValueError, "lacks a current case"):
+                    reference_binding(select_cases("full")[0])
+
     def test_native_reference_alignment_and_corruption(self):
         """Bridge the initial-frame offset and reject corrupt or shifted native chunks."""
         with tempfile.TemporaryDirectory() as directory:

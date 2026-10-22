@@ -29,6 +29,7 @@ from scripts.monolithic_reference.retained_assets import validate_inputs as vali
 from scripts.monolithic_reference.run_baseline import cases, module_origins, sha
 
 ROOT = Path(__file__).resolve().parents[2]
+RETAINED_REFERENCE_COUNT = 10
 
 
 def select_cases(profile, filters=()):
@@ -145,9 +146,13 @@ def validate_inputs():
 def reference_binding(case):
     """Verify the selected reference before building a scene or taking any steps."""
     rows = json.loads((ASSET_ROOT / "references.json").read_text())
-    expected = {f"{c['id']}--fp64" for c in cases()}
-    if len(rows) != len(expected) or {row["case"] for row in rows} != expected:
+    # The immutable index keeps the ten historical FP64 recordings; the current
+    # cases bind to a subset of them.
+    indexed = {row["case"] for row in rows}
+    if len(rows) != RETAINED_REFERENCE_COUNT or len(indexed) != len(rows):
         raise ValueError("Retained reference index must contain the exact ten FP64 cases")
+    if not {f"{c['id']}--fp64" for c in cases()} <= indexed:
+        raise ValueError("Retained reference index lacks a current case")
     entry = next(row for row in rows if row["case"] == f"{case['id']}--fp64")
     directory = ASSET_ROOT / entry["retained_path"]
     if not directory.resolve().is_relative_to((ASSET_ROOT / "data/reference").resolve()):
