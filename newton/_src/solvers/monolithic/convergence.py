@@ -41,9 +41,13 @@ class ConvergencePolicy:
     # frozen cable L2 residual gates satisfiable row by row (2163 position and 720
     # angle rows for the finest helix); the rounding multiplier covers the measured
     # FP32 arithmetic error (at most 0.83 eps a) plus half-ULP coordinate placement.
+    # The relative tolerance was relaxed from 1e-6 in P8b PR-03 (approved
+    # 2026-10-23): the robot scenes needed a second Newton update on almost every
+    # step at 1e-6 with unchanged physical gates, and 1e-3 broke cloth, stiff shell
+    # and tet-vibration residual gates.
     absolute: tuple[float, float] = (1e-11, 1e-13)
     """Absolute targets ``g_u`` [N, N m]."""
-    relative: tuple[float, float] = (1e-6, 1e-6)
+    relative: tuple[float, float] = (1e-4, 1e-4)
     """Tolerances ``rtol_u`` relative to the block's step-start residual."""
     noise: tuple[float, float] = (4.0, 4.0)
     """Multipliers ``c_u`` of ``eps_T * a_i``."""
