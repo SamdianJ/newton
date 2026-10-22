@@ -33,7 +33,7 @@ _MAX_ITERATIONS = wp.constant(17)
 @wp.struct
 class _Parameters:
     tolerance: float
-    absolute_tolerance: float
+    absolute_tolerance: wp.array[float]
     floors: wp.array[float]
     aliases: wp.array[int]
     replacement_threshold: wp.float64
@@ -687,7 +687,7 @@ def _checkpoint_decision(
         2 * group_count,
         params.floors,
         params.tolerance,
-        params.absolute_tolerance,
+        params.absolute_tolerance[0],
         params.residual_norm_limits,
         3 * group_count,
         params.rounding,

@@ -23,7 +23,7 @@ import hashlib
 import itertools
 import math
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import numpy as np
 import warp as wp
@@ -153,6 +153,11 @@ class MaskedPcgResult:
     output_valid: bool
     ratios: tuple[float, float, float]
     current_drifts: tuple[float, float, float]
+
+
+def _plan_identity(config):
+    """Return the configuration fields that the captured PCG schedule depends on."""
+    return replace(config, linear_absolute_tolerance=0.0)
 
 
 def _signature(arr):
@@ -323,6 +328,11 @@ class MaskedPcgPlan:
         self.zero_guess = wp.ones(1, dtype=int, device=self.device)
         self.condition = wp.zeros(1, dtype=int, device=self.device)
         self.residual_norm_limits = wp.full(self.group_count, float("inf"), dtype=float, device=self.device)
+        # The absolute tolerance follows each Newton iterate's limits, so it is a
+        # bound value rather than part of the captured schedule.
+        self.absolute_tolerance = wp.full(
+            1, float(self.config.linear_absolute_tolerance), dtype=float, device=self.device
+        )
         self._conditional_graph_supported = self.device.is_cuda and wp.is_conditional_graph_supported()
         # Fuse single-tile dots of one world; retain the chunk reduction otherwise.
         self._products_kernel = (
@@ -339,7 +349,7 @@ class MaskedPcgPlan:
         self._storage = tuple(value for value in vars(self).values() if isinstance(value, wp.array))
         self._storage_signature = tuple(map(_signature, self._storage))
         self._schedule_signature = (
-            self.config,
+            _plan_identity(self.config),
             self.n,
             self.nq,
             self.nx,
@@ -350,7 +360,7 @@ class MaskedPcgPlan:
         c = self.config
         self.params = _Parameters()
         self.params.tolerance = float(c.linear_tolerance)
-        self.params.absolute_tolerance = float(c.linear_absolute_tolerance)
+        self.params.absolute_tolerance = self.absolute_tolerance
         self.params.floors = self.group_floors
         self.params.aliases = self.compat_groups
         self.params.replacement_threshold = float(c.residual_replacement_threshold)
@@ -405,7 +415,7 @@ class MaskedPcgPlan:
         if (
             self._stream_id() != self._stream
             or tuple(map(_signature, arrays)) != self._storage_signature
-            or (self.config, self.n, self.nq, self.nx, self.layout, self._conditional_graph_supported)
+            or (_plan_identity(self.config), self.n, self.nq, self.nx, self.layout, self._conditional_graph_supported)
             != self._schedule_signature
         ):
             raise ValueError("Stream, schedule or bound storage changed; construct a new PCG plan")
@@ -446,7 +456,7 @@ class MaskedPcgPlan:
             and (self._cable_preconditioner is None or self._cable_signature == self._cable_preconditioner.signature())
             and self._stream == self._stream_id()
             and self.layout == workspace.layout
-            and config == self.config
+            and _plan_identity(config) == _plan_identity(self.config)
             and tuple(map(_signature, arrays)) == self._binding_signature
         )
         if not bindings_match:
@@ -793,7 +803,10 @@ def solve_pcg_production(
         # Numeric validity was checked above; matching storage/layout permits
         # reuse of captured nodes. Bind this request without accepting stale callers.
         plan._generation = generation
-        # Per-Newton residual caps change numerically without changing graph bindings.
+        # Per-Newton residual caps and the absolute tolerance change numerically
+        # without changing graph bindings.
+        plan.config = prod_config
+        plan.absolute_tolerance.fill_(float(prod_config.linear_absolute_tolerance))
         plan.residual_norm_limits.assign(np.asarray(group_policy(workspace.layout, config)[1], dtype=np.float32))
         plan.set_solve_parameters(
             regularization=workspace._lambda, zero_initial_guess=warm_start == MonolithicPcgWarmStart.ZERO

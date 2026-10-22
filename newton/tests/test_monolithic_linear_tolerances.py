@@ -37,12 +37,14 @@ def test_absolute_acceptance(test, device):
                     test.assertGreater(max(result.rho, result.rho_q, result.rho_x), config.linear_tolerance)
                     np.testing.assert_array_equal(runner.y.numpy(), 0)
                     if mode == "production_graph":
+                        # The absolute tolerance is a bound value: changing it
+                        # takes effect in the captured graph without a rebuild.
                         graph = runner.workspace._masked_pcg_plan.graph
                         runner.config = replace(config, linear_absolute_tolerance=0.0)
                         second = runner.solve()
                         test.assertGreater(second.iterations, 0)
-                        test.assertTrue(second.graph_rebuilt)
-                        test.assertIsNot(runner.workspace._masked_pcg_plan.graph, graph)
+                        test.assertFalse(second.graph_rebuilt)
+                        test.assertIs(runner.workspace._masked_pcg_plan.graph, graph)
 
 
 def test_block_acceptance(test, device):

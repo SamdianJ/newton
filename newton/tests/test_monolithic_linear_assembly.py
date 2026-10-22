@@ -674,6 +674,31 @@ def test_pcg_dense_and_allocations(test, device):
         test.assertEqual(allocate.call_count, 0)
 
 
+def test_pcg_plan_survives_absolute_tolerance(test, device):
+    """Reuse one PCG plan and graph when only the per-Newton absolute tolerance changes."""
+    workspace, generation = _ready_system(device, heterogeneous=True)
+    rhs = wp.array(np.linspace(-1, 2, 11).astype(np.float32), device=device)
+    y = wp.zeros(11, dtype=float, device=device)
+    results = []
+    for atol in (0.0, 10.0, 0.0):
+        y.zero_()
+        result = workspace.solve_pcg(
+            rhs,
+            y,
+            generation=generation,
+            warm_start=MonolithicPcgWarmStart.ZERO,
+            config=_pcg_config(linear_tolerance=1e-6, linear_absolute_tolerance=atol),
+        )
+        test.assertEqual(result.status, MonolithicLinearStatus.SUCCESS, result)
+        results.append((workspace._masked_pcg_plan, result))
+    plans = {id(plan) for plan, _ in results}
+    test.assertEqual(len(plans), 1)
+    test.assertFalse(any(result.graph_rebuilt for _, result in results[1:]))
+    # The tolerance still applies: a large absolute term accepts at the first checkpoint.
+    test.assertLess(results[1][1].iterations, results[0][1].iterations)
+    test.assertEqual(results[2][1].iterations, results[0][1].iterations)
+
+
 def test_scaling_guards(test, device):
     """Reject nonpositive or nonfinite raw and dynamic diagonals before applying floors."""
     for source in ["raw", "dynamic"]:
@@ -1024,6 +1049,7 @@ for device in get_test_devices():
         test_pcg_partial_overlap,
         test_pcg_input_validation,
         test_pcg_dense_and_allocations,
+        test_pcg_plan_survives_absolute_tolerance,
         test_scaling_guards,
         test_lambda_and_warm_start,
         test_pcg_curvature_guards,
