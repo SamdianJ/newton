@@ -3,8 +3,6 @@
 
 """Complete private q/x continuation and final contact-force publication fields."""
 
-import copy
-
 import numpy as np
 import warp as wp
 
@@ -278,44 +276,14 @@ class CoupledState(ArticulationState):
         return 64 if self.dtype == wp.float64 else 32
 
     def load_checkpoint(self, state, path):
-        """Validate the declared old schema before migrating canonical A+T history."""
+        """Accept only this schema version; older schemas are not migrated."""
         with np.load(path, allow_pickle=False) as checkpoint:
             if "history.schema_version" not in checkpoint.files:
                 raise ValueError("Missing checkpoint schema version")
             version = checkpoint["history.schema_version"]
-            if version.shape != (1,) or version.dtype != np.int32 or version[0] not in (2, 3, 4, 5, 6):
+            if version.shape != (1,) or version.dtype != np.int32 or version[0] != self.version:
                 raise ValueError("Unsupported checkpoint schema version")
-            version = int(version[0])
-        if self.materials is not None and version != self.version:
-            raise ValueError("Material checkpoints require complete theta and frame history")
-        if version in (5, 6) and self.materials is None:
-            raise ValueError("Material checkpoint cannot be loaded into an A/R/T solver")
-        if version == self.version:
-            return super().load_checkpoint(state, path)
-        if tuple(actor.kind for actor in self.actors.actors) != ("articulation", "tet"):
-            raise ValueError("Legacy checkpoints require canonical A+T layout")
-        if version == 2 and self.dtype != wp.float64:
-            raise ValueError("Legacy schema 2 checkpoints require FP64")
-        scratch = self.copy(state)
-        history = getattr(scratch, self.namespace)
-        legacy_owner = copy.copy(self)
-        additions = set(self.layout_metadata) | {name for name in self.schema if name.startswith("rigid_")}
-        if version == 2:
-            additions.add("precision")
-        saved = {name: getattr(history, name) for name in additions}
-        for name in additions:
-            delattr(history, name)
-        legacy_owner.schema = {name: item for name, item in self.schema.items() if name not in additions}
-        legacy_owner.version = version
-        history.schema_version.fill_(version)
-        # Original fields, precision and physical digest are checked in scratch.
-        ArticulationState.load_checkpoint(legacy_owner, scratch, path)
-        for name, value in saved.items():
-            setattr(history, name, value)
-        history.precision.fill_(self.precision_bits)
-        history.schema_version.fill_(self.version)
-        self.validate(scratch)
-        state.assign(scratch)
+        return super().load_checkpoint(state, path)
 
     def bind(self, state, *, dt):
         super().bind(state, dt=dt)

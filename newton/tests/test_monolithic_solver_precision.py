@@ -117,26 +117,23 @@ class TestSolverPrecision(unittest.TestCase):
                     other.step(state, target, model.control(), dt=0.001)
                 assert_snapshot(self, target, before)
                 run.load_checkpoint(state, path)
-            # Simulate the exact old field schema, including its original physical digest.
-            legacy = snapshot(state64)
-            for name in list(legacy):
-                if name in {
-                    "history.precision",
-                    "history.layout_version",
-                    "history.layout_digest",
-                    "history.actor_layout",
-                } or name.startswith("history.rigid_"):
-                    del legacy[name]
-            legacy["history.schema_version"][:] = 2
-            np.savez(path, **legacy)
-            run64.load_checkpoint(state64, path)
-            self.assertEqual(state64._monolithic_coupled.precision.numpy()[0], 64)
+            # Older field schemas, even with the current physical digest, are not migrated.
             before = snapshot(state64)
-            legacy["history.config_digest"][0] ^= 1
-            np.savez(path, **legacy)
-            with self.assertRaises(ValueError):
-                run64.load_checkpoint(state64, path)
-            assert_snapshot(self, state64, before)
+            for version in (2, 3):
+                legacy = {name: value.copy() for name, value in before.items()}
+                for name in list(legacy):
+                    if name in {
+                        "history.precision",
+                        "history.layout_version",
+                        "history.layout_digest",
+                        "history.actor_layout",
+                    } or name.startswith("history.rigid_"):
+                        del legacy[name]
+                legacy["history.schema_version"][:] = version
+                np.savez(path, **legacy)
+                with self.assertRaisesRegex(ValueError, "Unsupported checkpoint schema version"):
+                    run64.load_checkpoint(state64, path)
+                assert_snapshot(self, state64, before)
         before = snapshot(state32)
         for dt in (1e-100, 1e100):
             with self.assertRaises(ValueError), np.errstate(over="ignore"):

@@ -112,11 +112,11 @@ The precision-tagged state uses schema 4, including actor ownership, layout
 identity and native rigid continuation fields. Cross-layout and cross-precision
 checkpoint loads are rejected. The configuration identity covers every option
 that changes the solution, the resolved contact resources and the physical,
-material and SDF digests; PCG mode and CUDA graph use are excluded. The
-resolved contact batch size differs between CPU and CUDA, so checkpoints of
-scenes with more than 256 contact samples are device specific. Checkpoints
-written before configuration version 3, including every schema-2 and schema-3
-checkpoint, are rejected; start a new run. Failed loads preserve the
+material and SDF digests; PCG mode and CUDA graph use are excluded. CPU and
+CUDA resolve the same contact batch size, so checkpoints move between devices.
+Only the current schema loads: older schemas are not migrated, and checkpoints
+written before the current configuration version are rejected; start a new
+run. Failed loads preserve the
 destination. A plain initialization source is a new start, not a conversion of
 integration history.
 

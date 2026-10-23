@@ -566,7 +566,7 @@ def test_rigid_checkpoint_rejections(test, device):
             bad = {key: value.copy() for key, value in fields.items()}
             bad["history.schema_version"][:] = version
             np.savez(path, **bad)
-            with test.assertRaisesRegex(ValueError, "canonical A"):
+            with test.assertRaisesRegex(ValueError, "Unsupported checkpoint schema version"):
                 run.load_checkpoint(state, path)
             assert_snapshot(test, state, original)
         del bad["history.rigid_com"]
