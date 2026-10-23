@@ -6,6 +6,7 @@
 import ast
 import itertools
 import json
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -13,8 +14,10 @@ import numpy as np
 import warp as wp
 
 import newton
+from newton._src.solvers.monolithic.contact_pipeline import CONTACT_BATCH_CAPACITY
 from newton.solvers.experimental.monolithic import SolverMonolithic
 from newton.tests.test_monolithic_solver_actor_contacts import CASE, contact_scene, contact_solver, contact_state, frame
+from newton.tests.test_monolithic_solver_coupled import assert_snapshot, snapshot
 from newton.tests.unittest_utils import add_function_test, get_test_devices
 
 PACKAGE = Path(__file__).resolve().parents[1] / "_src/solvers/monolithic"
@@ -96,7 +99,7 @@ def test_graph_bitwise(test, device):
     assert_bitwise(test, run_chain(device, 6, graph=False), run_chain(device, 6, graph=True))
 
 
-def ordered_scene(device, order):
+def ordered_scene(device, order, *, arm_boxes=2):
     """Create an arm, a FREE body and a static box in ``order`` before one tet."""
     builder = newton.ModelBuilder(gravity=(0, 0, -9.81))
     inertia = wp.diag(wp.vec3(0.001))
@@ -105,7 +108,7 @@ def ordered_scene(device, order):
         link = builder.add_link(mass=1, inertia=inertia, label="arm")
         joint = builder.add_joint_prismatic(-1, link, axis=newton.Axis.X, limit_ke=0, limit_kd=0)
         builder.add_articulation([joint])
-        for k in range(2):
+        for k in range(arm_boxes):
             builder.add_shape_box(
                 link,
                 xform=wp.transform((0.2, 0.05 * k, 0), wp.quat_identity()),
@@ -193,12 +196,41 @@ def test_creation_order_bitwise(test, device):
     assert_bitwise(test, run_chain(device, 6, graph=False), run_chain(device, 6, graph=False, before=True))
 
 
+def test_device_resources(test, device):
+    """Contact batches, and so the checkpoint resource identity, do not depend on the device."""
+
+    def make(target):
+        model = ordered_scene(target, ("arm", "rigid", "static"), arm_boxes=4)
+        return SolverMonolithic(
+            model,
+            friction_velocity_scale=0.01,
+            tet_rest_density=wp.full(model.tet_count, 1000, dtype=float, device=model.device),
+        )
+
+    run = make(device)
+    count = run._contact.count
+    # More samples than the former CPU batch of 256.
+    test.assertGreater(count, 256)
+    test.assertEqual(run._contact._batch.batch_capacity, min(count, CONTACT_BATCH_CAPACITY))
+    if device.is_cuda:
+        host = make("cpu")
+        np.testing.assert_array_equal(run._contact.resource_identity, host._contact.resource_identity)
+        test.assertEqual(run._kinematics.digest, host._kinematics.digest)
+        state = run.create_state(dt=0.001)
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "state.npz"
+            run.save_checkpoint(state, path)
+            restored = host.create_state(dt=0.001)
+            host.load_checkpoint(restored, path)
+        assert_snapshot(test, restored, snapshot(state))
+
+
 class TestSolverDeterminism(unittest.TestCase):
     pass
 
 
 for _device in get_test_devices():
-    for _test in (test_repeat_bitwise, test_creation_order_samples, test_creation_order_bitwise):
+    for _test in (test_repeat_bitwise, test_creation_order_samples, test_creation_order_bitwise, test_device_resources):
         add_function_test(TestSolverDeterminism, _test.__name__, _test, devices=[_device])
     if _device.is_cuda:
         add_function_test(TestSolverDeterminism, "test_graph_bitwise", test_graph_bitwise, devices=[_device])

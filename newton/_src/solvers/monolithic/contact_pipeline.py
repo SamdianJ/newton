@@ -20,6 +20,9 @@ from .contact_pool import _CONTACT_WORKERS
 from .contact_spatial import _ContactSpatial
 from .segment_graph import _SegmentGraphCache
 
+# Contact samples per batch on every device; CUDA geometry needs more than one row-reduction block.
+CONTACT_BATCH_CAPACITY = 8192
+
 
 @wp.kernel
 def _reserve_pool_triplets(records: Any, flags: wp.array[int], triplets: Any, base: wp.array[int]):
@@ -90,11 +93,11 @@ class _PooledContactObjective(ContactObjective):
 
     def initialize_pool(self, factor_capacity, *, use_cuda_graph):
         actors = self.actor_samples.actors
-        # CUDA geometry needs larger batches than a single row-reduction block.
-        batch_capacity = 8192 if self.model.device.is_cuda else 256
+        # Chunked reductions follow the batch size, so every device uses the
+        # same one; the resource identity, and checkpoints, are then portable.
         self._batch = _ContactBatch(
             self,
-            batch_capacity=min(self.count, batch_capacity),
+            batch_capacity=min(self.count, CONTACT_BATCH_CAPACITY),
             capacity=None,
             contact_factor_capacity=factor_capacity,
             use_cuda_graph=use_cuda_graph,

@@ -100,8 +100,8 @@ class MonolithicConfig:
 
         Execution mode (PCG observation level and graph capture) is excluded.
         Capacity options are excluded because their resolved values, including
-        the device-specific contact batch size, belong to the contact resource
-        identity.
+        the device-independent contact batch size, belong to the contact
+        resource identity.
         """
         return {
             "config_version": np.array([CONFIG_VERSION], dtype=np.int32),
