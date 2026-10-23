@@ -19,7 +19,7 @@ from newton.solvers.experimental.monolithic import build_smooth_sdf
 import newton
 from newton.examples.softbody.monolithic_grasp_trajectory import RecordedGrasp
 from newton.examples.softbody.monolithic_recording import measure, save, serial, state_arrays
-from newton.examples.softbody.monolithic_sharpa_scene import ASSETS, REPO, build, mask_statistics
+from newton.examples.softbody.monolithic_sharpa_scene import ASSETS, REPO, build
 
 
 def build_recorded(payload):
@@ -122,9 +122,13 @@ def run(args):
         )
         if not np.array_equal(samples, np.load(expected_controls, allow_pickle=False)):
             raise ValueError("Constructed controls differ from frozen controls")
-    pose = solver._kinematics.poses.numpy()[palm]
-    np.testing.assert_allclose(pose[:3], trajectory.position[0], atol=1e-8, rtol=0)
-    if abs(abs(np.dot(pose[3:], trajectory.quaternion)) - 1) > 1e-12:
+    pose = solver._kinematics.poses.numpy()[palm].astype(float)
+    # The solver evaluates the initial pose in its own precision.
+    position_tolerance, rotation_tolerance = (
+        (1e-8, 1e-12) if solver.precision == solver.Precision.FP64 else (2e-6, 2e-6)
+    )
+    np.testing.assert_allclose(pose[:3], trajectory.position[0], atol=position_tolerance, rtol=0)
+    if abs(abs(np.dot(pose[3:], trajectory.quaternion)) - 1) > rotation_tolerance:
         raise ValueError("Initial palm orientation does not match recording")
     config = {
         "trajectory": payload,
@@ -251,7 +255,7 @@ def run(args):
                     slip=fields["slip"],
                     friction_work=fields["friction_work"],
                     force_balance=fields["force_balance"],
-                    mask=fields["mask"] if contact_recorder else mask_statistics(solver._contact),
+                    mask=fields["mask"],
                     **(
                         {name: fields[name] for name in ("full_system", "contact_pool", "contact_spatial")}
                         if contact_recorder

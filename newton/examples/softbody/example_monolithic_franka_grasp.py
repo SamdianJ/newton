@@ -18,6 +18,7 @@ import warp as wp
 
 import newton.examples
 from newton.examples.softbody.monolithic_franka import DT, REPO, TIMES, FrankaGrasp, sha
+from newton.examples.softbody.monolithic_recording import contact_fields as measure_contact_fields
 from newton.examples.softbody.monolithic_recording import save, serial, state_arrays
 
 
@@ -52,13 +53,6 @@ class Example:
         self.closed = False
         self.weights = self.case.model.particle_mass.numpy().astype(float)
         self.initial_com = np.average(self.case.state.particle_q.numpy(), axis=0, weights=self.weights)
-        c = self.case.solver._contact
-        self.plane_keys = (
-            None
-            if self.contact_recorder
-            else self.case.model.shape_type.numpy()[c.shapes.numpy()[np.arange(c.count) % c.shapes.size]]
-            == int(newton.GeoType.PLANE)
-        )
         if self.output:
             self.log = gzip.open(self.output / "steps.jsonl.gz", "wt")
             save(self.output / "configuration.json", self.case.metadata)
@@ -141,18 +135,8 @@ class Example:
             }
             if not stats.rolled_back:
                 state = self.case.state
-                c = self.case.solver._contact
-                if self.contact_recorder:
-                    contact_fields = self.contact_recorder(self.case.solver, state)
-                else:
-                    forces = -np.einsum("kij,kj->ki", c.current.rotation.numpy(), c.local_residual.numpy())
-                    gap = c.current.distance.numpy() - c.parameters[4]
-                    gap -= c.margins.numpy()[c.shapes.numpy()[np.arange(c.count) % c.shapes.size]]
-                    contact_fields = {
-                        "ground_force": forces[self.plane_keys].sum(axis=0),
-                        "robot_force": forces[~self.plane_keys].sum(axis=0),
-                        "penetration": max(0.0, float(-gap.min())),
-                    }
+                recorder = self.contact_recorder or measure_contact_fields
+                contact_fields = recorder(self.case.solver, state)
                 q = state.joint_q.numpy()
                 row.update(
                     cube_com=np.average(state.particle_q.numpy(), axis=0, weights=self.weights),

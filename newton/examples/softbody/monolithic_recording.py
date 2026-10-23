@@ -13,6 +13,8 @@ from pathlib import Path
 import numpy as np
 import warp as wp
 
+import newton
+
 REPO = Path(__file__).resolve().parents[3]
 NORMAL = json.loads((REPO / "scripts/monolithic_reference/fixtures/normal_loading_frozen_v3.json").read_text())
 # Private producers keep measurement independent of the solver's spatial selection and pool.
@@ -73,6 +75,8 @@ def measure(run, state):
     # Leaves the solver kinematics at the accepted state, as before measurement.
     args = batch._state(*_native_inputs(run, state))
     gaps, slips, load, work = [], [], 0.0, 0.0
+    # Contacts the alignment mask omits still report their loads and penetration.
+    masked_keys, masked_gaps, omitted_sum = [], [], np.zeros(4)
     for mode in batch._chunks():
         batch._stage(args, mode, run._dt, begin=False)
         if batch._flags.numpy()[0]:
@@ -90,12 +94,30 @@ def measure(run, state):
         )
         work += float(np.sum(friction * slide))
         slips.append(np.linalg.norm(slip, axis=1))
+        omitted = batch.omitted.numpy()[:n]
+        active = np.any(omitted[:, 2:] > 0, axis=1)
+        masked_keys.extend(batch.pool.candidates.identities.numpy()[:n][active].tolist())
+        masked_gaps.append(gaps[-1][active])
+        omitted_sum += omitted.sum(axis=0)
     gaps, slips = np.concatenate(gaps or [np.zeros(0)]), np.concatenate(slips or [np.zeros(0)])
+    masked_gaps = np.concatenate(masked_gaps or [np.zeros(0)])
     physical = state._monolithic_coupled
     pforce = physical.contact_particle_force.numpy()
     bforce = physical.contact_body_force.numpy()
+    penetration = max(0.0, float(-gaps.min())) if len(gaps) else 0.0
     return {
-        "penetration": max(0.0, float(-gaps.min())) if len(gaps) else 0.0,
+        "penetration": penetration,
+        "mask": {
+            "masked_active_count": len(masked_keys),
+            "masked_active_keys": masked_keys,
+            "omitted_normal_energy": float(omitted_sum[0]),
+            "omitted_friction_energy": float(omitted_sum[1]),
+            "omitted_normal_load_sum": float(omitted_sum[2]),
+            "omitted_friction_load_sum": float(omitted_sum[3]),
+            "max_masked_penetration": max(0.0, float(-masked_gaps.min())) if len(masked_gaps) else 0.0,
+            "max_all_penetration": penetration,
+            "switch_history": "NOT_RECORDED_BY_BOUNDED_STREAM",
+        },
         "contact_load": load,
         "friction_work": work,
         "slip": float(slips.max()) if len(slips) else 0.0,
@@ -113,4 +135,33 @@ def measure(run, state):
         "v": state.particle_qd.numpy().copy(),
         "com": k.com.numpy().copy(),
         "rotation": k.rotations.numpy().copy(),
+    }
+
+
+def contact_fields(run, state):
+    """Return precision-generic penetration and ground/robot contact forces [m, N].
+
+    Penetration covers every contact sample from the step start; forces sum the
+    production pool's committed per-contact forces on the tet, split by whether the
+    target shape is a plane. Requires canonical tet-to-shape samples.
+    """
+    c = run._contact
+    records = c.pool.records
+    n = int(records.count.numpy()[0])
+    ids, pairs = records.identities.numpy()[:n], records.pairs.numpy()[:n]
+    sources, targets = c._batch.all_samples.sources.numpy(), c._batch.all_samples.targets.numpy()
+    plane = run.model.shape_type.numpy()[targets] == int(newton.GeoType.PLANE)
+    forces = np.zeros((2, 3))
+    for slot in np.argsort(ids, kind="stable"):
+        key = int(ids[slot])
+        if sources[key] != -1:
+            raise ValueError("Contact fields require canonical tet-to-shape samples")
+        forces[int(not plane[key])] += pairs[slot, 0, :3]
+    measured = measure(run, state)
+    return {
+        "penetration": measured["penetration"],
+        "contact_load": measured["contact_load"],
+        "slip": measured["slip"],
+        "ground_force": forces[0],
+        "robot_force": forces[1],
     }

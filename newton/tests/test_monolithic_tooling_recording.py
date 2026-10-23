@@ -15,6 +15,32 @@ import numpy as np
 from scripts.monolithic_reference import check_recording as recording
 
 
+class TestContactFields(unittest.TestCase):
+    def test_forces_match_publication_in_both_precisions(self):
+        """Split committed contact forces by target in FP64 and FP32 without the FP64 audit."""
+        from newton.examples.softbody.monolithic_recording import contact_fields, measure  # noqa: PLC0415
+        from newton.tests.test_monolithic_solver_coupled import scene, solver  # noqa: PLC0415
+
+        model = scene("cpu")
+        for precision in ("fp64", "fp32"):
+            with self.subTest(precision=precision):
+                run = solver(model, precision=precision)
+                state = run.create_state(dt=0.001)
+                for _ in range(3):
+                    run.step(state, state, model.control(), dt=0.001)
+                fields = contact_fields(run, state)
+                published = state._monolithic_coupled.contact_particle_force.numpy().astype(float).sum(axis=0)
+                total = fields["ground_force"] + fields["robot_force"]
+                self.assertGreater(np.linalg.norm(published), 0)
+                tolerance = 1e-10 if precision == "fp64" else 1e-5
+                np.testing.assert_allclose(total, published, rtol=tolerance, atol=tolerance * np.linalg.norm(published))
+                self.assertTrue(np.isfinite(fields["penetration"]) and fields["penetration"] >= 0)
+                mask = measure(run, state)["mask"]
+                self.assertEqual(mask["max_all_penetration"], fields["penetration"])
+                self.assertLessEqual(mask["max_masked_penetration"], mask["max_all_penetration"])
+                self.assertEqual(mask["masked_active_count"], len(mask["masked_active_keys"]))
+
+
 class TestRecordingValidation(unittest.TestCase):
     def test_comparison_envelope(self):
         """Bound floating differences without relaxing metadata or layout equality."""
