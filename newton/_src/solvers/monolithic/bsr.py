@@ -122,26 +122,6 @@ def _append_monolithic_scalar_triplet(triplets: Any, row: int, column: int, valu
 
 
 @wp.func
-def _accumulate_monolithic_actor_q_entry(
-    aq_actor_dense: wp.array2d[Any],
-    global_triplets: Any,
-    q_row: int,
-    q_column: int,
-    value: Any,
-):
-    if global_triplets.active_token[0] != global_triplets.token:
-        return
-    if q_row < 0 or q_row >= aq_actor_dense.shape[0] or q_column < 0 or q_column >= aq_actor_dense.shape[1]:
-        wp.atomic_max(global_triplets.status, 0, 3)
-        return
-    if not wp.isfinite(value):
-        wp.atomic_max(global_triplets.status, 0, 7)
-        return
-    wp.atomic_add(aq_actor_dense, q_row, q_column, value)
-    _append_monolithic_scalar_triplet(global_triplets, q_row, q_column, value)
-
-
-@wp.func
 def _accumulate_monolithic_internal_x_block(
     ax_internal_triplets: Any,
     global_triplets: Any,

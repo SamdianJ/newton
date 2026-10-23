@@ -10,6 +10,7 @@ import numpy as np
 import warp as wp
 
 from ...sim.model import Model
+from .residual import _accumulate_rows, _row_gather_map
 from .tet_common import (
     _validate_candidate_particles,
     _validate_evaluation,
@@ -30,11 +31,18 @@ class TetTripletPattern:
     global_rows: np.ndarray
     global_columns: np.ndarray
     elastic_block_slots: np.ndarray
+    residual_rows: np.ndarray
+    """Compact residual row of each (tet, vertex) term, ``-1`` for fixed particles."""
+    dynamic_count: int
 
 
 @dataclass(slots=True)
 class TetAssemblyWorkspace:
     elastic_block_slots: wp.array2d[int]
+    residual_offsets: wp.array[int]
+    residual_slots: wp.array[int]
+    residual_terms: wp.array
+    """Per (tet, vertex) residual terms, gathered by row in a fixed order."""
     tet_energy: wp.array
     """Per-element energy in the assembly precision."""
     min_det_f: wp.array
@@ -70,9 +78,10 @@ def build_tet_triplet_pattern(
     rows, columns = np.asarray(rows, dtype=np.int32), np.asarray(columns, dtype=np.int32)
     global_rows = (x_dof_start + 3 * rows[:, None] + np.repeat(np.arange(3), 3)).reshape(-1).astype(np.int32)
     global_columns = (x_dof_start + 3 * columns[:, None] + np.tile(np.arange(3), 3)).reshape(-1).astype(np.int32)
-    for array in (rows, columns, global_rows, global_columns, slots):
+    residual_rows = particle_to_dynamic[tet_indices].reshape(-1).astype(np.int32)
+    for array in (rows, columns, global_rows, global_columns, slots, residual_rows):
         array.setflags(write=False)
-    return TetTripletPattern(rows, columns, global_rows, global_columns, slots)
+    return TetTripletPattern(rows, columns, global_rows, global_columns, slots, residual_rows, count)
 
 
 def create_tet_assembly_workspace(
@@ -83,8 +92,13 @@ def create_tet_assembly_workspace(
         raise ValueError("tet_count disagrees with elastic slot map")
     if dtype not in (wp.float32, wp.float64):
         raise ValueError("Tet assembly requires float32 or float64")
+    offsets, slots = _row_gather_map(pattern.residual_rows, pattern.dynamic_count, device)
+    vector = wp.vec3d if dtype == wp.float64 else wp.vec3
     return TetAssemblyWorkspace(
         wp.array(pattern.elastic_block_slots, dtype=int, device=device),
+        offsets,
+        slots,
+        wp.zeros(4 * tet_count, dtype=vector, device=device),
         wp.zeros(tet_count, dtype=dtype, device=device),
         wp.zeros(1, dtype=dtype, device=device),
         wp.zeros(1, dtype=int, device=device),
@@ -142,19 +156,18 @@ def _add_consistent_inertia(
     x: wp.array[Any],
     xn: wp.array[Any],
     vn: wp.array[Any],
-    residual: wp.array[Any],
+    terms: wp.array[Any],
 ):
     tet, a = wp.tid()
-    i = mapping[indices[tet, a]]
-    if i >= 0:
-        r = residual.dtype()
+    if mapping[indices[tet, a]] >= 0:
+        r = terms.dtype()
         for b in range(4):
             j = indices[tet, b]
             weight = type(dt)(coefficients[tet])
             if a == b:
                 weight *= type(dt)(2.0)
             r += weight * (x[j] - xn[j] - dt * vn[j]) / (dt * dt)
-        wp.atomic_add(residual, i, r)
+        terms[4 * tet + a] = r
 
 
 @wp.kernel
@@ -194,7 +207,7 @@ def _assemble_elastic_residual_tangent(
     tet_materials: wp.array2d[float],
     particle_to_dynamic: wp.array[int],
     elastic_block_slots: wp.array2d[int],
-    residual_x: wp.array[Any],
+    residual_terms: wp.array[Any],
     ax_values: wp.array[Any],
     global_values: wp.array[Any],
     tet_energy: wp.array[Any],
@@ -227,7 +240,7 @@ def _assemble_elastic_residual_tangent(
             ga = _shape_gradient(pose, a)
             index = particle_to_dynamic[tet_indices[tet, a]]
             if index >= 0:
-                wp.atomic_add(residual_x, index, stress * ga)
+                residual_terms[4 * tet + a] += stress * ga
             for b in range(a, 4):
                 slot = elastic_block_slots[tet, 4 * a + b]
                 if slot >= 0:
@@ -278,6 +291,7 @@ def _prepare_evaluation(model, args):
     workspace.failure_flags.zero_()
     workspace.min_det_f.fill_(float("inf"))
     workspace.tet_energy.zero_()
+    workspace.residual_terms.zero_()
     physics = workspace.physics
     wp.launch(
         _validate_candidate_particles,
@@ -320,7 +334,7 @@ def _prepare_evaluation(model, args):
                 args["candidate_particle_q"],
                 args["particle_q_n"],
                 args["particle_qd_n"],
-                args["residual_x"],
+                workspace.residual_terms,
             ],
             device=model.device,
         )
@@ -378,6 +392,12 @@ def assemble_tet_residual_tangent(
         or scatter.ax_values.size < dynamic_particle_ids.size
     ):
         raise ValueError("tet scatter requires matching block/scalar slices of one precision on the model device")
+    if (
+        workspace.residual_terms.dtype != residual_x.dtype
+        or workspace.residual_terms.size != 4 * model.tet_count
+        or workspace.residual_offsets.size != residual_x.size + 1
+    ):
+        raise ValueError("tet workspace residual terms must match the residual precision and rows")
     physics = workspace.physics
     mode = int(physics is not None and physics.material_model == "smith_log_stabilized")
     poses = physics.poses if physics is not None else model.tet_poses
@@ -416,13 +436,20 @@ def assemble_tet_residual_tangent(
             materials,
             particle_to_dynamic,
             workspace.elastic_block_slots,
-            residual_x,
+            workspace.residual_terms,
             scatter.ax_values,
             scatter.global_values,
             workspace.tet_energy,
             workspace.min_det_f,
             workspace.failure_flags,
         ],
+        device=model.device,
+    )
+    # Element terms reach each row in a fixed order, independent of thread scheduling.
+    wp.launch(
+        _accumulate_rows,
+        residual_x.size,
+        [workspace.residual_offsets, workspace.residual_slots, workspace.residual_terms, residual_x],
         device=model.device,
     )
     wp.launch(_check_residual_finite, residual_x.size, [residual_x, workspace.failure_flags], device=model.device)

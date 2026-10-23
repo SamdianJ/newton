@@ -5,6 +5,7 @@
 
 import unittest
 from dataclasses import replace
+from typing import Any
 from unittest.mock import patch
 
 import numpy as np
@@ -13,7 +14,6 @@ import warp.sparse as sparse
 
 from newton._src.solvers.monolithic.bsr import (
     ASSEMBLY_STRUCTS,
-    _accumulate_monolithic_actor_q_entry,
     _accumulate_monolithic_internal_x_block,
     _append_monolithic_contact_factor_triplets,
     _append_monolithic_scalar_triplet,
@@ -33,6 +33,27 @@ from newton.tests.unittest_utils import add_function_test, get_test_devices
 from scripts.monolithic_reference.linear_reference import _DiagonalInverse
 
 _FP32 = ASSEMBLY_STRUCTS[wp.float32]
+
+
+@wp.func
+def _accumulate_monolithic_actor_q_entry(
+    aq_actor_dense: wp.array2d[Any],
+    global_triplets: Any,
+    q_row: int,
+    q_column: int,
+    value: Any,
+):
+    """Write one dense q entry and its scalar triplet from a single-thread fixture kernel."""
+    if global_triplets.active_token[0] != global_triplets.token:
+        return
+    if q_row < 0 or q_row >= aq_actor_dense.shape[0] or q_column < 0 or q_column >= aq_actor_dense.shape[1]:
+        wp.atomic_max(global_triplets.status, 0, 3)
+        return
+    if not wp.isfinite(value):
+        wp.atomic_max(global_triplets.status, 0, 7)
+        return
+    aq_actor_dense[q_row, q_column] = aq_actor_dense[q_row, q_column] + value
+    _append_monolithic_scalar_triplet(global_triplets, q_row, q_column, value)
 
 
 @wp.kernel

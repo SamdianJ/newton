@@ -35,7 +35,7 @@ def _particles(
     dt: Any,
     residual: wp.array[Any],
     absolute: wp.array[Any],
-    parts: wp.array[Any],
+    parts: wp.array2d[Any],
     flags: wp.array[int],
 ):
     i = wp.tid()
@@ -58,8 +58,8 @@ def _particles(
     absolute[i] = magnitude
     if not wp.isfinite(inertia) or not wp.isfinite(external) or not wp.isfinite(wp.length(r)):
         wp.atomic_max(flags, 0, 2)
-    wp.atomic_add(parts, 0, inertia)
-    wp.atomic_add(parts, 2, external)
+    parts[0, i] = inertia
+    parts[1, i] = external
 
 
 @wp.kernel
@@ -78,7 +78,7 @@ def _elements(
     guard: Any,
     terms: wp.array[Any],
     absolute_terms: wp.array[Any],
-    parts: wp.array[Any],
+    parts: wp.array2d[Any],
     min_det: wp.array[Any],
     flags: wp.array[int],
 ):
@@ -135,8 +135,15 @@ def _elements(
             absolute_terms[4 * e + a] = magnitude
     if not wp.isfinite(inertia):
         wp.atomic_max(flags, 0, 2)
-    wp.atomic_add(parts, 0, inertia)
-    wp.atomic_add(parts, 1, energy)
+    parts[0, e] = inertia
+    parts[1, e] = energy
+
+
+@wp.kernel
+def _combine_parts(particle: wp.array2d[Any], element: wp.array2d[Any], parts: wp.array[Any]):
+    parts[0] = particle[0, 0] + element[0, 0]
+    parts[1] = element[1, 0]
+    parts[2] = particle[1, 0]
 
 
 @wp.kernel
@@ -183,6 +190,12 @@ class TetObjective:
         self.residual = wp.zeros(len(ids), dtype=self.vector, device=model.device)
         self.absolute = wp.zeros(len(ids), dtype=self.vector, device=model.device)
         self.parts = wp.zeros(3, dtype=self.dtype, device=model.device)
+        # Per-particle (inertia, external) and per-element (inertia, elastic)
+        # energies reduce in a fixed order rather than by atomic accumulation.
+        self._particle_parts = wp.zeros((2, len(ids)), dtype=self.dtype, device=model.device)
+        self._element_parts = wp.zeros((2, model.tet_count), dtype=self.dtype, device=model.device)
+        self._particle_sums = wp.zeros((2, 1), dtype=self.dtype, device=model.device)
+        self._element_sums = wp.zeros((2, 1), dtype=self.dtype, device=model.device)
         self.min_det_f = wp.zeros(1, dtype=self.dtype, device=model.device)
         self.flags = wp.zeros(1, dtype=int, device=model.device)
         self._difference = wp.zeros(model.particle_count, dtype=self.vector, device=model.device)
@@ -221,7 +234,7 @@ class TetObjective:
             wp.launch(_difference, x.size, [x, xn, displacement], device=self.model.device)
         physics = self.physics
         self.flags.zero_()
-        self.parts.zero_()
+        self._element_parts.zero_()
         self._residual_terms.zero_()
         self._absolute_terms.zero_()
         self.min_det_f.fill_(float("inf"))
@@ -247,7 +260,7 @@ class TetObjective:
                 self.dtype(dt),
                 self.residual,
                 self.absolute,
-                self.parts,
+                self._particle_parts,
                 self.flags,
             ],
             device=self.model.device,
@@ -270,7 +283,7 @@ class TetObjective:
                 self.dtype(min_det_f_guard),
                 self._residual_terms,
                 self._absolute_terms,
-                self.parts,
+                self._element_parts,
                 self.min_det_f,
                 self.flags,
             ],
@@ -288,4 +301,7 @@ class TetObjective:
             [self._residual_offsets, self._residual_slots, self._absolute_terms, self.absolute],
             device=self.model.device,
         )
+        wp.utils.array_sum(self._particle_parts, out=self._particle_sums, axis=1)
+        wp.utils.array_sum(self._element_parts, out=self._element_sums, axis=1)
+        wp.launch(_combine_parts, 1, [self._particle_sums, self._element_sums, self.parts], device=self.model.device)
         wp.launch(_finite, self.residual.size, [self.residual, self.flags], device=self.model.device)
