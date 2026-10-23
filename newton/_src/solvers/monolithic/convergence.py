@@ -39,8 +39,12 @@ class ConvergencePolicy:
 
     # Calibrated in P8b PR-01 and approved 2026-10-19. The absolute targets keep the
     # frozen cable L2 residual gates satisfiable row by row (2163 position and 720
-    # angle rows for the finest helix); the rounding multiplier covers the measured
-    # FP32 arithmetic error (at most 0.83 eps a) plus half-ULP coordinate placement.
+    # angle rows for the finest helix).
+    # The rounding multiplier was raised from 4 in P8b PR-03 (approved 2026-10-24).
+    # Step-start residuals of component fixtures carry at most 0.83 eps a of FP32
+    # arithmetic error, but replayed stalled FP32 Sharpa steps plateau at 4-8 eps a
+    # while closing and 21-31 eps a at the end, on tet rows summing 10-30 terms
+    # ((n - 1) eps a bounds such a sum). Unconverged steps there need 500 or more.
     # The relative tolerance was relaxed from 1e-6 in P8b PR-03 (approved
     # 2026-10-23): the robot scenes needed a second Newton update on almost every
     # step at 1e-6 with unchanged physical gates, and 1e-3 broke cloth, stiff shell
@@ -49,7 +53,7 @@ class ConvergencePolicy:
     """Absolute targets ``g_u`` [N, N m]."""
     relative: tuple[float, float] = (1e-4, 1e-4)
     """Tolerances ``rtol_u`` relative to the block's step-start residual."""
-    noise: tuple[float, float] = (4.0, 4.0)
+    noise: tuple[float, float] = (32.0, 32.0)
     """Multipliers ``c_u`` of ``eps_T * a_i``."""
 
     def __post_init__(self):

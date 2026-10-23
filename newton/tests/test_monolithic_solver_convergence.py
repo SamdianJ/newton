@@ -89,7 +89,7 @@ class TestMonolithicConvergence(unittest.TestCase):
         policy = ConvergencePolicy()
         self.assertEqual(policy.absolute, (1e-11, 1e-13))
         self.assertEqual(policy.relative, (1e-4, 1e-4))
-        self.assertEqual(policy.noise, (4.0, 4.0))
+        self.assertEqual(policy.noise, (32.0, 32.0))
 
     def test_row_groups_split_units(self):
         """Separate revolute and prismatic rows, rigid translation/rotation and cable position/angle."""
