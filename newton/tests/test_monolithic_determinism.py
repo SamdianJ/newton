@@ -4,12 +4,16 @@
 """Bitwise run-to-run determinism and the floating-point atomic scan of the solve path."""
 
 import ast
+import itertools
 import json
 import unittest
 from pathlib import Path
 
 import numpy as np
+import warp as wp
 
+import newton
+from newton.solvers.experimental.monolithic import SolverMonolithic
 from newton.tests.test_monolithic_solver_actor_contacts import CASE, contact_scene, contact_solver, contact_state, frame
 from newton.tests.unittest_utils import add_function_test, get_test_devices
 
@@ -56,9 +60,9 @@ class TestAtomicScan(unittest.TestCase):
         self.assertLessEqual(_INTEGER_FIELDS, set(sites))
 
 
-def run_chain(device, steps, *, graph):
+def run_chain(device, steps, *, graph, before=False):
     case = json.loads(CASE.read_text())
-    model = contact_scene(device, "chain")
+    model = contact_scene(device, "chain", before=before)
     run = contact_solver(model, mode="production", graph=graph)
     state = contact_state(run, "chain")
     control = model.control()
@@ -92,12 +96,110 @@ def test_graph_bitwise(test, device):
     assert_bitwise(test, run_chain(device, 6, graph=False), run_chain(device, 6, graph=True))
 
 
+def ordered_scene(device, order):
+    """Create an arm, a FREE body and a static box in ``order`` before one tet."""
+    builder = newton.ModelBuilder(gravity=(0, 0, -9.81))
+    inertia = wp.diag(wp.vec3(0.001))
+
+    def arm():
+        link = builder.add_link(mass=1, inertia=inertia, label="arm")
+        joint = builder.add_joint_prismatic(-1, link, axis=newton.Axis.X, limit_ke=0, limit_kd=0)
+        builder.add_articulation([joint])
+        for k in range(2):
+            builder.add_shape_box(
+                link,
+                xform=wp.transform((0.2, 0.05 * k, 0), wp.quat_identity()),
+                hx=0.02,
+                hy=0.02,
+                hz=0.02,
+                cfg=builder.ShapeConfig(density=0),
+                label=f"arm/{k}",
+            )
+
+    def rigid():
+        body = builder.add_link(
+            xform=wp.transform((-0.2, 0, 0), wp.quat_identity()), mass=1, inertia=inertia, label="rigid"
+        )
+        builder.add_articulation([builder.add_joint_free(body)])
+        builder.add_shape_box(body, hx=0.02, hy=0.02, hz=0.02, cfg=builder.ShapeConfig(density=0), label="rigid/0")
+
+    def static():
+        builder.add_shape_box(
+            -1,
+            xform=wp.transform((0, 0, -0.1), wp.quat_identity()),
+            hx=0.5,
+            hy=0.5,
+            hz=0.05,
+            cfg=builder.ShapeConfig(density=0),
+            label="static/0",
+        )
+
+    for name in order:
+        {"arm": arm, "rigid": rigid, "static": static}[name]()
+    builder.add_soft_mesh(
+        pos=(0, 0, 0.0008),
+        rot=wp.quat_identity(),
+        scale=1.0,
+        vel=(0, 0, 0),
+        vertices=[(0, 0, 0), (0.04, 0, 0), (0, 0.03, 0), (0, 0, 0.02)],
+        indices=[0, 1, 2, 3],
+        density=1000,
+        k_mu=10000 / 2.6,
+        k_lambda=10000 * 0.3 / (1.3 * 0.4),
+        k_damp=0,
+        particle_radius=0.001,
+        tri_ke=0,
+        tri_ka=0,
+        tri_kd=0,
+    )
+    return builder.finalize(device=device)
+
+
+def sample_table(run):
+    """Return every contact sample with shapes named by label instead of Model index."""
+    contact, names = run._contact, run.model.shape_label
+    samples = contact.actor_samples
+    return {
+        "tet_shape": [names[s] for s in contact.shapes.numpy()],
+        "sources": [names[s] if s >= 0 else int(s) for s in samples.source_shapes],
+        "targets": [names[s] for s in samples.targets],
+        "faces": samples.faces.tolist(),
+        "slots": samples.slots.tolist(),
+        "points": samples.points.tolist(),
+        "weights": samples.weights.tolist(),
+    }
+
+
+def test_creation_order_samples(test, device):
+    """Contact samples enumerate in the semantic actor order, whatever the Model creation order."""
+    tables = []
+    for order in itertools.permutations(("arm", "rigid", "static")):
+        model = ordered_scene(device, order)
+        run = SolverMonolithic(
+            model,
+            friction_velocity_scale=0.01,
+            tet_rest_density=wp.full(model.tet_count, 1000, dtype=float, device=model.device),
+        )
+        tables.append((order, sample_table(run)))
+    reference = tables[0][1]
+    test.assertTrue(reference["tet_shape"] and reference["targets"])
+    for order, table in tables[1:]:
+        with test.subTest(order=order):
+            test.assertEqual(table, reference)
+
+
+def test_creation_order_bitwise(test, device):
+    """Creating the FREE bodies before the arm leaves every step bitwise unchanged."""
+    assert_bitwise(test, run_chain(device, 6, graph=False), run_chain(device, 6, graph=False, before=True))
+
+
 class TestSolverDeterminism(unittest.TestCase):
     pass
 
 
 for _device in get_test_devices():
-    add_function_test(TestSolverDeterminism, "test_repeat_bitwise", test_repeat_bitwise, devices=[_device])
+    for _test in (test_repeat_bitwise, test_creation_order_samples, test_creation_order_bitwise):
+        add_function_test(TestSolverDeterminism, _test.__name__, _test, devices=[_device])
     if _device.is_cuda:
         add_function_test(TestSolverDeterminism, "test_graph_bitwise", test_graph_bitwise, devices=[_device])
 

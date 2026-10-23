@@ -18,7 +18,7 @@ import warp as wp
 
 from ...geometry import GeoType, ShapeFlags
 from ...geometry.sdf_texture import TextureSDFData
-from .contact_sampling import ContactSamples, _checked_contact_capacity
+from .contact_sampling import ContactSamples, _canonical_shapes, _checked_contact_capacity
 from .linear_types import MonolithicLinearLayout
 from .smooth_sdf import _sdf_type
 
@@ -362,6 +362,7 @@ class ContactObjective:
         shapes = np.flatnonzero(v["shape_flags"] & int(ShapeFlags.COLLIDE_PARTICLES)).astype(np.int32)
         if self.actor_samples is not None:
             shapes = shapes[~np.isin(shapes, self.actor_samples.rigid_shapes)]
+            shapes = np.asarray(_canonical_shapes(actors, shapes), dtype=np.int32)
         if not np.isin(
             v["shape_type"][shapes], [int(GeoType.PLANE), int(GeoType.SPHERE), int(GeoType.BOX), int(GeoType.MESH)]
         ).all():
