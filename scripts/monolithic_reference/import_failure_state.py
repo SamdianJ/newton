@@ -23,7 +23,6 @@ from types import SimpleNamespace
 import numpy as np
 import warp as wp
 
-from newton._src.solvers.monolithic.material_inputs import _cable_geometry
 from scripts.monolithic_reference.retained_assets import ASSET_ROOT
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -142,37 +141,6 @@ def _contact_free(name, source):
     return name.startswith("history.contact_") and bool(forces) and not any(np.any(value) for value in forces)
 
 
-def _project_cable_frames(states, scratch):
-    """Re-project converted cable reference directors onto the converted edges; return the frame count.
-
-    Rounding the coordinates to a narrower precision tilts each short edge far more than the
-    director orthogonality tolerance, so the directors take the minimal correction and their
-    reference twists the matching principal value on the saved branch.
-    """
-    if states.materials is None or not states.materials.cable:
-        return 0
-    history = getattr(scratch, states.namespace)
-    positions = scratch.particle_q.numpy().astype(float)
-    directors = history.cable_ref_director.numpy().astype(float)
-    twists = history.cable_ref_twist.numpy().astype(float)
-    cursor, count = 0, 0
-    for obj in states.materials.cable:
-        part = slice(int(obj["theta_offset"]), int(obj["theta_offset"]) + len(obj["rest_theta"]))
-        edges = np.diff(positions[obj["particle_ids"]], axis=0)
-        tangent = edges / np.linalg.norm(edges, axis=1)[:, None]
-        director = directors[part] - np.sum(directors[part] * tangent, axis=1)[:, None] * tangent
-        directors[part] = director / np.linalg.norm(director, axis=1)[:, None]
-        principal = _cable_geometry(positions[obj["particle_ids"]], directors[part])[3]
-        branch = slice(cursor, cursor + len(principal))
-        twists[branch] = principal + 2 * np.pi * np.round((twists[branch] - principal) / (2 * np.pi))
-        cursor += len(principal)
-        count += len(director)
-    for prefix in ("cable_", "cable_bound_"):
-        getattr(history, prefix + "ref_director").assign(directors.astype(history.cable_ref_director.numpy().dtype))
-        getattr(history, prefix + "ref_twist").assign(twists.astype(history.cable_ref_twist.numpy().dtype))
-    return count
-
-
 def import_state(solver, state, source):
     """Write saved coordinates and history by name into a validated copy, then replace ``state``."""
     states = solver._states
@@ -207,8 +175,6 @@ def import_state(solver, state, source):
             report["converted"].append(name)
         array.assign(value.astype(expected.dtype))
         report["imported"].append(name)
-    if report["converted"]:
-        report["reprojected_cable_frames"] = _project_cable_frames(states, scratch)
     states.validate(scratch)
     state.assign(scratch)
     return report

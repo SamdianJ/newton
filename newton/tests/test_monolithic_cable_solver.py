@@ -247,6 +247,45 @@ class TestMonolithicCableSolver(unittest.TestCase):
         self.assertEqual(detail["publication_status"], "STOPPED_ACCEPTED")
         self.assertIn("cable_0_theta", detail["stopped_candidate"]["final_ratios"])
 
+    def test_fp32_frames_follow_exact_edges(self):
+        """Admit FP32 frames that follow the exact edges of rounded far, short-edged coordinates."""
+        from newton._src.solvers.monolithic.material_inputs import _cable_geometry  # noqa: PLC0415
+
+        case = CableBenchmark("cantilever", segments=256, precision="fp32", device=self.device)
+        states = case.solver._states
+        state = states.copy(case.state)
+        history = state._monolithic_coupled
+        # A helix 4 m from the origin: rounding the stored coordinates tilts its 6 mm edges
+        # by ~1e-5, while the frames follow the exact increment-form edges.
+        s = np.linspace(0.0, 1.0, 257)
+        x = np.c_[4.0 + s, 0.3 * np.cos(4 * s), 0.3 * np.sin(4 * s)]
+        tangent = np.diff(x, axis=0)
+        tangent /= np.linalg.norm(tangent, axis=1)[:, None]
+        director = np.cross(tangent, [1.0, 0.0, 0.0])
+        director /= np.linalg.norm(director, axis=1)[:, None]
+        twist = _cable_geometry(x, director)[3]
+        state.particle_q.assign(x.astype(np.float32))
+        history.bound_x.assign(x.astype(np.float32))
+
+        def frames(director, twist):
+            for prefix in ("cable_", "cable_bound_"):
+                getattr(history, prefix + "ref_director").assign(director.astype(np.float32))
+                getattr(history, prefix + "ref_twist").assign(twist.astype(np.float32))
+
+        frames(director, twist)
+        states.validate(state)
+        # A frame tilted beyond the rounding bound is still rejected.
+        tilted = director.copy()
+        tilted[100] = np.cos(1e-3) * director[100] + np.sin(1e-3) * tangent[100]
+        frames(tilted, twist)
+        with self.assertRaisesRegex(ValueError, "perpendicular"):
+            states.validate(state)
+        changed = twist.copy()
+        changed[100] += 1e-3
+        frames(director, changed)
+        with self.assertRaisesRegex(ValueError, "twist"):
+            states.validate(state)
+
     def test_consistent_tet_mass_excludes_cable_particles(self):
         """Assemble a consistent-mass tet and a line-density cable in one solve."""
         _, solver = self.scene(cloth=False, cables=1, tet=True, mass_mode="consistent")

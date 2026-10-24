@@ -9,7 +9,7 @@ import warp as wp
 from ...sim import Model
 from . import state_checks
 from .articulation_state import ArticulationState
-from .material_inputs import _cable_geometry, _shell_adjacency
+from .material_inputs import _cable_geometry, _rounding_tilt, _shell_adjacency
 
 
 class CoupledState(ArticulationState):
@@ -225,15 +225,19 @@ class CoupledState(ArticulationState):
         directors, twists = history.cable_ref_director.numpy(), history.cable_ref_twist.numpy()
         cursor = 0
         tolerance = 2e-6 if self.dtype == wp.float32 else 1e-6
+        # Frames follow the exact increment-form edges, not the rounded stored positions.
+        roundoff = np.finfo(self.kinematics.numpy_dtype).eps / 2
         for obj in self.materials.cable:
             offset, count = int(obj["theta_offset"]), len(obj["rest_theta"])
             part = slice(offset, offset + count)
-            lengths, _, _, principal = _cable_geometry(positions[obj["particle_ids"]], directors[part])
+            tilt = _rounding_tilt(positions[obj["particle_ids"]], roundoff)
+            lengths, _, _, principal = _cable_geometry(positions[obj["particle_ids"]], directors[part], tilt=tilt)
             if np.any(lengths / obj["rest_lengths"] <= 1e-8):
                 raise ValueError("Cable state has collapsed edges")
             branch = twists[cursor : cursor + len(principal)]
             error = np.remainder(branch - principal + np.pi, 2 * np.pi) - np.pi
-            if np.any(abs(error) > tolerance):
+            # Each twist compares the frames of two edges.
+            if np.any(abs(error) > tolerance + 2 * (tilt[:-1] + tilt[1:])):
                 raise ValueError("Cable reference twist is inconsistent with its directors")
             if bool(obj["gauge"]) and theta[offset] != obj["rest_theta"][0].astype(self.kinematics.numpy_dtype):
                 raise ValueError("Cable state changed its permanent theta gauge")
