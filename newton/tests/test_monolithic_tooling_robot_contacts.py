@@ -99,6 +99,31 @@ def test_robot_policy_certificate(test, device):
             certify_configuration(run, bad, digest)
 
 
+def test_robot_precision(test, device):
+    """Build, certify and audit an FP32 robot recipe; a scene of another precision is rejected."""
+    from newton.solvers.experimental.monolithic import SolverMonolithic  # noqa: PLC0415
+
+    def build(**options):
+        factory = FrozenRobotFactory("franka-cube", precision="fp32")
+        factory.JointTerms = SolverMonolithic.JointTerms
+        with patch("newton.tests.test_monolithic_solver_coupled.SolverMonolithic", factory):
+            return factory, solver(scene(device), mode="production", graph=device.is_cuda, **options)
+
+    with test.assertRaisesRegex(ValueError, "precision"):
+        build()
+    factory, run = build(precision="fp32")
+    test.assertEqual(run.precision, SolverMonolithic.Precision.FP32)
+    test.assertEqual(factory.recipe()["precision"], "fp32")
+    certificate = factory.certify(run._kinematics.digest.hex())
+    test.assertTrue(certificate.receipt()["authenticated"])
+    with test.assertRaisesRegex(ValueError, "Actual constructor configuration"):
+        certify_configuration(run, factory.fields, run._kinematics.digest.hex())
+    state = run.create_state(dt=0.001)
+    run.step(state, state, run.model.control(), dt=0.001)
+    test.assertTrue(run.last_stats.converged, run.last_stats)
+    test.assertEqual(factory.measure(run, state)["full_system"]["status"], "PASS_FULL_RESIDUAL")
+
+
 class TestRobotContacts(unittest.TestCase):
     pass
 
@@ -187,6 +212,7 @@ for device in get_test_devices():
         TestRobotContacts, "test_robot_policy_certificate", test_robot_policy_certificate, devices=[device]
     )
     add_function_test(TestRobotContacts, "test_robot_diagnostics", test_robot_diagnostics, devices=[device])
+    add_function_test(TestRobotContacts, "test_robot_precision", test_robot_precision, devices=[device])
 
 
 if __name__ == "__main__":

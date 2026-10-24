@@ -130,6 +130,9 @@ class FrozenRobotFactory:
         def capture(k, *args, **kwargs):
             original(k, *args, **kwargs)
             fields = {**k._source_values, **kwargs.get("extra_config", {})}
+            if self.precision == solver_monolithic.SolverMonolithic.Precision.FP32:
+                # FP32 kinematics add their native width to the digested fields.
+                fields["native_precision"] = np.array([32], dtype=np.int32)
             if _configuration_digest(fields) != k.digest:
                 raise ValueError("Captured constructor fields differ")
             captured.append({name: np.asarray(value).copy() for name, value in fields.items()})
