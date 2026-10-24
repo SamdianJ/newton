@@ -19,6 +19,43 @@ REPO = Path(__file__).resolve().parents[3]
 NORMAL = json.loads((REPO / "scripts/monolithic_reference/fixtures/normal_loading_frozen_v3.json").read_text())
 # Private producers keep measurement independent of the solver's spatial selection and pool.
 _MEASURE_BATCHES = weakref.WeakKeyDictionary()
+# Grasp success, approved 2026-10-24: over the final 0.5 s at the top of the lift, every
+# published step keeps the ground support within 5% of the object weight and the object
+# center of mass at least a quarter of its smallest edge above rest.
+GRASP_WINDOW_STEPS = 500
+GRASP_GROUND_WEIGHT_FRACTION = 0.05
+GRASP_RISE_EDGE_FRACTION = 0.25
+
+
+def grasp_metrics(window, *, initial_com_z, weight, edge):
+    """Measure the grasp window from ``(step, com_z, ground_force_z)`` rows [m, N].
+
+    The window must be ``GRASP_WINDOW_STEPS`` consecutive published steps; otherwise the
+    grasp is not held.
+    """
+    steps = [int(step) for step, _, _ in window]
+    rise = min((float(z) - initial_com_z for _, z, _ in window), default=None)
+    ground = max((abs(float(force)) for _, _, force in window), default=None)
+    complete = len(steps) == GRASP_WINDOW_STEPS and steps == list(range(steps[0], steps[0] + len(steps)))
+    return {
+        "window_first_step": steps[0] if steps else None,
+        "window_last_step": steps[-1] if steps else None,
+        "window_steps": len(steps),
+        "min_com_rise_m": rise,
+        "max_ground_force_N": ground,
+        "weight_N": weight,
+        "object_min_edge_m": edge,
+        "held": bool(
+            complete and ground <= GRASP_GROUND_WEIGHT_FRACTION * weight and rise >= GRASP_RISE_EDGE_FRACTION * edge
+        ),
+    }
+
+
+def object_weight_and_edge(model, positions):
+    """Return the soft object weight [N] and smallest rest bounding-box edge [m]."""
+    gravity = float(np.linalg.norm(model.gravity.numpy()[0]))
+    mass = float(model.particle_mass.numpy().astype(float).sum())
+    return mass * gravity, float(np.ptp(np.asarray(positions, dtype=float), axis=0).min())
 
 
 def serial(value):

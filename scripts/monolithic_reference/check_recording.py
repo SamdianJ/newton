@@ -95,8 +95,8 @@ def check(directory, expected_steps, *, require_complete=True):
     summary = json.loads((directory / "summary.json").read_text())
     if (require_complete and not summary["complete"]) or summary["published_steps"] != expected_steps:
         raise ValueError("Summary does not establish complete publication")
-    if require_complete and expected_steps == 5250 and not summary["held_cube"]:
-        raise ValueError("Franka did not satisfy original grasp criteria")
+    if require_complete and expected_steps == 5250 and not summary["grasp"]["held"]:
+        raise ValueError("Franka did not satisfy the grasp criteria")
     return {
         "status": "PASS" if require_complete else "PASS_PREFIX",
         "frames": len(labels),

@@ -328,11 +328,11 @@ def worker(case, output, *, max_steps=None):
         if any(not (ROOT / name).is_file() or sha(ROOT / name) != value for name, value in source_hashes.items()):
             raise ValueError("Source changed during robot acceptance")
         if max_steps is None:
-            from scripts.monolithic_reference.physical_gates import load_gates  # noqa: PLC0415
+            from scripts.monolithic_reference.physical_gates import GATES_PATH, load_gates  # noqa: PLC0415
 
             summary = json.loads((recording / "summary.json").read_text())
             gates = load_gates(allow_proposed=True)
-            receipt["physical_gate_sha256"] = sha(ROOT / "scripts/monolithic_reference/fixtures/physical_gates_v1.json")
+            receipt["physical_gate_sha256"] = sha(GATES_PATH)
             receipt["physical"] = qualify_robot(case["id"].split("--")[0], summary, receipt["comparison"], gates=gates)
             receipt["status"] = receipt["physical"]["status"]
         else:

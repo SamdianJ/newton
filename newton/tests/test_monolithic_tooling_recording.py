@@ -41,6 +41,34 @@ class TestContactFields(unittest.TestCase):
                 self.assertEqual(mask["masked_active_count"], len(mask["masked_active_keys"]))
 
 
+class TestGraspMetrics(unittest.TestCase):
+    def test_frozen_definition(self):
+        """Hold the object off the ground and above a quarter edge for every window step."""
+        from newton.examples.softbody.monolithic_recording import GRASP_WINDOW_STEPS, grasp_metrics  # noqa: PLC0415
+
+        def window(rise=0.02, ground=0.0, first=101, count=GRASP_WINDOW_STEPS):
+            return [(first + i, rise, ground) for i in range(count)]
+
+        def held(rows):
+            return grasp_metrics(rows, initial_com_z=0.0, weight=1.0, edge=0.04)["held"]
+
+        metrics = grasp_metrics(window(), initial_com_z=0.0, weight=1.0, edge=0.04)
+        self.assertEqual((metrics["window_first_step"], metrics["window_last_step"]), (101, 600))
+        self.assertEqual(metrics["window_steps"], GRASP_WINDOW_STEPS)
+        self.assertAlmostEqual(metrics["min_com_rise_m"], 0.02)
+        self.assertTrue(metrics["held"])
+        # Both limits are inclusive.
+        self.assertTrue(held(window(rise=0.01, ground=0.05)))
+        self.assertFalse(held(window(rise=0.0099)))
+        self.assertFalse(held(window(ground=-0.051)))
+        self.assertFalse(held(window(rise=0.009, count=1) + window(first=102, count=GRASP_WINDOW_STEPS - 1)))
+        # An incomplete or interrupted window is not a grasp.
+        self.assertFalse(held(window(count=GRASP_WINDOW_STEPS - 1)))
+        self.assertFalse(held(window(count=1) + window(first=103, count=GRASP_WINDOW_STEPS - 1)))
+        empty = grasp_metrics([], initial_com_z=0.0, weight=1.0, edge=0.04)
+        self.assertEqual((empty["window_steps"], empty["min_com_rise_m"], empty["held"]), (0, None, False))
+
+
 class TestRecordingValidation(unittest.TestCase):
     def test_comparison_envelope(self):
         """Bound floating differences without relaxing metadata or layout equality."""

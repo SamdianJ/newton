@@ -228,23 +228,39 @@ class TestSceneRunner(unittest.TestCase):
             "stopped_fraction_max": 0.01,
             "penetration_max_m": 0.001,
             "det_f_min": 0.2,
-            "require_held_cube": True,
+            "grasp": {
+                "window_steps": 2,
+                "ground_weight_fraction_max": 0.05,
+                "com_rise_min_edge_fraction": 0.25,
+                "required": True,
+            },
+        }
+        grasp = {
+            "window_first_step": 99,
+            "window_last_step": 100,
+            "window_steps": 2,
+            "min_com_rise_m": 0.02,
+            "max_ground_force_N": 0.0,
+            "weight_N": 0.64,
+            "object_min_edge_m": 0.04,
+            "held": True,
         }
         summary = {
             "complete": True,
             "counts": {"CONVERGED": 100, "STOPPED_ACCEPTED": 0, "HARD_FAILURE": 0},
             "maximum_penetration_m": 0.0,
             "minimum_det_f": 1.0,
-            "held_cube": True,
+            "grasp": grasp,
         }
-        frozen = {"version": 1, "status": "FROZEN", "robot": {"franka-cube": scene_gates}}
+        frozen = {"version": 2, "status": "FROZEN", "robot": {"franka-cube": scene_gates}}
         result = qualify_robot("franka-cube", summary, {"status": "NOT_READY_TOLERANCE"}, gates=frozen)
         self.assertEqual(result["status"], "PASS")
         self.assertEqual(result["diagnostic_comparison"], "NOT_READY_TOLERANCE")
         proposed = {**frozen, "status": "PROPOSED"}
         self.assertEqual(qualify_robot("franka-cube", summary, {}, gates=proposed)["status"], "PARTIAL")
-        failed = qualify_robot("franka-cube", {**summary, "held_cube": False}, {}, gates=frozen)
-        self.assertEqual((failed["status"], failed["failures"]), ("FAIL", ["held_cube"]))
+        dropped = {**summary, "grasp": {**grasp, "min_com_rise_m": 0.0}}
+        failed = qualify_robot("franka-cube", dropped, {}, gates=frozen)
+        self.assertEqual((failed["status"], failed["failures"]), ("FAIL", ["grasp"]))
 
     def test_list(self):
         """List the frozen matrix without initializing a GPU or loading scenes."""

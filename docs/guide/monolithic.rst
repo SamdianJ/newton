@@ -221,9 +221,14 @@ links to that project-specific policy. The runner binds each case
 to ``asset/monolithic/references.json``, verifies retained file hashes and frozen
 controls, and rejects a changed physical configuration before stepping. Robot
 cases qualify on the frozen physical plausibility gates in
-``scripts/monolithic_reference/fixtures/physical_gates_v1.json``: no hard
+``scripts/monolithic_reference/fixtures/physical_gates_v2.json``: no hard
 failures, at most 1% Stopped steps, sampled penetration of at most 2 mm, a
-minimum tet determinant of 0.2 and, for Franka, a held cube. Comparison with the
+minimum tet determinant of 0.2 and, for Franka, a successful grasp. A grasp
+succeeds when, over the final 500 steps at the top of the lift, every published
+step keeps the ground support within 5% of the cube weight and the cube center
+of mass at least a quarter of its smallest edge above rest. Sharpa reports the
+same grasp result as a diagnostic: its recorded hand closure does not lift the
+cube. Comparison with the
 retained reference trajectories is reported as a diagnostic only; new results
 need not match them. Missing frozen inputs produce FAIL; filtered profiles
 remain PARTIAL.

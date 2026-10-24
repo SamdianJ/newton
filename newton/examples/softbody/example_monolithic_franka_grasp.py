@@ -19,7 +19,13 @@ import warp as wp
 import newton.examples
 from newton.examples.softbody.monolithic_franka import DT, REPO, TIMES, FrankaGrasp, sha
 from newton.examples.softbody.monolithic_recording import contact_fields as measure_contact_fields
-from newton.examples.softbody.monolithic_recording import save, serial, state_arrays
+from newton.examples.softbody.monolithic_recording import (
+    grasp_metrics,
+    object_weight_and_edge,
+    save,
+    serial,
+    state_arrays,
+)
 
 
 class Example:
@@ -53,6 +59,9 @@ class Example:
         self.closed = False
         self.weights = self.case.model.particle_mass.numpy().astype(float)
         self.initial_com = np.average(self.case.state.particle_q.numpy(), axis=0, weights=self.weights)
+        self.object_weight, self.object_edge = object_weight_and_edge(
+            self.case.model, self.case.state.particle_q.numpy()
+        )
         if self.output:
             self.log = gzip.open(self.output / "steps.jsonl.gz", "wt")
             save(self.output / "configuration.json", self.case.metadata)
@@ -194,11 +203,14 @@ class Example:
             "zero_accepted_steps": [r["step"] for r in successful if r["zero_accepted"]],
             "final_cube_com": successful[-1]["cube_com"] if successful else self.initial_com,
             "final_ground_force": successful[-1]["ground_force"] if successful else None,
-            "hold_steps": len(hold),
-            "grasp_criteria": {"hold_seconds": 0.5, "minimum_com_rise_m": 0.05, "maximum_ground_weight_fraction": 0.05},
             "maximum_com_rise_m": max((r["cube_com"][2] - self.initial_com[2] for r in successful), default=0.0),
-            "hold_min_com_rise_m": min((r["cube_com"][2] - self.initial_com[2] for r in hold), default=None),
-            "hold_max_ground_force_N": max((abs(r["ground_force"][2]) for r in hold), default=None),
+            # The hold phase is the window at the top of the lift.
+            "grasp": grasp_metrics(
+                [(r["step"], r["cube_com"][2], r["ground_force"][2]) for r in hold],
+                initial_com_z=float(self.initial_com[2]),
+                weight=self.object_weight,
+                edge=self.object_edge,
+            ),
             "maximum_penetration_m": max((r["penetration"] for r in successful), default=0.0),
             "minimum_det_f": min((r["min_det_f"] for r in successful), default=1.0),
             "max_finger_asymmetry_m": max((r["finger_asymmetry"] for r in successful), default=0.0),
@@ -206,11 +218,6 @@ class Example:
             "solve_seconds": sum(r["solve_seconds"] for r in self.rows),
             "acceptance_scope": "single-scene demonstration; no general precision certification",
         }
-        self.summary["held_cube"] = bool(
-            len(hold) == 500
-            and self.summary["hold_min_com_rise_m"] >= 0.05
-            and self.summary["hold_max_ground_force_N"] < 0.05 * self.weights.sum() * 9.81
-        )
         if self.output:
             self.flush()
             self.log.close()
@@ -234,7 +241,7 @@ class Example:
         """Require a complete run and a sustained off-ground grasp during the hold."""
         self.close()
         assert self.summary["complete"] and not self.case.failed
-        assert self.summary["held_cube"], self.summary
+        assert self.summary["grasp"]["held"], self.summary
 
 
 if __name__ == "__main__":

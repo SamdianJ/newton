@@ -18,7 +18,15 @@ from newton.solvers.experimental.monolithic import build_smooth_sdf
 
 import newton
 from newton.examples.softbody.monolithic_grasp_trajectory import RecordedGrasp
-from newton.examples.softbody.monolithic_recording import measure, save, serial, state_arrays
+from newton.examples.softbody.monolithic_recording import (
+    GRASP_WINDOW_STEPS,
+    grasp_metrics,
+    measure,
+    object_weight_and_edge,
+    save,
+    serial,
+    state_arrays,
+)
 from newton.examples.softbody.monolithic_sharpa_scene import ASSETS, REPO, build
 
 
@@ -199,7 +207,10 @@ def run(args):
     counts = dict.fromkeys(("CONVERGED", "STOPPED_ACCEPTED", "HARD_FAILURE"), 0)
     weights = model.particle_mass.numpy().astype(float)
     initial_com = np.average(state.particle_q.numpy(), axis=0, weights=weights)
+    object_weight, object_edge = object_weight_and_edge(model, state.particle_q.numpy())
     max_penetration, min_det, max_com_rise, last_ground = 0.0, 1.0, 0.0, None
+    # The recording ends at the top of the lift, so its final steps form the grasp window.
+    grasp_window = []
     begin = time.perf_counter()
     calls = []
     zero_accepted_steps = []
@@ -268,6 +279,8 @@ def run(args):
                 min_det = min(min_det, stats.min_det_f)
                 max_com_rise = max(max_com_rise, com[2] - initial_com[2])
                 last_ground = row["ground_force_on_cube"]
+                if step > trajectory.steps - GRASP_WINDOW_STEPS:
+                    grasp_window.append((step, com[2], last_ground[2]))
                 record(step, label, q, v)
                 if label == "STOPPED_ACCEPTED" and counts[label] == 1:
                     np.savez_compressed(output / "first-stop-input.npz", **before)
@@ -305,7 +318,9 @@ def run(args):
         "final_ground_force": last_ground,
         "elapsed_seconds": time.perf_counter() - begin,
         "strict_complete": counts["CONVERGED"] == trajectory.steps,
-        "physical_grasp_acceptance": "NOT_CERTIFIED",
+        "grasp": grasp_metrics(
+            grasp_window, initial_com_z=float(initial_com[2]), weight=object_weight, edge=object_edge
+        ),
         "missing_phases": config["missing_phases"],
     }
     save(output / "summary.json", summary)
