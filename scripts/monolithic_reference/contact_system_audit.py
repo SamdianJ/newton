@@ -87,7 +87,9 @@ class ContactSystemAudit:
             k.jw,
             rigid_com=history.rigid_com,
             rigid_rotation=history.rigid_rotation,
-            **({} if begin else {"dt": self.run._dt}),
+            # Slip uses the run's exact step increments, as in production; increments
+            # derived from rounded absolute poses differ visibly in FP32.
+            **({} if begin else {"dt": self.run._dt, "steps": self.run._contact_steps(source)}),
         )
 
     def evaluate(self):

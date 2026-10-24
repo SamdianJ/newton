@@ -204,7 +204,16 @@ class RobotContactRecorder:
         report = self.audit.evaluate()
         k, b = complete._kinematics, complete._contact._batch
         h = self.audit.state._monolithic_coupled
-        args = b._state(self.audit.state.particle_q, k.poses, k.com, k.jt, k.jw, h.rigid_com, h.rigid_rotation)
+        args = b._state(
+            self.audit.state.particle_q,
+            k.poses,
+            k.com,
+            k.jt,
+            k.jw,
+            h.rigid_com,
+            h.rigid_rotation,
+            run._contact_steps(run._accepted),
+        )
         penetration, masked_penetration, slip_max, work, load = 0.0, 0.0, 0.0, 0.0, 0.0
         keys, omitted_sum = [], np.zeros(4)
         for mode in b._chunks():

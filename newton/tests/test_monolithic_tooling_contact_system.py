@@ -68,6 +68,10 @@ def test_full_system_precision(test, device):
         result = audit.evaluate()
         test.assertEqual(result["status"], "PASS_FULL_RESIDUAL", result)
         test.assertEqual(len(result["blocks"]), 7)
+        # Every contributing sample is a candidate, so the complete and clipped contact
+        # residuals differ only by FP32 summation order when both use the exact increments.
+        scale = np.linalg.norm(run._contact.residual.numpy().astype(float))
+        test.assertLess(result["residual_difference_l2"], 1e-5 * scale)
     mixed = pooled_solver(contact_scene(device), contact_factor_capacity=0, mode="production", graph=device.is_cuda)
     with test.assertRaisesRegex(ValueError, "one precision"):
         ContactSystemAudit(run, mixed)
