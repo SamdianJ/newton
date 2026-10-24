@@ -113,6 +113,8 @@ def test_robot_precision(test, device):
         build()
     factory, run = build(precision="fp32")
     test.assertEqual(run.precision, SolverMonolithic.Precision.FP32)
+    # FP32 keeps the complete candidate bounds; the reduced Franka bounds are FP64 calibrations.
+    test.assertEqual(run._contact.candidate_capacity, run._contact.count)
     test.assertEqual(factory.recipe()["precision"], "fp32")
     certificate = factory.certify(run._kinematics.digest.hex())
     test.assertTrue(certificate.receipt()["authenticated"])

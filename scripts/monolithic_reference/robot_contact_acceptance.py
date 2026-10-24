@@ -147,8 +147,13 @@ class FrozenRobotFactory:
             complete = solver_monolithic.SolverMonolithic(model, contact_factor_capacity=0, **options)
         resources = {}
         if self.dataflow == "spatial":
-            resources["contact_candidate_capacity"] = 8192 if self.scene == "franka-cube" else complete._contact.count
-            resources["contact_factor_capacity"] = 24576 if self.scene == "franka-cube" else 3 * complete._contact.count
+            # The reduced Franka bounds were calibrated in FP64. FP32 candidate envelopes are wider
+            # (Franka needs about 21000 of 23328 candidates), so FP32 keeps the complete bounds.
+            calibrated = (
+                self.scene == "franka-cube" and self.precision == solver_monolithic.SolverMonolithic.Precision.FP64
+            )
+            resources["contact_candidate_capacity"] = 8192 if calibrated else complete._contact.count
+            resources["contact_factor_capacity"] = 24576 if calibrated else 3 * complete._contact.count
         with patch.object(_TreeKinematics, "__init__", capture):
             run = solver_monolithic.SolverMonolithic(model, **resources, **options)
         self.recorder = RobotContactRecorder(run, complete)
