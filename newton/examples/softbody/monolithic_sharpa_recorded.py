@@ -11,6 +11,7 @@ import sys
 import time
 import traceback
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import warp as wp
@@ -78,9 +79,8 @@ def targets(trajectory, curve, mapping, time_s):
     return target, rate, position, phase
 
 
-def run(args):
-    """Preserve the first failure and record every published complete state."""
-    output = args.output
+def setup(args):
+    """Build the recorded scene, its solver and the checked initial state."""
     payload = json.loads(args.trajectory.read_text())
     model, scene, mapping, curve, terms, trajectory, palm = build_recorded(payload)
     smooth = build_smooth_sdf(model, qualified_directory=ASSETS / "sharpa/geometry-rebuilt")
@@ -110,7 +110,7 @@ def run(args):
         smooth_sdf=smooth,
     )
     source, control = model.state(), model.control()
-    q, v, _, _ = targets(trajectory, curve, mapping, 0)
+    q, _, _, _ = targets(trajectory, curve, mapping, 0)
     initial = source.joint_q.numpy()
     for coord, _, slot in mapping.values():
         initial[coord] = q[slot]
@@ -140,6 +140,32 @@ def run(args):
     np.testing.assert_allclose(pose[:3], trajectory.position[0], atol=position_tolerance, rtol=0)
     if abs(abs(np.dot(pose[3:], trajectory.quaternion)) - 1) > rotation_tolerance:
         raise ValueError("Initial palm orientation does not match recording")
+    return SimpleNamespace(
+        payload=payload,
+        model=model,
+        scene=scene,
+        mapping=mapping,
+        curve=curve,
+        terms=terms,
+        trajectory=trajectory,
+        palm=palm,
+        smooth=smooth,
+        solver=solver,
+        contact_recorder=contact_recorder,
+        state=state,
+        control=control,
+        pose=pose,
+    )
+
+
+def run(args):
+    """Preserve the first failure and record every published complete state."""
+    output = args.output
+    s = setup(args)
+    payload, model, scene, mapping, curve, terms = s.payload, s.model, s.scene, s.mapping, s.curve, s.terms
+    trajectory, palm, smooth, solver, contact_recorder = s.trajectory, s.palm, s.smooth, s.solver, s.contact_recorder
+    state, control, pose = s.state, s.control, s.pose
+    q, v, _, _ = targets(trajectory, curve, mapping, 0)
     config = {
         "trajectory": payload,
         "trajectory_sha256": hashlib.sha256(args.trajectory.read_bytes()).hexdigest(),
