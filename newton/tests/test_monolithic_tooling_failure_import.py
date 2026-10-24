@@ -11,8 +11,15 @@ from pathlib import Path
 
 import numpy as np
 
+from newton._src.solvers.monolithic.material_inputs import _cable_geometry
 from newton.tests.test_monolithic_solver_coupled import scene, snapshot, solver
-from scripts.monolithic_reference.import_failure_state import check_scene, import_state, read_source
+from scripts.monolithic_reference.cable_benchmarks import CableBenchmark
+from scripts.monolithic_reference.import_failure_state import (
+    _project_cable_frames,
+    check_scene,
+    import_state,
+    read_source,
+)
 
 
 def saved(run, state):
@@ -68,6 +75,30 @@ class TestFailureImport(unittest.TestCase):
         self.assertEqual(int(snapshot(state)["history.precision"][0]), 32)
         other.step(state, state, self.model.control(), dt=0.001)
         self.assertFalse(other.last_stats.rolled_back, other.last_stats)
+
+    def test_converted_cable_frames(self):
+        """Re-project FP64 cable frames onto FP32-rounded short edges so the converted state stays valid."""
+        case = CableBenchmark("cantilever", segments=256, precision="fp32")
+        states = case.solver._states
+        scratch = states.copy(case.state)
+        s = np.linspace(0.0, 1.0, 257)
+        x = np.c_[s, 0.3 * np.cos(4 * s), 0.3 * np.sin(4 * s)]
+        tangent = np.diff(x, axis=0)
+        tangent /= np.linalg.norm(tangent, axis=1)[:, None]
+        director = np.cross(tangent, [1.0, 0.0, 0.0])
+        director /= np.linalg.norm(director, axis=1)[:, None]
+        twist = _cable_geometry(x, director)[3]
+        history = scratch._monolithic_coupled
+        scratch.particle_q.assign(x.astype(np.float32))
+        history.bound_x.assign(x.astype(np.float32))
+        for prefix in ("cable_", "cable_bound_"):
+            getattr(history, prefix + "ref_director").assign(director.astype(np.float32))
+            getattr(history, prefix + "ref_twist").assign(twist.astype(np.float32))
+        with self.assertRaisesRegex(ValueError, "directors"):
+            states.validate(scratch)
+        self.assertEqual(_project_cable_frames(states, scratch), 256)
+        states.validate(scratch)
+        self.assertLess(np.abs(history.cable_ref_director.numpy() - director).max(), 1e-4)
 
     def test_rejections(self):
         """Reject changed shapes, unknown or missing fields and states of another scene."""
