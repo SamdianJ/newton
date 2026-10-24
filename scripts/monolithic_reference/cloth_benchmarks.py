@@ -22,9 +22,14 @@ RECIPES = json.loads(RECIPE_PATH.read_text())
 class ClothBenchmark:
     """Exercise flat and naturally folded shells under frozen nodal loading."""
 
-    def __init__(self, kind, *, device="cpu", pcg_mode="diagnostic", use_cuda_graph=False):
+    def __init__(self, kind, *, device="cpu", pcg_mode="diagnostic", use_cuda_graph=False, precision="fp64"):
         self.kind = kind
-        self.options = {"device": device, "pcg_mode": pcg_mode, "use_cuda_graph": use_cuda_graph}
+        self.options = {
+            "device": device,
+            "pcg_mode": pcg_mode,
+            "use_cuda_graph": use_cuda_graph,
+            "precision": precision,
+        }
         self.recipe = r = RECIPES["common"] | RECIPES[kind]
         self.dt = r["dt"]
         self.total_steps = sum(r[k] for k in ("ramp_steps", "hold_steps", "unload_steps", "recovery_steps"))
@@ -75,7 +80,7 @@ class ClothBenchmark:
                     surface_density=r["surface_density"],
                 )
             ],
-            precision=SolverMonolithic.Precision.FP64,
+            precision=SolverMonolithic.Precision(precision),
             pcg_mode=SolverMonolithic.PCGMode(pcg_mode),
             use_cuda_graph=use_cuda_graph,
             newton_max_iterations=60,

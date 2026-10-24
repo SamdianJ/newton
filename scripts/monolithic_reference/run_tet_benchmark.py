@@ -67,8 +67,10 @@ def run_case(args):
             device=args.device,
             pcg_mode=args.pcg_mode,
             use_cuda_graph=args.use_cuda_graph,
+            precision=args.precision,
         )
         receipt["cells"] = list(case.cells)
+        receipt["precision"] = case.solver.precision.value
         for _ in range(min(args.max_steps or case.total_steps, case.total_steps)):
             case.step()
         result = case.check_final()
@@ -113,6 +115,7 @@ def main():
     case.add_argument("--device", default="cpu")
     case.add_argument("--pcg-mode", choices=("diagnostic", "production"), default="diagnostic")
     case.add_argument("--use-cuda-graph", action="store_true")
+    case.add_argument("--precision", choices=("fp64", "fp32"), default="fp64")
     case.add_argument("--max-steps", type=int)
     case.add_argument("--output", type=Path, required=True)
     case.set_defaults(func=run_case)

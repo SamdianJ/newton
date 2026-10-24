@@ -76,7 +76,7 @@ def check_robot_reports(directory, run, expected_steps):
     }
 
 
-def certify_configuration(run, fields, reference_digest):
+def certify_configuration(run, fields, reference_digest, *, precision_bits=64):
     """Bind the actual constructor identity and report whether it equals the frozen reference.
 
     Robot runs qualify on physical gates (D11), so a frozen-reference trajectory
@@ -84,7 +84,7 @@ def certify_configuration(run, fields, reference_digest):
     recorded fields; a differing reference only leaves the certificate
     unauthenticated.
     """
-    if _configuration_digest(fields) != run._kinematics.digest or run._states.precision_bits != 64:
+    if _configuration_digest(fields) != run._kinematics.digest or run._states.precision_bits != precision_bits:
         raise ValueError("Actual constructor configuration digest differs")
     authenticated = run._kinematics.digest.hex() == reference_digest
     reason = None if authenticated else "Configuration identity differs from the frozen reference"
@@ -117,10 +117,11 @@ class _ConfigurationCertificate:
 class FrozenRobotFactory:
     """Select a bounded experiment at construction without changing the solver API/default."""
 
-    def __init__(self, scene, *, dataflow="spatial"):
+    def __init__(self, scene, *, dataflow="spatial", precision="fp64"):
         if scene not in ("franka-cube", "sharpa-recorded-10mm") or dataflow not in ("spatial", "default"):
             raise ValueError("Unsupported frozen robot recipe")
         self.scene, self.dataflow = scene, dataflow
+        self.precision = solver_monolithic.SolverMonolithic.Precision(precision)
         self.fields, self.run, self.recorder = None, None, None
 
     def __call__(self, model, **options):
@@ -135,6 +136,8 @@ class FrozenRobotFactory:
 
         if self.run is not None or "contact_factor_capacity" in options:
             raise ValueError("Robot recipe cannot be reused or override resources")
+        if solver_monolithic.SolverMonolithic.Precision(options.get("precision", "fp64")) != self.precision:
+            raise ValueError("Robot scene precision differs from its recipe")
         # Sharpa retains the complete static resource bounds; calibration may reduce them later.
         # Derive the exact supported enumeration from compact metadata, not a shape-count guess.
         with pooled_audit_route():
@@ -152,7 +155,8 @@ class FrozenRobotFactory:
         return run
 
     def certify(self, reference_digest):
-        return certify_configuration(self.run, self.fields, reference_digest)
+        bits = 64 if self.precision == solver_monolithic.SolverMonolithic.Precision.FP64 else 32
+        return certify_configuration(self.run, self.fields, reference_digest, precision_bits=bits)
 
     def measure(self, run, state):
         if run is not self.run or self.recorder is None:
@@ -169,7 +173,7 @@ class FrozenRobotFactory:
         return {
             "scene": self.scene,
             "dataflow": "spatial",
-            "precision": "fp64",
+            "precision": self.precision.value,
             "production_default": self.dataflow == "default",
             "resources": c.resource_identity.tolist(),
             "zero_overflow_required": True,

@@ -20,7 +20,16 @@ class CableBenchmark:
     """Own one prescribed physical experiment and its independent analytical comparison."""
 
     def __init__(
-        self, kind, *, segments=None, axis=1, ea_multiplier=1, device="cpu", pcg_mode="diagnostic", use_cuda_graph=False
+        self,
+        kind,
+        *,
+        segments=None,
+        axis=1,
+        ea_multiplier=1,
+        device="cpu",
+        pcg_mode="diagnostic",
+        use_cuda_graph=False,
+        precision="fp64",
     ):
         self.kind, self.axis = kind, axis
         self.ea_multiplier = ea_multiplier
@@ -34,7 +43,7 @@ class CableBenchmark:
         )
         self.s = np.linspace(0, r["length"], n + 1)
         # Model stores the reference geometry in FP32. Mass uses those same
-        # lengths, while the simulation's unknowns and E/r are native FP64.
+        # lengths, while the simulation's unknowns and E/r use the solver precision.
         rest = np.zeros((n + 1, 3), dtype=np.float32)
         rest[:, 0] = self.s - r["length"] / 2
         length = np.diff(rest[:, 0]).astype(float)
@@ -73,6 +82,7 @@ class CableBenchmark:
             "linear_tolerance": 0.5,
             "pcg_mode": SolverMonolithic.PCGMode(pcg_mode),
             "use_cuda_graph": use_cuda_graph,
+            "precision": SolverMonolithic.Precision(precision),
         }
         self.solver = SolverMonolithic(self.model, **self.solver_options)
         self.state = self.solver.create_state(dt=self.dt)

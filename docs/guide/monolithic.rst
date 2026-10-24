@@ -231,7 +231,11 @@ same grasp result as a diagnostic: its recorded hand closure does not lift the
 cube. Comparison with the
 retained reference trajectories is reported as a diagnostic only; new results
 need not match them. Missing frozen inputs produce FAIL; filtered profiles
-remain PARTIAL.
+remain PARTIAL. Pass ``--precision fp32`` to run every case in FP32: the cases
+qualify on the same physical gates and complete-candidate contact audit, skip
+the comparison with the FP64 reference trajectories, and their receipts record
+the precision. The material, cable, cloth and tet runners accept the same
+option.
 
 After completion, review ``summary.json``, ``RESULTS.md`` and per-case receipts.
 By default, successful new recordings are removed after their summaries and

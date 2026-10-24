@@ -86,10 +86,11 @@ def run(args):
     smooth = build_smooth_sdf(model, qualified_directory=ASSETS / "sharpa/geometry-rebuilt")
     solver_factory = getattr(args, "solver_factory", None)
     contact_recorder = getattr(args, "contact_recorder", None)
+    precision = getattr(args, "precision", "fp64")
     if solver_factory is None:
         from scripts.monolithic_reference.robot_contact_acceptance import FrozenRobotFactory  # noqa: PLC0415
 
-        solver_factory = FrozenRobotFactory("sharpa-recorded-10mm", dataflow="default")
+        solver_factory = FrozenRobotFactory("sharpa-recorded-10mm", dataflow="default", precision=precision)
         contact_recorder = solver_factory.measure
     solver = solver_factory(
         model,
@@ -105,6 +106,7 @@ def run(args):
         joint_terms=terms,
         pcg_mode="production",
         use_cuda_graph=True,
+        precision=precision,
         smooth_sdf=smooth,
     )
     source, control = model.state(), model.control()
@@ -332,6 +334,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--trajectory", type=Path, default=ASSETS / "sharpa/recorded-control.json")
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--precision", choices=("fp64", "fp32"), default="fp64", help="Solver precision")
     args = parser.parse_args()
     args.output.mkdir(parents=True, exist_ok=False)
     save(args.output / "command.json", {"argv": sys.argv, "cwd": str(Path.cwd())})

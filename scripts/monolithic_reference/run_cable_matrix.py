@@ -24,6 +24,7 @@ def main():
     parser.add_argument("--device", default="cpu")
     parser.add_argument("--pcg-mode", choices=("diagnostic", "production"), default="diagnostic")
     parser.add_argument("--use-cuda-graph", action="store_true")
+    parser.add_argument("--precision", choices=("fp64", "fp32"), default="fp64")
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
@@ -60,6 +61,8 @@ def main():
             args.device,
             "--pcg-mode",
             args.pcg_mode,
+            "--precision",
+            args.precision,
             "--output",
             str(output),
         ]
@@ -88,6 +91,8 @@ def main():
                 identity = receipt["sha256"]
             if receipt["sha256"] != identity:
                 failures.append(name + ": mixed source identities")
+            if receipt.get("precision") != args.precision:
+                failures.append(name + ": precision differs from the matrix")
             if returncode or receipt["status"] not in ("PASS", "MESH_SAMPLE", "EA_SAMPLE"):
                 failures.append(name + ": failed/incomplete experiment")
             print(name, receipt["status"], flush=True)
@@ -137,6 +142,7 @@ def main():
     summary = {
         "status": "FAIL" if failures else "PASS",
         "kind": args.kind,
+        "precision": args.precision,
         "cases": cases,
         "comparisons": comparisons,
         "failures": failures,

@@ -65,7 +65,13 @@ def aggregate(results, filtered):
     if any(row["status"] not in ("PASS", "PARTIAL") for row in results):
         return "FAIL"
     identities = {
-        (row.get("commit"), row.get("source_sha256"), row.get("input_manifest_sha256"), row.get("contact_dataflow"))
+        (
+            row.get("commit"),
+            row.get("source_sha256"),
+            row.get("input_manifest_sha256"),
+            row.get("contact_dataflow"),
+            row.get("precision"),
+        )
         for row in results
     }
     if len(identities) > 1:
@@ -109,7 +115,8 @@ def write_report(output, summary):
     lines = [
         "# Monolithic scene regression",
         "",
-        f"Profile: {summary['profile']}; status: {summary['status']}; complete: {summary['complete']}.",
+        f"Profile: {summary['profile']}; precision: {summary['precision']}; status: {summary['status']}; "
+        f"complete: {summary['complete']}.",
         "Component tests: NOT_RUN_BY_SCENE_RUNNER. Stopped is not convergence.",
         "",
         "| Case | Result | Converged | Stopped | Recording retained | Median ms | Steps/s | Receipt |",
@@ -202,10 +209,13 @@ def reference_binding(case):
     return reference, controls, native_controls, envelopes, {**entry, "comparison_policy": policy}
 
 
-def worker(case, output, *, max_steps=None):
-    """Run a complete scene and validate recordings against the frozen envelopes."""
+def worker(case, output, *, max_steps=None, precision="fp64"):
+    """Run a complete scene and validate recordings against the frozen envelopes.
+
+    The retained references are FP64, so an FP32 run skips the diagnostic trajectory comparison.
+    """
     output.mkdir(parents=True, exist_ok=False)
-    receipt = {"case": case, "status": "FAIL", "source_root": str(ROOT)}
+    receipt = {"case": case, "status": "FAIL", "source_root": str(ROOT), "precision": precision}
     source_hashes = {
         str(p.relative_to(ROOT)): sha(p)
         for folder in ("newton", "scripts/monolithic_reference")
@@ -219,7 +229,7 @@ def worker(case, output, *, max_steps=None):
         if case.get("kind") == "rigid_stack":
             from scripts.monolithic_reference.run_rigid_stack import record_run  # noqa: PLC0415
 
-            scene = record_run(output, max_steps=max_steps)
+            scene = record_run(output, max_steps=max_steps, precision=precision)
             receipt.update({name: value for name, value in scene.items() if name != "status"})
             if receipt["scene_input_sha256"] != case["input_sha256"]:
                 raise ValueError("Rigid fixture changed after case selection")
@@ -239,7 +249,7 @@ def worker(case, output, *, max_steps=None):
             check_robot_reports,
         )
 
-        factory = FrozenRobotFactory(case["id"].split("--")[0], dataflow="spatial")
+        factory = FrozenRobotFactory(case["id"].split("--")[0], dataflow="spatial", precision=precision)
         certificate = None
         limit = min(max_steps, case["steps"]) if max_steps is not None else case["steps"]
 
@@ -264,6 +274,7 @@ def worker(case, output, *, max_steps=None):
                 solver_factory=factory,
                 contact_recorder=factory.measure,
                 max_steps=max_steps,
+                precision=precision,
             )
             example = Example(ViewerNull(), args)
             certificate = factory.certify(binding["config_digest"])
@@ -290,6 +301,7 @@ def worker(case, output, *, max_steps=None):
                 solver_factory=factory,
                 contact_recorder=factory.measure,
                 max_steps=max_steps,
+                precision=precision,
             )
 
             def certify(solver):
@@ -306,7 +318,9 @@ def worker(case, output, *, max_steps=None):
                 raise ValueError("Sharpa did not publish its complete trajectory")
         receipt["recording"] = check(recording, limit, require_complete=max_steps is None)
         receipt["full_system"] = check_robot_reports(recording, factory.run, limit)
-        if max_steps is None:
+        if precision != "fp64":
+            receipt["comparison"] = {"status": "NOT_RUN_PRECISION"}
+        elif max_steps is None:
             try:
                 receipt["comparison"] = compare(
                     reference,
@@ -361,6 +375,7 @@ def main():
     )
     parser.add_argument("--worker", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--max-steps", type=int, help="Bounded smoke only; always PARTIAL, no trajectory qualification")
+    parser.add_argument("--precision", choices=("fp64", "fp32"), default="fp64", help="Solver precision of every case")
     args = parser.parse_args()
     args.contact_dataflow = "spatial"
     if args.max_steps is not None and args.max_steps <= 0:
@@ -377,7 +392,7 @@ def main():
     if args.worker:
         if len(selected) != 1:
             parser.error("Worker requires exactly one case")
-        return worker(selected[0], args.output.resolve(), max_steps=args.max_steps)
+        return worker(selected[0], args.output.resolve(), max_steps=args.max_steps, precision=args.precision)
     args.output.mkdir(parents=True, exist_ok=False)
     results = []
     for case in selected:
@@ -394,6 +409,8 @@ def main():
             "--worker",
             "--output",
             str(destination),
+            "--precision",
+            args.precision,
         ]
         if args.max_steps is not None:
             command += ["--max-steps", str(args.max_steps)]
@@ -416,6 +433,7 @@ def main():
                 ).hexdigest(),
                 "input_manifest_sha256": receipt.get("input_manifest_sha256"),
                 "contact_dataflow": args.contact_dataflow,
+                "precision": receipt.get("precision"),
                 "effective_contact_dataflow": receipt.get("effective_contact_dataflow", args.contact_dataflow),
                 "scene_input_sha256": receipt.get("scene_input_sha256"),
                 "performance": receipt.get("performance", {}),
@@ -424,6 +442,7 @@ def main():
         )
         summary = {
             "profile": args.profile,
+            "precision": args.precision,
             "status": aggregate(results, bool(args.case)),
             "complete": len(results) == len(selected),
             "filtered": bool(args.case),

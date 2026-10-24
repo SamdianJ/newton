@@ -42,13 +42,14 @@ class TestSceneRunner(unittest.TestCase):
             patch(
                 "scripts.monolithic_reference.run_rigid_stack.record_run",
                 return_value={"status": "PASS", "scene_input_sha256": "changed"},
-            ),
+            ) as record,
         ):
             output = Path(directory) / "case"
-            self.assertEqual(worker(case, output), 1)
+            self.assertEqual(worker(case, output, precision="fp32"), 1)
             receipt = json.loads((output / "receipt.json").read_text())
-            self.assertEqual(receipt["status"], "FAIL")
+            self.assertEqual((receipt["status"], receipt["precision"]), ("FAIL", "fp32"))
             self.assertIn("fixture changed", receipt["exception"])
+            self.assertEqual(record.call_args.kwargs["precision"], "fp32")
 
     def test_recording_retention(self):
         """Drop only passed output recordings; preserve failures, summaries and opt-in full data."""
@@ -81,6 +82,7 @@ class TestSceneRunner(unittest.TestCase):
             output = Path(folder)
             summary = {
                 "profile": "nightly",
+                "precision": "fp32",
                 "status": "FAIL",
                 "complete": True,
                 "cases": [
@@ -95,6 +97,7 @@ class TestSceneRunner(unittest.TestCase):
             write_report(output, summary)
             report = (output / "RESULTS.md").read_text()
             self.assertIn("NOT_RUN_BY_SCENE_RUNNER", report)
+            self.assertIn("precision: fp32", report)
             self.assertIn("case1 | FAIL | 1 | 2 | True", report)
 
     def test_relocated_input_identity(self):
@@ -217,6 +220,9 @@ class TestSceneRunner(unittest.TestCase):
         self.assertEqual(aggregate([{"status": "FAIL"}], True), "FAIL")
         self.assertEqual(
             aggregate([{"status": "PASS", "commit": "a"}, {"status": "PASS", "commit": "b"}], False), "FAIL"
+        )
+        self.assertEqual(
+            aggregate([{"status": "PASS", "precision": "fp64"}, {"status": "PASS", "precision": "fp32"}], False), "FAIL"
         )
         with self.assertRaises(ValueError):
             select_cases("dev", ["franka-cube--Armijo--C-EE--production--graph1"])

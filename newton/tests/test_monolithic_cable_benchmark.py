@@ -52,11 +52,13 @@ class TestMonolithicCableBenchmark(unittest.TestCase):
             self.assertEqual(record["status"], "PARTIAL")
             self.assertEqual(record["metrics"]["steps"], 101)
             self.assertEqual(record["resumed_from_step"], 100)
+            self.assertEqual(record["precision"], "fp64")
             with np.load(root / "resumed/final.npz") as resumed, np.load(root / "continuous/final.npz") as continuous:
                 for key in resumed.files:
                     np.testing.assert_array_equal(resumed[key], continuous[key])
-            error = run("resumed", "--resume", "--ea-multiplier", "10", success=False)
-            self.assertIn("identical source, recipe and execution arguments", error)
+            for options in (("--ea-multiplier", "10"), ("--precision", "fp32")):
+                error = run("resumed", "--resume", *options, success=False)
+                self.assertIn("identical source, recipe and execution arguments", error)
             self.assertEqual(receipt.read_bytes(), original)
             record["status"] = "FAIL"
             receipt.write_text(json.dumps(record))

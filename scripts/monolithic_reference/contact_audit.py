@@ -130,8 +130,9 @@ def verify_contract(left, right):
         raise ValueError("Comparison requires pooled/spatial algorithms")
     algorithm_fields = ALGORITHM_FIELDS | {"contact_spatial"}
     labels = ("pooled", "spatial")
-    if left.precision.value != "fp64" or right.precision.value != "fp64":
-        raise ValueError("Comparison requires native FP64")
+    # Both objectives evaluate the same kernels, so the audit holds in either precision.
+    if left.precision != right.precision:
+        raise ValueError("Comparison requires one precision")
     model_inputs = _physical_model_arrays(left)
     _exact(model_inputs, _physical_model_arrays(right))
     _exact(left._physics_values, right._physics_values)

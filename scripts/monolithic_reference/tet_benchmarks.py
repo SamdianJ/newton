@@ -37,7 +37,7 @@ class TetBenchmark:
         device="cpu",
         pcg_mode="diagnostic",
         use_cuda_graph=False,
-        precision=SolverMonolithic.Precision.FP64,
+        precision="fp64",
     ):
         if kind not in KINDS or (kind == "patch") != (case is not None):
             raise ValueError("Unknown tet benchmark or patch case")
@@ -103,7 +103,7 @@ class TetBenchmark:
             newton_max_iterations=r["newton_max_iterations"],
             pcg_mode=SolverMonolithic.PCGMode(pcg_mode),
             use_cuda_graph=use_cuda_graph,
-            precision=precision,
+            precision=SolverMonolithic.Precision(precision),
             **options,
         )
         source = self.model.state()
@@ -231,6 +231,8 @@ def qualify_matrix(kind, receipts, *, recipe_status):
         return {"status": "INCOMPLETE", "failures": ["case_set"]}
     if len({json.dumps(r["sha256"], sort_keys=True) for r in receipts}) != 1:
         return {"status": "FAIL", "failures": ["mixed_source"]}
+    if len({r.get("precision") for r in receipts}) != 1:
+        return {"status": "FAIL", "failures": ["mixed_precision"]}
     result = summarize_matrix(kind, receipts)
     if result["status"] == "PASS" and recipe_status != "FROZEN":
         result["status"] = "PARTIAL"

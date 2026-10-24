@@ -179,6 +179,8 @@ class TestTetMatrix(unittest.TestCase):
         self.assertEqual(qualify_matrix("patch", rows, recipe_status="FROZEN")["status"], "PASS")
         self.assertEqual(qualify_matrix("patch", rows, recipe_status="PROPOSED")["status"], "PARTIAL")
         self.assertEqual(qualify_matrix("patch", rows[1:], recipe_status="FROZEN")["status"], "INCOMPLETE")
+        mixed = [{**rows[0], "precision": "fp32"}, *rows[1:]]
+        self.assertEqual(qualify_matrix("patch", mixed, recipe_status="FROZEN")["failures"], ["mixed_precision"])
         rows[0] = {**rows[0], "sha256": {"a": "2"}}
         self.assertEqual(qualify_matrix("patch", rows, recipe_status="FROZEN")["status"], "FAIL")
 
@@ -189,13 +191,16 @@ class TestTetRunner(unittest.TestCase):
             root = Path(directory)
             command = [sys.executable, "-m", "scripts.monolithic_reference.run_tet_benchmark"]
             arguments = ["case", "patch", "--case", "shear", "--cells", "2", "2", "2", "--max-steps", "1"]
+            arguments += ["--precision", "fp32"]
             subprocess.run(
                 [*command, *arguments, "--output", str(root / "shear")],
                 check=True,
                 capture_output=True,
             )
             receipt = json.loads((root / "shear/receipt.json").read_text())
-            self.assertEqual((receipt["status"], receipt["cells"]), ("PARTIAL", [2, 2, 2]))
+            self.assertEqual(
+                (receipt["status"], receipt["cells"], receipt["precision"]), ("PARTIAL", [2, 2, 2], "fp32")
+            )
             result = subprocess.run(
                 [*command, "summarize", "patch", "--input", str(root)], capture_output=True, check=False
             )

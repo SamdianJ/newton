@@ -56,6 +56,23 @@ def test_full_system_residual(test, device):
             test.assertEqual(run._contact.candidate_generation, generation)
 
 
+def test_full_system_precision(test, device):
+    """Audit an FP32 run against an FP32 complete objective; mixed precisions are not comparable."""
+    options = {"mode": "production", "graph": device.is_cuda, "precision": "fp32"}
+    run = spatial_solver(contact_scene(device), **options)
+    audit = ContactSystemAudit(run, pooled_solver(contact_scene(device), contact_factor_capacity=0, **options))
+    state = contact_state(run, "chain")
+    for _ in range(2):
+        run.step(state, state, run.model.control(), dt=0.001)
+        test.assertTrue(run.last_stats.converged, run.last_stats)
+        result = audit.evaluate()
+        test.assertEqual(result["status"], "PASS_FULL_RESIDUAL", result)
+        test.assertEqual(len(result["blocks"]), 7)
+    mixed = pooled_solver(contact_scene(device), contact_factor_capacity=0, mode="production", graph=device.is_cuda)
+    with test.assertRaisesRegex(ValueError, "one precision"):
+        ContactSystemAudit(run, mixed)
+
+
 def test_full_system_detects_miss(test, device):
     """Reject clipped convergence when a deliberately omitted contact violates the full residual gate."""
     options = {"mode": "production", "graph": device.is_cuda}
@@ -209,6 +226,7 @@ class TestContactSystemAudit(unittest.TestCase):
 for device in get_test_devices():
     for name in (
         "test_full_system_residual",
+        "test_full_system_precision",
         "test_full_system_detects_miss",
         "test_actor_system_report",
         "test_actor_contact_trajectories",

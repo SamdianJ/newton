@@ -25,9 +25,24 @@ def load_fraction(step, common):
 class MaterialScene:
     """Keep scene construction and controls identical across device and restart paths."""
 
-    def __init__(self, name, *, recipe=MATERIAL_RECIPE_PATH, device="cpu", pcg_mode="diagnostic", use_cuda_graph=False):
+    def __init__(
+        self,
+        name,
+        *,
+        recipe=MATERIAL_RECIPE_PATH,
+        device="cpu",
+        pcg_mode="diagnostic",
+        use_cuda_graph=False,
+        precision="fp64",
+    ):
         self.name = name
-        self.options = {"recipe": recipe, "device": device, "pcg_mode": pcg_mode, "use_cuda_graph": use_cuda_graph}
+        self.options = {
+            "recipe": recipe,
+            "device": device,
+            "pcg_mode": pcg_mode,
+            "use_cuda_graph": use_cuda_graph,
+            "precision": precision,
+        }
         self.case = case = build_case(name, recipe=recipe)
         self.common, self.recipe = c, r = case["common"], case["recipe"]
         self.dt, self.steps = c["dt"], 0
@@ -114,7 +129,7 @@ class MaterialScene:
             cable_inputs=cables,
             mass_mode="lumped",
             joint_terms=SolverMonolithic.JointTerms(implicit_pd=True),
-            precision=SolverMonolithic.Precision.FP64,
+            precision=SolverMonolithic.Precision(precision),
             pcg_mode=SolverMonolithic.PCGMode(pcg_mode),
             use_cuda_graph=use_cuda_graph,
             contact_stiffness=r.get("contact_stiffness", c["contact_stiffness"]),

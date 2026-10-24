@@ -44,7 +44,7 @@ def stack_scene(device, *, columns=((-0.03, 0), (0.03, 0)), layers=3):
     return builder.finalize(device=device)
 
 
-def stack_solver(model, *, spatial, graph=False, query_capacity=4096, support_capacity=None):
+def stack_solver(model, *, spatial, graph=False, query_capacity=4096, support_capacity=None, precision="fp64"):
     """Use the spatial route, or the complete-candidate pooled audit route, with fixed budgets."""
     options = {} if support_capacity is None else {"contact_factor_capacity": 3 * support_capacity}
     context = nullcontext()
@@ -58,7 +58,7 @@ def stack_solver(model, *, spatial, graph=False, query_capacity=4096, support_ca
             friction_velocity_scale=0.01,
             pcg_mode="production",
             use_cuda_graph=graph,
-            precision="fp64",
+            precision=precision,
             publish_policy="strict",
             **options,
         )

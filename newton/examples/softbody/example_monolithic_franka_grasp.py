@@ -37,14 +37,16 @@ class Example:
             self.output.mkdir(parents=True, exist_ok=False)
         solver_factory = getattr(args, "solver_factory", None)
         self.contact_recorder = getattr(args, "contact_recorder", None)
+        precision = getattr(args, "precision", "fp64")
         if solver_factory is None:
             from scripts.monolithic_reference.robot_contact_acceptance import FrozenRobotFactory  # noqa: PLC0415
 
-            solver_factory = FrozenRobotFactory("franka-cube", dataflow="default")
+            solver_factory = FrozenRobotFactory("franka-cube", dataflow="default", precision=precision)
             self.contact_recorder = solver_factory.measure
         self.case = FrankaGrasp(
             args.asset_cache,
             device=args.device,
+            precision=precision,
             solver_factory=solver_factory,
         )
         self.step_limit = min(getattr(args, "max_steps", None) or round(TIMES[-1] / DT), round(TIMES[-1] / DT))
@@ -91,6 +93,7 @@ class Example:
             default=REPO / "asset/monolithic/data/inputs/franka/sdf-cache",
         )
         parser.add_argument("--output", type=Path, help="New directory for complete trajectory and diagnostics")
+        parser.add_argument("--precision", choices=("fp64", "fp32"), default="fp64", help="Solver precision")
         parser.set_defaults(device="cuda:0", num_frames=525)
         return parser
 
