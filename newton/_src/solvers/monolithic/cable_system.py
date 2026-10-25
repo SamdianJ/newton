@@ -29,6 +29,7 @@ def _residual(
     fixed: wp.array[int],
     stretch: wp.array2d[Any],
     bend: wp.array2d[Any],
+    bend_rounding: wp.array2d[Any],
     rows: wp.array[int],
     dt: Any,
     raw: wp.array[Any],
@@ -48,7 +49,7 @@ def _residual(
             magnitude += wp.abs(stretch[edge, 3 * (vertex - edge) + axis])
         for stencil in range(wp.max(0, vertex - 2), wp.min(nv - 2, vertex + 1)):
             value += bend[stencil, 3 * (vertex - stencil) + axis]
-            magnitude += wp.abs(bend[stencil, 3 * (vertex - stencil) + axis])
+            magnitude += bend_rounding[stencil, 3 * (vertex - stencil) + axis]
         applied = type(dt)(forces[vertex][axis]) + mass[vertex] * type(dt)(gravity[axis])
         displacement = step[vertex][axis]
         prediction_error = displacement - dt * vn[vertex][axis]
@@ -63,7 +64,7 @@ def _residual(
         edge = row - 3 * nv
         for stencil in range(wp.max(0, edge - 1), wp.min(nv - 2, edge + 1)):
             value += bend[stencil, 9 + edge - stencil]
-            magnitude += wp.abs(bend[stencil, 9 + edge - stencil])
+            magnitude += bend_rounding[stencil, 9 + edge - stencil]
         value -= torque[edge]
         magnitude += wp.abs(torque[edge])
         energy = -torque[edge] * theta_step[edge]
@@ -316,6 +317,7 @@ class CableBlock:
                 self.fixed,
                 objective.stretch_r,
                 objective.bend_twist_r,
+                objective.bend_twist_rounding,
                 self.rows,
                 self.dtype(dt),
                 self.raw,

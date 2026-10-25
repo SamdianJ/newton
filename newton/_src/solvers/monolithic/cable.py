@@ -124,6 +124,7 @@ def _bend_twist(
     energy: wp.array[Any],
     jacobian: wp.array3d[Any],
     residual: wp.array2d[Any],
+    rounding: wp.array2d[Any],
     matrix: wp.array3d[Any],
     flags: wp.array[int],
 ):
@@ -175,6 +176,27 @@ def _bend_twist(
         type(gj)(0.5) * strain[2] * stress[2],
         type(gj)(0.0),
     )
+    # Near rest each strain is a small sum of larger operands: unit frame products
+    # scaled by |kb| <= 2 / (1 + t0 . t1), and the angle differences plus the frame
+    # angle. Its rounding follows those operands, so bound the stress from them.
+    curvature = type(gj)(2.0) / denominator
+    operands = type(t0)(
+        curvature + wp.abs(rest_strain[i][0]),
+        curvature + wp.abs(rest_strain[i][1]),
+        wp.abs(anchor_theta[i + 1] - anchor_theta[i])
+        + wp.abs(theta_step[i + 1] - theta_step[i])
+        + wp.abs(phi)
+        + type(gj)(1.0)
+        + wp.abs(rest_strain[i][2]),
+    )
+    stress_bound = (
+        type(t0)(
+            wp.abs(bending[0, 0]) * operands[0] + wp.abs(bending[0, 1]) * operands[1],
+            wp.abs(bending[1, 0]) * operands[0] + wp.abs(bending[1, 1]) * operands[1],
+            wp.abs(gj) * operands[2],
+        )
+        / dual[i]
+    )
     old_t0 = wp.normalize(anchor_x[i + 1] - anchor_x[i])
     old_t1 = wp.normalize(anchor_x[i + 2] - anchor_x[i + 1])
     zero = type(t0)(type(gj)(0.0))
@@ -216,6 +238,9 @@ def _bend_twist(
             dtheta1 - dtheta0 + dphi,
         )
         residual[i, a] = wp.dot(ds, stress)
+        rounding[i, a] = wp.abs(residual[i, a]) + (
+            wp.abs(ds[0]) * stress_bound[0] + wp.abs(ds[1]) * stress_bound[1] + wp.abs(ds[2]) * stress_bound[2]
+        )
         for row in range(3):
             jacobian[i, row, a] = ds[row]
     for a in range(11):
@@ -261,6 +286,8 @@ class CableObjective:
         self.stretch_b = wp.zeros((ne, 6, 6), dtype=dtype, device=device)
         self.jacobian = wp.zeros((ni, 3, 11), dtype=dtype, device=device)
         self.bend_twist_r = wp.zeros((ni, 11), dtype=dtype, device=device)
+        # Per-entry operand magnitude whose eps multiple bounds the residual rounding.
+        self.bend_twist_rounding = wp.zeros((ni, 11), dtype=dtype, device=device)
         self.bend_twist_b = wp.zeros((ni, 11, 11), dtype=dtype, device=device)
         self.flags = wp.zeros(1, dtype=int, device=device)
         self._step = self._theta_step = None
@@ -320,6 +347,7 @@ class CableObjective:
                 self.bend_twist_energy,
                 self.jacobian,
                 self.bend_twist_r,
+                self.bend_twist_rounding,
                 self.bend_twist_b,
                 self.flags,
             ],

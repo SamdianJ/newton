@@ -147,6 +147,49 @@ class TestMonolithicCableObjective(unittest.TestCase):
         # An extension formed as |e| - L0 varies by ~EA eps32 here.
         self.assertLess(noise, 0.05 * stiffness[0] * np.finfo(np.float32).eps)
 
+    def test_rounding_bound_covers_float32_twist_error(self):
+        """Bound the FP32 response of a strongly twisted rod near rest by the noise floor of its rounding magnitude.
+
+        The twist strain is a small sum of angle differences and the frame angle; its
+        rounding follows those operands, not the small strain.
+        """
+        from newton._src.solvers.monolithic.convergence import ConvergencePolicy  # noqa: PLC0415
+
+        multiplier, eps = ConvergencePolicy().noise[1], np.finfo(np.float32).eps
+        s = np.linspace(0.0, 1.0, 9)
+        x0 = np.c_[s, 0.05 * np.cos(6 * s), 0.05 * np.sin(6 * s)].astype(np.float32).astype(float)
+        tangent = np.diff(x0, axis=0)
+        tangent /= np.linalg.norm(tangent, axis=1)[:, None]
+        d0 = np.cross(tangent, [1.0, 0.0, 0.0])
+        d0 /= np.linalg.norm(d0, axis=1)[:, None]
+        # Many accumulated turns, as in the localized helix.
+        theta0 = 60.0 + 0.2 * np.arange(8)
+        stiffness = (12.0, np.array([[0.08, 0.02], [0.02, 0.04]]), 0.5)
+        rest = CableReference(x0, theta0, d0, stiffness)
+        start = x0.astype(np.float32).astype(float)
+        theta = theta0.astype(np.float32).astype(float)
+        frame = CableFrame(start, d0)
+        objective = CableObjective(x0, theta0, d0, stiffness, dtype=wp.float32, device=self.device)
+        rng = np.random.default_rng(3)
+        zero_x, zero_theta = np.zeros_like(x0), np.zeros(8)
+        base = objective.evaluate_host(start, theta, frame, step=zero_x, theta_step=zero_theta)[1]
+        exact_base = cable_derivatives(rest, start, theta, frame)[0]
+        for scale in (1e-7, 1e-5):
+            with self.subTest(scale=scale):
+                step = (scale * rng.standard_normal(x0.shape)).astype(np.float32).astype(float)
+                turn = (scale * rng.standard_normal(8)).astype(np.float32).astype(float)
+                residual = objective.evaluate_host(start, theta, frame, step=step, theta_step=turn)[1]
+                rounding = np.zeros_like(residual)
+                for i, value in enumerate(np.abs(objective.stretch_r.numpy())):
+                    rounding[3 * i : 3 * i + 6] += value
+                for i, value in enumerate(objective.bend_twist_rounding.numpy()):
+                    rows = np.r_[np.arange(3 * i, 3 * i + 9), 3 * len(x0) + np.arange(i, i + 2)]
+                    rounding[rows] += value
+                exact = cable_derivatives(rest, start + step, theta + turn, frame)[0]
+                error = np.abs((residual - base) - (exact - exact_base))
+                bound = multiplier * eps * (np.abs(residual) + rounding)
+                self.assertTrue(np.all(error <= bound), error / bound)
+
 
 @unittest.skipUnless(wp.is_cuda_available(), "CUDA unavailable")
 class TestMonolithicCableObjectiveCUDA(TestMonolithicCableObjective):
