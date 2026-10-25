@@ -25,6 +25,8 @@ def main():
     parser.add_argument("--checkpoint", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--iterations", type=int, default=80)
+    parser.add_argument("--checkpoint-iterations", type=int, default=400)
+    parser.add_argument("--wrist", action="store_true")
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--rotation-predictor", action="store_true")
     parser.add_argument("--probe", action="store_true")
@@ -41,7 +43,13 @@ def main():
     if args.steps <= 0 or args.iterations <= 0:
         parser.error("steps and iterations must be positive")
     args.output.mkdir(parents=True, exist_ok=False)
-    scene = TaskScene("pinch-transfer", device=args.device, newton_iterations=400)
+    scene = TaskScene(
+        "pinch-transfer",
+        device=args.device,
+        newton_iterations=args.checkpoint_iterations,
+        wrist=args.wrist,
+        alignment_policy="mask" if args.wrist else "guard",
+    )
     solver = scene.solver
     solver.load_checkpoint(scene.state, args.checkpoint)
     next_step = int(scene.state._monolithic_coupled.force_generation.numpy()[0]) + 1
@@ -100,13 +108,10 @@ def main():
 
     def predict_rotation(producer, owner, state_in):
         predictor(producer, owner, state_in)
-        if args.rotation_predictor:
-            d = np.zeros(owner._delta.shape[0])
-            d[owner._rigid.rows_numpy[:, 3:]] = DT * state_in._monolithic_coupled.rigid_omega.numpy()
-            steps = owner._rigid_steps(owner._accepted)
-            owner._rigid.trial(
-                steps, owner._accepted, steps, wp.array(d, dtype=owner._dtype, device=owner.model.device), 1.0
-            )
+        if not args.rotation_predictor:
+            # Retain the PR-03 no-angular-prediction reproducer after the production fix.
+            wp.copy(owner._accepted._monolithic_coupled.rigid_rotation, owner._rigid.quat_n)
+            owner._rigid_steps(owner._accepted)[1].fill_(wp.quat_identity(owner._dtype))
 
     def probe(owner, r, b):
         original = owner._delta.numpy()
@@ -117,7 +122,7 @@ def main():
             j = np.zeros_like(b)
             eg = np.zeros(len(r))
             for column in range(len(r)):
-                h = translation_h * (100 if column >= 9 else 1)
+                h = translation_h * (100 if column >= len(r) - 3 else 1)
                 values = []
                 for sign in (-1, 1):
                     d = np.zeros(len(r))

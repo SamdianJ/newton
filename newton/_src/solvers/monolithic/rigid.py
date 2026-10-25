@@ -104,6 +104,31 @@ def _rotation_step(q: Any):
 
 
 @wp.kernel
+def _predict_pose(
+    predicted_com: wp.array[Any],
+    predicted_step: wp.array[Any],
+    quat_n: wp.array[Any],
+    omega: wp.array[Any],
+    h: Any,
+    com: wp.array[Any],
+    rotation: wp.array[Any],
+    step: wp.array[Any],
+    rotation_step: wp.array[Any],
+):
+    i = wp.tid()
+    dr = h * omega[i]
+    angle = wp.length(dr)
+    increment = type(quat_n[0])(type(h)(0.0), type(h)(0.0), type(h)(0.0), type(h)(1.0))
+    # Keep the previous initial guess if extrapolation leaves the rigid domain.
+    if angle > type(h)(0.0) and angle < type(h)(1.5707963267948966):
+        increment = wp.quat_from_axis_angle(dr / angle, angle)
+    com[i] = predicted_com[i]
+    step[i] = predicted_step[i]
+    rotation_step[i] = increment
+    rotation[i] = wp.normalize(increment * quat_n[i])
+
+
+@wp.kernel
 def _trial(
     step: wp.array[Any],
     rotation_step: wp.array[Any],
@@ -475,6 +500,26 @@ class RigidObjective:
             ],
             device=self.device,
         )
+
+    def predict_pose(self, state_in, accepted, steps, dt):
+        """Initialize both translations and rotations without changing the inertial objective."""
+        if self.count:
+            history = accepted._monolithic_coupled
+            wp.launch(
+                _predict_pose,
+                self.count,
+                [
+                    self.predicted_t,
+                    self.step_t,
+                    self.quat_n,
+                    state_in._monolithic_coupled.rigid_omega,
+                    self.dtype(dt),
+                    history.rigid_com,
+                    history.rigid_rotation,
+                    *steps,
+                ],
+                device=self.device,
+            )
 
     def derive_steps(self, state):
         """Return the increments of a state the solver does not own from its rounded pose."""

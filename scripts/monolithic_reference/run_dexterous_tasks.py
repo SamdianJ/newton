@@ -34,7 +34,7 @@ def ramp(t, start, end):
     return u**3 * (10 - 15 * u + 6 * u**2), 30 * u**2 * (1 - u) ** 2 / (end - start)
 
 
-def targets(task, t):
+def targets(task, t, *, turn_angle=np.pi / 2, initial_yaw=0.0):
     """Return finger center positions [m], velocities [m/s], and phase."""
     close, close_v = ramp(t, 0.2, 0.8)
     release, release_v = ramp(t, 3.1, 3.5)
@@ -48,7 +48,7 @@ def targets(task, t):
         center[:] = (0.07 * move, 0, 0.016 + 0.045 * (lift - lower))
         velocity[:] = (0.07 * move_v, 0, 0.045 * (lift_v - lower_v))
         if task == "pinch-transfer":
-            angle, angle_v = np.pi / 2 * move, np.pi / 2 * move_v
+            angle, angle_v = initial_yaw + turn_angle * move, turn_angle * move_v
         open_gap, closed_gap = 0.04, 0.025
     elif task == "turn-knob":
         center[2] = 0.04
@@ -75,15 +75,49 @@ def targets(task, t):
 class TaskScene:
     """Build a small coupled scene without modifying the solver or frozen assets."""
 
-    def __init__(self, task, *, device="cuda:0", precision="fp64", friction=0.6, newton_iterations=80):
+    def __init__(
+        self,
+        task,
+        *,
+        device="cuda:0",
+        precision="fp64",
+        friction=0.6,
+        newton_iterations=80,
+        wrist=True,
+        turn_angle=np.pi / 2,
+        initial_yaw=0.0,
+        alignment_policy="mask",
+    ):
         self.task = task
+        self.wrist = wrist and task == "pinch-transfer"
+        self.turn_angle, self.initial_yaw = turn_angle, initial_yaw
         builder = newton.ModelBuilder(gravity=(0, 0, -9.81))
         cfg = builder.ShapeConfig(density=0, margin=0.0)
-        self.initial, _, _ = targets(task, 0)
+        self.initial, _, _ = targets(task, 0, turn_angle=turn_angle, initial_yaw=initial_yaw)
+        self.finger_origins = targets(task, 0)[0] if self.wrist else self.initial
+        self.finger_dofs = slice(int(self.wrist), int(self.wrist) + 6)
         self.fingers = []
         root = builder.add_link(mass=1.0, inertia=wp.diag(wp.vec3(0.01)), label="fixed_support")
         joints = [builder.add_joint_fixed(-1, root)]
-        for finger, origin in enumerate(self.initial):
+        if self.wrist:
+            wrist_body = builder.add_link(mass=0.001, inertia=wp.diag(wp.vec3(5e-5)), label="wrist_yaw")
+            joints.append(
+                builder.add_joint_revolute(
+                    root,
+                    wrist_body,
+                    axis=wp.vec3(0, 0, 1),
+                    target_ke=4.0,
+                    target_kd=0.05,
+                    actuator_mode=newton.JointTargetMode.POSITION_VELOCITY,
+                    limit_ke=0,
+                    limit_kd=0,
+                    damping=0,
+                    friction=0,
+                )
+            )
+            builder.joint_q[builder.joint_q_start[joints[-1]]] = initial_yaw
+            root = wrist_body
+        for finger, origin in enumerate(self.finger_origins):
             parent = root
             for axis in range(3):
                 body = builder.add_link(
@@ -115,7 +149,7 @@ class TaskScene:
         if task in ("pinch-transfer", "pinch-place"):
             builder.add_articulation(joints)
             self.object_body = builder.add_body(
-                xform=wp.transform((0, 0, 0.016), wp.quat_identity()),
+                xform=wp.transform((0, 0, 0.016), wp.quat_from_axis_angle(wp.vec3(0, 0, 1), float(initial_yaw))),
                 mass=0.012,
                 inertia=wp.diag(wp.vec3(0.012 * 0.03**2 / 6)),
                 label="free_block",
@@ -167,7 +201,7 @@ class TaskScene:
             joint_terms=SolverMonolithic.JointTerms(
                 implicit_pd=True,
                 friction=True,
-                friction_velocity_scale=tuple([0.001] * (7 if task == "turn-knob" else 6)),
+                friction_velocity_scale=tuple([0.001] * (7 if self.wrist or task == "turn-knob" else 6)),
             ),
             contact_stiffness=1e7,
             friction_coefficient=friction,
@@ -179,16 +213,28 @@ class TaskScene:
             pcg_mode="production",
             use_cuda_graph=wp.get_device(device).is_cuda,
             publish_policy="strict",
+            # Robot surface contact uses the existing one-sided sample selection.
+            alignment_policy=alignment_policy,
         )
         self.state = self.solver.create_state(dt=DT)
         self.control = self.solver.create_control()
 
     def step(self, t):
         """Only update fingertip actuator targets; leave the object unactuated."""
-        position, velocity, phase = targets(self.task, t)
+        position, velocity, phase = targets(self.task, t, turn_angle=self.turn_angle, initial_yaw=self.initial_yaw)
         q = np.zeros(self.control.joint_target_q.shape[0])
         v = np.zeros(self.control.joint_target_qd.shape[0])
-        q[:6], v[:6] = (position - self.initial).ravel(), velocity.ravel()
+        local_position, local_velocity = position, velocity
+        if self.wrist:
+            move, move_v = ramp(t, 1.2, 2.3)
+            angle, rate = self.initial_yaw + self.turn_angle * move, self.turn_angle * move_v
+            c, s = np.cos(angle), np.sin(angle)
+            rotation = np.array([[c, -s, 0], [s, c, 0], [0, 0, 1]])
+            local_position = position @ rotation
+            local_velocity = (velocity - np.cross([0, 0, rate], position)) @ rotation
+            q[0], v[0] = angle, rate
+        q[self.finger_dofs] = (local_position - self.finger_origins).ravel()
+        v[self.finger_dofs] = local_velocity.ravel()
         self.control.joint_target_q.assign(q)
         self.control.joint_target_qd.assign(v)
         self.solver.step(self.state, self.state, self.control, dt=DT)
@@ -204,7 +250,11 @@ def task_metrics(scene, rows):
         poses = np.array([r["object_pose"] for r in rows])
         quat = poses[-1, 3:]
         yaw = np.arctan2(2 * (quat[3] * quat[2] + quat[0] * quat[1]), 1 - 2 * (quat[1] ** 2 + quat[2] ** 2))
-        target_yaw = np.pi / 2 if scene.task == "pinch-transfer" else 0.0
+        target_yaw = (
+            getattr(scene, "initial_yaw", 0.0) + getattr(scene, "turn_angle", np.pi / 2)
+            if scene.task == "pinch-transfer"
+            else 0.0
+        )
         yaw_error = abs(np.arctan2(np.sin(yaw - target_yaw), np.cos(yaw - target_yaw)))
         metrics.update(
             lift_m=float(poses[:, 2].max() - 0.016),
@@ -246,6 +296,9 @@ def run_case(task, args):
         precision=args.precision,
         friction=args.friction,
         newton_iterations=args.newton_iterations,
+        wrist=not args.translation_only_fingers,
+        turn_angle=np.radians(args.turn_angle_deg),
+        initial_yaw=np.radians(args.initial_yaw_deg),
     )
     frames = {key: [] for key in ("time", "body_q", "particle_q", "joint_q", "target", "phase")}
     rows, error = [], None
@@ -346,6 +399,11 @@ def main():
     parser.add_argument("--friction", type=float, default=0.6)
     parser.add_argument("--max-steps", type=int)
     parser.add_argument("--newton-iterations", type=int, default=80)
+    parser.add_argument(
+        "--translation-only-fingers", action="store_true", help="Retain the original rolling-contact ablation"
+    )
+    parser.add_argument("--turn-angle-deg", type=float, default=90.0)
+    parser.add_argument("--initial-yaw-deg", type=float, default=0.0)
     args = parser.parse_args()
     if args.max_steps is not None and args.max_steps <= 0:
         parser.error("--max-steps must be positive")
@@ -353,6 +411,12 @@ def main():
         parser.error("--newton-iterations must be positive")
     if not np.isfinite(args.friction) or args.friction < 0:
         parser.error("--friction must be finite and nonnegative")
+    if not np.isfinite([args.turn_angle_deg, args.initial_yaw_deg]).all():
+        parser.error("turn angles must be finite")
+    if args.task != "pinch-transfer" and (
+        args.translation_only_fingers or args.turn_angle_deg != 90 or args.initial_yaw_deg != 0
+    ):
+        parser.error("turning variations require --task pinch-transfer")
     args.output.mkdir(parents=True, exist_ok=False)
     sources = [Path(__file__), *sorted((REPO / "newton/_src/solvers/monolithic").glob("*.py"))]
     save_json(
@@ -366,6 +430,10 @@ def main():
             "max_steps": args.max_steps,
             "newton_iterations": args.newton_iterations,
             "task": args.task,
+            "translation_only_fingers": args.translation_only_fingers,
+            "turn_angle_deg": args.turn_angle_deg,
+            "initial_yaw_deg": args.initial_yaw_deg,
+            "alignment_policy": "mask",
             "input_kind": "scripted dynamic fingertip proxies; no video or object pose replay",
             "source_sha256": {str(p.relative_to(REPO)): hashlib.sha256(p.read_bytes()).hexdigest() for p in sources},
         },

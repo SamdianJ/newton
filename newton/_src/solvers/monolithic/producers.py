@@ -355,9 +355,7 @@ class RigidProducer(_Producer):
         super().__init__("rigid", solver._rigid.rows_numpy.ravel())
 
     def begin_step(self, solver, state_in):
-        # The predictor moves the COM by h v and keeps the step-start rotation.
-        wp.copy(solver._accepted._monolithic_coupled.rigid_com, solver._rigid.predicted_t)
-        wp.copy(solver._rigid_steps(solver._accepted)[0], solver._rigid.step_t)
+        solver._rigid.predict_pose(state_in, solver._accepted, solver._rigid_steps(solver._accepted), solver._dt)
 
     def candidate(self, solver, accepted, trial, direction, alpha, dt):
         solver._rigid.trial(solver._rigid_steps(accepted), trial, solver._rigid_steps(trial), direction, alpha)

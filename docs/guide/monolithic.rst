@@ -60,6 +60,19 @@ CUDA graph. PCG has no stagnation exit: it iterates until its tolerance or
 inspected. Regularized direction retries use the same schedule for every scene,
 starting without regularization.
 
+FREE rigid actors predict translation and rotation from their current velocities;
+this changes the Newton starting point, not the discrete inertial equation.
+ArmijoOrResNorm permits either energy or residual progress. Within a physical
+step, each accepting branch must also preserve its best value reached so far,
+up to the existing rounding allowance, to prevent alternating regressions.
+The other measure may still increase; C-IE energy acceptance remains heuristic.
+
+``alignment_policy="guard"`` rejects penetrating samples whose surface normals
+point in the same direction. Robot surface contact can instead explicitly use
+``"mask"`` to exclude each such complete contact term, including both endpoint
+forces. This existing one-sided sampling model retains invalid-geometry checks
+and does not provide continuous collision or continuous normals at sharp edges.
+
 A step converges when every residual row lies within its own tolerance: the
 largest of an absolute target (1e-11 N for force rows, 1e-13 N m for torque
 rows), 1e-6 times the largest step-start residual of the same block and unit,

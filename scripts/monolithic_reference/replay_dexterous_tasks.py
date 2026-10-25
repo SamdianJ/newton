@@ -26,7 +26,16 @@ def render(case):
     data = np.load(case / "trajectory.npz", allow_pickle=False)
     task = summary["task"]
     with wp.ScopedDevice("cpu"):
-        scene = TaskScene(task, device="cpu", precision=manifest["precision"], friction=manifest["friction"])
+        scene = TaskScene(
+            task,
+            device="cpu",
+            precision=manifest["precision"],
+            friction=manifest["friction"],
+            wrist=not manifest.get("translation_only_fingers", True),
+            turn_angle=np.radians(manifest.get("turn_angle_deg", 90)),
+            initial_yaw=np.radians(manifest.get("initial_yaw_deg", 0)),
+            alignment_policy=manifest.get("alignment_policy", "guard"),
+        )
         model = scene.model
         colors = np.tile((0.32, 0.39, 0.46), (model.shape_count, 1))
         colors[:2] = (0.96, 0.55, 0.32)
