@@ -163,7 +163,9 @@ def _publish_frame(
     history_phi: wp.array[Any],
 ):
     i = wp.tid()
-    history_director[theta_offset + i] = director[i]
+    # Parallel transport keeps unit length only to rounding; the published frame
+    # anchors the next step, so normalize it rather than let the error accumulate.
+    history_director[theta_offset + i] = wp.normalize(director[i])
     if i < phi.shape[0]:
         history_phi[phi_offset + i] = phi[i]
 

@@ -286,6 +286,14 @@ class TestMonolithicCableSolver(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "twist"):
             states.validate(state)
 
+    def test_fp32_published_frames_stay_unit(self):
+        """Keep FP32 reference directors unit across steps instead of accumulating transport rounding."""
+        case = CableBenchmark("cantilever", segments=32, precision="fp32", device=self.device)
+        for _ in range(120):
+            case.step()
+        directors = case.state._monolithic_coupled.cable_ref_director.numpy().astype(float)
+        self.assertLess(np.abs(np.linalg.norm(directors, axis=1) - 1).max(), np.finfo(np.float32).eps)
+
     def test_consistent_tet_mass_excludes_cable_particles(self):
         """Assemble a consistent-mass tet and a line-density cable in one solve."""
         _, solver = self.scene(cloth=False, cables=1, tet=True, mass_mode="consistent")
