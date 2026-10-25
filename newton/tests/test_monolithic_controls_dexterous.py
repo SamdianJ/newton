@@ -14,7 +14,7 @@ from scripts.monolithic_reference.run_dexterous_tasks import TASKS, targets, tas
 class TestDexterousControls(unittest.TestCase):
     def test_velocity_matches_positions(self):
         """Compare commanded velocities against independent central differences."""
-        for task in TASKS:
+        for task in (*TASKS, "pinch-place"):
             for t in np.linspace(0.01, 3.99, 201):
                 with self.subTest(task=task, time=t):
                     h = 1e-6
@@ -24,7 +24,7 @@ class TestDexterousControls(unittest.TestCase):
 
     def test_release_and_end_hold(self):
         """Require fingers to reopen and settle at the end of each task."""
-        for task in TASKS:
+        for task in (*TASKS, "pinch-place"):
             initial = targets(task, 0)[0]
             held = targets(task, 2.5)[0]
             final, velocity, _ = targets(task, 4.0)
@@ -34,7 +34,7 @@ class TestDexterousControls(unittest.TestCase):
 
     def test_static_object_fails_tasks(self):
         """Reject a stationary object even when actuator contact forces are present."""
-        for task in TASKS:
+        for task in (*TASKS, "pinch-place"):
             row = {
                 "finger_contact_force_N": 1.0,
                 "object_pose": [0, 0, 0.015, 0, 0, 0, 1],

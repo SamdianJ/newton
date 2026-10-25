@@ -42,12 +42,13 @@ def targets(task, t):
     move, move_v = ramp(t, 1.2, 2.3)
     center, velocity = np.zeros(3), np.zeros(3)
     angle = angle_v = 0.0
-    if task == "pinch-transfer":
+    if task in ("pinch-transfer", "pinch-place"):
         lift, lift_v = ramp(t, 0.9, 1.2)
         lower, lower_v = ramp(t, 2.5, 3.0)
         center[:] = (0.07 * move, 0, 0.016 + 0.045 * (lift - lower))
         velocity[:] = (0.07 * move_v, 0, 0.045 * (lift_v - lower_v))
-        angle, angle_v = np.pi / 2 * move, np.pi / 2 * move_v
+        if task == "pinch-transfer":
+            angle, angle_v = np.pi / 2 * move, np.pi / 2 * move_v
         open_gap, closed_gap = 0.04, 0.025
     elif task == "turn-knob":
         center[2] = 0.04
@@ -74,7 +75,7 @@ def targets(task, t):
 class TaskScene:
     """Build a small coupled scene without modifying the solver or frozen assets."""
 
-    def __init__(self, task, *, device="cuda:0", precision="fp64", friction=0.6):
+    def __init__(self, task, *, device="cuda:0", precision="fp64", friction=0.6, newton_iterations=80):
         self.task = task
         builder = newton.ModelBuilder(gravity=(0, 0, -9.81))
         cfg = builder.ShapeConfig(density=0, margin=0.0)
@@ -111,7 +112,7 @@ class TaskScene:
         builder.add_shape_plane(width=0, length=0, cfg=cfg)
         self.object_body = None
         cables = []
-        if task == "pinch-transfer":
+        if task in ("pinch-transfer", "pinch-place"):
             builder.add_articulation(joints)
             self.object_body = builder.add_body(
                 xform=wp.transform((0, 0, 0.016), wp.quat_identity()),
@@ -172,7 +173,7 @@ class TaskScene:
             friction_coefficient=friction,
             friction_velocity_scale=0.001,
             normal_smoothing=1e-4,
-            newton_max_iterations=80,
+            newton_max_iterations=newton_iterations,
             linear_max_iterations=300,
             line_search_max_iterations=24,
             pcg_mode="production",
@@ -199,11 +200,12 @@ def task_metrics(scene, rows):
     contact = max((r["finger_contact_force_N"] for r in rows), default=0.0)
     metrics = {"peak_finger_contact_force_N": contact}
     gates = {"contact_present": contact > 0.01}
-    if scene.task == "pinch-transfer":
+    if scene.task in ("pinch-transfer", "pinch-place"):
         poses = np.array([r["object_pose"] for r in rows])
         quat = poses[-1, 3:]
         yaw = np.arctan2(2 * (quat[3] * quat[2] + quat[0] * quat[1]), 1 - 2 * (quat[1] ** 2 + quat[2] ** 2))
-        yaw_error = abs(np.arctan2(np.sin(yaw - np.pi / 2), np.cos(yaw - np.pi / 2)))
+        target_yaw = np.pi / 2 if scene.task == "pinch-transfer" else 0.0
+        yaw_error = abs(np.arctan2(np.sin(yaw - target_yaw), np.cos(yaw - target_yaw)))
         metrics.update(
             lift_m=float(poses[:, 2].max() - 0.016),
             placement_error_m=float(np.linalg.norm(poses[-1, :3] - (0.07, 0, 0.015))),
@@ -238,7 +240,13 @@ def run_case(task, args):
     output = args.output / task
     output.mkdir(parents=True, exist_ok=False)
     started = time.perf_counter()
-    scene = TaskScene(task, device=args.device, precision=args.precision, friction=args.friction)
+    scene = TaskScene(
+        task,
+        device=args.device,
+        precision=args.precision,
+        friction=args.friction,
+        newton_iterations=args.newton_iterations,
+    )
     frames = {key: [] for key in ("time", "body_q", "particle_q", "joint_q", "target", "phase")}
     rows, error = [], None
 
@@ -272,6 +280,9 @@ def run_case(task, args):
                     "pcg": stats.linear_iterations,
                     "failure_reason": stats.failure_reason,
                 }
+                for name in ("convergence_ratio", "accepted_alpha", "raw_residual_q_norm"):
+                    value = getattr(stats, name)
+                    row[name] = float(value) if np.isfinite(value) else None
                 body = scene.state.body_q.numpy()
                 row["tracking_error_m"] = float(np.max(np.linalg.norm(body[scene.fingers, :3] - target, axis=1)))
                 force = scene.solver.get_contact_forces(scene.state)
@@ -292,6 +303,7 @@ def run_case(task, args):
                     record(step * DT, target, phase)
                 if not stats.converged or stats.rolled_back:
                     error = f"Step {step}: {stats.status}: {stats.failure_reason}"
+                    scene.solver.save_checkpoint(scene.state, output / "last-published-state.npz")
                     break
                 if step % 200 == 0:
                     print(
@@ -327,15 +339,18 @@ def run_case(task, args):
 def main():
     """Run every selected task, retaining failures without suppressing later cases."""
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--task", choices=(*TASKS, "all"), default="all")
+    parser.add_argument("--task", choices=(*TASKS, "pinch-place", "all"), default="all")
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--precision", choices=("fp64", "fp32"), default="fp64")
     parser.add_argument("--friction", type=float, default=0.6)
     parser.add_argument("--max-steps", type=int)
+    parser.add_argument("--newton-iterations", type=int, default=80)
     args = parser.parse_args()
     if args.max_steps is not None and args.max_steps <= 0:
         parser.error("--max-steps must be positive")
+    if args.newton_iterations <= 0:
+        parser.error("--newton-iterations must be positive")
     if not np.isfinite(args.friction) or args.friction < 0:
         parser.error("--friction must be finite and nonnegative")
     args.output.mkdir(parents=True, exist_ok=False)
@@ -349,6 +364,7 @@ def main():
             "precision": args.precision,
             "friction": args.friction,
             "max_steps": args.max_steps,
+            "newton_iterations": args.newton_iterations,
             "task": args.task,
             "input_kind": "scripted dynamic fingertip proxies; no video or object pose replay",
             "source_sha256": {str(p.relative_to(REPO)): hashlib.sha256(p.read_bytes()).hexdigest() for p in sources},

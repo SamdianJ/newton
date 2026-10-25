@@ -5,6 +5,8 @@
 
 import argparse
 import json
+import subprocess
+import sys
 from pathlib import Path
 
 import numpy as np
@@ -36,13 +38,16 @@ def render(case):
         viewer.set_model(model)
         viewer.show_ground = False
         viewer.show_joints = False
-        viewer.set_camera(pos=wp.vec3(0.28, -0.30, 0.25), pitch=-25.0, yaw=130.0)
+        viewer.set_camera(pos=wp.vec3(0.18, -0.20, 0.16), pitch=-22.0, yaw=130.0)
+        if task == "cable-pull":
+            viewer.set_camera(pos=wp.vec3(0.22, -0.24, 0.23), pitch=-15.0, yaw=130.0)
         viewer.hide_loading_splash()
         images = []
         try:
             for i, t in enumerate(data["time"]):
                 state.body_q.assign(data["body_q"][i].astype(np.float32))
-                state.particle_q.assign(data["particle_q"][i].astype(np.float32))
+                if model.particle_count:
+                    state.particle_q.assign(data["particle_q"][i].astype(np.float32))
                 viewer.begin_frame(float(t))
                 viewer.log_state(state)
                 if task == "cable-pull":
@@ -54,9 +59,12 @@ def render(case):
                         colors=(0.1, 0.65, 0.8),
                     )
                     viewer.log_points(
-                        "cable_nodes", wp.array(points, dtype=wp.vec3), radii=0.003, colors=(0.1, 0.65, 0.8)
+                        "cable_nodes",
+                        wp.array(points, dtype=wp.vec3),
+                        radii=0.003,
+                        colors=wp.full(len(points), wp.vec3(0.1, 0.65, 0.8), dtype=wp.vec3),
                     )
-                if task == "pinch-transfer":
+                if task in ("pinch-transfer", "pinch-place"):
                     viewer.log_lines(
                         "placement",
                         wp.array(((0.05, 0, 0.0001), (0.07, -0.02, 0.0001)), dtype=wp.vec3),
@@ -105,8 +113,14 @@ def main():
     )
     if not cases:
         parser.error("No recorded trajectories found")
-    for case in cases:
-        render(case)
+    if (args.path / "trajectory.npz").exists():
+        render(args.path)
+    else:
+        # OpenGL caches cannot be reused after closing the first viewer context.
+        for case in cases:
+            subprocess.run(
+                [sys.executable, "-m", "scripts.monolithic_reference.replay_dexterous_tasks", str(case)], check=True
+            )
 
 
 if __name__ == "__main__":
