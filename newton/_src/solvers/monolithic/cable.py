@@ -3,8 +3,9 @@
 
 """Finite-EA DER strains and analytic first derivatives in a committed frame chart.
 
-The native-precision residual is exact. The FP32 tangent is the full
-strain-Jacobian Gauss-Newton matrix, including all position/theta blocks.
+The native-precision residual is exact. The tangent is the full
+strain-Jacobian Gauss-Newton matrix in the solver precision, including all
+position/theta blocks; it omits the stress-weighted second derivatives.
 No finite differences, numerical differentiation or theta inertia are used.
 """
 

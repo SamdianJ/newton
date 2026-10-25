@@ -57,7 +57,7 @@ factor capacity rolls back the step; it does not publish a truncated force sum.
 ``get_contact_forces()`` returns particle forces and body/joint reactions from
 the same finally assembled candidate. Material checkpoint schema 6 also carries
 cable contact torque. Earlier material schemas are rejected because they lack
-this history. Checkpoints written before configuration identity version 3
+this history. Checkpoints written before the current configuration version
 are rejected.
 
 Numerical contract
@@ -68,13 +68,13 @@ residual. Its complete 6-by-6 material Hessian is spectrally projected before
 mapping to nodal coordinates. Six-node curvature bending uses an analytic
 strain Jacobian and its full 18-by-18 material tangent. Missing boundary
 neighbors are eliminated by affine extrapolation before differentiation.
-All cross-node terms remain in the FP32 global matrix. Three-coordinate vertex
+All cross-node terms remain in the global matrix. Three-coordinate vertex
 Cholesky blocks are only a preconditioner. Cloth and cable coordinates use one
 Newton direction, line search and transaction.
 
 Every cloth coordinate row must satisfy the solver's per-row force tolerance
-described in :doc:`monolithic`. Native FP64 is the
-acceptance path; B and PCG remain FP32 with native direction qualification.
+described in :doc:`monolithic`. The matrix and PCG use the solver precision;
+FP64 is the reference acceptance precision.
 The full element matrix is checked against independent NumPy/complex-step
 references, including negative lambda, compression, missing neighbors and
 natural folds. Scalar inertia never substitutes for material PSD checks.
