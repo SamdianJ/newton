@@ -9,7 +9,7 @@ import numpy as np
 import warp as wp
 
 from .material_scene import MaterialScene
-from .numerical_gates import gate_floor, row_excess
+from .numerical_gates import balance_rounding, gate_floor, row_excess
 
 
 def segment_distance(point, start, end):
@@ -119,6 +119,8 @@ class MaterialAcceptance(MaterialScene):
                 else center[2] - samples[:, 2]
             ) - r["thickness_m"] / 2
         sampled_penetration = float(max(0, -gap.min()))
+        # Wrench moments sum force times world position; the farthest sample bounds the lever.
+        lever = float(np.linalg.norm(samples, axis=1).max(initial=0))
         assert forces.force_valid
         particle, body = forces.particle_force, forces.body_wrench
         balance = np.linalg.norm(particle.sum(axis=0) + body[:, :3].sum(axis=0))
@@ -145,6 +147,8 @@ class MaterialAcceptance(MaterialScene):
             "pair_balance": float(pair_balance),
             "moment_balance": float(moment_balance),
             "moment_scale": float(moment_scale),
+            "contact_lever": lever,
+            "contact_rounding": balance_rounding(solver),
             "force_generation": int(forces.force_generation),
             "iterations": int(solver.last_stats.nonlinear_iterations),
         }
@@ -171,13 +175,14 @@ class MaterialAcceptance(MaterialScene):
             assert row_excess(force, force_floor, g["rest_force_inf_N"]) <= 1, m
             assert row_excess(theta, theta_floor, g["rest_theta_torque_inf_Nm"]) <= 1, m
         assert m["penetration"] <= r["penetration_max_m"], m
-        assert (
-            m["force_balance"]
-            <= g["contact_force_balance_absolute_N"] + g["contact_balance_relative"] * m["force_scale"]
+        # Balance gates admit the rounding of summed wrenches in the solver precision.
+        force_floor = m["contact_rounding"] * m["force_scale"]
+        assert m["force_balance"] <= max(
+            g["contact_force_balance_absolute_N"] + g["contact_balance_relative"] * m["force_scale"], force_floor
         ), m
-        assert (
-            m["moment_balance"]
-            <= g["contact_torque_balance_absolute_Nm"] + g["contact_balance_relative"] * m["moment_scale"]
+        assert m["moment_balance"] <= max(
+            g["contact_torque_balance_absolute_Nm"] + g["contact_balance_relative"] * m["moment_scale"],
+            force_floor * m["contact_lever"],
         ), m
         prefix = "edge_stretch" if r["material"] == "cable" else "area_ratio"
         assert r[prefix + "_min"] <= m["ratio_min"] <= m["ratio_max"] <= r[prefix + "_max"], m

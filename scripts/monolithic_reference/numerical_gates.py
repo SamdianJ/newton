@@ -29,6 +29,11 @@ def gate_floor(solver):
     return criterion.noise.numpy().astype(float) * criterion.magnitude.numpy().astype(float)
 
 
+def balance_rounding(solver):
+    """Return ``c eps_T``, the relative rounding of contact wrenches summed in the solver precision."""
+    return float(solver._criterion.noise.numpy().max())
+
+
 def row_excess(residual, floor, gate):
     """Return ``max_i |r_i| / max(gate, floor_i)``; at most 1 passes."""
     residual = np.abs(np.asarray(residual, dtype=float))

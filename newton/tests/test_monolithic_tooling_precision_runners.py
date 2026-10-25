@@ -73,7 +73,11 @@ class TestNumericalGates(unittest.TestCase):
 
     def test_floor_follows_precision(self):
         """Keep FP64 floors at the rounding term far below the gates; FP32 floors are the solver tolerance."""
-        from scripts.monolithic_reference.numerical_gates import block_norms, gate_floor  # noqa: PLC0415
+        from scripts.monolithic_reference.numerical_gates import (  # noqa: PLC0415
+            balance_rounding,
+            block_norms,
+            gate_floor,
+        )
 
         for precision in ("fp64", "fp32"):
             with self.subTest(precision=precision):
@@ -86,6 +90,8 @@ class TestNumericalGates(unittest.TestCase):
                 norm, _ = block_norms(case.solver, residual, floor, "cable_0_x")
                 expected = blocks["cable_0_x"]["raw_residual_cable_0_x_norm"]
                 self.assertAlmostEqual(norm, expected, delta=1e-12 + 1e-6 * norm)
+                native = np.float64 if precision == "fp64" else np.float32
+                self.assertAlmostEqual(balance_rounding(case.solver), 32 * float(np.finfo(native).eps), delta=1e-20)
                 if precision == "fp64":
                     rounding = criterion.noise.numpy() * criterion.magnitude.numpy()
                     np.testing.assert_array_equal(floor, rounding)
