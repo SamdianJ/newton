@@ -88,7 +88,7 @@ class TestMonolithicConvergence(unittest.TestCase):
         """Keep the approved per-unit targets, relative tolerances and rounding multipliers."""
         policy = ConvergencePolicy()
         self.assertEqual(policy.absolute, (1e-11, 1e-13))
-        self.assertEqual(policy.relative, (1e-4, 1e-4))
+        self.assertEqual(policy.relative, (1e-6, 1e-6))
         self.assertEqual(policy.noise, (32.0, 32.0))
 
     def test_row_groups_split_units(self):

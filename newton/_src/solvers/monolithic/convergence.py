@@ -45,13 +45,14 @@ class ConvergencePolicy:
     # arithmetic error, but replayed stalled FP32 Sharpa steps plateau at 4-8 eps a
     # while closing and 21-31 eps a at the end, on tet rows summing 10-30 terms
     # ((n - 1) eps a bounds such a sum). Unconverged steps there need 500 or more.
-    # The relative tolerance was relaxed from 1e-6 in P8b PR-03 (approved
-    # 2026-10-23): the robot scenes needed a second Newton update on almost every
-    # step at 1e-6 with unchanged physical gates, and 1e-3 broke cloth, stiff shell
-    # and tet-vibration residual gates.
+    # The relative tolerance is 1e-6 in both precisions (restored 2026-10-25). P8b
+    # PR-03 had relaxed it to 1e-4 for FP64 robot speed, but a step whose load
+    # changes then accepts 1e-4 of its step-start imbalance unresolved: the stiff
+    # precreased box and the prefolded cloth exceed their 1e-6 N force gates. The
+    # robots stay within their physical gates at 1e-6; FP32 costs 8-13% per step.
     absolute: tuple[float, float] = (1e-11, 1e-13)
     """Absolute targets ``g_u`` [N, N m]."""
-    relative: tuple[float, float] = (1e-4, 1e-4)
+    relative: tuple[float, float] = (1e-6, 1e-6)
     """Tolerances ``rtol_u`` relative to the block's step-start residual."""
     noise: tuple[float, float] = (32.0, 32.0)
     """Multipliers ``c_u`` of ``eps_T * a_i``."""
