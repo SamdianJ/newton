@@ -101,6 +101,7 @@ class TetBenchmark:
             mass_mode=mass_mode,
             publish_policy="strict",
             newton_max_iterations=r["newton_max_iterations"],
+            **({"linear_max_iterations": r["linear_max_iterations"]} if "linear_max_iterations" in r else {}),
             pcg_mode=SolverMonolithic.PCGMode(pcg_mode),
             use_cuda_graph=use_cuda_graph,
             precision=SolverMonolithic.Precision(precision),

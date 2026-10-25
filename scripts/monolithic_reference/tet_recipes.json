@@ -1,7 +1,7 @@
 {
   "version": 1,
   "status": "FROZEN",
-  "approval": "Approved by the user on 2026-10-18. The cantilever is a P8a diagnostic and a hard P8b acceptance target (open items P8-N1, P8-N2).",
+  "approval": "Approved by the user on 2026-10-18. The cantilever is a P8a diagnostic and a hard P8b acceptance target (open items P8-N1, P8-N2). On 2026-10-25 the user moved its meshes from 10/20/40 to 20/40/80 cells along the beam (one-cell-thick linear tets lock outside the asymptotic range) and raised its PCG budget to 1000 until an AMG preconditioner replaces the diagonal one, which needs about 225 iterations at 40 x 4 x 4.",
   "patch": {
     "size": [0.1, 0.1, 0.1],
     "cells": [[4, 4, 4]],
@@ -23,7 +23,7 @@
   },
   "cantilever": {
     "size": [0.5, 0.05, 0.05],
-    "cells": [[10, 1, 1], [20, 2, 2], [40, 4, 4]],
+    "cells": [[20, 2, 2], [40, 4, 4], [80, 8, 8]],
     "density": 1000.0,
     "mu": 1000000.0,
     "lambda": 0.0,
@@ -33,6 +33,7 @@
     "ramp_steps": 50,
     "hold_steps": 150,
     "newton_max_iterations": 50,
+    "linear_max_iterations": 1000,
     "models": ["smith_log_stabilized"],
     "gates": {"extrapolated_relative_error": 0.05, "minimum_observed_order": 1.0, "velocity_m_s": 1e-6}
   },

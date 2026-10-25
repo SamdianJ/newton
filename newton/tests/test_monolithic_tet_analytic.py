@@ -166,6 +166,10 @@ class TestTetMatrix(unittest.TestCase):
 
     def test_expected_matrix(self):
         self.assertEqual([len(expected_cases(k)) for k in ("patch", "cantilever", "axial_vibration")], [6, 3, 6])
+        # Meshes refine past the one-cell-thick locking range; the PCG budget covers the diagonal preconditioner.
+        self.assertEqual([c["cells"] for c in expected_cases("cantilever")], [[20, 2, 2], [40, 4, 4], [80, 8, 8]])
+        case = TetBenchmark("cantilever", cells=(10, 1, 1))
+        self.assertEqual(case.solver.linear_max_iterations, 1000)
         self.assertIn(
             {"case": "shear", "cells": [4, 4, 4], "material_model": "kim_stable_no_log", "mass_mode": "consistent"},
             expected_cases("patch"),
