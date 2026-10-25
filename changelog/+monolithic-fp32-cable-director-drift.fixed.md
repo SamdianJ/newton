@@ -1,1 +1,1 @@
-Fix experimental `SolverMonolithic` FP32 cables failing their own state check after a few hundred steps: published reference directors are now normalized, so transport rounding no longer accumulates in their length.
+Fix experimental `SolverMonolithic` FP32 cables failing their own state check after a few hundred to a few thousand steps: published reference directors are now normalized and projected normal to the step's exact edge, so transport rounding no longer accumulates in their length or orthogonality.

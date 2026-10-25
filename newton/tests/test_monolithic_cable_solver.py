@@ -294,6 +294,39 @@ class TestMonolithicCableSolver(unittest.TestCase):
         directors = case.state._monolithic_coupled.cable_ref_director.numpy().astype(float)
         self.assertLess(np.abs(np.linalg.norm(directors, axis=1) - 1).max(), np.finfo(np.float32).eps)
 
+    def test_published_frames_stay_perpendicular(self):
+        """Publish each director perpendicular to its step's exact edge, so transport rounding cannot accumulate."""
+        from newton._src.solvers.monolithic.cable_system import _publish_frame  # noqa: PLC0415
+
+        rng = np.random.default_rng(4)
+        tangent = rng.standard_normal((16, 3))
+        tangent /= np.linalg.norm(tangent, axis=1)[:, None]
+        director = np.cross(tangent, rng.standard_normal((16, 3)))
+        director /= np.linalg.norm(director, axis=1)[:, None]
+        # A transported director a little off its edge's normal plane and unit length.
+        drifted = (director + 1e-5 * tangent) * (1 + 1e-6)
+        published = wp.zeros(16, dtype=wp.vec3, device=self.device)
+        twist = wp.zeros(15, dtype=float, device=self.device)
+        wp.launch(
+            _publish_frame,
+            16,
+            [
+                wp.array(drifted, dtype=wp.vec3, device=self.device),
+                wp.array(tangent, dtype=wp.vec3, device=self.device),
+                wp.zeros(15, dtype=float, device=self.device),
+                0,
+                0,
+                published,
+                twist,
+            ],
+            device=self.device,
+        )
+        result = published.numpy().astype(float)
+        eps = np.finfo(np.float32).eps
+        self.assertLess(np.abs(np.sum(result * tangent, axis=1)).max(), 4 * eps)
+        self.assertLess(np.abs(np.linalg.norm(result, axis=1) - 1).max(), 4 * eps)
+        np.testing.assert_allclose(result, director, atol=1e-4)
+
     def test_consistent_tet_mass_excludes_cable_particles(self):
         """Assemble a consistent-mass tet and a line-density cable in one solve."""
         _, solver = self.scene(cloth=False, cables=1, tet=True, mass_mode="consistent")

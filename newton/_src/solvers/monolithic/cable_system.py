@@ -157,6 +157,7 @@ def _candidate(
 @wp.kernel
 def _publish_frame(
     director: wp.array[Any],
+    tangent: wp.array[Any],
     phi: wp.array[Any],
     theta_offset: int,
     phi_offset: int,
@@ -164,9 +165,11 @@ def _publish_frame(
     history_phi: wp.array[Any],
 ):
     i = wp.tid()
-    # Parallel transport keeps unit length only to rounding; the published frame
-    # anchors the next step, so normalize it rather than let the error accumulate.
-    history_director[theta_offset + i] = wp.normalize(director[i])
+    # Parallel transport keeps a director unit and normal to its edge only to
+    # rounding; the published frame anchors the next step, so project it onto the
+    # normal plane of the step's exact edge rather than let the error accumulate.
+    d, t = director[i], tangent[i]
+    history_director[theta_offset + i] = wp.normalize(d - wp.dot(d, t) * t)
     if i < phi.shape[0]:
         history_phi[phi_offset + i] = phi[i]
 
@@ -338,6 +341,7 @@ class CableBlock:
                 ne,
                 [
                     objective.director,
+                    objective.tangent,
                     objective.phi,
                     self.theta_offset,
                     self.phi_offset,
