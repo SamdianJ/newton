@@ -13,9 +13,19 @@ convergence (approved 2026-10-25). Physical gates (displacement, energy, analyti
 error, penetration) never use the floor.
 """
 
+import sys
+from pathlib import Path
+
 import numpy as np
 
 from newton._src.solvers.monolithic.iteration import blocks
+
+
+def loaded_reference_modules():
+    """Return every loaded module file of this package, so a receipt identity covers all runner code."""
+    package = Path(__file__).resolve().parent
+    files = {Path(m.__file__).resolve() for m in list(sys.modules.values()) if getattr(m, "__file__", None)}
+    return sorted(f for f in files if f.parent == package and f.name != "__init__.py")
 
 
 def gate_floor(solver):

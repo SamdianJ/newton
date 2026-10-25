@@ -16,6 +16,7 @@ import warp as wp
 import newton
 
 from .cable_benchmarks import CableBenchmark
+from .numerical_gates import loaded_reference_modules
 
 
 def main():
@@ -39,9 +40,7 @@ def main():
         raise RuntimeError("Benchmark imported Newton outside the tested checkout")
     files = [
         *sorted((source / "newton/_src/solvers/monolithic").glob("*.py")),
-        Path(__file__),
-        Path(__file__).with_name("cable_benchmarks.py"),
-        Path(__file__).with_name("cable_analytic.py"),
+        *loaded_reference_modules(),
         Path(__file__).with_name("cable_recipes.json"),
     ]
     receipt = {

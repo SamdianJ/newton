@@ -55,6 +55,10 @@ class TestPrecisionRunners(unittest.TestCase):
                 )
             cloth = json.loads((root / "cloth/receipt.json").read_text())
             self.assertEqual((cloth["status"], cloth["precision"]), ("PARTIAL", "fp32"))
+            from newton.tests.test_monolithic_cable_benchmark import imported_reference_modules  # noqa: PLC0415
+
+            modules = imported_reference_modules("scripts.monolithic_reference.cloth_benchmarks")
+            self.assertLessEqual(modules, cloth["sha256"].keys())
             material = json.loads((root / "material/cloth-press/receipt.json").read_text())
             self.assertEqual((material["status"], material["precision"]), ("PARTIAL", "fp32"))
             summary = json.loads((root / "material/summary.json").read_text())

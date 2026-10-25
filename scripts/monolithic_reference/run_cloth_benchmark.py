@@ -16,6 +16,7 @@ import warp as wp
 import newton
 
 from .cloth_benchmarks import ClothBenchmark
+from .numerical_gates import loaded_reference_modules
 
 
 def main():
@@ -35,11 +36,8 @@ def main():
         raise RuntimeError("Benchmark imported Newton outside tested checkout")
     files = [
         *sorted((source / "newton/_src/solvers/monolithic").glob("*.py")),
-        Path(__file__),
-        *[
-            Path(__file__).with_name(name)
-            for name in ("cloth_benchmarks.py", "cloth_recipes.json", "cloth_oracle.py", "material_recipes.py")
-        ],
+        *loaded_reference_modules(),
+        Path(__file__).with_name("cloth_recipes.json"),
     ]
     receipt = {
         "status": "INCOMPLETE",
