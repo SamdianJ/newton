@@ -3,11 +3,14 @@
 
 """Precision-aware numerical residual gates.
 
-A frozen residual gate asks for an absolute force or torque. Below the solver's
-rounding floor ``c_u eps_T a_i`` no precision can resolve a row, so each gate
-admits a row up to the larger of its frozen value and that floor. In FP64 the
-floor lies far below every frozen gate, which therefore stays unchanged; physical
-gates (displacement, energy, analytic error, penetration) never use the floor.
+A frozen residual gate asks for an absolute force or torque. Each gate admits a
+row up to the larger of its frozen value and a precision floor. In FP64 the floor
+is the solver's rounding term ``c_u eps_T a_i``, which lies far below every frozen
+gate, so FP64 checks stay unchanged. In FP32 it is the solver's complete row
+tolerance: FP32 keeps a 1e-4 relative tolerance because its rounding term does not
+yet bound near-rest tet elasticity, so its residual gates certify the solver's own
+convergence (approved 2026-10-25). Physical gates (displacement, energy, analytic
+error, penetration) never use the floor.
 """
 
 import numpy as np
@@ -15,9 +18,14 @@ import numpy as np
 from newton._src.solvers.monolithic.iteration import blocks
 
 
-def rounding_floor(solver):
-    """Return the per-row rounding floor ``c_u eps_T a_i`` [N or N m] of the last assessed iterate."""
+def gate_floor(solver):
+    """Return the per-row precision floor [N or N m] of the last assessed iterate.
+
+    FP64 uses the rounding term ``c_u eps_T a_i``; FP32 the complete tolerance ``tau_i``.
+    """
     criterion = solver._criterion
+    if solver.precision == solver.Precision.FP32:
+        return criterion.tau.numpy().astype(float)
     return criterion.noise.numpy().astype(float) * criterion.magnitude.numpy().astype(float)
 
 

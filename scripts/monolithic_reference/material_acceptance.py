@@ -9,7 +9,7 @@ import numpy as np
 import warp as wp
 
 from .material_scene import MaterialScene
-from .numerical_gates import rounding_floor, row_excess
+from .numerical_gates import gate_floor, row_excess
 
 
 def segment_distance(point, start, end):
@@ -74,8 +74,8 @@ class MaterialAcceptance(MaterialScene):
         rows = np.asarray(solver._actors.maps["theta_to_global"], dtype=int)
         force_mask = np.ones(len(residual), dtype=bool)
         force_mask[rows[rows >= 0]] = False
-        floor = rounding_floor(solver)
-        # Residual gates admit each row up to the solver's rounding floor.
+        floor = gate_floor(solver)
+        # Residual gates admit each row up to the solver's precision floor.
         self.gate_rows = (residual[force_mask], floor[force_mask], residual[~force_mask], floor[~force_mask])
         torque = max(
             (

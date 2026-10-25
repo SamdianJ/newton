@@ -12,7 +12,7 @@ from newton.solvers.experimental.monolithic import SolverMonolithic
 import newton
 
 from .cable_analytic import cantilever_deflection, localized_helix
-from .numerical_gates import block_norms, rounding_floor
+from .numerical_gates import block_norms, gate_floor
 
 RECIPES = json.loads(Path(__file__).with_name("cable_recipes.json").read_text())
 
@@ -122,7 +122,7 @@ class CableBenchmark:
             self.state._monolithic_coupled.cable_ref_director.assign(d)
             self.state._monolithic_coupled.cable_ref_twist.assign(phi)
             self.solver.reset_state(self.state, dt=self.dt)
-        # Raw block L2 residuals and their ratios to max(gate, rounding floor L2).
+        # Raw block L2 residuals and their ratios to max(gate, precision floor L2).
         self.maximum_residual = {"position": 0.0, "theta": 0.0, "position_excess": 0.0, "theta_excess": 0.0}
 
     def step(self):
@@ -146,7 +146,7 @@ class CableBenchmark:
             raise RuntimeError(f"{self.kind} step {step}: {self.solver.last_stats}")
         self.steps = step
         residual = self.solver.last_stats.variational["residual"]
-        floor = rounding_floor(self.solver)
+        floor = gate_floor(self.solver)
         for part, group in (("position", "x"), ("theta", "theta")):
             value, rounding = block_norms(self.solver, residual, floor, f"cable_0_{group}")
             gate = r["gates"][f"raw_{part}_residual"]
@@ -248,7 +248,7 @@ class CableBenchmark:
             "relative_torque_error",
             "writhe_turn_error",
         }
-        # Residual gates admit each block up to the solver's rounding floor.
+        # Residual gates admit each block up to the solver's precision floor.
         floored = {"raw_position_residual", "raw_theta_residual"}
         failures = {
             k: (result[k], limit)

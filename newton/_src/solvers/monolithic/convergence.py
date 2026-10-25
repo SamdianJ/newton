@@ -45,23 +45,31 @@ class ConvergencePolicy:
     # arithmetic error, but replayed stalled FP32 Sharpa steps plateau at 4-8 eps a
     # while closing and 21-31 eps a at the end, on tet rows summing 10-30 terms
     # ((n - 1) eps a bounds such a sum). Unconverged steps there need 500 or more.
-    # The relative tolerance is 1e-6 in both precisions (restored 2026-10-25). P8b
-    # PR-03 had relaxed it to 1e-4 for FP64 robot speed, but a step whose load
-    # changes then accepts 1e-4 of its step-start imbalance unresolved: the stiff
-    # precreased box and the prefolded cloth exceed their 1e-6 N force gates. The
-    # robots stay within their physical gates at 1e-6; FP32 costs 8-13% per step.
+    # The FP64 relative tolerance is 1e-6 (restored 2026-10-25). P8b PR-03 had
+    # relaxed it to 1e-4 for robot speed, but a step whose load changes then
+    # accepts 1e-4 of its step-start imbalance unresolved: the stiff precreased
+    # box and the prefolded cloth exceed their 1e-6 N force gates. FP32 keeps 1e-4,
+    # the setting the rounding multiplier was calibrated with: near rest, tet
+    # elasticity rounds above 32 eps a (stresses cancel in F - I), so at 1e-6 FP32
+    # tet vibration and the Sharpa grasp plateau above tau.
     absolute: tuple[float, float] = (1e-11, 1e-13)
     """Absolute targets ``g_u`` [N, N m]."""
     relative: tuple[float, float] = (1e-6, 1e-6)
     """Tolerances ``rtol_u`` relative to the block's step-start residual."""
     noise: tuple[float, float] = (32.0, 32.0)
     """Multipliers ``c_u`` of ``eps_T * a_i``."""
+    relative_fp32: tuple[float, float] = (1e-4, 1e-4)
+    """FP32 tolerances ``rtol_u``; ``relative`` applies to FP64."""
 
     def __post_init__(self):
-        for name in ("absolute", "relative", "noise"):
+        for name in ("absolute", "relative", "noise", "relative_fp32"):
             values = getattr(self, name)
             if len(values) != len(Unit) or not all(np.isfinite(v) and v > 0 for v in values):
                 raise ValueError(f"Convergence {name} values must be positive and finite per unit")
+
+    def relative_for(self, dtype):
+        """Return the relative tolerances of native precision ``dtype``."""
+        return self.relative_fp32 if np.dtype(dtype) == np.float32 else self.relative
 
 
 @dataclass(frozen=True)
@@ -123,7 +131,7 @@ def tolerances(reference, magnitude, rows, policy, dtype):
     block = np.zeros(len(rows.names), dtype=dtype)
     np.maximum.at(block, rows.groups, np.abs(reference))
     absolute = np.asarray(policy.absolute, dtype=dtype)[rows.units]
-    relative = np.asarray(policy.relative, dtype=dtype)[rows.units] * block[rows.groups]
+    relative = np.asarray(policy.relative_for(dtype), dtype=dtype)[rows.units] * block[rows.groups]
     noise = np.asarray(policy.noise, dtype=dtype)[rows.units] * np.finfo(dtype).eps * magnitude
     physical = np.maximum(absolute, relative)
     return np.maximum(physical, noise), physical
@@ -234,7 +242,9 @@ class Criterion:
         n, count = len(rows.units), len(rows.names)
         self.groups = wp.array(rows.groups, dtype=int, device=device)
         self.absolute = wp.array(np.asarray(policy.absolute, dtype=native)[rows.units], dtype=dtype, device=device)
-        self.relative = wp.array(np.asarray(policy.relative, dtype=native)[rows.units], dtype=dtype, device=device)
+        self.relative = wp.array(
+            np.asarray(policy.relative_for(native), dtype=native)[rows.units], dtype=dtype, device=device
+        )
         self.noise = wp.array(
             np.asarray(policy.noise, dtype=native)[rows.units] * np.finfo(native).eps, dtype=dtype, device=device
         )

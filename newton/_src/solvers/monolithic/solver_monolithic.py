@@ -317,7 +317,9 @@ class SolverMonolithic(SolverBase):
         policy = convergence.ConvergencePolicy()
         self._coupled_config = {
             **self._options.identity_fields(),
-            "convergence_policy": np.array([*policy.absolute, *policy.relative, *policy.noise], dtype=np.float64),
+            "convergence_policy": np.array(
+                [*policy.absolute, *policy.relative, *policy.noise, *policy.relative_fp32], dtype=np.float64
+            ),
             "contact_parameters": np.asarray(self._contact.parameters, dtype=float),
             "guard_capacity": np.array([min_det_f_guard, capacity]),
             "contact_dataflow": self._contact.dataflow_identity,

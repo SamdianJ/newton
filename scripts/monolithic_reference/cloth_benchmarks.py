@@ -14,7 +14,7 @@ import newton
 
 from .cloth_oracle import shell_energy
 from .material_recipes import shell_coefficients, shell_stencils
-from .numerical_gates import rounding_floor, row_excess
+from .numerical_gates import gate_floor, row_excess
 
 RECIPE_PATH = Path(__file__).with_name("cloth_recipes.json")
 RECIPES = json.loads(RECIPE_PATH.read_text())
@@ -134,8 +134,8 @@ class ClothBenchmark:
         )
         rows = np.asarray(self.solver.last_stats.variational["residual"])
         residual = float(np.max(abs(rows)))
-        floor = rounding_floor(self.solver)
-        # The residual gate admits each row up to the solver's rounding floor.
+        floor = gate_floor(self.solver)
+        # The residual gate admits each row up to the solver's precision floor.
         excess = row_excess(rows, floor, self.recipe["maximum_residual"])
         kinetic = float(np.sum(self.mass[~self.fixed, None] * v[~self.fixed] ** 2) / 2)
         n = self.recipe["cells"]

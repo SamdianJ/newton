@@ -60,7 +60,9 @@ def test_local_load_is_not_diluted(test, device):
 def test_criterion_matches_oracle(test, device):
     """Compute identical row tolerances and group assessments on device and in NumPy."""
     rows = convergence.row_groups(mixed_layout(), [Unit.TORQUE, Unit.FORCE, Unit.TORQUE])
-    policy = ConvergencePolicy(absolute=(1e-9, 1e-10), relative=(1e-6, 1e-5), noise=(32.0, 16.0))
+    policy = ConvergencePolicy(
+        absolute=(1e-9, 1e-10), relative=(1e-6, 1e-5), noise=(32.0, 16.0), relative_fp32=(1e-4, 1e-3)
+    )
     rng = np.random.default_rng(7)
     n = rows.units.size
     for dtype, native in ((wp.float64, np.float64), (wp.float32, np.float32)):
@@ -89,7 +91,10 @@ class TestMonolithicConvergence(unittest.TestCase):
         policy = ConvergencePolicy()
         self.assertEqual(policy.absolute, (1e-11, 1e-13))
         self.assertEqual(policy.relative, (1e-6, 1e-6))
+        self.assertEqual(policy.relative_fp32, (1e-4, 1e-4))
         self.assertEqual(policy.noise, (32.0, 32.0))
+        self.assertEqual(policy.relative_for(np.float64), policy.relative)
+        self.assertEqual(policy.relative_for(np.float32), policy.relative_fp32)
 
     def test_row_groups_split_units(self):
         """Separate revolute and prismatic rows, rigid translation/rotation and cable position/angle."""
@@ -113,6 +118,12 @@ class TestMonolithicConvergence(unittest.TestCase):
         worst, limited = convergence.assess(np.array([3e-8, 2e-3, 0.0]), tau, physical, rows)
         np.testing.assert_allclose(worst, [1.0, 0.0], atol=1e-15)
         np.testing.assert_array_equal(limited, [1, 0])
+        # FP32 takes its own relative tolerance.
+        policy = ConvergencePolicy(
+            absolute=(1e-9, 1e-10), relative=(1e-6, 1e-6), noise=(1.0, 1.0), relative_fp32=(1e-4, 1e-4)
+        )
+        _, physical = convergence.tolerances([1e-2, -3e-2, 0.0], [0.0, 0.0, 0.0], rows, policy, np.float32)
+        np.testing.assert_allclose(physical, [3e-6, 3e-6, 1e-10], rtol=1e-6)
 
     def test_policy_validation(self):
         """Reject missing, nonpositive or nonfinite policy values."""

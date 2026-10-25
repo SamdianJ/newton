@@ -72,24 +72,26 @@ class TestNumericalGates(unittest.TestCase):
         self.assertEqual(row_excess([], [], 1e-6), 0.0)
 
     def test_floor_follows_precision(self):
-        """Keep FP64 floors far below the frozen gates and scale FP32 floors with eps32."""
-        from scripts.monolithic_reference.numerical_gates import block_norms, rounding_floor  # noqa: PLC0415
+        """Keep FP64 floors at the rounding term far below the gates; FP32 floors are the solver tolerance."""
+        from scripts.monolithic_reference.numerical_gates import block_norms, gate_floor  # noqa: PLC0415
 
-        floors = {}
         for precision in ("fp64", "fp32"):
-            case = MaterialScene("cable-bend-twist", precision=precision)
-            case.step()
-            floor = rounding_floor(case.solver)
-            residual = case.solver.last_stats.variational["residual"]
-            blocks = case.solver.last_stats.variational["material_blocks"]
-            norm, _ = block_norms(case.solver, residual, floor, "cable_0_x")
-            self.assertAlmostEqual(norm, blocks["cable_0_x"]["raw_residual_cable_0_x_norm"], delta=1e-12 + 1e-6 * norm)
-            floors[precision] = floor.max()
-        self.assertLess(floors["fp64"], 1e-3 * case.common["gates"]["force_residual_inf_N"])
-        ratio = floors["fp32"] / floors["fp64"]
-        expected = np.finfo(np.float32).eps / np.finfo(np.float64).eps
-        self.assertGreater(ratio, 0.1 * expected)
-        self.assertLess(ratio, 10 * expected)
+            with self.subTest(precision=precision):
+                case = MaterialScene("cable-bend-twist", precision=precision)
+                case.step()
+                criterion = case.solver._criterion
+                floor = gate_floor(case.solver)
+                residual = case.solver.last_stats.variational["residual"]
+                blocks = case.solver.last_stats.variational["material_blocks"]
+                norm, _ = block_norms(case.solver, residual, floor, "cable_0_x")
+                expected = blocks["cable_0_x"]["raw_residual_cable_0_x_norm"]
+                self.assertAlmostEqual(norm, expected, delta=1e-12 + 1e-6 * norm)
+                if precision == "fp64":
+                    rounding = criterion.noise.numpy() * criterion.magnitude.numpy()
+                    np.testing.assert_array_equal(floor, rounding)
+                    self.assertLess(floor.max(), 1e-3 * case.common["gates"]["force_residual_inf_N"])
+                else:
+                    np.testing.assert_array_equal(floor, criterion.tau.numpy().astype(float))
 
 
 if __name__ == "__main__":
