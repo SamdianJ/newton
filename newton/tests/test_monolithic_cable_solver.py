@@ -327,6 +327,14 @@ class TestMonolithicCableSolver(unittest.TestCase):
         self.assertLess(np.abs(np.linalg.norm(result, axis=1) - 1).max(), 4 * eps)
         np.testing.assert_allclose(result, director, atol=1e-4)
 
+    def test_fp32_straight_rod_responds_to_small_load(self):
+        """Resolve a small load on an axis-aligned FP32 rod instead of accepting it under the rounding floor."""
+        case = CableBenchmark("cantilever", segments=128, precision="fp32", device=self.device)
+        for _ in range(3):
+            case.step()
+            self.assertGreater(case.solver.last_stats.nonlinear_iterations, 0)
+        self.assertGreater(abs(case.state.particle_q.numpy()[-1, case.axis]), 0.0)
+
     def test_consistent_tet_mass_excludes_cable_particles(self):
         """Assemble a consistent-mass tet and a line-density cable in one solve."""
         _, solver = self.scene(cloth=False, cables=1, tet=True, mass_mode="consistent")

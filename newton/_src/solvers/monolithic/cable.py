@@ -27,6 +27,21 @@ def _rotate(angle: Any, increment: Any):
 
 
 @wp.func
+def _abs_cross(a: Any, b: Any):
+    """Return the componentwise sum of absolute products forming ``a x b``."""
+    return type(a)(
+        wp.abs(a[1] * b[2]) + wp.abs(a[2] * b[1]),
+        wp.abs(a[2] * b[0]) + wp.abs(a[0] * b[2]),
+        wp.abs(a[0] * b[1]) + wp.abs(a[1] * b[0]),
+    )
+
+
+@wp.func
+def _abs_dot(a: Any, b: Any):
+    return wp.abs(a[0] * b[0]) + wp.abs(a[1] * b[1]) + wp.abs(a[2] * b[2])
+
+
+@wp.func
 def _transport(a: Any, b: Any, d: Any):
     v = wp.cross(a, b)
     first = wp.cross(v, d)
@@ -176,17 +191,21 @@ def _bend_twist(
         type(gj)(0.5) * strain[2] * stress[2],
         type(gj)(0.0),
     )
-    # Near rest each strain is a small sum of larger operands: unit frame products
-    # scaled by |kb| <= 2 / (1 + t0 . t1), and the angle differences plus the frame
-    # angle. Its rounding follows those operands, so bound the stress from them.
-    curvature = type(gj)(2.0) / denominator
+    # Near rest each strain is a small sum of larger operands: the products forming
+    # kb and its projections on the material frames, and the angle differences plus
+    # the frame angle, whose atan2 rounds with the products forming its sine. The
+    # rounding follows those operands, so bound the stress from them. Componentwise
+    # products keep the bound at zero where a straight axis-aligned rod is exact.
+    curvature = type(gj)(2.0) * _abs_cross(t0, t1) / denominator
+    absolute0, absolute1 = wp.abs(m10) + wp.abs(m11), wp.abs(m20) + wp.abs(m21)
+    sine_operands = _abs_dot(t1, _abs_cross(carried, d1))
     operands = type(t0)(
-        curvature + wp.abs(rest_strain[i][0]),
-        curvature + wp.abs(rest_strain[i][1]),
+        type(gj)(0.5) * _abs_dot(curvature, absolute1) + wp.abs(rest_strain[i][0]),
+        type(gj)(0.5) * _abs_dot(curvature, absolute0) + wp.abs(rest_strain[i][1]),
         wp.abs(anchor_theta[i + 1] - anchor_theta[i])
         + wp.abs(theta_step[i + 1] - theta_step[i])
         + wp.abs(phi)
-        + type(gj)(1.0)
+        + sine_operands
         + wp.abs(rest_strain[i][2]),
     )
     stress_bound = (

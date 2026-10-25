@@ -64,8 +64,16 @@ def _kernels(dtype):
         return value, differential
 
     @wp.func
+    def absolute_dot(a: vec, b: vec):
+        return wp.abs(a[0] * b[0]) + wp.abs(a[1] * b[1]) + wp.abs(a[2] * b[2])
+
+    @wp.func
     def curvature_magnitude(p: points_type):
-        """Bound each curvature component's operands; it rounds to a few eps times this."""
+        """Bound each curvature component's operands; it rounds to a few eps times this.
+
+        Componentwise products keep the bound at zero where an axis-aligned flat
+        stencil evaluates exactly.
+        """
         normals = normals_type()
         for face in range(4):
             a, b, c = int(0), int(1), int(2)
@@ -74,12 +82,15 @@ def _kernels(dtype):
                 a, b, c = 3 + opposite, (opposite + 2) % 3, (opposite + 1) % 3
             cross = wp.cross(p[b] - p[a], p[c] - p[a])
             normals[face] = cross / wp.length(cross)
-        size = vec()
+        mean = mat3()
         for i in range(3):
             n = (normals[0] + normals[i + 1]) * dtype(0.5)
-            size[i] = dtype(1.0) / wp.length(n)
-        e, f = wp.length(p[1] - p[0]), wp.length(p[0] - p[2])
-        return vec(e * (size[1] + size[0]), f * (size[0] + size[2]), f * size[0]) * dtype(2.0)
+            m = n / wp.dot(n, n)
+            mean[i] = vec(wp.abs(m[0]), wp.abs(m[1]), wp.abs(m[2]))
+        e, f = p[1] - p[0], p[0] - p[2]
+        return vec(
+            absolute_dot(mean[1] + mean[0], e), absolute_dot(mean[0] + mean[2], f), absolute_dot(mean[0], f)
+        ) * dtype(2.0)
 
     @wp.func
     def strain(b: vec, transform: mat2):
