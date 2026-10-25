@@ -23,6 +23,7 @@ def _residual(
     offsets: wp.array[int],
     entries: wp.array[int],
     local: wp.array2d[Any],
+    rounding: wp.array2d[Any],
     rows: wp.array[int],
     dt: Any,
     raw: wp.array[Any],
@@ -37,7 +38,7 @@ def _residual(
     for i in range(offsets[row], offsets[row + 1]):
         entry = entries[i]
         value += local[entry // 18, entry % 18]
-        magnitude += wp.abs(local[entry // 18, entry % 18])
+        magnitude += rounding[entry // 18, entry % 18]
     force = type(dt)(forces[vertex][axis]) + mass[vertex] * type(dt)(gravity[axis])
     displacement = step[vertex][axis]
     difference = displacement - dt * vn[vertex][axis]
@@ -219,6 +220,7 @@ class ClothBlock:
                 self.offsets,
                 self.entries,
                 self.objective.residual,
+                self.objective.rounding,
                 self.rows,
                 self.dtype(dt),
                 self.raw,

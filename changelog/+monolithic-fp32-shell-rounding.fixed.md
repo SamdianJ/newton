@@ -1,0 +1,1 @@
+Fix experimental `SolverMonolithic` FP32 shells near rest stalling at the Newton budget: the convergence noise floor of shell rows now bounds the rounding of the bending curvature from its operands rather than from the cancelled force.

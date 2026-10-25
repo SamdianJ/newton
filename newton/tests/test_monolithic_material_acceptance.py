@@ -31,6 +31,13 @@ class TestMaterialAcceptance(unittest.TestCase):
             residual = np.asarray(case.solver.last_stats.variational["residual"])
             self.assertLessEqual(np.abs(residual).max(), gate)
 
+    def test_fp32_box_converges_near_rest(self):
+        """Converge the stiff FP32 precreased box near rest at its shell rounding floor."""
+        case = MaterialScene("precreased-box", precision="fp32")
+        for _ in range(3):
+            case.step()
+        self.assertEqual(case.steps, 3)
+
     def test_retired_solver_options_rejected(self):
         """Refuse recipes whose solver tolerance options were replaced by per-row physical limits."""
         for version in (6, 7):

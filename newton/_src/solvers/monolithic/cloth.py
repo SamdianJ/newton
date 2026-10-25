@@ -64,6 +64,24 @@ def _kernels(dtype):
         return value, differential
 
     @wp.func
+    def curvature_magnitude(p: points_type):
+        """Bound each curvature component's operands; it rounds to a few eps times this."""
+        normals = normals_type()
+        for face in range(4):
+            a, b, c = int(0), int(1), int(2)
+            if face > 0:
+                opposite = face - 1
+                a, b, c = 3 + opposite, (opposite + 2) % 3, (opposite + 1) % 3
+            cross = wp.cross(p[b] - p[a], p[c] - p[a])
+            normals[face] = cross / wp.length(cross)
+        size = vec()
+        for i in range(3):
+            n = (normals[0] + normals[i + 1]) * dtype(0.5)
+            size[i] = dtype(1.0) / wp.length(n)
+        e, f = wp.length(p[1] - p[0]), wp.length(p[0] - p[2])
+        return vec(e * (size[1] + size[0]), f * (size[0] + size[2]), f * size[0]) * dtype(2.0)
+
+    @wp.func
     def strain(b: vec, transform: mat2):
         tensor = mat2(b[0], b[2], b[2], b[1])
         mapped = wp.transpose(transform) * tensor * transform
@@ -81,6 +99,7 @@ def _kernels(dtype):
         build_tangent: bool,
         energy: wp.array2d[dtype],
         residual: wp.array2d[dtype],
+        rounding: wp.array2d[dtype],
         tangent: wp.array3d[dtype],
         flags: wp.array[int],
     ):
@@ -217,6 +236,18 @@ def _kernels(dtype):
         s = strain(curvature_value - reference_curvature[face], transform)
         stress = beta * s + alpha * (s[0] + s[1]) * vec(dtype(1.0), dtype(1.0), dtype(0.0))
         energy[face, 1] = area * dtype(0.5) * wp.dot(s, stress)
+        # Near rest the curvature difference cancels: its rounding follows the operand
+        # sizes, not the small difference, so bound the bending stress from them.
+        operands = curvature_magnitude(p)
+        magnitude = mat2(operands[0], operands[2], operands[2], operands[1])
+        absolute = mat2(
+            wp.abs(transform[0, 0]), wp.abs(transform[0, 1]), wp.abs(transform[1, 0]), wp.abs(transform[1, 1])
+        )
+        mapped = wp.transpose(absolute) * magnitude * absolute
+        s_bound = vec(mapped[0, 0], mapped[1, 1], wp.sqrt(dtype(2.0)) * mapped[0, 1])
+        stress_bound = wp.abs(beta) * s_bound + wp.abs(alpha) * (s_bound[0] + s_bound[1]) * vec(
+            dtype(1.0), dtype(1.0), dtype(0.0)
+        )
         jac = jac_type()
         mapping = map_type()
         for column in range(18):
@@ -232,6 +263,8 @@ def _kernels(dtype):
             for k in range(3):
                 jac[k, column] = ds[k]
             value = wp.dot(ds, stress)
+            bending_bound = wp.abs(ds[0]) * stress_bound[0] + wp.abs(ds[1]) * stress_bound[1]
+            bending_bound += wp.abs(ds[2]) * stress_bound[2]
             if column < 9:
                 de, dg_edge = dp[1] - dp[0], dp[2] - dp[0]
                 df = de * transform[0, 0] + dg_edge * transform[1, 0]
@@ -243,6 +276,7 @@ def _kernels(dtype):
                     mapping[k, column] = df[k]
                     mapping[k + 3, column] = dg[k]
             residual[face, column] = area * value
+            rounding[face, column] = area * (wp.abs(value) + bending_bound)
         if build_tangent:
             for a in range(18):
                 for bcol in range(a, 18):
@@ -294,6 +328,8 @@ class ClothObjective:
         self.materials = wp.array(materials, dtype=dtype, device=device)
         self.energy = wp.zeros((count, 2), dtype=dtype, device=device)
         self.residual = wp.zeros((count, 18), dtype=dtype, device=device)
+        # Per-entry operand magnitude whose eps multiple bounds the residual rounding.
+        self.rounding = wp.zeros((count, 18), dtype=dtype, device=device)
         self.tangent = wp.zeros((count, 18, 18), dtype=dtype, device=device)
         self.flags = wp.zeros(1, dtype=int, device=device)
         self.kernel = _kernels(dtype)
@@ -325,6 +361,7 @@ class ClothObjective:
                 build_tangent,
                 self.energy,
                 self.residual,
+                self.rounding,
                 self.tangent,
                 self.flags,
             ],
