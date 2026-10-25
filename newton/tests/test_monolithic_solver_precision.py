@@ -218,7 +218,9 @@ class TestSolverPrecision(unittest.TestCase):
                 # step increments still resolve it to rounding.
                 reference, single = velocities
                 self.assertLess(np.abs(single - reference).max(), 1e-4 * np.abs(reference).max())
-                self.assertEqual(iterations[1], iterations[0])
+                # Every FP32 step takes a Newton update (no acceptance by coordinate
+                # rounding); its looser relative tolerance never needs more than FP64.
+                self.assertTrue(all(1 <= a <= b for a, b in zip(iterations[1], iterations[0], strict=True)), iterations)
 
     def test_far_friction_in_float32(self):
         """Resolve frictional slip of a tet sliding on a ground plane 100 m from the origin."""
