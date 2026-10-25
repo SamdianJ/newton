@@ -9,6 +9,7 @@ import numpy as np
 import warp as wp
 
 from .material_scene import MaterialScene
+from .numerical_gates import rounding_floor, row_excess
 
 
 def segment_distance(point, start, end):
@@ -73,6 +74,9 @@ class MaterialAcceptance(MaterialScene):
         rows = np.asarray(solver._actors.maps["theta_to_global"], dtype=int)
         force_mask = np.ones(len(residual), dtype=bool)
         force_mask[rows[rows >= 0]] = False
+        floor = rounding_floor(solver)
+        # Residual gates admit each row up to the solver's rounding floor.
+        self.gate_rows = (residual[force_mask], floor[force_mask], residual[~force_mask], floor[~force_mask])
         torque = max(
             (
                 np.max(abs(block.raw.numpy()[3 * block.ids.size :][~block.reference["fixed_theta"]]), initial=0)
@@ -128,6 +132,7 @@ class MaterialAcceptance(MaterialScene):
         result = {
             "step": self.steps,
             "force_residual": float(np.max(abs(residual[force_mask]), initial=0)),
+            "force_floor": float(np.max(floor[force_mask], initial=0)),
             "theta_residual": float(torque),
             "energy": float(energy),
             "penetration": float(penetration),
@@ -159,11 +164,12 @@ class MaterialAcceptance(MaterialScene):
     def check_step(self, m):
         """Apply gates to every measured step; no stopped or failing steps are filtered."""
         g, r = self.common["gates"], self.recipe
-        assert m["force_residual"] <= g["force_residual_inf_N"], m
-        assert m["theta_residual"] <= g["theta_residual_inf_Nm"], m
+        force, force_floor, theta, theta_floor = self.gate_rows
+        assert row_excess(force, force_floor, g["force_residual_inf_N"]) <= 1, m
+        assert row_excess(theta, theta_floor, g["theta_residual_inf_Nm"]) <= 1, m
         if self.steps <= self.common["phases"][0][1]:
-            assert m["force_residual"] <= g["rest_force_inf_N"], m
-            assert m["theta_residual"] <= g["rest_theta_torque_inf_Nm"], m
+            assert row_excess(force, force_floor, g["rest_force_inf_N"]) <= 1, m
+            assert row_excess(theta, theta_floor, g["rest_theta_torque_inf_Nm"]) <= 1, m
         assert m["penetration"] <= r["penetration_max_m"], m
         assert (
             m["force_balance"]

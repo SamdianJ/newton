@@ -11,6 +11,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
+import numpy as np
+
 from newton.solvers.experimental.monolithic import SolverMonolithic
 from scripts.monolithic_reference.cable_benchmarks import CableBenchmark
 from scripts.monolithic_reference.cloth_benchmarks import ClothBenchmark
@@ -57,6 +59,37 @@ class TestPrecisionRunners(unittest.TestCase):
             self.assertEqual((material["status"], material["precision"]), ("PARTIAL", "fp32"))
             summary = json.loads((root / "material/summary.json").read_text())
             self.assertEqual((summary["status"], summary["precision"]), ("PARTIAL", "fp32"))
+
+
+class TestNumericalGates(unittest.TestCase):
+    def test_row_excess(self):
+        """Admit each row up to the larger of the frozen gate and its rounding floor."""
+        from scripts.monolithic_reference.numerical_gates import row_excess  # noqa: PLC0415
+
+        residual = np.array([5e-7, -3e-6, 0.0])
+        self.assertAlmostEqual(row_excess(residual, np.zeros(3), 1e-6), 3.0)
+        self.assertAlmostEqual(row_excess(residual, np.array([0.0, 4e-6, 0.0]), 1e-6), 0.75)
+        self.assertEqual(row_excess([], [], 1e-6), 0.0)
+
+    def test_floor_follows_precision(self):
+        """Keep FP64 floors far below the frozen gates and scale FP32 floors with eps32."""
+        from scripts.monolithic_reference.numerical_gates import block_norms, rounding_floor  # noqa: PLC0415
+
+        floors = {}
+        for precision in ("fp64", "fp32"):
+            case = MaterialScene("cable-bend-twist", precision=precision)
+            case.step()
+            floor = rounding_floor(case.solver)
+            residual = case.solver.last_stats.variational["residual"]
+            blocks = case.solver.last_stats.variational["material_blocks"]
+            norm, _ = block_norms(case.solver, residual, floor, "cable_0_x")
+            self.assertAlmostEqual(norm, blocks["cable_0_x"]["raw_residual_cable_0_x_norm"], delta=1e-12 + 1e-6 * norm)
+            floors[precision] = floor.max()
+        self.assertLess(floors["fp64"], 1e-3 * case.common["gates"]["force_residual_inf_N"])
+        ratio = floors["fp32"] / floors["fp64"]
+        expected = np.finfo(np.float32).eps / np.finfo(np.float64).eps
+        self.assertGreater(ratio, 0.1 * expected)
+        self.assertLess(ratio, 10 * expected)
 
 
 if __name__ == "__main__":

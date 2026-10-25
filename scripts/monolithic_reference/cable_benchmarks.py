@@ -12,6 +12,7 @@ from newton.solvers.experimental.monolithic import SolverMonolithic
 import newton
 
 from .cable_analytic import cantilever_deflection, localized_helix
+from .numerical_gates import block_norms, rounding_floor
 
 RECIPES = json.loads(Path(__file__).with_name("cable_recipes.json").read_text())
 
@@ -121,7 +122,8 @@ class CableBenchmark:
             self.state._monolithic_coupled.cable_ref_director.assign(d)
             self.state._monolithic_coupled.cable_ref_twist.assign(phi)
             self.solver.reset_state(self.state, dt=self.dt)
-        self.maximum_residual = {"position": 0.0, "theta": 0.0}
+        # Raw block L2 residuals and their ratios to max(gate, rounding floor L2).
+        self.maximum_residual = {"position": 0.0, "theta": 0.0, "position_excess": 0.0, "theta_excess": 0.0}
 
     def step(self):
         """Apply prescribed loading, solve all coordinates, and require convergence."""
@@ -143,10 +145,15 @@ class CableBenchmark:
         if not self.solver.last_stats.converged:
             raise RuntimeError(f"{self.kind} step {step}: {self.solver.last_stats}")
         self.steps = step
-        metrics = self.solver.last_stats.variational["material_blocks"]
+        residual = self.solver.last_stats.variational["residual"]
+        floor = rounding_floor(self.solver)
         for part, group in (("position", "x"), ("theta", "theta")):
-            value = metrics[f"cable_0_{group}"][f"raw_residual_cable_0_{group}_norm"]
-            self.maximum_residual[part] = max(self.maximum_residual[part], float(value))
+            value, rounding = block_norms(self.solver, residual, floor, f"cable_0_{group}")
+            gate = r["gates"][f"raw_{part}_residual"]
+            self.maximum_residual[part] = max(self.maximum_residual[part], value)
+            self.maximum_residual[part + "_excess"] = max(
+                self.maximum_residual[part + "_excess"], value / max(gate, rounding)
+            )
 
     def restore_checkpoint(self, path):
         """Replace the solver with a fresh instance and continue the same experiment."""
@@ -174,6 +181,8 @@ class CableBenchmark:
             "velocity": float(np.max(np.linalg.norm(self.state.particle_qd.numpy(), axis=1))),
             "raw_position_residual": self.maximum_residual["position"],
             "raw_theta_residual": self.maximum_residual["theta"],
+            "raw_position_residual_excess": self.maximum_residual["position_excess"],
+            "raw_theta_residual_excess": self.maximum_residual["theta_excess"],
         }
         if self.kind == "cantilever":
             w = cantilever_deflection(self.s, length=r["length"], force=r["force"], bending=r["bending"][self.axis - 1])
@@ -239,10 +248,14 @@ class CableBenchmark:
             "relative_torque_error",
             "writhe_turn_error",
         }
+        # Residual gates admit each block up to the solver's rounding floor.
+        floored = {"raw_position_residual", "raw_theta_residual"}
         failures = {
             k: (result[k], limit)
             for k, limit in self.recipe["gates"].items()
-            if k in result and result[k] > limit and (accuracy or k not in approximation)
+            if k in result
+            and (result[k + "_excess"] > 1 if k in floored else result[k] > limit)
+            and (accuracy or k not in approximation)
         }
         if failures:
             raise AssertionError(failures)
