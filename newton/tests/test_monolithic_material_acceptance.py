@@ -13,7 +13,7 @@ import numpy as np
 
 from scripts.monolithic_reference.compare_material_acceptance import compare
 from scripts.monolithic_reference.material_acceptance import MaterialAcceptance, segment_distance, triangle_distance
-from scripts.monolithic_reference.material_recipes import RECIPE_PATH, build_case
+from scripts.monolithic_reference.material_recipes import MATERIAL_RECIPE_PATH, RECIPE_PATH, build_case
 from scripts.monolithic_reference.material_scene import MaterialScene, load_fraction
 
 
@@ -43,6 +43,16 @@ class TestMaterialAcceptance(unittest.TestCase):
         for version in (6, 7):
             with self.subTest(version=version), self.assertRaisesRegex(ValueError, "retired solver options"):
                 MaterialScene("cloth-press", recipe=RECIPE_PATH.with_name(f"material_acceptance_v{version}.json"))
+
+    def test_recipe_precision_rejected(self):
+        """Refuse recipes that fix a precision, which only the runner selects."""
+        recipe = json.loads(MATERIAL_RECIPE_PATH.read_text())
+        recipe["common"]["precision"] = "FP64"
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "recipe.json"
+            path.write_text(json.dumps(recipe))
+            with self.assertRaisesRegex(ValueError, "fixes the precision"):
+                MaterialScene("cloth-press", recipe=path)
 
     def test_cross_mode_evidence(self):
         """Reject an intermediate-frame drift and partial or mixed-source matrices."""

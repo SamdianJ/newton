@@ -1,6 +1,6 @@
 {
   "version": 8,
-  "purpose": "v7 with linear solves stopped at the physical row limits (P8b): the absolute linear tolerance option is removed and PCG runs in the solver precision; physical gates, loads and solver budgets are unchanged",
+  "purpose": "v7 with linear solves stopped at the physical row limits (P8b): the absolute linear tolerance option is removed and PCG runs in the solver precision; physical gates, loads and solver budgets are unchanged; the runner selects the precision",
   "common": {
     "dt": 0.001,
     "steps": 6000,
@@ -38,7 +38,6 @@
     ],
     "checkpoint_step": 2000,
     "ramp": "3*s*s-2*s*s*s",
-    "precision": "FP64",
     "contact_model": "C-IE",
     "globalization": "ArmijoOrResNorm",
     "publish_policy": "strict",

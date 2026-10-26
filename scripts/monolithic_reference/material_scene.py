@@ -123,6 +123,8 @@ class MaterialScene:
         retired = {"joint_residual_tolerance", "cloth_position_tolerance", "linear_absolute_tolerance"} & c.keys()
         if retired:
             raise ValueError(f"Recipe sets retired solver options {sorted(retired)}; use material_acceptance_v8.json")
+        if "precision" in c:
+            raise ValueError("Recipe fixes the precision; the runner selects it")
         self.solver = SolverMonolithic(
             self.model,
             cloth_inputs=cloth,
