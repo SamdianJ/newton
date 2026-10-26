@@ -84,7 +84,7 @@ class MassMode(str, enum.Enum):
 
 
 class Precision(enum.Enum):
-    """Construction-time precision of nonlinear state and decisions."""
+    """Construction-time precision of every solver array."""
 
     FP64 = "fp64"
     FP32 = "fp32"
@@ -139,7 +139,7 @@ class Stats:
     failure_reason: str | None = None
     converged: bool = False
     variational: Mapping | None = None
-    """Internal tet-only diagnostics; None on the legacy coupled path."""
+    """Internal diagnostics; ``convergence_groups`` maps each row group to its largest ``|r|/tau`` and its count of rows that passed only within their rounding allowance."""
     rolled_back: bool = False
     step_generation: int = 0
     accepted_generation: int = 0
@@ -184,31 +184,31 @@ class Stats:
     rho_x: float = math.nan
     """Normalized particle scaled residual [dimensionless]; NaN when unmeasured."""
     merit_initial: float = math.nan
-    """First current merit using its initial scale; not a convergence denominator."""
+    """``merit_final`` at the first evaluation of the step [dimensionless]."""
     merit_q_initial: float = math.nan
-    """Joint merit at the first current evaluation, using its initial scale."""
+    """Joint ``merit_q_final`` at the first evaluation of the step [dimensionless]."""
     merit_x_initial: float = math.nan
-    """Particle merit at the first current evaluation, using its initial scale."""
+    """Particle ``merit_x_final`` at the first evaluation of the step [dimensionless]."""
     merit_final: float = math.nan
-    """Last evaluated current merit; on rollback this can describe a discarded state."""
+    """RMS of ``r_i / tau_i`` over all rows at the last evaluation [dimensionless]; on rollback this can describe a discarded state."""
     merit_q_final: float = math.nan
-    """Joint block of the last evaluated current merit."""
+    """RMS of ``r_i / tau_i`` over joint rows at the last evaluation [dimensionless]."""
     merit_x_final: float = math.nan
-    """Particle block of the last evaluated current merit."""
+    """RMS of ``r_i / tau_i`` over particle rows at the last evaluation [dimensionless]."""
     merit_reference: float = math.nan
-    """Initial residual RMS re-evaluated with the last current scale."""
+    """RMS of ``r0_i / tau_i`` over all rows, for the step-start residual ``r0`` [dimensionless]."""
     merit_q_reference: float = math.nan
-    """Joint reference RMS using the last current scale."""
+    """RMS of ``r0_i / tau_i`` over joint rows [dimensionless]."""
     merit_x_reference: float = math.nan
-    """Particle reference RMS using the last current scale."""
+    """RMS of ``r0_i / tau_i`` over particle rows [dimensionless]."""
     convergence_ratio: float = math.nan
-    """Current merit / (absolute gate + relative gate * reference); must be <= 1."""
+    """Largest ``|r_i| / tau_i`` over all rows at the last evaluation; the step converges when it is <= 1."""
     convergence_ratio_q: float = math.nan
-    """Joint convergence ratio; must be <= 1 independently of the global gate."""
+    """Largest ``|r_i| / tau_i`` over joint rows."""
     convergence_ratio_x: float = math.nan
-    """Particle convergence ratio; must be <= 1 independently of the global gate."""
+    """Largest ``|r_i| / tau_i`` over particle rows."""
     scale_generation: int = -1
-    """Current assembly sequence for the reported merit/reference/gates."""
+    """Assembly sequence of the reported merits and ratios."""
     raw_residual_q_norm: float = math.nan
     """Unscaled joint L2 norm [mixed N, N*m]; diagnostic only."""
     raw_residual_x_norm: float = math.nan
@@ -219,8 +219,6 @@ class Stats:
     """Joint RMS of the last accepted alpha*y in its solve scale."""
     scaled_step_x: float = math.nan
     """Particle RMS of the last accepted alpha*y in its solve scale."""
-    merit_noise: float = math.nan
-    """Actual absolute allowance in the trial merit decrease condition."""
     residual_floor_global: float = math.nan
     """Actual global scaled linear residual denominator floor."""
     residual_floor_q: float = math.nan

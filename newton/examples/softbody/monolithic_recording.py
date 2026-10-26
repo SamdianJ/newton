@@ -19,7 +19,7 @@ REPO = Path(__file__).resolve().parents[3]
 NORMAL = json.loads((REPO / "scripts/monolithic_reference/fixtures/normal_loading_frozen_v3.json").read_text())
 # Private producers keep measurement independent of the solver's spatial selection and pool.
 _MEASURE_BATCHES = weakref.WeakKeyDictionary()
-# Grasp success, approved 2026-10-24: over the final 0.5 s at the top of the lift, every
+# Grasp success: over the final 0.5 s at the top of the lift, every
 # published step keeps the ground support within 5% of the object weight and the object
 # center of mass at least a quarter of its smallest edge above rest.
 GRASP_WINDOW_STEPS = 500

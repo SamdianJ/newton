@@ -59,8 +59,8 @@ class MonolithicPcgConfig:
     prevents articulation drift from being masked by larger deformable residuals.
     Default 0.1 (replace when any block drifts >= 10%). Set to 0.0 for always-replace."""
     linear_absolute_tolerance: float = 1.0e-6
-    """Absolute scaled residual norm tolerance for every block; provisional, pending calibration.
-    Zero retains the legacy relative-with-floor acceptance rule."""
+    """Absolute scaled residual norm tolerance for every block.
+    The nonlinear solver sets it to the largest group limit, so each group stops at its own limit."""
     residual_norm_limits: tuple[float, float, float] | None = None
     """Optional outer-solve caps on global/q/x scaled L2 residuals, applied after rtol/atol.
     None leaves standalone PCG acceptance unchanged. These are per-solve numeric data."""

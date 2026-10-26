@@ -218,7 +218,7 @@ class MaskedPcgPlan:
         self._cable_signature = None if cable_preconditioner is None else cable_preconditioner.signature()
         self._cable_active = None if cable_preconditioner is None else wp.zeros(1, dtype=int, device=self.device)
         self.n = y.size
-        # Every bound and owned float array uses the solution's precision.
+        # Owned vectors use the solution's precision; stopping thresholds are FP32 and compared in FP64.
         self.dtype = y.dtype
         self.matrix_type = wp.mat33d if self.dtype == wp.float64 else wp.mat33
         self.nq = q_cholesky.shape[0]

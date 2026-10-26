@@ -8,9 +8,9 @@ row up to the larger of its frozen value and a precision floor. In FP64 the floo
 is the solver's rounding term ``c_u eps_T a_i``, which lies far below every frozen
 gate, so FP64 checks stay unchanged. In FP32 it is the solver's complete row
 tolerance: FP32 keeps a 1e-4 relative tolerance because its rounding term does not
-yet bound near-rest tet elasticity, so its residual gates certify the solver's own
-convergence (approved 2026-10-25). Physical gates (displacement, energy, analytic
-error, penetration) never use the floor.
+yet bound near-rest tet elasticity, so its residual gates only confirm the solver's
+own stopping rule and do not certify it independently. Physical gates
+(displacement, energy, analytic error, penetration) never use the floor.
 """
 
 import sys

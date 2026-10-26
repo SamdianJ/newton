@@ -13,9 +13,9 @@ from .solver_types import MassMode, MaterialModel, PCGMode, Precision
 # The single supported contact law and trial acceptance (P8 production combination).
 CONTACT_MODEL = "C-IE"
 GLOBALIZATION = "ArmijoOrResNorm"
-# Version 4 (P8b): per-row physical convergence replaces the scaled-norm goals and
-# the cable, cloth and joint residual tolerance options. Version 5: linear solves
-# stop at the physical limits, and the absolute linear tolerance option is removed.
+# Version 4: per-row physical convergence replaces the scaled-norm goals and the
+# cable, cloth and joint residual tolerance options. Version 5: linear solves stop
+# at the physical limits, and the absolute linear tolerance option is removed.
 CONFIG_VERSION = 5
 
 

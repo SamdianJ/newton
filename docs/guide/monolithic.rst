@@ -74,8 +74,17 @@ report each block's largest residual-to-tolerance ratio, and
 ``Stats.variational["convergence_groups"]`` counts the rows that passed only
 within their rounding allowance. FP32 keeps the looser relative tolerance
 because its rounding magnitude does not yet bound near-rest tet elasticity,
-whose stresses cancel in ``F - I``. Each Newton direction reduces the scaled
-residual by ``linear_tolerance`` or reaches half of every row tolerance.
+whose stresses cancel in ``F - I``. The step-start residual is evaluated
+before the inertial prediction, so it contains each body's momentum over the
+time step: a fast-moving body widens the relative tolerance of its whole block,
+and a step whose prediction already lies within that tolerance is accepted
+without a Newton update. The rounding term likewise can exceed small loads; in
+FP32 a cable that is not aligned with the coordinate axes may be accepted at
+its prediction and not respond to a load near rest. Both are known limitations.
+Each Newton direction reduces the scaled residual by ``linear_tolerance`` or
+reaches half of every row tolerance; a direction whose residual reaches the
+rounding of ``|A| |y|`` is also accepted, capped at 1e-2 of the right-hand
+side.
 Force results are independent read-only NumPy snapshots; check ``force_valid``
 and ``force_generation`` before using them. Stopped publication under an opt-in
 production policy is not convergence. Reset with ``reset_state(state, dt=...)``.
@@ -102,19 +111,27 @@ The experimental constructor parameter ``precision`` accepts
 It cannot change after construction and selects one precision for every
 solver array: state, history, contact forces, energy and residual, the global
 matrix and its scaling, preconditioner factors, and PCG vectors and scalars.
-There is no mixed-precision correction or higher-precision accumulation.
+There is no mixed-precision correction or higher-precision accumulation; the
+only exception is the PCG stopping test, whose per-block thresholds are stored
+in FP32 and compared with the residual norms in FP64.
 Reductions use fixed orders: global matrix assembly orders duplicate
 contributions by row, column and value bits and sums them with a fixed pairwise
 tree, residual, energy and PCG reductions use fixed trees, and the solve path
-uses no floating-point atomics. On one device, repeated runs, CUDA graph replay
-and a permuted actor creation order give bitwise identical trajectories; CPU
-and CUDA, and the two precisions, differ by rounding.
+uses no floating-point atomic additions (only order-independent atomic maxima).
+On one device, repeated runs and CUDA graph replay give bitwise identical
+trajectories. Changing the Model numbering of bodies, joints and shapes while
+keeping the actor layout (articulation, rigid bodies in creation order, tets,
+materials) also gives bitwise identical trajectories; reordering actors of the
+same kind or static shapes changes the summation order and differs by rounding.
+CPU and CUDA, and the two precisions, differ by rounding.
 
-FP32 qualification is per scene. The P8b stage acceptance qualifies FP32 for
-the Franka and Sharpa robot scenes, the 64-box stack, the material scenes, cloth
-and the tet patch and vibration benchmarks. FP32 cable cantilevers and the
-finest tet cantilever are not yet qualified, and the localized helix is outside
-the stage acceptance in both precisions (see :doc:`monolithic_cable`).
+FP32 qualification is per scene and rests on physical gates; an FP32 residual
+gate only confirms the solver's own stopping rule. FP32 meets the physical
+gates for the Franka and Sharpa robot scenes (the Sharpa grasp is a
+diagnostic in both precisions), the 64-box stack, the material scenes, cloth and the tet patch and
+vibration benchmarks. FP32 cable cantilevers and the finest tet cantilever are
+not yet qualified, and the localized helix is outside the acceptance set in
+both precisions (see :doc:`monolithic_cable`).
 
 The precision-tagged state uses schema 4, including actor ownership, layout
 identity and native rigid continuation fields. Cross-layout and cross-precision
@@ -243,12 +260,14 @@ remain PARTIAL. Pass ``--precision fp32`` to run every case in FP32: the cases
 qualify on the same physical gates and complete-candidate contact audit, skip
 the comparison with the FP64 reference trajectories, and their receipts record
 the precision. The material, cable, cloth and tet runners accept the same
-option. Their residual and contact-balance gates admit each row up to a
-precision floor: in FP64 the solver's rounding term, far below the frozen
-values; in FP32 the solver's complete row tolerance, so an FP32 residual gate
-confirms the stopping rule rather than certifying it independently. Physical
-gates such as displacement, energy, analytic error, velocity and penetration
-never use the floor.
+option. Their residual gates admit each row up to a precision floor: in FP64
+the solver's rounding term, far below the frozen values; in FP32 the solver's
+complete row tolerance, so an FP32 residual gate confirms the stopping rule
+rather than certifying it independently. Contact force and moment balance gates
+admit 32 times the precision's machine epsilon times the summed contact force
+magnitude (times the largest contact lever for moments). Physical gates such as
+displacement, energy, analytic error, velocity and penetration never use a
+floor.
 
 After completion, review ``summary.json``, ``RESULTS.md`` and per-case receipts.
 By default, successful new recordings are removed after their summaries and

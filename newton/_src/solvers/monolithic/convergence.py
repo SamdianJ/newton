@@ -37,19 +37,16 @@ class Unit(enum.IntEnum):
 class ConvergencePolicy:
     """Per-unit absolute targets, relative tolerances and rounding multipliers, indexed by :class:`Unit`."""
 
-    # Calibrated in P8b PR-01 and approved 2026-10-19. The absolute targets keep the
-    # frozen cable L2 residual gates satisfiable row by row (2163 position and 720
-    # angle rows for the finest helix).
-    # The rounding multiplier was raised from 4 in P8b PR-03 (approved 2026-10-24).
-    # Step-start residuals of component fixtures carry at most 0.83 eps a of FP32
-    # arithmetic error, but replayed stalled FP32 Sharpa steps plateau at 4-8 eps a
-    # while closing and 21-31 eps a at the end, on tet rows summing 10-30 terms
-    # ((n - 1) eps a bounds such a sum). Unconverged steps there need 500 or more.
-    # The FP64 relative tolerance is 1e-6 (restored 2026-10-25). P8b PR-03 had
-    # relaxed it to 1e-4 for robot speed, but a step whose load changes then
-    # accepts 1e-4 of its step-start imbalance unresolved: the stiff precreased
-    # box and the prefolded cloth exceed their 1e-6 N force gates. FP32 keeps 1e-4,
-    # the setting the rounding multiplier was calibrated with: near rest, tet
+    # The absolute targets keep the frozen cable L2 residual gates satisfiable row by
+    # row (2163 position and 720 angle rows for the finest helix).
+    # Rounding multiplier: step-start residuals of component fixtures carry at most
+    # 0.83 eps a of FP32 arithmetic error, but replayed stalled FP32 Sharpa steps
+    # plateau at 4-8 eps a while closing and 21-31 eps a at the end, on tet rows
+    # summing 10-30 terms ((n - 1) eps a bounds such a sum).
+    # Relative tolerances: at 1e-4 a step whose load changes accepts 1e-4 of its
+    # step-start imbalance unresolved, so the stiff precreased box and the prefolded
+    # cloth exceed their 1e-6 N force gates; FP64 therefore uses 1e-6. FP32 keeps
+    # 1e-4, the setting the rounding multiplier was calibrated with: near rest, tet
     # elasticity rounds above 32 eps a (stresses cancel in F - I), so at 1e-6 FP32
     # tet vibration and the Sharpa grasp plateau above tau.
     absolute: tuple[float, float] = (1e-11, 1e-13)
