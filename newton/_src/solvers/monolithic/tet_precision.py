@@ -12,7 +12,7 @@ import warp as wp
 from .convergence import abs3
 from .residual import _accumulate_rows, _row_gather_map
 from .tet_common import TetPhysicsWorkspace, _validate_candidate_particles, validate_tet_scope
-from .tet_material import _evaluate_energy_stress
+from .tet_material import _cofactor_offset, _energy_stress_from, _volume_change, _volumetric_modulus
 
 
 @wp.kernel
@@ -101,7 +101,18 @@ def _elements(
         wp.atomic_max(flags, 0, 1)
         return
     volume = type(dt)(1.0) / (type(dt)(6.0) * wp.determinant(pose))
-    energy, stress = _evaluate_energy_stress(h, volume, type(dt)(materials[e, 0]), type(dt)(materials[e, 1]), material)
+    mu, lam = type(dt)(materials[e, 0]), type(dt)(materials[e, 1])
+    # det F - 1 from its step-start value plus the step's exact change: a nearly
+    # incompressible element's volumetric stress then rounds with the step, not
+    # with the strain, and its bound stays below small loads.
+    d, d_size = _volume_change(start - wp.identity(n=3, dtype=type(dt)), step)
+    energy, stress = _energy_stress_from(h, d, volume, mu, lam, material)
+    cofactor = wp.identity(n=3, dtype=type(dt)) + _cofactor_offset(h)
+    stress_bound = wp.matrix(shape=(3, 3), dtype=type(dt))
+    scale = volume * _volumetric_modulus(mu, lam, material) * d_size
+    for i in range(3):
+        for j in range(3):
+            stress_bound[i, j] = scale * wp.abs(cofactor[i, j])
     if not wp.isfinite(energy) or not wp.isfinite(wp.ddot(stress, stress)):
         wp.atomic_max(flags, 0, 2)
         return
@@ -118,7 +129,7 @@ def _elements(
         else:
             gradient = type(dx[0])(pose[a - 1, 0], pose[a - 1, 1], pose[a - 1, 2])
         r = stress * gradient
-        magnitude = abs3(r)
+        magnitude = abs3(r) + stress_bound * abs3(gradient)
         da = dx[ia] - dt * vn[ia]
         if consistent:
             for b in range(4):

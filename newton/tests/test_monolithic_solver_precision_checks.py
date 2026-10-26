@@ -34,6 +34,16 @@ REQUIRED = (
     "tet_noise/nu0.3/stretch1.2",
     "tet_noise/nu0.49/stretch1",
     "tet_noise/nu0.499/stretch1",
+    # PR-04: split volume and area changes with step-sized rounding bounds. The noise
+    # cases failed at 3b3c7417 (tet) or before the membrane change (shell); the
+    # resolution cases failed with a bound taken from the full strain's operands.
+    "tet_noise/nu0.49/stretch1.2",
+    "tet_noise/nu0.499/stretch1.2",
+    *(f"tet_resolution/nu{nu}/stretch1/strain{s}" for nu in ("0.3", "0.49", "0.499") for s in ("1e-06", "0.0001")),
+    *(f"tet_resolution/nu{nu}/stretch1.2/strain0.0001" for nu in ("0.3", "0.49", "0.499")),
+    *(f"shell_noise/nu{nu}/stretch{t}" for nu in ("0.3", "0.49") for t in ("1", "1.2")),
+    *(f"shell_resolution/nu{nu}/stretch1/strain{s}" for nu in ("0.3", "0.49") for s in ("1e-06", "0.0001")),
+    *(f"shell_resolution/nu{nu}/stretch1.2/strain0.0001" for nu in ("0.3", "0.49")),
 )
 
 

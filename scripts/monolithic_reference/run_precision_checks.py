@@ -370,57 +370,63 @@ def moving_tet(spec, *, device, representation_ulps):
             )
 
 
+def _tet_grid(nu, stretch, device):
+    """Return a 2x1x1 tet grid stretched isochorically, and an FP32/FP64 residual evaluator."""
+    vectors = {wp.float32: wp.vec3, wp.float64: wp.vec3d}
+    young = 1.0e6
+    mu, lam = young / (2 * (1 + nu)), young * nu / ((1 + nu) * (1 - 2 * nu))
+    builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0))
+    builder.add_soft_grid(
+        pos=wp.vec3(0.0),
+        rot=wp.quat_identity(),
+        vel=wp.vec3(0.0),
+        dim_x=2,
+        dim_y=1,
+        dim_z=1,
+        cell_x=0.1,
+        cell_y=0.1,
+        cell_z=0.1,
+        density=1000.0,
+        k_mu=mu,
+        k_lambda=lam,
+        k_damp=0.0,
+        add_surface_mesh_edges=False,
+        particle_radius=0.001,
+    )
+    model = builder.finalize(device=device)
+    rest = model.particle_q.numpy().astype(float)
+    lateral = 1 / np.sqrt(stretch)
+    xn = (rest @ np.diag([stretch, lateral, lateral])).astype(np.float32)
+    objectives = {
+        dtype: TetObjective(model, material_model="kim_stable_no_log", mass_mode="lumped", dtype=dtype)
+        for dtype in (wp.float32, wp.float64)
+    }
+    zeros = wp.zeros(model.particle_count, dtype=wp.vec3, device=device)
+
+    def evaluate(dtype, step):
+        native = np.float32 if dtype == wp.float32 else np.float64
+
+        def array(a):
+            return wp.array(np.asarray(a, dtype=native), dtype=vectors[dtype], device=device)
+
+        o = objectives[dtype]
+        x = (xn + step).astype(np.float32)
+        o.evaluate(
+            array(x), array(xn), array(np.zeros_like(xn)), zeros, model.gravity, dt=1e-2, displacement=array(step)
+        )
+        return o.residual.numpy().astype(float).ravel(), o.absolute.numpy().astype(float).ravel()
+
+    return xn, evaluate, lam / mu
+
+
 def tet_noise(spec, *, device, representation_ulps):
     """Element-level coverage: FP32 residual jitter against the rounding allowance."""
     del representation_ulps
-    vectors = {wp.float32: wp.vec3, wp.float64: wp.vec3d}
 
     def run(nu, stretch):
-        young = 1.0e6
-        mu, lam = young / (2 * (1 + nu)), young * nu / ((1 + nu) * (1 - 2 * nu))
-        builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0))
-        builder.add_soft_grid(
-            pos=wp.vec3(0.0),
-            rot=wp.quat_identity(),
-            vel=wp.vec3(0.0),
-            dim_x=2,
-            dim_y=1,
-            dim_z=1,
-            cell_x=0.1,
-            cell_y=0.1,
-            cell_z=0.1,
-            density=1000.0,
-            k_mu=mu,
-            k_lambda=lam,
-            k_damp=0.0,
-            add_surface_mesh_edges=False,
-            particle_radius=0.001,
-        )
-        model = builder.finalize(device=device)
+        xn, evaluate, ratio_moduli = _tet_grid(nu, stretch, device)
         rng = np.random.default_rng(0)
-        rest = model.particle_q.numpy().astype(float)
-        lateral = 1 / np.sqrt(stretch)
-        xn = (rest @ np.diag([stretch, lateral, lateral])).astype(np.float32)
         step0 = (spec["scale"] * rng.standard_normal(xn.shape)).astype(np.float32)
-        objectives = {
-            dtype: TetObjective(model, material_model="kim_stable_no_log", mass_mode="lumped", dtype=dtype)
-            for dtype in (wp.float32, wp.float64)
-        }
-        zeros = wp.zeros(model.particle_count, dtype=wp.vec3, device=device)
-
-        def evaluate(dtype, step):
-            native = np.float32 if dtype == wp.float32 else np.float64
-
-            def array(a):
-                return wp.array(np.asarray(a, dtype=native), dtype=vectors[dtype], device=device)
-
-            o = objectives[dtype]
-            x = (xn + step).astype(np.float32)
-            o.evaluate(
-                array(x), array(xn), array(np.zeros_like(xn)), zeros, model.gravity, dt=1e-2, displacement=array(step)
-            )
-            return o.residual.numpy().astype(float).ravel(), o.absolute.numpy().astype(float).ravel()
-
         errors, magnitudes = [], []
         for _ in range(spec["samples"]):
             step = (step0 + spec["scale"] * 1e-3 * rng.standard_normal(xn.shape)).astype(np.float32)
@@ -435,7 +441,7 @@ def tet_noise(spec, *, device, representation_ulps):
         judgement = {
             "coverage": {"noise_below_allowance": ratio <= 1},
             "noise_over_allowance": ratio,
-            "lambda_over_mu": lam / mu,
+            "lambda_over_mu": ratio_moduli,
             "PASS": bool(ratio <= 1),
         }
         return {"judgement": judgement}
@@ -449,12 +455,178 @@ def tet_noise(spec, *, device, representation_ulps):
             )
 
 
+def tet_resolution(spec, *, device, representation_ulps):
+    """Element-level resolution: the force of a small isochoric shear step must exceed the allowance.
+
+    The step shears the grid by ``strain`` (x displacement proportional to y),
+    which changes no volume to first order: the case most exposed to the
+    volumetric rounding of nearly incompressible materials.
+    """
+    del representation_ulps
+
+    def run(nu, stretch, strain):
+        xn, evaluate, ratio_moduli = _tet_grid(nu, stretch, device)
+        shear = np.zeros(xn.shape)
+        shear[:, 0] = strain * xn[:, 1].astype(float)
+        step = shear.astype(np.float32)
+        base64, _ = evaluate(wp.float64, np.zeros(xn.shape))
+        moved64, _ = evaluate(wp.float64, step.astype(np.float64))
+        _, magnitude32 = evaluate(wp.float32, step)
+        response = np.abs(moved64 - base64)
+        load = float(response.max())
+        allowance = spec["noise_multiple"] * FP32_EPS * magnitude32
+        loaded = response > 0.1 * load
+        ratio = float(np.max(allowance[loaded] / response[loaded]))
+        judgement = {
+            "resolution": {"allowance_below_load": ratio < 1},
+            "allowance_over_load": ratio,
+            "load": load,
+            "lambda_over_mu": ratio_moduli,
+            "PASS": bool(ratio < 1),
+        }
+        return {"judgement": judgement}
+
+    for nu in spec["poisson"]:
+        for stretch in spec["stretch"]:
+            for strain in spec["strains"]:
+                yield (
+                    f"tet_resolution/nu{nu:g}/stretch{stretch:g}/strain{strain:g}",
+                    {"poisson": nu, "stretch": stretch, "strain": strain},
+                    lambda nu=nu, stretch=stretch, strain=strain: run(nu, stretch, strain),
+                )
+
+
+def _shell_element_patch(nu, stretch, device):
+    """Return a flat 2x2 shell patch, area-preservingly stretched, and an FP32/FP64 element evaluator."""
+    from newton._src.solvers.monolithic.cloth import ClothObjective  # noqa: PLC0415
+
+    cells, width = 2, 0.2
+    uv = np.array([(i, j) for i in range(cells + 1) for j in range(cells + 1)]) / cells * width - width / 2
+    rest = np.c_[uv, np.zeros(len(uv))].astype(np.float32).astype(float)
+    triangles = np.array(
+        [
+            face
+            for i in range(cells)
+            for j in range(cells)
+            for face in (
+                (i * (cells + 1) + j, (i + 1) * (cells + 1) + j, (i + 1) * (cells + 1) + j + 1),
+                (i * (cells + 1) + j, (i + 1) * (cells + 1) + j + 1, i * (cells + 1) + j + 1),
+            )
+        ]
+    )
+    edges = {}
+    for face, triangle in enumerate(triangles):
+        for opposite in range(3):
+            a, b = triangle[(opposite + 1) % 3], triangle[(opposite + 2) % 3]
+            edges.setdefault(tuple(sorted((a, b))), []).append((face, opposite))
+    stencils = []
+    for face, triangle in enumerate(triangles):
+        ids = list(triangle)
+        for opposite in range(3):
+            edge = tuple(sorted((triangle[(opposite + 1) % 3], triangle[(opposite + 2) % 3])))
+            neighbors = [entry for entry in edges[edge] if entry[0] != face]
+            ids.append(int(triangles[neighbors[0][0], neighbors[0][1]]) if neighbors else -1)
+        stencils.append(ids)
+    young, thickness = 2.0e5, 2.0e-4
+    mu = young * thickness / (2 * (1 + nu))
+    lam = young * thickness * nu / (1 - nu**2)
+    materials = np.tile([lam, mu, lam * thickness**2 / 12, 2 * mu * thickness**2 / 12], (len(triangles), 1))
+    xn = (rest * np.array([stretch, 1 / stretch, 1.0])).astype(np.float32).astype(float)
+    objectives = {
+        dtype: ClothObjective(rest, stencils, materials, dtype=dtype, device=device)
+        for dtype in (wp.float32, wp.float64)
+    }
+
+    def evaluate(dtype, step):
+        native = np.float32 if dtype == wp.float32 else np.float64
+        o = objectives[dtype]
+        _, residual, _ = o.evaluate_host(xn.astype(native), step=np.asarray(step, dtype=native))
+        return residual.astype(float).ravel(), o.rounding.numpy().astype(float).ravel()
+
+    return xn, evaluate, lam / mu
+
+
+def shell_noise(spec, *, device, representation_ulps):
+    """Element-level coverage of the shell rounding magnitude, membrane included."""
+    del representation_ulps
+
+    def run(nu, stretch):
+        xn, evaluate, ratio_moduli = _shell_element_patch(nu, stretch, device)
+        rng = np.random.default_rng(0)
+        step0 = (spec["scale"] * rng.standard_normal(xn.shape)).astype(np.float32)
+        errors, magnitudes = [], []
+        for _ in range(spec["samples"]):
+            step = (step0 + spec["scale"] * 1e-3 * rng.standard_normal(xn.shape)).astype(np.float32)
+            r32, a32 = evaluate(wp.float32, step)
+            r64, _ = evaluate(wp.float64, step.astype(np.float64))
+            errors.append(r32 - r64)
+            magnitudes.append(a32)
+        errors, magnitudes = np.array(errors), np.array(magnitudes)
+        jitter = errors.max(axis=0) - errors.min(axis=0)
+        allowance = spec["noise_multiple"] * FP32_EPS * magnitudes.max(axis=0)
+        ratio = float(np.max(jitter / np.maximum(allowance, np.finfo(float).tiny)))
+        judgement = {
+            "coverage": {"noise_below_allowance": ratio <= 1},
+            "noise_over_allowance": ratio,
+            "lambda_over_mu": ratio_moduli,
+            "PASS": bool(ratio <= 1),
+        }
+        return {"judgement": judgement}
+
+    for nu in spec["poisson"]:
+        for stretch in spec["stretch"]:
+            yield (
+                f"shell_noise/nu{nu:g}/stretch{stretch:g}",
+                {"poisson": nu, "stretch": stretch},
+                lambda nu=nu, stretch=stretch: run(nu, stretch),
+            )
+
+
+def shell_resolution(spec, *, device, representation_ulps):
+    """Element-level resolution: an in-plane shear step's force must exceed the shell allowance."""
+    del representation_ulps
+
+    def run(nu, stretch, strain):
+        xn, evaluate, ratio_moduli = _shell_element_patch(nu, stretch, device)
+        shear = np.zeros(xn.shape)
+        shear[:, 0] = strain * xn[:, 1]
+        step = shear.astype(np.float32)
+        base64, _ = evaluate(wp.float64, np.zeros(xn.shape))
+        moved64, _ = evaluate(wp.float64, step.astype(np.float64))
+        _, magnitude32 = evaluate(wp.float32, step)
+        response = np.abs(moved64 - base64)
+        load = float(response.max())
+        allowance = spec["noise_multiple"] * FP32_EPS * magnitude32
+        loaded = response > 0.1 * load
+        ratio = float(np.max(allowance[loaded] / response[loaded]))
+        judgement = {
+            "resolution": {"allowance_below_load": ratio < 1},
+            "allowance_over_load": ratio,
+            "load": load,
+            "lambda_over_mu": ratio_moduli,
+            "PASS": bool(ratio < 1),
+        }
+        return {"judgement": judgement}
+
+    for nu in spec["poisson"]:
+        for stretch in spec["stretch"]:
+            for strain in spec["strains"]:
+                yield (
+                    f"shell_resolution/nu{nu:g}/stretch{stretch:g}/strain{strain:g}",
+                    {"poisson": nu, "stretch": stretch, "strain": strain},
+                    lambda nu=nu, stretch=stretch, strain=strain: run(nu, stretch, strain),
+                )
+
+
 FAMILIES = {
     "cable_cantilever": cable_cantilever,
     "cable_twist": cable_twist,
     "shell_patch": shell_patch,
     "moving_tet": moving_tet,
     "tet_noise": tet_noise,
+    "tet_resolution": tet_resolution,
+    "shell_noise": shell_noise,
+    "shell_resolution": shell_resolution,
 }
 
 

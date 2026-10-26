@@ -137,9 +137,13 @@ def tolerances(reference, magnitude, rows, policy, dtype):
 def assess(residual, tau, physical, rows):
     """Return each group's largest ``|r|/tau`` and its count of rounding-limited rows.
 
-    A row is rounding limited when it passes only because of the rounding term.
+    A row is rounding limited when it passes only because of the rounding term. A
+    row whose tolerance is not finite (an overflowed rounding magnitude) cannot be
+    judged and never passes.
     """
-    ratio = np.abs(residual) / tau
+    tau = np.asarray(tau)
+    with np.errstate(invalid="ignore"):
+        ratio = np.where(np.isfinite(tau), np.abs(residual) / tau, np.inf).astype(tau.dtype)
     worst = np.zeros(len(rows.names), dtype=ratio.dtype)
     np.maximum.at(worst, rows.groups, ratio)
     limited = np.bincount(
@@ -222,6 +226,9 @@ def _assess_rows(
     i = wp.tid()
     value = wp.abs(residual[i])
     ratio = value / tau[i]
+    # An overflowed rounding magnitude makes tau infinite; such a row cannot pass.
+    if not wp.isfinite(tau[i]):
+        ratio = type(ratio)(wp.inf)
     wp.atomic_max(worst, groups[i], ratio)
     if ratio <= type(ratio)(1.0) and value > physical[i]:
         wp.atomic_add(limited, groups[i], 1)

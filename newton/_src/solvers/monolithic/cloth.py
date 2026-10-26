@@ -156,12 +156,23 @@ def _kernels(dtype):
         df_step = edge_d * transform[0, 0] + other_d * transform[1, 0]
         dg_step = edge_d * transform[0, 1] + other_d * transform[1, 1]
         f, g = fn + df_step, gn + dg_step
-        e00 = (wp.dot(fn, fn) - dtype(1.0)) + (dtype(2.0) * wp.dot(fn, df_step) + wp.dot(df_step, df_step))
-        e11 = (wp.dot(gn, gn) - dtype(1.0)) + (dtype(2.0) * wp.dot(gn, dg_step) + wp.dot(dg_step, dg_step))
-        c01 = wp.dot(fn, gn) + (wp.dot(fn, dg_step) + wp.dot(df_step, g))
+        e00_n, e11_n, c01_n = wp.dot(fn, fn) - dtype(1.0), wp.dot(gn, gn) - dtype(1.0), wp.dot(fn, gn)
+        de00 = dtype(2.0) * wp.dot(fn, df_step) + wp.dot(df_step, df_step)
+        de11 = dtype(2.0) * wp.dot(gn, dg_step) + wp.dot(dg_step, dg_step)
+        dc01 = wp.dot(fn, dg_step) + wp.dot(df_step, g)
+        e00, e11, c01 = e00_n + de00, e11_n + de11, c01_n + dc01
         c00, c11 = dtype(1.0) + e00, dtype(1.0) + e11
-        # j^2 - 1 = det(C) - 1 and j - 1 = (j^2 - 1) / (j + 1).
-        j2m1 = e00 + e11 + e00 * e11 - c01 * c01
+        # j^2 - 1 = det(C) - 1 and j - 1 = (j^2 - 1) / (j + 1). Near area preservation
+        # det(C) - 1 is a small sum of strain-sized terms: form it from its step-start
+        # value, fixed within the step, plus the step's terms, so iterates differ by
+        # rounding of the step's size rather than of the strain's.
+        j2m1_n = e00_n + e11_n + e00_n * e11_n - c01_n * c01_n
+        j2m1 = j2m1_n + (de00 + de11 + de00 * e11_n + e00_n * de11 + de00 * de11 - (dtype(2.0) * c01_n + dc01) * dc01)
+        # Operand sizes of the step-dependent parts, which bound their rounding.
+        s00 = dtype(2.0) * absolute_dot(fn, df_step) + absolute_dot(df_step, df_step)
+        s11 = dtype(2.0) * absolute_dot(gn, dg_step) + absolute_dot(dg_step, dg_step)
+        s01 = absolute_dot(fn, dg_step) + absolute_dot(df_step, g)
+        sj = s00 + s11 + s00 * wp.abs(e11) + wp.abs(e00) * s11 + dtype(2.0) * wp.abs(c01) * s01
         j = wp.sqrt(dtype(1.0) + j2m1)
         jm1 = j2m1 / (j + dtype(1.0))
         cross = wp.cross(f, g)
@@ -178,6 +189,11 @@ def _kernels(dtype):
         w11 = dtype(0.5) * (mu * (jm1 - e00) + (lam + mu) * jm1 * c00) / j
         w01 = (mu - (lam + mu) * jm1) * c01 / j
         pressure = (lam + mu) * jm1 - mu
+        # Membrane stress rounding from those step operands; j - 1 rounds with sj / (j + 1).
+        sm = sj / (j + dtype(1.0))
+        n00 = dtype(0.5) * (wp.abs(mu) * (sm + s11) + wp.abs(lam + mu) * (sm * wp.abs(c11) + wp.abs(jm1) * s11)) / j
+        n11 = dtype(0.5) * (wp.abs(mu) * (sm + s00) + wp.abs(lam + mu) * (sm * wp.abs(c00) + wp.abs(jm1) * s00)) / j
+        n01 = (wp.abs(lam + mu) * sm * wp.abs(c01) + wp.abs(mu - (lam + mu) * jm1) * s01) / j
         # Exact six-dimensional material derivatives, independent of the nodal map.
         dn = points_type()
         dj = vec6()
@@ -282,6 +298,9 @@ def _kernels(dtype):
                 dg = de * transform[0, 1] + dg_edge * transform[1, 1]
                 value += dtype(2.0) * (w00 * wp.dot(f, df) + w11 * wp.dot(g, dg)) + w01 * (
                     wp.dot(f, dg) + wp.dot(g, df)
+                )
+                bending_bound += dtype(2.0) * (n00 * absolute_dot(f, df) + n11 * absolute_dot(g, dg)) + n01 * (
+                    absolute_dot(f, dg) + absolute_dot(g, df)
                 )
                 for k in range(3):
                     mapping[k, column] = df[k]

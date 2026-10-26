@@ -213,30 +213,76 @@ def _log_excess(y: Any):
 
 
 @wp.func
-def _evaluate_energy_stress(h: Any, volume: Any, mu: Any, lam: Any, material: int):
-    """Evaluate energy and first Piola stress from the displacement gradient ``h = F - I``.
+def _abs_cross_columns(a: Any, b: Any):
+    """Componentwise sum of the absolute products forming ``a x b``."""
+    return type(a)(
+        wp.abs(a[1] * b[2]) + wp.abs(a[2] * b[1]),
+        wp.abs(a[2] * b[0]) + wp.abs(a[0] * b[2]),
+        wp.abs(a[0] * b[1]) + wp.abs(a[1] * b[0]),
+    )
 
-    Every term is formed from ``h`` directly, so a strain near rest is not the
-    difference of terms of the size of the moduli: with ``cof(I + h) = I + c1``
-    and ``det(I + h) - 1 = d``,
 
-    - Kim: ``P = mu (h - c1) + (lambda + mu) d (I + c1)``,
-      ``psi = mu (|h|^2/2 - i2 - det h) + (lambda + mu) d^2 / 2``;
-    - Smith: ``P = mu (h - c1) + delta_a (I + h) + lambda_hat d (I + c1)``, with
-      ``a = mu + delta_a``, and the energy's logarithm through ``y - log(1 + y)``.
-    """
-    half = type(volume)(0.5)
-    identity = wp.identity(n=3, dtype=type(volume))
+@wp.func
+def _cofactor_offset(h: Any):
+    """Return ``c1`` with ``cof(I + h) = I + c1``."""
     trace = h[0, 0] + h[1, 1] + h[2, 2]
-    # Second invariant (tr(h)^2 - tr(h h)) / 2 and det(h): the higher terms of det(I + h).
-    hh = h * h
-    i2 = half * (trace * trace - (hh[0, 0] + hh[1, 1] + hh[2, 2]))
-    d = trace + i2 + wp.determinant(h)
-    c1 = (
-        trace * identity
+    return (
+        trace * wp.identity(n=3, dtype=type(h[0, 0]))
         - wp.transpose(h)
         + wp.matrix_from_cols(wp.cross(h[:, 1], h[:, 2]), wp.cross(h[:, 2], h[:, 0]), wp.cross(h[:, 0], h[:, 1]))
     )
+
+
+@wp.func
+def _volume_change(start: Any, step: Any):
+    """Return ``det(I + start + step) - 1`` and the operand size of its step-dependent part.
+
+    Near volume preservation ``det F - 1`` is a small sum of terms of the size of
+    ``h``. The step-start part ``start`` is fixed within a step, so its rounding is
+    a constant; the step enters through the exact 3x3 identity
+    ``det(A + S) = det A + tr(adj(A) S) + tr(A adj(S)) + det S`` with ``A = I + start``,
+    whose terms are the size of the step. Iterates of a step therefore differ by
+    rounding of the step's size, not of the strain's.
+    """
+    half = type(start[0, 0])(0.5)
+    identity = wp.identity(n=3, dtype=type(start[0, 0]))
+    trace = start[0, 0] + start[1, 1] + start[2, 2]
+    squares = start * start
+    anchor = trace + half * (trace * trace - (squares[0, 0] + squares[1, 1] + squares[2, 2])) + wp.determinant(start)
+    deformation = identity + start
+    adjugate = wp.transpose(identity + _cofactor_offset(start))
+    step_cofactor = wp.matrix_from_cols(
+        wp.cross(step[:, 1], step[:, 2]), wp.cross(step[:, 2], step[:, 0]), wp.cross(step[:, 0], step[:, 1])
+    )
+    change = type(start[0, 0])(0.0)
+    size = type(start[0, 0])(0.0)
+    absolute_step = wp.matrix(shape=(3, 3), dtype=type(start[0, 0]))
+    for i in range(3):
+        for j in range(3):
+            absolute_step[i, j] = wp.abs(step[i, j])
+    step_cofactor_size = wp.matrix_from_cols(
+        _abs_cross_columns(absolute_step[:, 1], absolute_step[:, 2]),
+        _abs_cross_columns(absolute_step[:, 2], absolute_step[:, 0]),
+        _abs_cross_columns(absolute_step[:, 0], absolute_step[:, 1]),
+    )
+    for i in range(3):
+        for j in range(3):
+            change += adjugate[i, j] * step[j, i] + deformation[i, j] * step_cofactor[i, j]
+            size += wp.abs(adjugate[i, j] * step[j, i]) + wp.abs(deformation[i, j]) * step_cofactor_size[i, j]
+    change += wp.determinant(step)
+    size += wp.dot(absolute_step[:, 0], _abs_cross_columns(absolute_step[:, 1], absolute_step[:, 2]))
+    return anchor + change, size
+
+
+@wp.func
+def _energy_stress_from(h: Any, d: Any, volume: Any, mu: Any, lam: Any, material: int):
+    """Evaluate energy and first Piola stress from ``h = F - I`` and ``d = det F - 1``."""
+    half = type(volume)(0.5)
+    identity = wp.identity(n=3, dtype=type(volume))
+    trace = h[0, 0] + h[1, 1] + h[2, 2]
+    hh = h * h
+    i2 = half * (trace * trace - (hh[0, 0] + hh[1, 1] + hh[2, 2]))
+    c1 = _cofactor_offset(h)
     norm = wp.ddot(h, h)
     # |F|^2 / 2 - det F + const without the O(1) terms: |h|^2/2 - i2 - det(h).
     shear = half * norm - i2 - wp.determinant(h)
@@ -255,6 +301,36 @@ def _evaluate_energy_stress(h: Any, volume: Any, mu: Any, lam: Any, material: in
             + half * lh * d * d
         )
     return volume * energy, volume * stress
+
+
+@wp.func
+def _volumetric_modulus(mu: Any, lam: Any, material: int):
+    """Coefficient of ``d (I + c1)`` in the stress."""
+    if material == 1:
+        return lam + type(mu)(5.0) * mu / type(mu)(6.0)
+    return lam + mu
+
+
+@wp.func
+def _evaluate_energy_stress(h: Any, volume: Any, mu: Any, lam: Any, material: int):
+    """Evaluate energy and first Piola stress from the displacement gradient ``h = F - I``.
+
+    Every term is formed from ``h`` directly, so a strain near rest is not the
+    difference of terms of the size of the moduli: with ``cof(I + h) = I + c1``
+    and ``det(I + h) - 1 = d``,
+
+    - Kim: ``P = mu (h - c1) + (lambda + mu) d (I + c1)``,
+      ``psi = mu (|h|^2/2 - i2 - det h) + (lambda + mu) d^2 / 2``;
+    - Smith: ``P = mu (h - c1) + delta_a (I + h) + lambda_hat d (I + c1)``, with
+      ``a = mu + delta_a``, and the energy's logarithm through ``y - log(1 + y)``.
+    """
+    half = type(volume)(0.5)
+    trace = h[0, 0] + h[1, 1] + h[2, 2]
+    # Second invariant (tr(h)^2 - tr(h h)) / 2 and det(h): the higher terms of det(I + h).
+    hh = h * h
+    i2 = half * (trace * trace - (hh[0, 0] + hh[1, 1] + hh[2, 2]))
+    d = trace + i2 + wp.determinant(h)
+    return _energy_stress_from(h, d, volume, mu, lam, material)
 
 
 @wp.func
