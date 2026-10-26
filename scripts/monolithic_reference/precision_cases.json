@@ -1,7 +1,7 @@
 {
   "version": 1,
-  "status": "draft",
-  "change": "P8b2 PR-01: two-sided FP32 check set (rounding coverage and small-load resolution).",
+  "status": "frozen",
+  "change": "v1 (P8b2 PR-01): two-sided FP32 check set (rounding coverage and small-load resolution), frozen with the baseline of 3b3c7417. Later changes may add cases, never remove or relax one.",
   "representation_ulps": 4,
   "cable_cantilever": {
     "angles": [0, 30, 45],
