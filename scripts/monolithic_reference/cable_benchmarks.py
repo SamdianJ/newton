@@ -27,6 +27,7 @@ class CableBenchmark:
         segments=None,
         axis=1,
         ea_multiplier=1,
+        angle=0.0,
         device="cpu",
         pcg_mode="diagnostic",
         use_cuda_graph=False,
@@ -34,6 +35,13 @@ class CableBenchmark:
     ):
         self.kind, self.axis = kind, axis
         self.ea_multiplier = ea_multiplier
+        if not np.isfinite(angle) or (angle != 0 and kind != "cantilever"):
+            raise ValueError("Only the cantilever may be rotated, by a finite angle")
+        # Rotation about z of the whole experiment: geometry, frames and load.
+        # At zero angle every array below is the axis-aligned recipe exactly.
+        self.angle = float(angle)
+        c, s_ = np.cos(np.radians(self.angle)), np.sin(np.radians(self.angle))
+        self.rotation = np.array([[c, -s_, 0.0], [s_, c, 0.0], [0.0, 0.0, 1.0]]) if self.angle else np.eye(3)
         self.recipe = r = RECIPES[kind]
         self.segments = n = segments or r["segments"][-1]
         if n < 4 or axis not in (1, 2) or not np.isfinite(ea_multiplier) or ea_multiplier <= 0:
@@ -48,6 +56,9 @@ class CableBenchmark:
         rest = np.zeros((n + 1, 3), dtype=np.float32)
         rest[:, 0] = self.s - r["length"] / 2
         length = np.diff(rest[:, 0]).astype(float)
+        if self.angle:
+            rest = (rest.astype(float) @ self.rotation.T).astype(np.float32)
+            length = np.linalg.norm(np.diff(rest.astype(float), axis=0), axis=1)
         mass = np.r_[length[0] / 2, (length[:-1] + length[1:]) / 2, length[-1] / 2] * r["linear_density"]
         fixed = np.zeros(n + 1, dtype=bool)
         fixed[:2] = True
@@ -62,6 +73,13 @@ class CableBenchmark:
         self.model = builder.finalize(device=device)
         self.rest = self.model.particle_q.numpy().astype(float)
         bending = np.diag(r["bending"]) if kind == "cantilever" else np.eye(2) * r["bending"]
+        director = np.tile(self.rotation @ np.array([0.0, 1.0, 0.0]), (n, 1))
+        if self.angle:
+            # Keep the rotated director exactly normal to the stored FP32 edges.
+            edges = np.diff(self.rest, axis=0)
+            edges /= np.linalg.norm(edges, axis=1)[:, None]
+            director -= np.sum(director * edges, axis=1)[:, None] * edges
+            director /= np.linalg.norm(director, axis=1)[:, None]
         cable = SolverMonolithic.CableInput(
             particle_ids=tuple(range(n + 1)),
             EA=r["EA"] * ea_multiplier,
@@ -70,7 +88,7 @@ class CableBenchmark:
             radius=r["radius"],
             linear_density=r["linear_density"],
             rest_theta=np.zeros(n),
-            rest_director=np.tile([0.0, 1.0, 0.0], (n, 1)),
+            rest_director=director,
             fixed_theta=fixed_theta,
         )
         self.solver_options = {
@@ -130,7 +148,7 @@ class CableBenchmark:
         r, step = self.recipe, self.steps + 1
         if self.kind == "cantilever":
             force = np.zeros((self.segments + 1, 3), dtype=np.float32)
-            force[-1, self.axis] = r["force"] * min(step / r["ramp_steps"], 1)
+            force[-1] = r["force"] * min(step / r["ramp_steps"], 1) * self.rotation[:, self.axis]
             self.state.particle_f.assign(force)
         else:
             target = self.rest.copy()
@@ -173,7 +191,7 @@ class CableBenchmark:
         x = self.state.particle_q.numpy().copy()
         edges = np.diff(x, axis=0)
         lengths = np.linalg.norm(edges, axis=1)
-        rest_lengths = np.diff(self.rest[:, 0])
+        rest_lengths = np.linalg.norm(np.diff(self.rest, axis=0), axis=1)
         result = {
             "steps": self.steps,
             "complete": self.steps == self.total_steps,
@@ -184,9 +202,18 @@ class CableBenchmark:
             "raw_position_residual_excess": self.maximum_residual["position_excess"],
             "raw_theta_residual_excess": self.maximum_residual["theta_excess"],
         }
+        # Representation limits of the stored coordinates in the solver precision:
+        # one spacing per edge end bounds the measurable strain, one per step the
+        # measurable velocity. Gates at or below them cannot be resolved (P8b2 D-1).
+        native = np.float32 if self.solver.precision == SolverMonolithic.Precision.FP32 else np.float64
+        spacing = float(np.spacing(native(np.abs(x).max())))
+        result["axial_strain_resolution"] = 2 * spacing / float(rest_lengths.min())
+        result["velocity_resolution"] = spacing / self.dt
         if self.kind == "cantilever":
             w = cantilever_deflection(self.s, length=r["length"], force=r["force"], bending=r["bending"][self.axis - 1])
-            reference = self.rest.copy()
+            # Compare in the experiment's own frame; at zero angle this is the identity.
+            x = x.astype(float) @ self.rotation
+            reference = self.rest @ self.rotation
             reference[:, self.axis] = w
             result.update(
                 relative_tip_error=float(abs(x[-1, self.axis] - w[-1]) / abs(w[-1])),

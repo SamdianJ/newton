@@ -1,0 +1,42 @@
+{
+  "version": 1,
+  "status": "draft",
+  "change": "P8b2 PR-01: two-sided FP32 check set (rounding coverage and small-load resolution).",
+  "representation_ulps": 4,
+  "cable_cantilever": {
+    "angles": [0, 30, 45],
+    "segments": [16, 128],
+    "loads": {
+      "ramp_first": {"force": 1.5e-08, "steps": 1},
+      "full": {"force": 3e-06, "steps": 25}
+    },
+    "response_tolerance": 0.02
+  },
+  "cable_twist": {
+    "angles": [0, 45],
+    "segments": [16],
+    "torque": 1e-07,
+    "steps": 10,
+    "response_tolerance": 0.02
+  },
+  "shell_patch": {
+    "tilts": [0, 30],
+    "cells": 4,
+    "loads": {"small": -2e-06, "full": -0.002},
+    "steps": 10,
+    "response_tolerance": 0.02
+  },
+  "moving_tet": {
+    "velocities": [0.0, 1.0, 100.0],
+    "gravity": [0.05, 9.81],
+    "dt": 0.001,
+    "response_tolerance": 0.01
+  },
+  "tet_noise": {
+    "poisson": [0.3, 0.49, 0.499],
+    "stretch": [1.0, 1.2],
+    "samples": 64,
+    "scale": 0.0001,
+    "noise_multiple": 32
+  }
+}
