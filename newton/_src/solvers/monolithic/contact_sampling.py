@@ -207,14 +207,8 @@ class ContactSamples:
             (sorted(map(int, pair), key=rank.get) for pair in pairs), key=lambda p: (rank[p[0]], rank[p[1]])
         )
         for a, b in ordered:
-            if (
-                owner[a] != owner[b]
-                and bodies[a] in tree_support
-                and bodies[b] in tree_support
-                and (support[bodies[a]] or support[bodies[b]])
-            ):
-                raise ValueError("Cross-articulation shape contact is not yet supported")
-            if owner[a] == owner[b] or not (a in self.rigid_shapes or b in self.rigid_shapes):
+            mechanical_pair = bodies[a] in tree_support and bodies[b] in tree_support
+            if owner[a] == owner[b] or not (mechanical_pair or a in self.rigid_shapes or b in self.rigid_shapes):
                 continue
             pair = tuple(sorted((a, b)))
             if pair in seen:
@@ -226,7 +220,13 @@ class ContactSamples:
             if not any(dynamic):
                 continue
             self.pair_kinds[pair] = (
-                "rigid-static" if not all(dynamic) else "R-R" if all(s in self.rigid_shapes for s in (a, b)) else "A-R"
+                "A-A"
+                if mechanical_pair
+                else "rigid-static"
+                if not all(dynamic)
+                else "R-R"
+                if all(s in self.rigid_shapes for s in (a, b))
+                else "A-R"
             )
             for source, target, enabled in ((a, b, dynamic[0]), (b, a, dynamic[1])):
                 if not enabled:
