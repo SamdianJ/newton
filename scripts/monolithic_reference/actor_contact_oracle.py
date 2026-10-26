@@ -65,7 +65,7 @@ def box_face_samples(half):
     return np.einsum("qn,fni->fqi", bary, tri).reshape(-1, 3), np.repeat(area / 3, 3)
 
 
-def fixture_terms(model, actors, state, start, law, *, mu=0.5, width=1e-4):
+def fixture_terms(model, actors, state, start, *, mu=0.5, width=1e-4):
     """Independent dense contact for the one-prismatic-arm analytic short fixture.
 
     Only Model physical input and actor row descriptions are read. No production
@@ -120,7 +120,7 @@ def fixture_terms(model, actors, state, start, law, *, mu=0.5, width=1e-4):
         # GeoType values are verified by the caller's analytic fixture.
         if kind is None:
             raise ValueError("Oracle requires an analytic sphere/box/plane target")
-        e, r, _, b = local(y, yn, kind, scales[target], law, offset=offset, stiffness=1e7 * weight, width=width, mu=mu)
+        e, r, _, b = local(y, yn, kind, scales[target], offset=offset, stiffness=1e7 * weight, width=width, mu=mu)
         j = rt.T @ (js - point_jacobian(int(bodies[target]), point, state))
         energy += e
         residual += j.T @ r
@@ -176,7 +176,7 @@ def fixture_terms(model, actors, state, start, law, *, mu=0.5, width=1e-4):
     return energy, residual, tangent
 
 
-def directed_terms(points, weights, source, target, start_source, start_target, *, kind, scale, law, offset, mu=0.5):
+def directed_terms(points, weights, source, target, start_source, start_target, *, kind, scale, offset, mu=0.5):
     """Assemble dense two-rigid E/r/B by independent point transformations and local law."""
     energy, residual, tangent = np.zeros(2), np.zeros(12), np.zeros((12, 12))
     positions, reactions = [], []
@@ -187,7 +187,7 @@ def directed_terms(points, weights, source, target, start_source, start_target, 
     for p, area in zip(points, weights, strict=True):
         world = cs + rs @ p
         y, yn = rt.T @ (world - ct), tr.T @ (cn + rn @ p - tn)
-        e, r, _, b = local(y, yn, kind, scale, law, offset=offset, stiffness=1e7 * area, mu=mu)
+        e, r, _, b = local(y, yn, kind, scale, offset=offset, stiffness=1e7 * area, mu=mu)
         jac = endpoint_terms(world, cs, ct, rt)
         energy += e
         residual += jac.T @ r
@@ -231,7 +231,7 @@ def preload_reference(case):
     }
 
 
-def static_reference(case, law):
+def static_reference(case):
     """Advance six native rigid coordinates against a plane with independent NumPy formulas."""
     h, mass = case["dt"], case["mass"]["rigid"]
     dimensions = np.asarray(case["dimensions"])
@@ -255,7 +255,6 @@ def static_reference(case, law):
                 yn,
                 "plane",
                 1,
-                law,
                 offset=2 * case["shape_margin"],
                 stiffness=case["contact_stiffness"] * area,
                 width=case["smoothing_width"],
@@ -319,9 +318,7 @@ def calibration():
     expected_area = 2 * sum(np.prod(np.delete(case["dimensions"], i)) for i in range(3))
     src, dst = (np.array([0.01, -0.02, -0.0398]), rotation(np.array([0.03, -0.02, 0.01]))), (np.zeros(3), np.eye(3))
     # The plane cap has smooth distance everywhere, independent of triangle correspondence.
-    _e, r, b, _, _ = directed_terms(
-        points, weights, src, dst, src, dst, kind="plane", scale=1, law="C-EE", offset=0.0002, mu=0
-    )
+    _e, r, b, _, _ = directed_terms(points, weights, src, dst, src, dst, kind="plane", scale=1, offset=0.0002, mu=0)
     errors = []
     for eps in (1e-7, 3e-8):
         numerical = []
@@ -341,9 +338,7 @@ def calibration():
                     else:
                         t = obj
                 values.append(
-                    directed_terms(
-                        points, weights, s, t, src, dst, kind="plane", scale=1, law="C-EE", offset=0.0002, mu=0
-                    )[0].sum()
+                    directed_terms(points, weights, s, t, src, dst, kind="plane", scale=1, offset=0.0002, mu=0)[0].sum()
                 )
             numerical.append((values[0] - values[1]) / (2 * eps))
         errors.append(float(np.max(np.abs(np.array(numerical) - r)) / max(1, np.max(np.abs(r)))))

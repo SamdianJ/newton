@@ -1,0 +1,1 @@
+Fix FP32 failures of experimental `SolverMonolithic` on ill-conditioned steps, such as slender tet cantilevers: a Newton direction is now accepted once its residual is within the rounding of `|A| |y|` in the solver precision, capped at a fixed fraction of the right-hand side, instead of requiring a linear residual FP32 cannot represent.

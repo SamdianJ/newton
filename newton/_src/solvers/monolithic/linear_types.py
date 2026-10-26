@@ -4,6 +4,7 @@
 """Shared layouts, capacities, configuration and results for linear solves."""
 
 import enum
+import itertools
 from dataclasses import dataclass
 
 import numpy as np
@@ -28,7 +29,6 @@ class MonolithicLinearStatus(enum.IntEnum):
     NON_POSITIVE_PRECONDITIONED_RESIDUAL = 15
     NONFINITE_ITERATION = 16
     MAX_ITERATIONS = 17
-    STAGNATION = 18
 
 
 class MonolithicPcgWarmStart(enum.IntEnum):
@@ -52,12 +52,6 @@ class MonolithicPcgConfig:
     residual_floor_global: float
     residual_floor_q: float
     residual_floor_x: float
-    curvature_absolute_tolerance: float
-    curvature_relative_tolerance: float
-    preconditioner_positive_tolerance: float
-    stagnation_window: int
-    """Number of scheduled true-residual checks without sufficient best-merit reduction."""
-    stagnation_minimum_reduction: float
     residual_replacement_threshold: float = 0.1
     """Relative gap threshold for replacing recursive residual with true residual.
     Replace when max(eta_global, eta_q, eta_x) >= threshold, where each eta is
@@ -65,8 +59,8 @@ class MonolithicPcgConfig:
     prevents articulation drift from being masked by larger deformable residuals.
     Default 0.1 (replace when any block drifts >= 10%). Set to 0.0 for always-replace."""
     linear_absolute_tolerance: float = 1.0e-6
-    """Absolute scaled residual norm tolerance for every block; provisional, pending calibration.
-    Zero retains the legacy relative-with-floor acceptance rule."""
+    """Absolute scaled residual norm tolerance for every block.
+    The nonlinear solver sets it to the largest group limit, so each group stops at its own limit."""
     residual_norm_limits: tuple[float, float, float] | None = None
     """Optional outer-solve caps on global/q/x scaled L2 residuals, applied after rtol/atol.
     None leaves standalone PCG acceptance unchanged. These are per-solve numeric data."""
@@ -112,26 +106,18 @@ class MonolithicPcgConfig:
             raise ValueError("linear_absolute_tolerance must be nonnegative and representable in float32")
         if any(
             not isinstance(value, int) or isinstance(value, bool) or value <= 0
-            for value in (self.maximum_iterations, self.true_residual_interval, self.stagnation_window)
+            for value in (self.maximum_iterations, self.true_residual_interval)
         ):
-            raise ValueError("PCG iteration counts and stagnation window must be positive integers")
+            raise ValueError("PCG iteration counts must be positive integers")
         positive = (self.linear_tolerance, self.residual_floor_global, self.residual_floor_q, self.residual_floor_x)
-        nonnegative = (
-            self.curvature_absolute_tolerance,
-            self.curvature_relative_tolerance,
-            self.preconditioner_positive_tolerance,
-            self.stagnation_minimum_reduction,
-            self.residual_replacement_threshold,
-        )
-        if (
-            any(
-                not np.isfinite(value)
-                or value < np.finfo(np.float32).smallest_subnormal
-                or value > np.finfo(np.float32).max
-                for value in positive
-            )
-            or any(not np.isfinite(value) or value < 0 or value > np.finfo(np.float32).max for value in nonnegative)
-            or self.stagnation_minimum_reduction >= 1
+        if any(
+            not np.isfinite(value)
+            or value < np.finfo(np.float32).smallest_subnormal
+            or value > np.finfo(np.float32).max
+            for value in positive
+        ) or not (
+            np.isfinite(self.residual_replacement_threshold)
+            and 0 <= self.residual_replacement_threshold <= np.finfo(np.float32).max
         ):
             raise ValueError("PCG tolerances must be finite with positive residual floors")
 
@@ -146,6 +132,8 @@ class MonolithicLinearLayout:
     actor_ranges: tuple[tuple[str, int, int], ...] = ()
     rigid_ranges: tuple[tuple[int, int], ...] = ()
     material_ranges: tuple[tuple[str, int, int, int, int], ...] = ()
+    # World segment boundaries: world w owns scalar rows [world_segments[w], world_segments[w + 1]).
+    world_segments: tuple[int, ...] = ()
 
     def __post_init__(self):
         for value in (self.q_dof_count, self.dynamic_particle_count, self.q_scalar_offset, self.x_scalar_offset):
@@ -179,6 +167,23 @@ class MonolithicLinearLayout:
             cursor += count
         if cursor != self.scalar_dof_count:
             raise ValueError("Actor ranges must partition the scalar layout")
+        if not self.world_segments:
+            object.__setattr__(self, "world_segments", (0, self.scalar_dof_count))
+        object.__setattr__(self, "world_segments", tuple(int(value) for value in self.world_segments))
+        boundaries = {0, *(start + count for _, start, count in self.actor_ranges)}
+        segments = self.world_segments
+        if (
+            len(segments) < 2
+            or segments[0] != 0
+            or segments[-1] != self.scalar_dof_count
+            or (
+                any(end <= start for start, end in itertools.pairwise(segments))
+                if self.scalar_dof_count
+                else segments != (0, 0)
+            )
+            or not set(segments) <= boundaries
+        ):
+            raise ValueError("World segments must partition the scalar layout at actor boundaries")
         if sorted((start, count) for kind, start, count in self.actor_ranges if kind == "rigid") != sorted(
             (start, 6) for _, start in self.rigid_ranges
         ):
@@ -228,6 +233,10 @@ class MonolithicLinearLayout:
     @property
     def x_scalar_offset(self) -> int:
         return self.q_dof_count if self.tet_scalar_offset is None else self.tet_scalar_offset
+
+    @property
+    def world_count(self) -> int:
+        return len(self.world_segments) - 1
 
     @property
     def groups(self) -> tuple[tuple[str, int, int], ...]:
@@ -341,15 +350,9 @@ class MonolithicLinearSolveResult:
     rho: float
     rho_q: float
     rho_x: float
-    min_p_ap: float
-    min_r_z: float
     warm_start: MonolithicPcgWarmStart | None = None
-    initial_guess_norm: float = float("nan")
-    """Measured L2 norm of the initial scaled unknown y; NaN before a solve starts."""
-    recursive_true_residual_gap: tuple[float, float, float] = (float("nan"),) * 3
-    """Maximum scaled L2 recursive-minus-true gap in global/q/x slices before replacement."""
-    stagnation_window: int | None = None
-    """Configured stagnation window in scheduled true-residual checks; None before a solve starts."""
+    checkpoint_history: tuple[tuple[int, tuple[float, ...]], ...] = ()
+    """Diagnostic observation only: (slot, true-residual norm per convergence group) at each checkpoint."""
 
     pcg_policy: str = "dynamic_smart_restart_v2"
     scheduled_slots: int = 0

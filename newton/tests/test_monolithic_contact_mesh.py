@@ -11,7 +11,7 @@ import warp as wp
 from newton._src.geometry import GeoType
 from newton._src.geometry.sdf_texture import TextureSDFData, create_sparse_sdf_textures
 from newton._src.solvers.monolithic.contact_geometry import _shape64
-from newton.tests.test_monolithic_contact_components import contact, fixture, state, tangent
+from newton.tests.test_monolithic_contact_components import batch_matrix, contact, fixture, native, state
 from newton.tests.unittest_utils import add_function_test, get_test_devices
 from scripts.monolithic_reference.contact_oracle import evaluate, mesh_reference
 
@@ -102,45 +102,35 @@ def test_mesh_contact_and_scale_gates(test, device):
     model._texture_sdf_data = wp.array([descriptor], dtype=TextureSDFData, device=device)
     xn[:, 2] -= 0.0003
     q = np.zeros(2)
-    for law in ("C-EE", "C-IE", "C-II"):
-        obj = contact(model, law)
-        obj.begin_step(*state(model, xn, q))
-        x = xn + np.array([1e-6, 2e-6, 1e-6])
-        obj.evaluate(*state(model, x, q), dt=0.001)
-        test.assertEqual(obj.flags.numpy()[0], 0)
-        expected = mesh_reference(data, obj.current.y.numpy())
-        np.testing.assert_allclose(obj.current.distance.numpy(), expected[:, 0], atol=1e-15)
-        np.testing.assert_allclose(obj.current.gradient.numpy(), expected[:, 1:], atol=1e-14)
-        oracle = evaluate(model, q, x, q, xn, law, kinds=[data])
-        np.testing.assert_allclose(obj.energy.numpy(), oracle[0], atol=1e-15)
-        np.testing.assert_allclose(obj.residual.numpy(), oracle[1], atol=1e-12)
-        workspace, generation, _ = tangent(obj)
-        test.assertEqual(workspace.finalize_assembly(generation=generation).status, 0)
-        np.testing.assert_allclose(
-            workspace.densify_for_test(generation=generation).raw_matrix, oracle[3], rtol=2e-5, atol=2e-4
-        )
-        r = obj.residual.numpy().copy()
-        rng = np.random.default_rng(977)
-        direction = rng.normal(size=14)
-        direction /= np.linalg.norm(direction)
-        for h in (1e-8, 3e-9):
-            values = []
-            residuals = []
-            for sign in (1, -1):
-                obj.evaluate(
-                    *state(model, x + sign * h * direction[2:].reshape(4, 3), q + sign * h * direction[:2]), dt=0.001
-                )
-                test.assertEqual(obj.flags.numpy()[0], 0)
-                values.append(obj.energy.numpy().sum())
-                residuals.append(obj.residual.numpy().copy())
-            dr = (residuals[0] - residuals[1]) / (2 * h)
-            test.assertLess(np.linalg.norm(dr - oracle[2] @ direction) / np.linalg.norm(oracle[2] @ direction), 1e-5)
-            if law == "C-EE":
-                test.assertAlmostEqual((values[0] - values[1]) / (2 * h), r @ direction, delta=1e-7)
+    batch = native(contact(model))
+    batch.begin_step(*state(model, xn, q))
+    x = xn + np.array([1e-6, 2e-6, 1e-6])
+    batch.evaluate(*state(model, x, q), dt=0.001)
+    test.assertEqual(int(batch.flags.numpy()[0]), 0)
+    expected = mesh_reference(data, batch.current.y.numpy())
+    np.testing.assert_allclose(batch.current.distance.numpy(), expected[:, 0], atol=1e-15)
+    np.testing.assert_allclose(batch.current.gradient.numpy(), expected[:, 1:], atol=1e-14)
+    oracle = evaluate(model, q, x, q, xn, kinds=[data])
+    np.testing.assert_allclose(batch.pool.energy.result.numpy()[:2], oracle[0].sum(axis=0), atol=1e-15)
+    np.testing.assert_allclose(batch.pool.residual.result.numpy(), oracle[1], atol=1e-12)
+    np.testing.assert_allclose(batch_matrix(batch), oracle[3], rtol=2e-5, atol=2e-4)
+    rng = np.random.default_rng(977)
+    direction = rng.normal(size=14)
+    direction /= np.linalg.norm(direction)
+    for h in (1e-8, 3e-9):
+        residuals = []
+        for sign in (1, -1):
+            batch.evaluate(
+                *state(model, x + sign * h * direction[2:].reshape(4, 3), q + sign * h * direction[:2]), dt=0.001
+            )
+            test.assertEqual(int(batch.flags.numpy()[0]), 0)
+            residuals.append(batch.pool.residual.result.numpy().copy())
+        dr = (residuals[0] - residuals[1]) / (2 * h)
+        test.assertLess(np.linalg.norm(dr - oracle[2] @ direction) / np.linalg.norm(oracle[2] @ direction), 1e-5)
     for scale in ([1, 2, 1], [-1, -1, -1], [0, 0, 0]):
         model.shape_scale.assign(np.array([scale], dtype=np.float32))
         with test.assertRaisesRegex(ValueError, "uniform"):
-            contact(model, "C-EE")
+            contact(model)
     test.assertIsNotNone(coarse)
     test.assertIsNotNone(fine)
 

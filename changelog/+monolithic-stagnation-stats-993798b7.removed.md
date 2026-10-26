@@ -1,0 +1,1 @@
+Remove `Status.LINEAR_STAGNATION` and the never-measured `Stats` fields `initial_guess_norm`, `recursive_true_residual_gap*`, `stagnation_window`, `min_p_ap`, `min_r_z` and `merit_noise` from experimental `SolverMonolithic`. Stagnating linear solves now run to `linear_max_iterations`; remove reads of the deleted fields.

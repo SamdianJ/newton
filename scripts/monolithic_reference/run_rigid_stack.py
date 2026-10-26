@@ -129,7 +129,7 @@ def step_errors(row, gates):
     return errors
 
 
-def record_run(output, *, max_steps=None, device="cuda:0"):
+def record_run(output, *, max_steps=None, device="cuda:0", precision="fp64"):
     """Run the frozen recipe; shortened runs remain PARTIAL and failed states remain recorded."""
     case, identity = json.loads(CASE.read_text()), sha(CASE)
     if (case["dt"], case["half_extent_m"], case["mass_kg"], case["gap_m"], case["gravity_m_s2"]) != (
@@ -153,9 +153,10 @@ def record_run(output, *, max_steps=None, device="cuda:0"):
         graph=graph,
         query_capacity=case["query_capacity"],
         support_capacity=case["support_capacity"],
+        precision=precision,
     )
     # Only full-reference batch scratch is needed by the offline auditor.
-    full = stack_solver(model, spatial=False, graph=graph, support_capacity=0)
+    full = stack_solver(model, spatial=False, graph=graph, support_capacity=0, precision=precision)
     audit = ContactSystemAudit(run, full)
     state, control = run.create_state(dt=DT), model.control()
     recording = output / "recording"
@@ -280,7 +281,7 @@ def record_run(output, *, max_steps=None, device="cuda:0"):
         "collision_window_includes_captures": True,
     }
     metrics = {
-        "bodies": model.body_count - 1,
+        "bodies": model.body_count,
         "expected_pairs": len(expected),
         "seen_pairs": len(seen),
         "full_residual_checks": full_checks,
@@ -301,6 +302,7 @@ def record_run(output, *, max_steps=None, device="cuda:0"):
         "performance": performance,
         "metrics": metrics,
         "effective_contact_dataflow": "spatial",
+        "precision": run.precision.value,
         "scene_input_sha256": identity,
         "reference": {"policy": "ANALYTIC_STACK_PHYSICS; NO_FROZEN_TRAJECTORY"},
         "recipe": {

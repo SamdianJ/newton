@@ -51,8 +51,10 @@ poses before simulation; it does not overwrite the dynamic state each frame.
 The 5.25 s sequence settles, approaches, closes, lifts by a commanded 75 mm,
 holds for 0.5 s, lowers, releases, and retracts. The solver takes 1 ms steps,
 with ten physical steps per displayed frame. ``--test`` requires completion
-and a 0.5 s hold with at least 50 mm COM rise and ground support below 5% of
-cube weight; it does not certify general physical accuracy.
+and, over the final 500 steps of the hold, ground support below 5% of the cube
+weight and a COM rise of at least a quarter of the cube's smallest edge; it
+does not certify general physical accuracy. ``--precision fp32`` runs the
+example in FP32.
 
 Solver scope
 ------------

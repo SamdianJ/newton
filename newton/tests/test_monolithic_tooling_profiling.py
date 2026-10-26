@@ -25,7 +25,7 @@ def test_spatial_solver_profile(test, device):
             device=device,
             graph=device.is_cuda,
             contact_dataflow="spatial",
-            spatial={"candidate_capacity": 256, "law_margin": 0.0},
+            spatial={"candidate_capacity": 256},
         )
         for _ in range(2)
     ]
@@ -119,8 +119,8 @@ def test_solver_profile(test, device):
 
 
 class TestProfiling(unittest.TestCase):
-    def test_contact_diagnostics_legacy(self):
-        """Suppress legacy host reports without changing native state or force publication."""
+    def test_contact_pair_diagnostics(self):
+        """Suppress host pair reports without changing native state or force publication."""
         from newton.examples.softbody.monolithic_recording import state_arrays  # noqa: PLC0415
         from scripts.monolithic_reference.profiling import contact_pair_diagnostics  # noqa: PLC0415
         from scripts.monolithic_reference.run_actor_coupling import build_model, make_solver  # noqa: PLC0415
@@ -130,19 +130,16 @@ class TestProfiling(unittest.TestCase):
         for enabled in (True, False):
             run = make_solver(model, graph=False)
             state, control = run.create_state(dt=0.001), model.control()
-            original = run._contact.actor_contact.diagnostics
+            original = run._contact.pair_diagnostics
             with contact_pair_diagnostics(run, enabled=enabled):
                 for _ in range(3):
                     run.step(state, state, control, dt=0.001)
                     self.assertTrue(run.last_stats.converged)
-            self.assertEqual(run._contact.actor_contact.diagnostics, original)
+            self.assertEqual(run._contact.pair_diagnostics, original)
             self.assertEqual(bool(run.last_stats.variational["actor_contact_pairs"]), enabled)
             outputs.append(state_arrays(state))
         for name in outputs[0]:
             np.testing.assert_array_equal(outputs[0][name], outputs[1][name], err_msg=name)
-        _, run, _, _ = build_scene("tiny-contact", device="cpu", graph=False)
-        with contact_pair_diagnostics(run, enabled=False):
-            self.assertIsNone(run._contact.actor_contact)
 
     def test_nested_accounting(self):
         """Subtract only immediate children and exclude capture-contaminated calls."""

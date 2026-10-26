@@ -4,24 +4,29 @@
 newton.solvers.experimental.monolithic
 ======================================
 
-Experimental implicit articulated rigid/tet solver with P1Q3 contact.
+Experimental implicit articulation, rigid, tet, cloth and cable solver with P1Q3 contact.
 
 .. experimental::
 
-The solver advances one supported articulation and one connected tet body with
-explicit C-EE, C-IE or C-II contact, scaled PCG and transactional publication.
-The collision pipeline can also detect tet-face contacts independently.
+The solver advances one world with at most one articulation, at most one
+connected tet body, FREE rigid actors and cloth/cable inputs through one step
+pipeline, with C-IE contact, ArmijoOrResNorm acceptance, spatial contact
+candidates, scaled PCG and transactional publication.
 
 State and migration
 -------------------
 
-Construct ``SolverMonolithic(model, contact_model=..., globalization=...,
-friction_velocity_scale=..., ...)`` directly. The experimental q-only, tet-only
-and private coupled factories are no longer supported. Constructor options are
-explicit; historical spring friction and ``tangential_stiffness`` are rejected.
-The defaults remain strict publication, diagnostic PCG and CUDA graphs disabled.
-C-IE/C-II or masked contact with Armijo/ArmijoOrResNorm require the explicit
-``allow_nonconservative_energy=True`` opt-in.
+Construct ``SolverMonolithic(model, friction_velocity_scale=..., ...)``
+directly. The experimental q-only, tet-only and private coupled factories are no
+longer supported. Constructor options are explicit; historical spring friction
+and ``tangential_stiffness`` are rejected; option values are validated before
+the Model is inspected. The defaults remain strict publication, diagnostic PCG
+and CUDA graphs disabled.
+Contact always uses C-IE: the normal penalty acts on the current gap and the
+friction load uses the gap linearized at the step start. A Newton trial is
+accepted when either the Armijo energy predicate or the residual-norm predicate
+holds. Frictional C-IE energy is not a potential, so its energy acceptance is
+reported as heuristic rather than variational.
 
 Use ``create_state(dt=..., source=None)`` for complete FP64 coordinates and P3
 integration history. An ordinary ``model.state()`` can supply initial coordinates
@@ -35,22 +40,20 @@ after success. ``load_checkpoint(state, path)`` validates in scratch before
 replacing the target. Both return None. Incompatible configurations or edited
 bound models are rejected; rebuild the solver after model changes.
 
-``get_contact_forces(state)`` returns an independent read-only FP64 NumPy snapshot.
+``get_contact_forces(state)`` returns an independent read-only NumPy snapshot in
+the solver's precision.
 Later stepping, resetting or loading does not modify previously returned arrays.
 Fresh/reset states have invalid zero forces; published Stopped states can have
 valid forces without satisfying equilibrium. Hard failures retain the original
 state and its force generation. See :class:`MonolithicContactForces` for units.
 
 ``supports_collision_pipeline`` is False and ``contacts`` returns None. External
-Contacts, contact updates and collision scheduling are rejected. Use
-:class:`MonolithicCollisionPipeline` separately when independent queries are needed.
+Contacts, contact updates and collision scheduling are rejected.
 
 .. py:module:: newton.solvers.experimental.monolithic
 .. currentmodule:: newton.solvers.experimental.monolithic
 
 .. rubric:: Classes
-
-.. autoclass:: MonolithicCollisionPipeline
 
 .. autoclass:: SolverMonolithic
 
@@ -63,7 +66,7 @@ through the keyword-only ``cloth_inputs`` and ``cable_inputs`` arguments.
 Independent cloth/cable and supported mixed articulation/rigid/tet/material
 scenes use the shared nonlinear solve and transactional publication path.
 Material surfaces contact supported articulation, rigid and static targets
-through the complete deterministic contact pool. Self-collision and soft-soft
+through the same spatial candidates as other scenes. Self-collision and soft-soft
 contact remain unsupported. Existing nonmaterial stepping is unchanged.
 
 Cloth inputs select Model triangle rows, bending coefficients ``(alpha, beta)``,
@@ -136,9 +139,9 @@ From the development checkout, list the frozen profiles without loading CUDA::
 
 Run with ``--output <new-directory>``. Each case executes serially in its own
 process and binds source paths/hashes, frozen inputs and comparison tolerances.
-Dev includes complete default Franka and recorded Sharpa trajectories. The
-current full profile has nine Franka law/globalization combinations and one
-Sharpa OR/C-IE case, all CUDA production with graphs. ``--case <id>`` filters
+The dev and full profiles run the production Franka and recorded Sharpa
+trajectories, CUDA production with graphs; nightly adds the large rigid
+collision scene. ``--case <id>`` filters
 within the chosen profile and reports PARTIAL instead of profile qualification.
 Missing frozen external inputs block execution; the runner does not fetch or
 replace them. Sharpa completion does not certify grasp success.

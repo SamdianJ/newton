@@ -11,7 +11,7 @@ import numpy as np
 import warp as wp
 
 from newton._src.solvers.monolithic.articulation import ArticulationObjective, _TreeKinematics
-from newton._src.solvers.monolithic.articulation_state import ArticulationState, _predict, _recover_history
+from newton._src.solvers.monolithic.articulation_state import ArticulationState, _predict, _recover_step
 from newton._src.solvers.monolithic.joint_parameters import JointParameters
 from newton.tests.unittest_utils import add_function_test, get_test_devices
 from scripts.monolithic_reference.articulation_fixtures import build_case, specification, target
@@ -26,10 +26,8 @@ def component(case, device, dtype=None):
     state = owner.create(dt=0.001)
     history = getattr(state, owner.namespace)
     obj = ArticulationObjective(k, JointParameters(model, **asdict(terms)).params.numpy())
-    wp.copy(obj.qn, state.joint_q)
+    obj.begin(state.joint_q)
     wp.copy(obj.vn, state.joint_qd)
-    wp.copy(obj.tn, k.com)
-    wp.copy(obj.rn, k.rotations)
     dt_type = wp.float64 if dtype is None else dtype
     wp.launch(
         _predict,
@@ -43,6 +41,8 @@ def component(case, device, dtype=None):
             dt_type(0.001),
             obj.predicted_t,
             obj.predicted_r,
+            obj.step_t,
+            obj.step_r,
         ],
         device=device,
     )
@@ -65,7 +65,6 @@ def test_components(test, device):
                 test.assertEqual(q.dtype, dtype)
                 for a in (k.com, k.rotations, k.jt, k.jw, obj.predicted_r, obj.residual, obj.tangent):
                     test.assertEqual(a.numpy().dtype, host)
-                test.assertEqual(obj.tangent32.dtype, wp.float32)
                 history = getattr(state, owner.namespace)
                 for name in (
                     "joint_v",
@@ -119,13 +118,11 @@ def test_components(test, device):
                     k.validate_inertia()
                     test.assertEqual(checked.call_args.args[0].dtype, host)
                 wp.launch(
-                    _recover_history,
+                    _recover_step,
                     k.bodies,
                     [
-                        obj.tn,
-                        obj.rn,
-                        k.com,
-                        k.rotations,
+                        k.com_steps,
+                        k.rotation_steps,
                         dtype(h),
                         history.link_v_com,
                         history.link_omega,
@@ -193,13 +190,11 @@ def test_graphs(test, device):
         history = getattr(state, owner.namespace)
         obj.evaluate(q, 0.001)
         wp.launch(
-            _recover_history,
+            _recover_step,
             k.bodies,
             [
-                obj.tn,
-                obj.rn,
-                k.com,
-                k.rotations,
+                k.com_steps,
+                k.rotation_steps,
                 k.dtype(0.001),
                 history.link_v_com,
                 history.link_omega,

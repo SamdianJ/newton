@@ -1,0 +1,1 @@
+Fix experimental `SolverMonolithic` checkpoints of scenes with more than 256 contact samples being rejected when moved between CPU and CUDA: both devices now process contacts in batches of the same size.

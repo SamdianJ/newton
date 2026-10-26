@@ -4,15 +4,14 @@
 """Audit the complete native residual outside the spatial solver's step."""
 
 import json
-from types import SimpleNamespace
 
 import numpy as np
 import warp as wp
 
 from newton._src.solvers.monolithic.coupled_kernels import combine
-from newton._src.solvers.monolithic.iteration import _block_policy, blocks, measure
+from newton._src.solvers.monolithic.iteration import blocks
 from newton._src.solvers.monolithic.rigid import _scatter_residual
-from scripts.monolithic_reference.compare_contact_dataflows import verify_contract
+from scripts.monolithic_reference.contact_audit import verify_contract
 
 
 def check_system_report(directory, run, summary):
@@ -48,22 +47,13 @@ def check_system_report(directory, run, summary):
             raise ValueError("Invalid complete system report")
         for name, part in blocks(run):
             value = row["blocks"][name]
-            goal = (
-                _block_policy(run._config, "merit_absolute", name)
-                + _block_policy(run._config, "merit_relative", name) * value["reference_merit"]
-            )
             if (
-                value.keys()
-                != {"clipped_merit", "full_merit", "reference_merit", "goal", "size", "clipped_pass", "full_pass"}
+                value.keys() != {"clipped_ratio", "full_ratio", "size", "clipped_pass", "full_pass"}
                 or value["size"] != part.stop - part.start
-                or value["goal"] != goal
-                or any(
-                    not np.isfinite(value[n]) or value[n] < 0
-                    for n in ("clipped_merit", "full_merit", "reference_merit")
-                )
+                or any(not np.isfinite(value[n]) or value[n] < 0 for n in ("clipped_ratio", "full_ratio"))
                 or value["clipped_pass"] is not True
                 or value["full_pass"] is not True
-                or max(value["clipped_merit"], value["full_merit"]) > goal
+                or max(value["clipped_ratio"], value["full_ratio"]) > 1
             ):
                 raise ValueError("Complete system report changed a physical gate")
     return report
@@ -97,7 +87,9 @@ class ContactSystemAudit:
             k.jw,
             rigid_com=history.rigid_com,
             rigid_rotation=history.rigid_rotation,
-            **({} if begin else {"dt": self.run._dt}),
+            # Slip uses the run's exact step increments, as in production; increments
+            # derived from rounded absolute poses differ visibly in FP32.
+            **({} if begin else {"dt": self.run._dt, "steps": self.run._contact_steps(source)}),
         )
 
     def evaluate(self):
@@ -145,40 +137,27 @@ class ContactSystemAudit:
         clipped = total(c.residual)
         np.testing.assert_array_equal(clipped, run._complete_r.numpy())
         full = total(batch.reference_residual)
-        reference = run._reference_residual
-        if isinstance(reference, wp.array):
-            reference = reference.numpy()
-        scale = run._linear.scale.numpy().astype(run._numpy_dtype)
-        if any(not np.isfinite(v).all() for v in (full, clipped, reference, scale)) or np.any(scale <= 0):
+        # The published state's frozen row tolerances judge both contact sets.
+        tau = run._criterion.tau.numpy()
+        if any(not np.isfinite(v).all() for v in (full, clipped, tau)) or np.any(tau <= 0):
             raise ValueError("Nonfinite complete system audit")
-        # measure writes diagnostics; a report-only view keeps production stats intact.
-        view = SimpleNamespace(
-            _numpy_dtype=run._numpy_dtype,
-            _linear=run._linear,
-            _config=run._config,
-            _metrics={},
-            _variational={},
-        )
-        values = [measure(view, residual, reference, scale) for residual in (clipped, full)]
-        blocks = {
-            name: {
-                "clipped_merit": values[0][name][0],
-                "full_merit": value[0],
-                "reference_merit": value[1],
-                "goal": value[2],
-                "size": value[3],
-                "clipped_pass": bool(values[0][name][0] <= value[2]),
-                "full_pass": bool(value[0] <= value[2]),
+        report = {}
+        for name, part in blocks(run):
+            ratios = [float(np.max(np.abs(r[part]) / tau[part])) for r in (clipped, full)]
+            report[name] = {
+                "clipped_ratio": ratios[0],
+                "full_ratio": ratios[1],
+                "size": part.stop - part.start,
+                "clipped_pass": ratios[0] <= 1,
+                "full_pass": ratios[1] <= 1,
             }
-            for name, value in values[1].items()
-        }
-        passed = all(block["full_pass"] for block in blocks.values())
+        passed = all(block["full_pass"] for block in report.values())
         return {
             "status": "PASS_FULL_RESIDUAL" if passed else "FAIL_FULL_RESIDUAL",
             "step": run._step_generation,
             "full_count": c.count,
             "candidate_count": c.spatial_diagnostics()["candidates"],
             "residual_difference_l2": float(np.linalg.norm(full - clipped)),
-            "blocks": blocks,
+            "blocks": report,
             "qualification": "FINAL_RESIDUAL_ONLY",
         }

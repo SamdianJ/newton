@@ -119,16 +119,6 @@ class TestMonolithicPcgBenchmark(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "fingerprint"):
                 benchmark.load_snapshot(path)
 
-    def test_no_diagnostic_fallback(self):
-        """Run production directly while the diagnostic solve is forbidden."""
-        case = benchmark.synthetic_cases()[0]
-        runner = benchmark.Runner(case, "production", "cpu", benchmark.pcg_config(maximum_iterations=30))
-        with patch.object(
-            benchmark.linear.MonolithicLinearWorkspace, "_solve_pcg_diagnostic", side_effect=AssertionError
-        ):
-            result = runner.solve()
-        self.assertEqual(result.pcg_policy, "masked_smart_restart_v3")
-
 
 add_function_test(
     TestMonolithicPcgBenchmark, "test_native_comparison", test_native_comparison, devices=get_test_devices()

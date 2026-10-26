@@ -120,7 +120,7 @@ def test_frozen_residual(test, device):
 
 
 def test_reduction_failure(test, device):
-    """Roll back complete state and retain old forces when a residual sum is nonfinite."""
+    """Roll back complete state and retain old forces when the tet residual sum is nonfinite."""
     run = contact_solver(contact_scene(device), mode="production", graph=device.is_cuda)
     state = contact_state(run, "chain")
     run.step(state, state, run.model.control(), dt=0.001)
@@ -129,21 +129,21 @@ def test_reduction_failure(test, device):
     before, output_before = snapshot(state), snapshot(output)
     force = run.get_contact_forces(state).body_wrench.copy()
     launch = wp.launch
-    for owner in (run._contact, run._tet):
-        run._graphs.entries.clear()
+    owner = run._tet
+    run._graphs.entries.clear()
 
-        def inject(kernel, dim, inputs=None, *args, owner=owner, **kwargs):
-            if kernel is _accumulate_rows and inputs[2] is owner._residual_terms:
-                owner._residual_terms.fill_(np.finfo(np.float64).max)
-            return launch(kernel, dim, inputs, *args, **kwargs)
+    def inject(kernel, dim, inputs=None, *args, **kwargs):
+        if kernel is _accumulate_rows and inputs[2] is owner._residual_terms:
+            owner._residual_terms.fill_(np.finfo(np.float64).max)
+        return launch(kernel, dim, inputs, *args, **kwargs)
 
-        with patch.object(wp, "launch", inject):
-            run.step(state, output, run.model.control(), dt=0.001)
-        test.assertTrue(run.last_stats.rolled_back)
-        test.assertEqual(run.last_stats.status, run.Status.NONFINITE)
-        assert_snapshot(test, state, before)
-        assert_snapshot(test, output, output_before)
-        np.testing.assert_array_equal(run.get_contact_forces(state).body_wrench, force)
+    with patch.object(wp, "launch", inject):
+        run.step(state, output, run.model.control(), dt=0.001)
+    test.assertTrue(run.last_stats.rolled_back)
+    test.assertEqual(run.last_stats.status, run.Status.NONFINITE)
+    assert_snapshot(test, state, before)
+    assert_snapshot(test, output, output_before)
+    np.testing.assert_array_equal(run.get_contact_forces(state).body_wrench, force)
 
 
 def test_graph_rebinding(test, device):
@@ -153,23 +153,19 @@ def test_graph_rebinding(test, device):
     run.step(state, state, run.model.control(), dt=0.001)
     test.assertTrue(run.last_stats.converged)
     expected = run._evaluate(run._accepted, 0.001)[1]
-    for owner in (run._contact, run._tet):
-        names = ("_residual_terms", "_residual_offsets", "_residual_slots")
-        if owner is run._contact:
-            names += ("_support_offsets", "_support_local")
-        for name in names:
-            count = run._graphs.captures["coupled_objective"]
-            setattr(owner, name, wp.clone(getattr(owner, name)))
-            np.testing.assert_array_equal(run._evaluate(run._accepted, 0.001)[1], expected)
-            test.assertEqual(run._graphs.captures["coupled_objective"], count + 1)
+    for name in ("_residual_terms", "_residual_offsets", "_residual_slots"):
+        count = run._graphs.captures["coupled_objective_owners"]
+        setattr(run._tet, name, wp.clone(getattr(run._tet, name)))
+        np.testing.assert_array_equal(run._evaluate(run._accepted, 0.001)[1], expected)
+        test.assertEqual(run._graphs.captures["coupled_objective_owners"], count + 1)
     x = run._accepted.particle_q.numpy()
     dynamic = run.model.particle_inv_mass.numpy() > 0
     x[dynamic, 1] += 1e-6
     run._accepted.particle_q.assign(x)
-    count = run._graphs.captures["coupled_objective"]
+    count = run._graphs.captures["coupled_objective_owners"]
     changed = run._evaluate(run._accepted, 0.001)[1]
     test.assertFalse(np.array_equal(changed, expected))
-    test.assertEqual(run._graphs.captures["coupled_objective"], count)
+    test.assertEqual(run._graphs.captures["coupled_objective_owners"], count)
     run._graphs.enabled = False
     np.testing.assert_array_equal(run._evaluate(run._accepted, 0.001)[1], changed)
 

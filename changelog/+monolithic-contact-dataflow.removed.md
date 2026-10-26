@@ -1,0 +1,1 @@
+Remove the experimental non-pooled Monolithic contact dataflow and the spatial `law_margin` experiment parameter. `SolverMonolithic` evaluates contact through the spatial candidate route only; bound it with `contact_candidate_capacity`. Recordings that relied on the retired dataflow can no longer be replayed.

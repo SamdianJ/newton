@@ -3,41 +3,35 @@
 
 """Allowlisted scene recipes shared by profiling and computational replay."""
 
+from contextlib import nullcontext
 from functools import partial
 from unittest.mock import patch
 
 import numpy as np
 import warp as wp
 
-from newton._src.solvers.monolithic.contact import ContactObjective
+from scripts.monolithic_reference.contact_routes import SOLVER_CONTACT, pooled_audit_route, spatial_parameters
 from scripts.monolithic_reference.coupled_fixtures import make_solver, make_tiny
 from scripts.monolithic_reference.retained_assets import validate_inputs
 from scripts.monolithic_reference.run_precision import build, cases
 
 
-def build_scene(name, *, device="cuda:0", graph=True, contact_dataflow="legacy", spatial=None):
-    """Select the contact algorithm at the existing offline constructor seam."""
-    if contact_dataflow not in ("legacy", "pooled", "spatial"):
+def build_scene(name, *, device="cuda:0", graph=True, contact_dataflow="spatial", spatial=None):
+    """Build with the spatial default, an explicit spatial capacity, or the pooled audit route."""
+    if contact_dataflow not in ("pooled", "spatial"):
         raise ValueError("Unsupported contact dataflow")
-    if (contact_dataflow == "spatial") != (spatial is not None):
-        raise ValueError("Spatial experiments require explicit capacity and law margin")
-    context = patch("newton._src.solvers.monolithic.solver_monolithic.ContactObjective", ContactObjective)
+    if contact_dataflow == "pooled" and spatial is not None:
+        raise ValueError("The pooled audit route takes no spatial parameters")
+    context = nullcontext()
     if contact_dataflow == "pooled":
-        from newton._src.solvers.monolithic.contact_pipeline import _PooledContactObjective  # noqa: PLC0415
-
-        context = patch("newton._src.solvers.monolithic.solver_monolithic.ContactObjective", _PooledContactObjective)
-    if contact_dataflow == "spatial":
+        context = pooled_audit_route()
+    elif spatial is not None:
         from newton._src.solvers.monolithic.contact_pipeline import _SpatialContactObjective  # noqa: PLC0415
 
-        if type(spatial) is not dict or set(spatial) != {"candidate_capacity", "law_margin"}:
-            raise ValueError("Invalid spatial experiment parameters")
-        context = patch(
-            "newton._src.solvers.monolithic.solver_monolithic.ContactObjective",
-            partial(_SpatialContactObjective, **spatial),
-        )
+        context = patch(SOLVER_CONTACT, partial(_SpatialContactObjective, **spatial_parameters(spatial)))
     with context:
         result = _build_scene(name, device=device, graph=graph)
-    if contact_dataflow == "spatial":
+    if result[1]._contact_spatial:
         # Allocate fixed query topology before snapshot reconstruction. Actual
         # steps overwrite these initial references from their physical input.
         _, run, state, _ = result
@@ -95,7 +89,7 @@ def _build_scene(name, *, device, graph):
     if name == "tiny-contact":
         model = make_tiny("normal_loading", device)
         model.joint_q.fill_(0.005)
-        run = make_solver(model, "normal_loading", "C-IE", mode="production", graph=graph)
+        run = make_solver(model, "normal_loading", mode="production", graph=graph)
         state = run.create_state(dt=0.001)
         return model, run, state, None
     names = {"franka-default": "franka-cube", "sharpa-default": "sharpa-recorded-10mm"}

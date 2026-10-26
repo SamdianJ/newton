@@ -19,7 +19,6 @@ import warp as wp
 
 import newton
 from newton._src.solvers.monolithic.actors import ActorTable
-from newton._src.solvers.monolithic.contact import ContactObjective
 from newton.tests.test_monolithic_solver_actor_contacts import contact_scene, contact_solver, contact_state
 from newton.tests.test_monolithic_solver_coupled import assert_snapshot, snapshot
 from newton.tests.unittest_utils import add_function_test, get_test_devices
@@ -380,17 +379,18 @@ class TestActorCoupling(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             for device in ("cpu", "cuda:0"):
-                with patch("newton._src.solvers.monolithic.solver_monolithic.ContactObjective", ContactObjective):
-                    run, state = frozen_case(device, mode="production", graph=device != "cpu")
+                run, state = frozen_case(device, mode="production", graph=device != "cpu")
                 summary = coupling.record_run(run, state, root / device, end_step=20)
                 self.assertEqual(summary["status"], "PASS_PREFIX", summary)
-            comparison = compare_actor(root / "cpu", root / "cuda:0", require_complete=False)
+            # Pool batch resources are device-specific, so configuration digests differ;
+            # compare the physical roles under the frozen envelope instead.
+            comparison = compare_actor(root / "cpu", root / "cuda:0", creation_order=True, require_complete=False)
             self.assertEqual(comparison["status"], "PASS_FROZEN_ENVELOPE", comparison)
             self.integration_cases = [comparison]
 
     def test_command_collection_and_retention(self):
         """Collect dependency failures and retain receipts before deleting successful recordings."""
-        from scripts.monolithic_reference import check_recording  # noqa: PLC0415
+        from scripts.monolithic_reference import check_recording, contact_audit, contact_system_audit  # noqa: PLC0415
 
         for failure, retain in ((None, "all"), (None, "failures"), ("step", "failures"), ("compare", "failures")):
             with self.subTest(failure=failure, retain=retain), tempfile.TemporaryDirectory() as directory:
@@ -416,12 +416,19 @@ class TestActorCoupling(unittest.TestCase):
                         "compare_actor",
                         return_value={"status": "FAIL" if failure == "compare" else "PASS_FROZEN_ENVELOPE"},
                     ),
+                    patch.object(contact_system_audit, "ContactSystemAudit"),
+                    patch.object(
+                        contact_audit,
+                        "compare_actor_contact_recordings",
+                        return_value={"status": "PASS_FROZEN_ENVELOPE"},
+                    ),
                 ):
                     self.assertEqual(coupling.main(), int(failure is not None))
                 result = json.loads((output / "summary.json").read_text())
                 self.assertEqual(result["nightly"], "NOT_RUN")
                 self.assertEqual(result["p5_status"], "PARTIAL")
-                self.assertEqual(recording.call_count, 3 if failure is None else 2)
+                # The complete counter-trajectory follows every passing primary run.
+                self.assertEqual(recording.call_count, 4 if failure is None else 3)
                 self.assertEqual(restore.call_args.args[-1], 1000)
                 for name in ("primary", "restored", "reordered"):
                     status = result["cases"][name]["status"]

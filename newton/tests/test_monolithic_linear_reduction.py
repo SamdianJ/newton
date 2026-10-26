@@ -23,19 +23,21 @@ from newton.tests.unittest_utils import add_function_test, get_test_devices
 
 
 def _tree(values):
-    """Evaluate the pair tree by recursively splitting at powers of two."""
+    """Evaluate the pair tree in the values' precision by recursively splitting at powers of two."""
     if len(values) == 1:
         return values[0]
     split = 1 << ((len(values) - 1).bit_length() - 1)
-    return np.float32(_tree(values[:split]) + _tree(values[split:]))
+    return values.dtype.type(_tree(values[:split]) + _tree(values[split:]))
 
 
 def _reference(rows, columns, values, size):
     """Group on the host and prescribe unsigned value-bit order within each entry."""
-    result = np.zeros((size, size), dtype=np.float32)
+    values = np.asarray(values)
+    bits = np.uint64 if values.dtype == np.float64 else np.uint32
+    result = np.zeros((size, size), dtype=values.dtype)
     for row, column in set(zip(rows, columns, strict=True)):
         terms = values[(rows == row) & (columns == column)]
-        terms = terms[np.argsort(terms.view(np.uint32), kind="stable")]
+        terms = terms[np.argsort(terms.view(bits), kind="stable")]
         result[row, column] = _tree(terms)
     return result
 

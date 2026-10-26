@@ -6,13 +6,17 @@
 import numpy as np
 
 from ...geometry import ShapeFlags
+from .contact_sampling import _canonical_shapes
 
 _CABLE_ANGULAR_SAMPLES = 64
 
 
 def _append_material_samples(samples, materials, support, append):
     model, actors = samples.model, samples.actors
-    targets = np.flatnonzero(model.shape_flags.numpy() & int(ShapeFlags.COLLIDE_PARTICLES))
+    targets = np.asarray(
+        _canonical_shapes(actors, np.flatnonzero(model.shape_flags.numpy() & int(ShapeFlags.COLLIDE_PARTICLES))),
+        dtype=np.int64,
+    )
     if not len(targets):
         samples.cable_edges = np.empty((0, 3), dtype=np.int32)
         samples.cable_coordinates = samples.cable_normals = np.empty((0, 3))

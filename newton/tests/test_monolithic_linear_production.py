@@ -2,22 +2,27 @@
 # SPDX-License-Identifier: Apache-2.0
 """Exercise the fixed masked policy using real kernels and small dense systems."""
 
+import ast
 import unittest
 from dataclasses import replace
+from pathlib import Path
 from unittest.mock import patch
 
 import numpy as np
 import warp as wp
 
 from newton._src.solvers.monolithic import pcg_production as impl
-from newton._src.solvers.monolithic.linear import MonolithicLinearWorkspace
-from newton._src.solvers.monolithic.linear_types import MonolithicLinearStatus, MonolithicPcgWarmStart
-from newton._src.solvers.monolithic.pcg_common import decide_restart
+from newton._src.solvers.monolithic.linear_types import (
+    MonolithicLinearLayout,
+    MonolithicLinearStatus,
+    MonolithicPcgWarmStart,
+)
 from newton.solvers.experimental.monolithic import SolverMonolithic
 from newton.tests import test_monolithic_linear_assembly as fixtures
-from newton.tests.monolithic_pcg_oracle import solve_fixed
+from newton.tests.monolithic_pcg_oracle import decide_restart, solve_fixed
 from newton.tests.monolithic_test_utils import build_contact_free_coupled_fixture, build_tiny_cpu_fixture
 from newton.tests.unittest_utils import add_function_test, get_test_devices
+from scripts.monolithic_reference import benchmark_pcg as benchmark
 
 
 def make_plan(device, matrix, rhs, *, nq=1, config=None, scale=None, lower_q=None, lower_x=None, empty=False):
@@ -159,7 +164,7 @@ def test_gap_recovery_and_block_gate(test, device):
     decision = wp.zeros(1, dtype=int, device=device)
     for gap, expected in ((0.124, False), (0.125, True), (0.126, True)):
         wp.launch(impl._initialize_state, 1, [plan.state, plan.error, plan.scalars, 11], device=device)
-        plan.norms.assign(np.asarray([100, 1, 100, 0.01, gap, 0.01, 100, 1, 100], dtype=np.float32))
+        plan.norms.assign(np.asarray([100, 1, 100, 0.01, gap, 0.01, 100, 1, 100, 0, 0, 0], dtype=np.float32))
         plan.params.replacement_threshold = 0.125
         wp.launch(
             impl._checkpoint_decision,
@@ -183,7 +188,7 @@ def test_gap_recovery_and_block_gate(test, device):
         [plan.products, plan.scalars, plan.state, plan.error, plan.params, 1],
         device=device,
     )
-    plan.norms.assign(np.asarray([1, 1, 0, 0, 0, 0, 1, 1, 0], dtype=np.float32))
+    plan.norms.assign(np.asarray([1, 1, 0, 0, 0, 0, 1, 1, 0, 0, 0, 0], dtype=np.float32))
     wp.launch(
         impl._checkpoint_decision, 1, [plan.norms, plan.state, plan.error, plan.params, 5, False, False], device=device
     )
@@ -201,7 +206,7 @@ def test_gap_recovery_and_block_gate(test, device):
     test.assertEqual(plan.state.numpy()[0]["status"], 15)
     # Global passes but a small unresolved q block vetoes success.
     wp.launch(impl._initialize_state, 1, [plan.state, plan.error, plan.scalars, 11], device=device)
-    plan.norms.assign(np.asarray([1e-5, 1e-5, 0, 0, 0, 0, 1e5, 1e-5, 1e5], dtype=np.float32))
+    plan.norms.assign(np.asarray([1e-5, 1e-5, 0, 0, 0, 0, 1e5, 1e-5, 1e5, 0, 0, 0], dtype=np.float32))
     wp.launch(
         impl._checkpoint_decision, 1, [plan.norms, plan.state, plan.error, plan.params, 11, False, True], device=device
     )
@@ -234,11 +239,7 @@ def test_all_heavy_kernels_masked(test, device):
 def test_binding_and_adapter(test, device):
     """Validate bindings, factor generations, warm starts and exclusive dispatch."""
 
-    original = fixtures.MonolithicLinearWorkspace
-    with patch.object(
-        fixtures, "MonolithicLinearWorkspace", side_effect=lambda *a, **kw: original(*a, **kw, pcg_mode="production")
-    ):
-        workspace, generation = fixtures._ready_system(device, heterogeneous=True)
+    workspace, generation = fixtures._ready_system(device, heterogeneous=True, pcg_mode="production")
     rhs = wp.array(np.linspace(-1, 2, 11, dtype=np.float32), device=device)
     y = wp.zeros(11, dtype=float, device=device)
     delta = wp.zeros_like(y)
@@ -248,26 +249,25 @@ def test_binding_and_adapter(test, device):
         "config": fixtures._pcg_config(),
         "delta": delta,
     }
-    with patch.object(MonolithicLinearWorkspace, "_solve_pcg_diagnostic", side_effect=AssertionError("old host solve")):
-        result = workspace.solve_pcg(rhs, y, **kwargs)
-        test.assertEqual(result.status, MonolithicLinearStatus.SUCCESS)
-        test.assertTrue(result.output_valid)
-        np.testing.assert_allclose(delta.numpy(), workspace.scale.numpy() * y.numpy(), rtol=1e-6)
-        test.assertFalse(hasattr(workspace, "_diagnostic_vector"))
-        old_plan = workspace._masked_pcg_plan
-        result = workspace.solve_pcg(rhs, y, **{**kwargs, "warm_start": MonolithicPcgWarmStart.SAME_GENERATION})
-        test.assertEqual(result.iterations, 0)
-        test.assertIs(workspace._masked_pcg_plan, old_plan)
-        workspace.set_regularization(0.5, generation=generation)
-        result = workspace.solve_pcg(rhs, y, **kwargs)
-        test.assertEqual(result.status, MonolithicLinearStatus.PRECONDITIONER_NOT_FACTORED)
-        workspace.factor_actor_preconditioner(generation=generation, pivot_tolerance=0)
-        result = workspace.solve_pcg(rhs, y, **kwargs)
-        test.assertEqual(result.status, MonolithicLinearStatus.SUCCESS)
-        result = workspace.solve_pcg(rhs, rhs, **kwargs)
-        test.assertEqual(result.status, MonolithicLinearStatus.INVALID_ARGUMENT)
-        result = workspace.solve_pcg(rhs, y, **{**kwargs, "generation": replace(generation, assembly_sequence=99)})
-        test.assertEqual(result.status, MonolithicLinearStatus.STALE_GENERATION)
+    result = workspace.solve_pcg(rhs, y, **kwargs)
+    test.assertEqual(result.status, MonolithicLinearStatus.SUCCESS)
+    test.assertTrue(result.output_valid)
+    np.testing.assert_allclose(delta.numpy(), workspace.scale.numpy() * y.numpy(), rtol=1e-6)
+    test.assertFalse(hasattr(workspace, "_diagnostic_vector"))
+    old_plan = workspace._masked_pcg_plan
+    result = workspace.solve_pcg(rhs, y, **{**kwargs, "warm_start": MonolithicPcgWarmStart.SAME_GENERATION})
+    test.assertEqual(result.iterations, 0)
+    test.assertIs(workspace._masked_pcg_plan, old_plan)
+    workspace.set_regularization(0.5, generation=generation)
+    result = workspace.solve_pcg(rhs, y, **kwargs)
+    test.assertEqual(result.status, MonolithicLinearStatus.PRECONDITIONER_NOT_FACTORED)
+    workspace.factor_actor_preconditioner(generation=generation, pivot_tolerance=0)
+    result = workspace.solve_pcg(rhs, y, **kwargs)
+    test.assertEqual(result.status, MonolithicLinearStatus.SUCCESS)
+    result = workspace.solve_pcg(rhs, rhs, **kwargs)
+    test.assertEqual(result.status, MonolithicLinearStatus.INVALID_ARGUMENT)
+    result = workspace.solve_pcg(rhs, y, **{**kwargs, "generation": replace(generation, assembly_sequence=99)})
+    test.assertEqual(result.status, MonolithicLinearStatus.STALE_GENERATION)
     plan = make_plan(device, np.eye(4), [1, 2, 3, 4])
     plan.columns.assign(np.zeros(16, dtype=np.int32))
     with test.assertRaisesRegex(ValueError, "layout"):
@@ -346,13 +346,7 @@ def test_solver_production_transactions(test, device):
             calls.append(result)
             return result
 
-        with (
-            patch.object(
-                MonolithicLinearWorkspace, "_solve_pcg_diagnostic", side_effect=AssertionError("host fallback")
-            ),
-            patch.object(solver._linear, "recover_delta", side_effect=AssertionError("duplicate recovery")),
-            patch.object(solver._linear, "solve_pcg", side_effect=observed),
-        ):
+        with patch.object(solver._linear, "solve_pcg", side_effect=observed):
             solver.step(fixture.state, fixture.state_next, fixture.control, dt=0.001)
         test.assertTrue(solver.last_stats.converged)
         test.assertTrue(calls)
@@ -458,8 +452,6 @@ def test_binding_rejections(test, device):
         with test.assertRaises(ValueError):
             SolverMonolithic(
                 model,
-                contact_model="C-EE",
-                globalization="Armijo",
                 friction_velocity_scale=0.01,
                 mass_mode="lumped",
                 use_cuda_graph=value,
@@ -467,16 +459,123 @@ def test_binding_rejections(test, device):
     with test.assertRaises(ValueError):
         SolverMonolithic(
             model,
-            contact_model="C-EE",
-            globalization="Armijo",
             friction_velocity_scale=0.01,
             mass_mode="lumped",
             use_cuda_graph=True,
         )
 
 
+def test_one_numerical_path(test, device):
+    """Solve identically in both observation levels; diagnostics only add checkpoint norms."""
+    for case in benchmark.synthetic_cases():
+        with test.subTest(case=case.name):
+            results = {}
+            for mode in ("diagnostic", "production"):
+                runner = benchmark.Runner(case, mode, device, benchmark.pcg_config(400))
+                results[mode] = (runner.solve(), runner.delta.numpy().copy())
+            (observed, delta), (plain, expected) = results["diagnostic"], results["production"]
+            test.assertEqual((observed.status, observed.iterations), (plain.status, plain.iterations))
+            np.testing.assert_array_equal(delta, expected)
+            test.assertEqual(len(observed.checkpoint_history), observed.true_residual_checks)
+            test.assertTrue(all(np.isfinite(norms).all() for _, norms in observed.checkpoint_history))
+            test.assertEqual(plain.checkpoint_history, ())
+
+
+def test_no_stagnation_exit(test, device):
+    """Keep iterating through a slow plateau until convergence or the iteration budget."""
+    case = next(c for c in benchmark.synthetic_cases() if c.name == "ill_conditioned")
+    runner = benchmark.Runner(case, "diagnostic", device, benchmark.pcg_config(400))
+    result = runner.solve()
+    test.assertEqual(result.status, MonolithicLinearStatus.MAX_ITERATIONS)
+    test.assertEqual(result.iterations, 400)
+    test.assertNotIn("STAGNATION", MonolithicLinearStatus.__members__)
+
+
+def test_fixed_order_reductions(test, device):
+    """Repeat a multi-chunk solve bitwise and match a float64 reference without float atomics."""
+    n = 3 * 1200 + 2
+    rng = np.random.default_rng(31)
+    diagonal = rng.uniform(1.0, 4.0, n)
+    off = rng.uniform(-0.2, 0.2, n - 1)
+    matrix = np.diag(diagonal) + np.diag(off, 1) + np.diag(off, -1)
+    rhs = rng.normal(size=n).astype(np.float32)
+    config = impl.MaskedPcgConfig(maximum_iterations=60, true_residual_interval=5, linear_tolerance=1e-6)
+    solutions = []
+    for _ in range(2):
+        plan = make_plan(device, matrix, rhs, nq=2, config=config)
+        result = solve(plan, graph=device.is_cuda)
+        test.assertEqual(result.status, impl.ProductionStatus.SUCCESS)
+        solutions.append(plan.y.numpy().copy())
+    np.testing.assert_array_equal(solutions[0], solutions[1])
+    np.testing.assert_allclose(solutions[0], np.linalg.solve(matrix, rhs), rtol=1e-4, atol=1e-5)
+
+
+def _rigid_worlds(device, worlds, count):
+    """Plan an identity system of identical worlds, each with `count` six-dimensional rigid actors."""
+    n = 6 * count * worlds
+    starts = range(0, n, 6)
+    layout = MonolithicLinearLayout(
+        0,
+        0,
+        actor_ranges=tuple(("rigid", start, 6) for start in starts),
+        rigid_ranges=tuple(enumerate(starts)),
+        world_segments=tuple(range(0, n + 1, 6 * count)),
+    )
+    return impl.MaskedPcgPlan(
+        offsets=wp.array(np.arange(n + 1, dtype=np.int32), device=device),
+        columns=wp.array(np.arange(n, dtype=np.int32), device=device),
+        values=wp.ones(n, dtype=float, device=device),
+        scale=wp.ones(n, dtype=float, device=device),
+        q_cholesky=wp.zeros((0, 0), dtype=float, device=device),
+        x_cholesky=wp.zeros(0, dtype=wp.mat33, device=device),
+        rhs_hat=wp.ones(n, dtype=float, device=device),
+        y=wp.zeros(n, dtype=float, device=device),
+        layout=layout,
+        rigid_cholesky=wp.array(np.tile(np.eye(6, dtype=np.float32), (len(starts), 1, 1)), device=device),
+        rigid_rows=wp.array(np.add.outer(np.asarray(starts), np.arange(6)).astype(np.int32), device=device),
+    )
+
+
+def test_world_segment_products(test, device):
+    """Reduce each world's products over its own chunk tree, whatever the other worlds hold."""
+    count = 50  # 300 rows per world, so each world spans two chunks.
+    a, b = np.random.default_rng(5).normal(size=(2, 2 * 6 * count)).astype(np.float32)
+    plans = [_rigid_worlds(device, 2, count), _rigid_worlds(device, 1, count)]
+    test.assertEqual((plans[0].layout.world_count, plans[1].layout.world_count), (2, 1))
+    test.assertIsNone(plans[0]._products_kernel)
+    # A single-world plan may fuse its dot in one tile; compare the chunk trees.
+    plans[1]._products_kernel = None
+    for plan in plans:
+        wp.launch(impl._initialize_state, 1, [plan.state, plan.error, plan.scalars, 200], device=device)
+    plans[0]._emit_products(wp.array(a, device=device), wp.array(b, device=device))
+    worlds = plans[0].segment_products.numpy()
+    for w, part in enumerate((slice(0, 6 * count), slice(6 * count, None))):
+        plans[1]._emit_products(wp.array(a[part], device=device), wp.array(b[part], device=device))
+        test.assertEqual(plans[1].products.numpy()[0].tobytes(), worlds[w].tobytes())
+    test.assertEqual(plans[0].products.numpy()[0], np.float32(np.float32(0) + worlds[0] + worlds[1]))
+    test.assertEqual(int(plans[0].error.numpy()[0]), 0)
+
+
+def test_world_segment_layout(test, device):
+    """Default to one world and place every world boundary on an actor boundary."""
+    layout = MonolithicLinearLayout(2, 3)
+    test.assertEqual((layout.world_segments, layout.world_count), ((0, 11), 1))
+    test.assertEqual(MonolithicLinearLayout(2, 3, world_segments=[0, 2, 11]).world_segments, (0, 2, 11))
+    for segments in ((0, 5, 11), (0, 11, 11), (1, 11), (0, 10), (0,)):
+        with test.assertRaises(ValueError):
+            MonolithicLinearLayout(2, 3, world_segments=segments)
+
+
 class TestMonolithicPcgProduction(unittest.TestCase):
-    pass
+    def test_no_float_atomic_accumulation(self):
+        """Reduce PCG products and residual norms in a fixed order on every device."""
+        tree = ast.parse(Path(impl.__file__).with_name("pcg_production_kernels.py").read_text())
+        calls = [
+            node.func.attr
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "atomic_add"
+        ]
+        self.assertEqual(calls, [])
 
 
 for fn in (
@@ -493,5 +592,10 @@ for fn in (
     test_solver_production_transactions,
     test_scalar_failures_and_first_slot,
     test_binding_rejections,
+    test_one_numerical_path,
+    test_no_stagnation_exit,
+    test_fixed_order_reductions,
+    test_world_segment_products,
+    test_world_segment_layout,
 ):
     add_function_test(TestMonolithicPcgProduction, fn.__name__, fn, devices=get_test_devices())

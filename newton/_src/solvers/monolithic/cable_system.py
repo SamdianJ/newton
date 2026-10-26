@@ -19,10 +19,9 @@ def _gather(source: wp.array[Any], ids: wp.array[int], target: wp.array[Any]):
 
 @wp.kernel
 def _residual(
-    x: wp.array[Any],
-    xn: wp.array[Any],
+    step: wp.array[Any],
     vn: wp.array[Any],
-    theta: wp.array[Any],
+    theta_step: wp.array[Any],
     torque: wp.array[Any],
     forces: wp.array[wp.vec3],
     gravity: wp.vec3,
@@ -30,37 +29,47 @@ def _residual(
     fixed: wp.array[int],
     stretch: wp.array2d[Any],
     bend: wp.array2d[Any],
+    bend_rounding: wp.array2d[Any],
     rows: wp.array[int],
     dt: Any,
     raw: wp.array[Any],
+    absolute: wp.array[Any],
     complete: wp.array[Any],
     external_energy: wp.array[Any],
 ):
     row = wp.tid()
-    nv = x.shape[0]
+    nv = step.shape[0]
     value = type(dt)(0.0)
+    magnitude = type(dt)(0.0)
     energy = type(dt)(0.0)
     if row < 3 * nv:
         vertex, axis = row // 3, row % 3
         for edge in range(wp.max(0, vertex - 1), wp.min(nv - 1, vertex + 1)):
             value += stretch[edge, 3 * (vertex - edge) + axis]
+            magnitude += wp.abs(stretch[edge, 3 * (vertex - edge) + axis])
         for stencil in range(wp.max(0, vertex - 2), wp.min(nv - 2, vertex + 1)):
             value += bend[stencil, 3 * (vertex - stencil) + axis]
+            magnitude += bend_rounding[stencil, 3 * (vertex - stencil) + axis]
         applied = type(dt)(forces[vertex][axis]) + mass[vertex] * type(dt)(gravity[axis])
-        displacement = x[vertex][axis] - xn[vertex][axis]
+        displacement = step[vertex][axis]
         prediction_error = displacement - dt * vn[vertex][axis]
         value -= applied
+        magnitude += wp.abs(applied)
         energy -= applied * displacement
         if fixed[vertex] == 0:
             value += mass[vertex] * prediction_error / (dt * dt)
+            magnitude += wp.abs(mass[vertex] * prediction_error / (dt * dt))
             energy += type(dt)(0.5) * mass[vertex] * prediction_error * prediction_error / (dt * dt)
     else:
         edge = row - 3 * nv
         for stencil in range(wp.max(0, edge - 1), wp.min(nv - 2, edge + 1)):
             value += bend[stencil, 9 + edge - stencil]
+            magnitude += bend_rounding[stencil, 9 + edge - stencil]
         value -= torque[edge]
-        energy = -torque[edge] * theta[edge]
+        magnitude += wp.abs(torque[edge])
+        energy = -torque[edge] * theta_step[edge]
     raw[row] = value
+    absolute[row] = magnitude
     external_energy[row] = energy
     if rows[row] >= 0:
         complete[rows[row]] = value
@@ -74,15 +83,15 @@ def _scatter_tangent(
     b: wp.array[int],
     mass: wp.array[Any],
     dt: Any,
-    stretch: wp.array3d[float],
-    bend: wp.array3d[float],
+    stretch: wp.array3d[Any],
+    bend: wp.array3d[Any],
     offset: int,
-    output: wp.array[float],
+    output: wp.array[Any],
 ):
     i = wp.tid()
-    value = float(0.0)
+    value = output.dtype(0.0)
     if kind[i] == 0:
-        value = float(mass[element[i]] / (dt * dt))
+        value = mass[element[i]] / (dt * dt)
     elif kind[i] == 1:
         value = stretch[element[i], a[i], b[i]]
     else:
@@ -99,44 +108,56 @@ def _candidate(
     theta_offset: int,
     target_x: wp.array[Any],
     target_theta: wp.array[Any],
-    accepted_x: wp.array[Any],
+    accepted_step: wp.array[Any],
     original_x: wp.array[Any],
     original_v: wp.array[Any],
-    accepted_theta: wp.array[Any],
+    accepted_theta_step: wp.array[Any],
+    original_theta: wp.array[Any],
     delta: wp.array[Any],
     alpha: Any,
     dt: Any,
     predict: bool,
     trial_x: wp.array[Any],
     trial_v: wp.array[Any],
+    trial_step: wp.array[Any],
     trial_theta: wp.array[Any],
+    trial_theta_step: wp.array[Any],
 ):
+    """Advance the exact position and angle increments; trial values are formed once from them."""
     i = wp.tid()
     nv = ids.shape[0]
     if i < nv:
         p = ids[i]
         x = target_x[p]
+        step = x - original_x[p]
         if fixed[i] == 0:
-            x = accepted_x[p]
+            step = accepted_step[p]
             if predict:
-                x = original_x[p] + dt * original_v[p]
+                step = dt * original_v[p]
             else:
                 for axis in range(3):
-                    x[axis] += alpha * type(dt)(delta[rows[3 * i + axis]])
+                    step[axis] += alpha * type(dt)(delta[rows[3 * i + axis]])
+            x = original_x[p] + step
         trial_x[p] = x
-        trial_v[p] = (x - original_x[p]) / dt
+        trial_step[p] = step
+        trial_v[p] = step / dt
     if i < nv - 1:
-        theta = accepted_theta[theta_offset + i]
-        if theta_fixed[i] != 0:
-            theta = target_theta[theta_offset + i]
-        elif not predict and rows[3 * nv + i] >= 0:
-            theta += alpha * type(dt)(delta[rows[3 * nv + i]])
-        trial_theta[theta_offset + i] = theta
+        j = theta_offset + i
+        theta = target_theta[j]
+        increment = theta - original_theta[j]
+        if theta_fixed[i] == 0:
+            increment = accepted_theta_step[j]
+            if not predict and rows[3 * nv + i] >= 0:
+                increment += alpha * type(dt)(delta[rows[3 * nv + i]])
+            theta = original_theta[j] + increment
+        trial_theta[j] = theta
+        trial_theta_step[j] = increment
 
 
 @wp.kernel
 def _publish_frame(
     director: wp.array[Any],
+    tangent: wp.array[Any],
     phi: wp.array[Any],
     theta_offset: int,
     phi_offset: int,
@@ -144,18 +165,28 @@ def _publish_frame(
     history_phi: wp.array[Any],
 ):
     i = wp.tid()
-    history_director[theta_offset + i] = director[i]
+    # Parallel transport keeps a director unit and normal to its edge only to
+    # rounding; the published frame anchors the next step, so project it onto the
+    # normal plane of the step's exact edge rather than let the error accumulate.
+    d, t = director[i], tangent[i]
+    history_director[theta_offset + i] = wp.normalize(d - wp.dot(d, t) * t)
     if i < phi.shape[0]:
         history_phi[phi_offset + i] = phi[i]
 
 
 @wp.kernel
 def _path_domain(
-    ids: wp.array[int], x: wp.array[Any], trial: wp.array[Any], lengths0: wp.array[Any], status: wp.array[int]
+    ids: wp.array[int],
+    original: wp.array[Any],
+    accepted: wp.array[Any],
+    trial: wp.array[Any],
+    lengths0: wp.array[Any],
+    status: wp.array[int],
 ):
     i = wp.tid()
-    edge = x[ids[i + 1]] - x[ids[i]]
-    change = trial[ids[i + 1]] - trial[ids[i]] - edge
+    a, b = ids[i], ids[i + 1]
+    edge = (original[b] - original[a]) + (accepted[b] - accepted[a])
+    change = (trial[b] - trial[a]) - (accepted[b] - accepted[a])
     norm_sq = wp.dot(change, change)
     alpha = type(lengths0[0])(0.0)
     if norm_sq > type(alpha)(0.0):
@@ -202,11 +233,12 @@ class CableBlock:
         self.fixed = wp.array(obj["fixed"], dtype=int, device=device)
         self.theta_fixed = wp.array(obj["fixed_theta"], dtype=int, device=device)
         self.mass = wp.array(obj["mass"], dtype=dtype, device=device)
-        self.positions = wp.zeros(nv, dtype=self.vector, device=device)
-        self.original_x = wp.zeros_like(self.positions)
-        self.original_v = wp.zeros_like(self.positions)
+        self.step = wp.zeros(nv, dtype=self.vector, device=device)
+        self.original_x = wp.zeros_like(self.step)
+        self.original_v = wp.zeros_like(self.step)
         self.forces = wp.zeros(nv, dtype=wp.vec3, device=device)
         self.raw = wp.zeros(len(rows), dtype=dtype, device=device)
+        self.absolute = wp.zeros(len(rows), dtype=dtype, device=device)
         self.external_energy = wp.zeros_like(self.raw)
         global_rows, global_columns, kinds, elements, aa, bb = [], [], [], [], [], []
 
@@ -252,18 +284,24 @@ class CableBlock:
         ):
             wp.launch(_gather, self.ids.size, [source, self.ids, output], device=self.device)
 
-    def evaluate(self, state, original, torque, gravity, dt, complete):
-        """Evaluate the same frozen frame chart for every current and trial state."""
+    def evaluate(self, state, step, theta_step, original, torque, gravity, dt, complete):
+        """Evaluate the same frozen frame chart for every current and trial state.
+
+        ``step`` and ``theta_step`` are the state's exact particle and angle
+        increments from the step start ``original``.
+        """
         objective = self.objective
         ne, ni = objective.lengths.size, objective.phi.size
         history, anchor = state._monolithic_coupled, original._monolithic_coupled
-        theta = history.cable_theta[self.theta_offset : self.theta_offset + ne]
-        wp.launch(_gather, self.ids.size, [state.particle_q, self.ids, self.positions], device=self.device)
-        objective.evaluate(
-            self.positions,
-            theta,
+        angles = slice(self.theta_offset, self.theta_offset + ne)
+        theta_step = theta_step[angles]
+        wp.launch(_gather, self.ids.size, [step, self.ids, self.step], device=self.device)
+        objective.evaluate_step(
+            self.step,
+            anchor.cable_theta[angles],
+            theta_step,
             self.original_x,
-            anchor.cable_ref_director[self.theta_offset : self.theta_offset + ne],
+            anchor.cable_ref_director[angles],
             anchor.cable_ref_twist[self.phi_offset : self.phi_offset + ni] if ni else objective.phi,
         )
         if objective.flags.numpy()[0]:
@@ -272,10 +310,9 @@ class CableBlock:
             _residual,
             self.raw.size,
             [
-                self.positions,
-                self.original_x,
+                self.step,
                 self.original_v,
-                theta,
+                theta_step,
                 torque[self.theta_offset : self.theta_offset + ne],
                 self.forces,
                 gravity,
@@ -283,9 +320,11 @@ class CableBlock:
                 self.fixed,
                 objective.stretch_r,
                 objective.bend_twist_r,
+                objective.bend_twist_rounding,
                 self.rows,
                 self.dtype(dt),
                 self.raw,
+                self.absolute,
                 complete,
                 self.external_energy,
             ],
@@ -302,6 +341,7 @@ class CableBlock:
                 ne,
                 [
                     objective.director,
+                    objective.tangent,
                     objective.phi,
                     self.theta_offset,
                     self.phi_offset,
@@ -332,8 +372,26 @@ class CableBlock:
             device=self.device,
         )
 
-    def candidate(self, accepted, original, trial, delta, target_x, target_theta, alpha, dt, *, predict=False):
-        """Apply xyz/theta in the same trial, including prescribed boundary values."""
+    def candidate(
+        self,
+        accepted_steps,
+        original,
+        trial,
+        trial_steps,
+        delta,
+        target_x,
+        target_theta,
+        alpha,
+        dt,
+        *,
+        predict=False,
+    ):
+        """Apply xyz/theta in the same trial, including prescribed boundary values.
+
+        ``accepted_steps`` and ``trial_steps`` are the ``(particle, theta)``
+        increments from ``original``; the trial values are formed from them.
+        """
+        (accepted_step, accepted_theta_step), (trial_step, trial_theta_step) = accepted_steps, trial_steps
         wp.launch(
             _candidate,
             self.ids.size,
@@ -345,28 +403,31 @@ class CableBlock:
                 self.theta_offset,
                 target_x,
                 target_theta,
-                accepted.particle_q,
+                accepted_step,
                 original.particle_q,
                 original.particle_qd,
-                accepted._monolithic_coupled.cable_theta,
+                accepted_theta_step,
+                original._monolithic_coupled.cable_theta,
                 delta,
                 self.dtype(alpha),
                 self.dtype(dt),
                 predict,
                 trial.particle_q,
                 trial.particle_qd,
+                trial_step,
                 trial._monolithic_coupled.cable_theta,
+                trial_theta_step,
             ],
             device=self.device,
         )
 
-    def path_valid(self, accepted, trial):
+    def path_valid(self, original, accepted_step, trial_step):
         """Reject an edge collapse anywhere along the actual line-search segment."""
         self.path_status.zero_()
         wp.launch(
             _path_domain,
             self.ids.size - 1,
-            [self.ids, accepted.particle_q, trial.particle_q, self.objective.lengths0, self.path_status],
+            [self.ids, original.particle_q, accepted_step, trial_step, self.objective.lengths0, self.path_status],
             device=self.device,
         )
         return not bool(self.path_status.numpy()[0])

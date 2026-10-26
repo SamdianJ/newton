@@ -8,9 +8,8 @@ from dataclasses import replace
 from unittest.mock import patch
 
 import numpy as np
-import warp as wp
 
-from newton._src.solvers.monolithic import pcg, pcg_production_kernels
+from newton._src.solvers.monolithic import pcg_production_kernels
 from newton._src.solvers.monolithic.pcg_production import MaskedPcgConfig
 from newton.solvers.experimental.monolithic import SolverMonolithic
 from newton.tests.monolithic_test_utils import build_contact_free_coupled_fixture, build_tiny_cpu_fixture
@@ -38,91 +37,77 @@ def test_absolute_acceptance(test, device):
                     test.assertGreater(max(result.rho, result.rho_q, result.rho_x), config.linear_tolerance)
                     np.testing.assert_array_equal(runner.y.numpy(), 0)
                     if mode == "production_graph":
+                        # The absolute tolerance is a bound value: changing it
+                        # takes effect in the captured graph without a rebuild.
                         graph = runner.workspace._masked_pcg_plan.graph
                         runner.config = replace(config, linear_absolute_tolerance=0.0)
                         second = runner.solve()
                         test.assertGreater(second.iterations, 0)
-                        test.assertTrue(second.graph_rebuilt)
-                        test.assertIsNot(runner.workspace._masked_pcg_plan.graph, graph)
+                        test.assertFalse(second.graph_rebuilt)
+                        test.assertIs(runner.workspace._masked_pcg_plan.graph, graph)
 
 
 def test_block_acceptance(test, device):
-    """Require every block to pass either its relative or absolute bound in both controllers."""
+    """Require every block to pass either its relative or absolute bound."""
     plan = make_plan(device, np.eye(4), [1, 0, 0, 0])
-    packet = wp.zeros(1, dtype=pcg._MonolithicPcgPacket, device=device)
-    ratios = wp.zeros(3, dtype=float, device=device)
     unbounded = (float("inf"),) * 3
-    for norms, rhs, limits, expected in (
-        ((5e-7, 3e-7, 4e-7), (5e-7, 3e-7, 4e-7), unbounded, True),
-        ((1e-5, 0, 1e-5), (1, 0, 1), unbounded, True),
-        ((2e-6, 2e-6, 0), (10, 2e-6, 10), unbounded, False),
-        ((2e-6, 0, 2e-6), (10, 10, 2e-6), unbounded, False),
-        ((5e-7, 3e-7, 4e-7), (5e-7, 3e-7, 4e-7), (1e-7, 1e-6, 1e-6), False),
-        ((5e-7, 3e-7, 4e-7), (5e-7, 3e-7, 4e-7), (1e-6, 1e-7, 1e-6), False),
-        ((5e-7, 3e-7, 4e-7), (5e-7, 3e-7, 4e-7), (1e-6, 1e-6, 1e-7), False),
-        ((1e-5, 0, 1e-5), (1, 0, 1), (1e-6, 1e-6, 1e-6), False),
+    # A block whose |A| |y| rounding exceeds its target accepts at that rounding.
+    floor = 1e-3 / plan.params.rounding
+    zero = (0, 0, 0)
+    for norms, rhs, limits, magnitude, expected in (
+        ((5e-7, 3e-7, 4e-7), (5e-7, 3e-7, 4e-7), unbounded, zero, True),
+        ((1e-5, 0, 1e-5), (1, 0, 1), unbounded, zero, True),
+        ((2e-6, 2e-6, 0), (10, 2e-6, 10), unbounded, zero, False),
+        ((2e-6, 0, 2e-6), (10, 10, 2e-6), unbounded, zero, False),
+        ((5e-7, 3e-7, 4e-7), (5e-7, 3e-7, 4e-7), (1e-7, 1e-6, 1e-6), zero, False),
+        ((5e-7, 3e-7, 4e-7), (5e-7, 3e-7, 4e-7), (1e-6, 1e-7, 1e-6), zero, False),
+        ((5e-7, 3e-7, 4e-7), (5e-7, 3e-7, 4e-7), (1e-6, 1e-6, 1e-7), zero, False),
+        ((1e-5, 0, 1e-5), (1, 0, 1), (1e-6, 1e-6, 1e-6), zero, False),
+        ((1e-3, 1e-3, 1e-3), (1, 1, 1), (1e-6, 1e-6, 1e-6), (1.01 * floor,) * 3, True),
+        ((1e-3, 1e-3, 1e-3), (1, 1, 1), (1e-6, 1e-6, 1e-6), (1.01 * floor, 1.01 * floor, 0.99 * floor), False),
+        # The rounding floor never accepts more than a fixed fraction of the rhs.
+        ((2e-2, 2e-2, 2e-2), (1, 1, 1), (1e-6, 1e-6, 1e-6), (1e6 * floor,) * 3, False),
     ):
-        with test.subTest(norms=norms, rhs=rhs, limits=limits):
+        with test.subTest(norms=norms, rhs=rhs, limits=limits, magnitude=magnitude):
             plan.residual_norm_limits.assign(np.asarray(limits, dtype=np.float32))
             plan._launch(pcg_production_kernels._initialize_state, 1, [plan.state, plan.error, plan.scalars, 11])
-            plan.norms.assign(np.array([*norms, 0, 0, 0, *rhs], dtype=np.float32))
+            plan.norms.assign(np.array([*norms, 0, 0, 0, *rhs, *magnitude], dtype=np.float32))
             plan._launch(
                 pcg_production_kernels._checkpoint_decision,
                 1,
                 [plan.norms, plan.state, plan.error, plan.params, 0, True, False],
             )
             test.assertEqual(int(plan.state.numpy()[0]["status"]) == 0, expected)
-            diagnostic_norms = wp.array([*norms, *rhs], dtype=float, device=device)
-            wp.launch(
-                pcg._pack_monolithic_pcg_residual,
-                1,
-                [
-                    plan.error,
-                    ratios,
-                    diagnostic_norms,
-                    plan.params.floors,
-                    1e-4,
-                    1e-6,
-                    plan.residual_norm_limits,
-                    plan.compat_groups,
-                    packet,
-                ],
-                device=device,
-            )
-            test.assertEqual(bool(packet.numpy()[0]["check"]), expected)
 
 
-def test_solver_option(test, device):
-    """Pass the public provisional default and explicit overrides into actual linear solves."""
-    for atol in (1e-6, 0.0, 2e-6):
-        fixture, solver = build_contact_free_coupled_fixture(
-            device, gravity=(0, 0, -9.81), linear_absolute_tolerance=atol
+def test_solver_targets(test, device):
+    """Stop every solver PCG group at the limit its direction posterior applies."""
+    fixture, solver = build_contact_free_coupled_fixture(device, gravity=(0, 0, -9.81))
+    original = solver._linear.solve_pcg
+    configs = []
+
+    def solve(*args, original=original, configs=configs, solver=solver, **kwargs):
+        config = kwargs["config"]
+        configs.append(config)
+        limits = config.residual_norm_limits
+        # The absolute term covers every limit, so min(max(rtol |b|, atol), limit) is the limit itself.
+        test.assertEqual(config.linear_absolute_tolerance, max(limits))
+        # Each block's limit is the global forcing term or half its smallest scaled row tolerance.
+        scaled = solver._linear.scale.numpy().astype(float) * solver._criterion.tau.numpy().astype(float)
+        forcing = solver.linear_tolerance * np.linalg.norm(solver._rhs.numpy().astype(float))
+        for i, part in enumerate((slice(None), slice(0, 2), slice(2, None))):  # TinyFixture global/q/x rows.
+            np.testing.assert_allclose(limits[i], max(0.5 * scaled[part].min(), forcing), rtol=1e-6, atol=0)
+        return original(*args, **kwargs)
+
+    with patch.object(solver._linear, "solve_pcg", solve):
+        solver.step(fixture.state, fixture.state_next, fixture.control, None, 0.001)
+    test.assertEqual(solver.last_stats.status, SolverMonolithic.Status.SUCCESS)
+    posts = solver.last_stats.variational["linear_postchecks"]
+    test.assertTrue(configs)
+    for config, post in zip(configs, posts, strict=True):
+        test.assertEqual(
+            config.residual_norm_limits, tuple(post["blocks"][name]["limit"] for name in ("global", "q", "x"))
         )
-        test.assertEqual(solver.linear_absolute_tolerance, atol)
-        original = solver._linear.solve_pcg
-        values = []
-
-        def solve(*args, original=original, values=values, solver=solver, **kwargs):
-            config = kwargs["config"]
-            values.append(config.linear_absolute_tolerance)
-            limits = config.residual_norm_limits
-            test.assertIsNotNone(limits)
-            metrics = solver._metrics
-            for i, block in enumerate(("global", "q", "x")):
-                ref = metrics["merit_reference" if i == 0 else f"merit_{block}_reference"]
-                goal = (
-                    getattr(solver._config, f"merit_absolute_{block}")
-                    + getattr(solver._config, f"merit_relative_{block}") * ref
-                )
-                count = (14, 2, 12)[i]  # TinyFixture's scalar global/q/x counts.
-                np.testing.assert_allclose(limits[i] / np.sqrt(count), 0.5 * goal, rtol=1e-12, atol=0)
-            return original(*args, **kwargs)
-
-        with patch.object(solver._linear, "solve_pcg", solve):
-            solver.step(fixture.state, fixture.state_next, fixture.control, None, 0.001)
-        test.assertEqual(solver.last_stats.status, SolverMonolithic.Status.SUCCESS)
-        test.assertTrue(values)
-        test.assertEqual(set(values), {atol})
 
 
 def test_unresolved_q_small_rhs(test, device):
@@ -186,41 +171,20 @@ def test_limits_reuse_graph(test, device):
 
 class TestMonolithicPcgTolerances(unittest.TestCase):
     def test_provisional_default(self):
-        """Expose the same provisional default at the public solver and PCG boundaries."""
-        self.assertEqual(inspect.signature(SolverMonolithic).parameters["linear_absolute_tolerance"].default, 1e-6)
+        """Keep the provisional PCG default; the solver derives its targets from physical limits."""
+        self.assertNotIn("linear_absolute_tolerance", inspect.signature(SolverMonolithic).parameters)
         self.assertEqual(benchmark.pcg_config().linear_absolute_tolerance, 1e-6)
         self.assertEqual(MaskedPcgConfig().linear_absolute_tolerance, 1e-6)
 
     def test_invalid_absolute_tolerances(self):
         """Reject malformed, negative and unrepresentable tolerances."""
-        model = build_tiny_cpu_fixture(device="cpu").model
         for value in (-1.0, float("nan"), float("inf"), True, "1e-6", None, 1e40, 1e-100):
             for config in (benchmark.pcg_config(), MaskedPcgConfig()):
                 with self.subTest(value=value, config=type(config).__name__), self.assertRaises(ValueError):
                     replace(config, linear_absolute_tolerance=value)
-            if value in (1e40, 1e-100):
-                # P3 keeps host-finite values at construction; the FP32 PCG
-                # configuration above rejects values it cannot represent.
-                solver = SolverMonolithic(
-                    model,
-                    contact_model="C-EE",
-                    globalization="Armijo",
-                    friction_velocity_scale=0.01,
-                    mass_mode="lumped",
-                    linear_absolute_tolerance=value,
-                )
-                self.assertEqual(solver.linear_absolute_tolerance, value)
-            else:
-                expected = TypeError if value is None or isinstance(value, str) else ValueError
-                with self.subTest(public=value), self.assertRaises(expected):
-                    SolverMonolithic(
-                        model,
-                        contact_model="C-EE",
-                        globalization="Armijo",
-                        friction_velocity_scale=0.01,
-                        mass_mode="lumped",
-                        linear_absolute_tolerance=value,
-                    )
+        model = build_tiny_cpu_fixture(device="cpu").model
+        with self.assertRaisesRegex(TypeError, "linear_absolute_tolerance"):
+            SolverMonolithic(model, friction_velocity_scale=0.01, mass_mode="lumped", linear_absolute_tolerance=1e-6)
 
     def test_invalid_outer_limits(self):
         """Reject malformed or unrepresentable per-block residual caps."""
@@ -242,7 +206,7 @@ class TestMonolithicPcgTolerances(unittest.TestCase):
 for function in (
     test_absolute_acceptance,
     test_block_acceptance,
-    test_solver_option,
+    test_solver_targets,
     test_unresolved_q_small_rhs,
     test_limits_reuse_graph,
 ):

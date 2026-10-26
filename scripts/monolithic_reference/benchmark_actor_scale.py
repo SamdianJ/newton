@@ -21,15 +21,15 @@ from scripts.monolithic_reference.run_actor_coupling import build_model, load_ca
 from scripts.monolithic_reference.run_performance import COUNTERS
 
 
-def build_chain(rigid_count, route, *, device="cuda:0"):
+def build_chain(rigid_count, *, device="cuda:0"):
     """Keep material and control settings fixed while extending the rigid chain."""
     model = build_model(device=device, rigid_count=rigid_count)
     run = make_solver(
         model,
         graph=model.device.is_cuda,
-        contact_dataflow=route,
-        spatial={"candidate_capacity": 360 * rigid_count, "law_margin": 0.0} if route == "spatial" else None,
-        contact_factor_capacity=1080 * rigid_count if route == "spatial" else None,
+        contact_dataflow="spatial",
+        spatial={"candidate_capacity": 360 * rigid_count},
+        contact_factor_capacity=1080 * rigid_count,
     )
     return model, run
 
@@ -37,7 +37,6 @@ def build_chain(rigid_count, route, *, device="cuda:0"):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--rigid-count", type=int, choices=(2, 4, 8, 16), required=True)
-    parser.add_argument("--route", choices=("legacy", "spatial"), required=True)
     parser.add_argument("--prepare", action="store_true", help="Advance the original loading clock to step 1000")
     parser.add_argument("--checkpoint", type=Path, help="Prepared route-specific directory")
     parser.add_argument("--steps", type=int, default=200)
@@ -49,7 +48,7 @@ def main():
     source = provenance()
     check_gpu_idle(wp.get_device("cuda:0"))
     case = load_case()
-    model, run = build_chain(args.rigid_count, args.route)
+    model, run = build_chain(args.rigid_count)
     state, control = run.create_state(dt=case["dt"]), model.control()
     arm = run._articulation_actor
     q, qd = control.joint_target_q.numpy(), control.joint_target_qd.numpy()
@@ -57,7 +56,7 @@ def main():
     receipt = {
         "status": "RUNNING",
         "source": source,
-        "route": args.route,
+        "route": "spatial",
         "rigid_count": args.rigid_count,
         "case": case,
         "policy": policy,
@@ -66,8 +65,8 @@ def main():
         "scalar_dofs": run._actors.scalar_dof_count,
         "particles": model.particle_count,
         "tets": model.tet_count,
-        "query_capacity": 360 * args.rigid_count if args.route == "spatial" else None,
-        "factor_capacity": 1080 * args.rigid_count if args.route == "spatial" else None,
+        "query_capacity": 360 * args.rigid_count,
+        "factor_capacity": 1080 * args.rigid_count,
         "rows": [],
         "scope": "exploratory loaded-window scaling; not formal full-trajectory qualification",
     }

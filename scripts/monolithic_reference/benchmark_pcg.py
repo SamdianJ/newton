@@ -20,8 +20,7 @@ import numpy as np
 import warp as wp
 import warp.sparse as sparse
 
-from newton._src.solvers.monolithic import linear, linear_types, pcg, pcg_production_kernels
-from newton._src.solvers.monolithic.soft_preconditioner import _BlockPreconditioner
+from newton._src.solvers.monolithic import linear, linear_types, pcg_production_kernels
 from newton._src.solvers.monolithic.solver_monolithic import _SolverMonolithicInternalConfig
 from scripts.monolithic_reference.linear_evidence import (
     array_fingerprint,
@@ -41,11 +40,6 @@ def pcg_config(maximum_iterations=200, *, linear_absolute_tolerance=1e-6):
         defaults.residual_floor_global,
         defaults.residual_floor_q,
         defaults.residual_floor_x,
-        0.0,
-        1e-12,
-        0.0,
-        10,
-        1e-3,
         linear_absolute_tolerance=linear_absolute_tolerance,
     )
 
@@ -247,7 +241,7 @@ def _bsr(arrays, prefix, rows, device, *, blocks=False):
 class Runner:
     """Offline binding of one shared input to an actual monolithic solve implementation."""
 
-    def __init__(self, case, mode, device, config, *, study_hierarchy=None):
+    def __init__(self, case, mode, device, config):
         self.mode, self.config = mode, config
         a = case.arrays
         nx = (case.n - case.nq) // 3
@@ -273,8 +267,6 @@ class Runner:
         w._generation = linear_types.MonolithicLinearGeneration(1, 0, 1, 1)
         w._sealed = w._valid = w._scaling_valid = True
         self._require(w.set_regularization(case.metadata["lambda"], generation=w._generation))
-        if study_hierarchy is not None:
-            w._study_soft = _BlockPreconditioner(w, study_hierarchy)
         self.factor()
         self.rhs = wp.array(a["rhs_hat"], dtype=float, device=device)
         self.y = wp.zeros(case.n, dtype=float, device=device)
@@ -306,8 +298,6 @@ class Runner:
             config=self.config,
             delta=self.delta,
         )
-        if self.mode == "diagnostic" and result.status == linear_types.MonolithicLinearStatus.SUCCESS:
-            self._require(w.recover_delta(self.y, self.delta, generation=w._generation))
         return result
 
 
@@ -325,11 +315,7 @@ def observe_convergence(runner, reference):
         nonlocal last_iterations
         result = launch(kernel, *args, **kwargs)
         recursive = None
-        if kernel is pcg._update_monolithic_pcg_solution_residual:
-            last_iterations += 1
-            slot = last_iterations
-            recursive = runner.workspace._r
-        elif kernel is pcg_production_kernels._finish_update:
+        if kernel is pcg_production_kernels._finish_update:
             plan = runner.workspace._masked_pcg_plan
             state = plan.state.numpy()[0]
             iterations = int(state["effective_iterations"])
@@ -415,6 +401,8 @@ def compare_case(case, device, *, repeats=10, warmups=3, config=None, include_ex
     if repeats < 1 or warmups < 1:
         raise ValueError("repeats and warmups must be positive")
     reference = Reference(case, config)
+    # The diagnostic observation level runs the same kernels as production; timing it
+    # measures the cost of reading every checkpoint.
     modes = ["diagnostic", "production"] + (["production_graph"] if device.is_cuda else [])
     if include_external:
         from scripts.monolithic_reference.pcg_backends import ExternalRunner  # noqa: PLC0415 - optional adapters
@@ -525,9 +513,9 @@ def write_report(output, results, config):
     report = [
         "# PCG 综合评估",
         "",
-        "使用当前原生 diagnostic / production；CUDA 另测 production graph。参考解为相同 float32 输入定义的线性系统的 float64 直接解，不是非线性物理真值。",
+        "使用当前原生 production PCG（diagnostic 观测级别与之数值相同）；CUDA 另测 production graph。参考解为相同 float32 输入定义的线性系统的 float64 直接解，不是非线性物理真值。",
         "",
-        f"两种数值策略保留各自检查点、stagnation 和 restart 行为；K={config.maximum_iterations}、间隔 {config.true_residual_interval}、rtol={config.linear_tolerance:g}、atol={config.linear_absolute_tolerance:g}（默认待标定）。global/q/x 各自满足 ||r|| <= max(rtol * max(||rhs||, floor), atol)。原生 SUCCESS 与 float64 独立残差通过分开统计，不据此改写求解器状态。",
+        f"单一数值策略：固定检查点间隔与 restart，无停滞提前退出；K={config.maximum_iterations}、间隔 {config.true_residual_interval}、rtol={config.linear_tolerance:g}、atol={config.linear_absolute_tolerance:g}（默认待标定）。global/q/x 各自满足 ||r|| <= max(rtol * max(||rhs||, floor), atol)。原生 SUCCESS 与 float64 独立残差通过分开统计，不据此改写求解器状态。",
         "",
         "reuse：同 generation/绑定的预热重复求解。new_generation：相同矩阵更新 generation，计入 actor 因子重算、PCG 准备/捕获、结果读取及 delta 恢复；不包含 BSR 装配、Newton 或物理 step。初次/JIT/捕获成本另存在 JSON，不能用 reuse 替代整体集成效率。",
         "",

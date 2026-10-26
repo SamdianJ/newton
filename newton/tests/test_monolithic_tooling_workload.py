@@ -116,7 +116,7 @@ def test_spatial_benchmark_without_pair_diagnostics(test, device):
             steps=1,
             windows=[(1, 1)],
             contact_dataflow="spatial",
-            spatial={"candidate_capacity": 256, "law_margin": 0.0},
+            spatial={"candidate_capacity": 256},
         )
         with patch("scripts.monolithic_reference.benchmark_workload.check_gpu_idle"):
             result = benchmark(root, device=device, warmup=1, repeat=1, contact_diagnostics=False)

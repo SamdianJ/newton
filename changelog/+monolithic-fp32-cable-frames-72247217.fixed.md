@@ -1,0 +1,1 @@
+Fix experimental `SolverMonolithic` rejecting its own FP32 cable states: the director orthogonality and reference twist checks now allow the edge tilt caused by rounding stored coordinates, which on long cables far from the origin exceeded the fixed 1e-6 tolerance.

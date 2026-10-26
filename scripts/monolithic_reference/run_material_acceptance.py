@@ -15,7 +15,7 @@ import numpy as np
 import warp as wp
 
 from .material_acceptance import MaterialAcceptance
-from .material_recipes import RECIPE_PATH
+from .material_recipes import MATERIAL_RECIPE_PATH
 from .profiling import provenance
 
 
@@ -40,7 +40,9 @@ def run_case(name, args, source):
             device=args.device,
             pcg_mode=args.pcg_mode,
             use_cuda_graph=bool(args.use_cuda_graph),
+            precision=args.precision,
         )
+        receipt["precision"] = case.solver.precision.value
         stop = min(args.max_steps or case.common["steps"], case.common["steps"])
         while case.steps < stop:
             if case.steps == case.common["checkpoint_step"]:
@@ -96,11 +98,12 @@ def run_case(name, args, source):
 def main():
     """Run every requested case; a filtered or short matrix remains PARTIAL."""
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--recipe", type=Path, default=RECIPE_PATH)
+    parser.add_argument("--recipe", type=Path, default=MATERIAL_RECIPE_PATH)
     parser.add_argument("--case", choices=("all", "cable-bend-twist", "cloth-press", "precreased-box"), default="all")
     parser.add_argument("--device", default="cpu")
     parser.add_argument("--pcg-mode", choices=("diagnostic", "production"), default="diagnostic")
     parser.add_argument("--use-cuda-graph", type=int, choices=(0, 1), default=0)
+    parser.add_argument("--precision", choices=("fp64", "fp32"), default="fp64")
     parser.add_argument("--max-steps", type=int)
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
@@ -118,7 +121,11 @@ def main():
         else "PARTIAL"
     )
     (args.output / "summary.json").write_text(
-        json.dumps({"status": status, "cases": {r["case"]: r["status"] for r in results}}, indent=2) + "\n"
+        json.dumps(
+            {"status": status, "precision": args.precision, "cases": {r["case"]: r["status"] for r in results}},
+            indent=2,
+        )
+        + "\n"
     )
     return 1 if status == "FAIL" else 0
 

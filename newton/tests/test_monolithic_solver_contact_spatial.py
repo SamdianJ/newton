@@ -14,8 +14,8 @@ import numpy as np
 import warp as wp
 
 from newton._src.solvers.monolithic import contact_pipeline, solver_monolithic
-from newton._src.solvers.monolithic.contact_pipeline import _SpatialContactObjective
-from newton.tests.test_monolithic_contact_batch import batch_matrix, native_inputs
+from newton.tests.test_monolithic_contact_actor_pairs import native_inputs
+from newton.tests.test_monolithic_contact_components import batch_matrix
 from newton.tests.test_monolithic_solver_actor_contacts import contact_scene, contact_solver, contact_state, frame
 from newton.tests.test_monolithic_solver_contact_pool import pooled_solver
 from newton.tests.test_monolithic_solver_coupled import assert_snapshot, snapshot
@@ -24,11 +24,9 @@ from newton.tests.unittest_utils import add_function_test, get_test_devices
 from scripts.monolithic_reference.workload_scene import build_scene
 
 
-def spatial_solver(model, *, capacity=4096, margin=0.0, **options):
-    """Select B3 at the existing offline constructor seam with explicit experiment parameters."""
-    factory = partial(_SpatialContactObjective, candidate_capacity=capacity, law_margin=margin)
-    with patch.object(solver_monolithic, "ContactObjective", factory):
-        return contact_solver(model, **options)
+def spatial_solver(model, *, capacity=4096, **options):
+    """Select an explicit spatial candidate capacity through the public constructor."""
+    return contact_solver(model, contact_candidate_capacity=capacity, **options)
 
 
 def test_spatial_default(test, device):
@@ -38,7 +36,6 @@ def test_spatial_default(test, device):
     run = contact_solver(model, **options)
     test.assertTrue(run._contact_spatial)
     test.assertEqual(run._contact.candidate_capacity, run._contact.count)
-    test.assertEqual(run._contact.law_margin, 0.0)
     explicit = spatial_solver(model, capacity=run._contact.count, **options)
     test.assertEqual(run._kinematics.digest, explicit._kinematics.digest)
     states = [contact_state(owner, "chain") for owner in (run, explicit)]
@@ -57,35 +54,46 @@ def test_spatial_default(test, device):
         assert_snapshot(test, target, snapshot(states[0]))
 
 
+def test_spatial_capacity_option(test, device):
+    """Select the spatial candidate capacity through the public constructor."""
+    model = contact_scene(device, "chain")
+    run = contact_solver(model, contact_candidate_capacity=7)
+    test.assertEqual(run._contact.candidate_capacity, 7)
+    state = contact_state(run, "chain")
+    run.step(state, state, model.control(), dt=0.001)
+    test.assertFalse(run.last_stats.rolled_back, run.last_stats)
+    with test.assertRaisesRegex(ValueError, "candidate capacity"):
+        contact_solver(model, contact_candidate_capacity=-1)
+
+
 def test_spatial_rounds(test, device):
     """Refresh once per Newton check, freeze trials/final, and preserve step-start authority."""
     modes = [("diagnostic", False), ("production", False)]
     if device.is_cuda:
         modes.append(("production", True))
-    for law in ("C-EE", "C-IE", "C-II"):
-        for mode, graph in modes:
-            options = {"law": law, "mode": mode, "graph": graph, "permuted": True}
-            run = spatial_solver(contact_scene(device, "chain"), **options)
-            full = pooled_solver(contact_scene(device, "chain"), **options)
-            states = [contact_state(owner, "chain") for owner in (run, full)]
-            for _ in range(2):
-                start = states[0].particle_q.numpy().copy()
-                for owner, state in zip((run, full), states, strict=True):
-                    owner.step(state, state, owner.model.control(), dt=0.001)
-                    test.assertTrue(owner.last_stats.converged, owner.last_stats)
-                test.assertEqual(
-                    run.last_stats.variational["contact_spatial"]["refreshes"], run.last_stats.nonlinear_iterations + 1
-                )
-                np.testing.assert_array_equal(run._contact._spatial.x0.numpy(), start)
-                test.assertFalse(run.last_stats.variational["contact_spatial"]["tainted"])
-                assert_physical(test, frame(full, states[1]), frame(run, states[0]))
-                np.testing.assert_allclose(run._reference_residual, full._reference_residual, rtol=1e-8, atol=1e-10)
-                expected = run._contact.pool.force.result.numpy()
-                force = run.get_contact_forces(states[0])
-                n = 3 * run.model.particle_count
-                np.testing.assert_array_equal(force.particle_force.ravel(), expected[:n])
-                np.testing.assert_array_equal(force.body_wrench.ravel(), expected[n:])
-                test.assertEqual(run._generation.contact_generation, run._contact.evaluation_generation)
+    for mode, graph in modes:
+        options = {"mode": mode, "graph": graph, "permuted": True}
+        run = spatial_solver(contact_scene(device, "chain"), **options)
+        full = pooled_solver(contact_scene(device, "chain"), **options)
+        states = [contact_state(owner, "chain") for owner in (run, full)]
+        for _ in range(2):
+            start = states[0].particle_q.numpy().copy()
+            for owner, state in zip((run, full), states, strict=True):
+                owner.step(state, state, owner.model.control(), dt=0.001)
+                test.assertTrue(owner.last_stats.converged, owner.last_stats)
+            test.assertEqual(
+                run.last_stats.variational["contact_spatial"]["refreshes"], run.last_stats.nonlinear_iterations + 1
+            )
+            np.testing.assert_array_equal(run._contact._spatial.x0.numpy(), start)
+            test.assertFalse(run.last_stats.variational["contact_spatial"]["tainted"])
+            assert_physical(test, frame(full, states[1]), frame(run, states[0]))
+            np.testing.assert_allclose(run._reference_residual, full._reference_residual, rtol=1e-8, atol=1e-10)
+            expected = run._contact.pool.force.result.numpy()
+            force = run.get_contact_forces(states[0])
+            n = 3 * run.model.particle_count
+            np.testing.assert_array_equal(force.particle_force.ravel(), expected[:n])
+            np.testing.assert_array_equal(force.body_wrench.ravel(), expected[n:])
+            test.assertEqual(run._generation.contact_generation, run._contact.evaluation_generation)
 
 
 def test_spatial_retry_freeze(test, device):
@@ -142,7 +150,7 @@ def test_spatial_retry_freeze(test, device):
 
 def test_spatial_miss_and_reference(test, device):
     """Detect a frozen-list miss without automatic handling and discover it using the original reference."""
-    run = spatial_solver(contact_scene(device, "A-R"), law="C-II", mode="production", graph=device.is_cuda)
+    run = spatial_solver(contact_scene(device, "A-R"), mode="production", graph=device.is_cuda)
     state = contact_state(run, "A-R")
     touching = run._states.copy(state)
     state._monolithic_coupled.rigid_com.fill_(wp.vec3d(10))
@@ -250,7 +258,6 @@ def test_spatial_reference_batches(test, device):
                 run = factory(
                     contact_scene(device, "chain"),
                     precision=precision,
-                    law="C-II",
                     mode="production",
                     graph=device.is_cuda,
                 )
@@ -281,7 +288,7 @@ def test_spatial_device_iteration(test, device):
             device=device,
             graph=device.is_cuda,
             contact_dataflow=algorithm,
-            spatial={"candidate_capacity": 256, "law_margin": 0.0} if algorithm == "spatial" else None,
+            spatial={"candidate_capacity": 256} if algorithm == "spatial" else None,
         )
         test.assertTrue(run._device_iteration)
         run.step(state, state, model.control(), dt=0.001)
@@ -344,7 +351,7 @@ def test_spatial_checkpoint(test, device):
         resumed = spatial_solver(model, **options)
         restored = resumed.create_state(dt=0.001)
         resumed.load_checkpoint(restored, path)
-        for other in (pooled_solver(model, **options), spatial_solver(model, margin=0.001, **options)):
+        for other in (pooled_solver(model, **options), spatial_solver(model, capacity=2048, **options)):
             target = other.create_state(dt=0.001)
             before = snapshot(target)
             with test.assertRaises(ValueError):
@@ -388,6 +395,7 @@ class TestSolverContactSpatial(unittest.TestCase):
 for _device in get_test_devices():
     for _test in (
         test_spatial_default,
+        test_spatial_capacity_option,
         test_spatial_rounds,
         test_spatial_retry_freeze,
         test_spatial_miss_and_reference,

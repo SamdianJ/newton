@@ -12,6 +12,7 @@ import numpy as np
 from newton._src.solvers.monolithic.actors import ActorTable
 from newton.examples.softbody.monolithic_recording import state_arrays
 from scripts.monolithic_reference.check_recording import sha
+from scripts.monolithic_reference.contact_routes import spatial_parameters
 
 FRAME_FIELDS = {
     "frame_steps",
@@ -106,17 +107,10 @@ def _context(directory, expected_run=None):
     ):
         raise ValueError("Invalid recorded contact algorithm")
     if pooled and algorithm["contact_dataflow"] == "spatial":
-        spatial = algorithm["spatial"]
-        if (
-            type(spatial) is not dict
-            or set(spatial) != {"candidate_capacity", "law_margin"}
-            or type(spatial["candidate_capacity"]) is not int
-            or not 0 <= spatial["candidate_capacity"] < 2**31
-            or type(spatial["law_margin"]) not in (int, float)
-            or not np.isfinite(spatial["law_margin"])
-            or spatial["law_margin"] < 0
-        ):
-            raise ValueError("Invalid recorded spatial parameters")
+        try:
+            spatial_parameters(algorithm["spatial"])
+        except ValueError as error:
+            raise ValueError("Invalid recorded spatial parameters") from error
     elif pooled and algorithm["spatial"] is not None:
         raise ValueError("Complete-candidate recordings cannot declare spatial parameters")
     if run is None:

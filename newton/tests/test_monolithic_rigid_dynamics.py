@@ -15,9 +15,8 @@ import warp as wp
 
 import newton
 from newton._src.geometry import ShapeFlags
-from newton._src.solvers.monolithic import solver_monolithic
+from newton._src.solvers.monolithic import convergence, solver_monolithic
 from newton._src.solvers.monolithic.actors import ActorTable
-from newton._src.solvers.monolithic.iteration import measure
 from newton._src.solvers.monolithic.linear import MonolithicLinearWorkspace
 from newton._src.solvers.monolithic.linear_types import (
     MonolithicLinearCapacities,
@@ -26,7 +25,9 @@ from newton._src.solvers.monolithic.linear_types import (
     MonolithicLinearStatus,
     MonolithicPcgWarmStart,
 )
+from newton._src.solvers.monolithic.pcg_common import group_policy
 from newton._src.solvers.monolithic.solver_monolithic import _StepFailure
+from newton.tests.monolithic_pcg_oracle import decide_restart
 from newton.tests.monolithic_test_utils import add_contact_free_tet
 from newton.tests.test_monolithic_actor_layout import mixed_model
 from newton.tests.test_monolithic_linear_assembly import _pcg_config
@@ -115,7 +116,7 @@ def test_rigid_mapping_and_terms(test, device):
         apply_wrench(run, state, control)
         run._rigid.prepare(state, control, 0.001)
         run._rigid.torque.zero_()
-        run._rigid.evaluate(state, 0.001, True)
+        run._rigid.evaluate(state, run._rigid.derive_steps(state), 0.001, True)
         for i, actor in enumerate(run._rigid.actors):
             c, r = history.rigid_com.numpy()[i], run._rigid.rotations.numpy()[i]
             cp, rp = run._rigid.predicted_t.numpy()[i], run._rigid.predicted_r.numpy()[i]
@@ -271,26 +272,43 @@ def test_mixed_dense_linear(test, device):
             np.testing.assert_allclose(
                 out.numpy(), np.linalg.solve(oracle.scaled_matrix, rhs_numpy), atol=2e-6, rtol=2e-5
             )
+            rows = run._criterion.rows
             for kind in ("_t", "_r"):
-                run._metrics, run._variational = {}, {}
                 residual = np.zeros(n)
                 name, start, _ = next(g for g in layout.groups if g[0].startswith("rigid_") and g[0].endswith(kind))
                 residual[start] = 3.2e-7 if kind == "_t" else 1e-7
-                measured = measure(run, residual, np.zeros(n), np.ones(n))
-                test.assertLess(measured["global"][0], measured["global"][2])
-                test.assertGreater(measured[name][0], measured[name][2])
+                tau, physical = convergence.tolerances(
+                    np.zeros(n), np.zeros(n), rows, run._config.convergence, np.float64
+                )
+                worst, _ = convergence.assess(residual, tau, physical, rows)
+                # One body's row fails its own tolerance; no other group is charged with it.
+                test.assertGreater(worst[rows.names.index(name)], 1)
+                test.assertEqual(np.count_nonzero(worst), 1)
                 # An isolated body's drift must trigger restart even when
                 # the global and other actor denominators mask it.
                 group = next(i for i, g in enumerate(layout.groups) if g[0] == name)
-                norms = np.full(2 * linear.group_count, 10.0, dtype=np.float32)
-                gap = np.zeros_like(norms)
-                norms[group], gap[group], gap[0] = 1e-5, 2e-6, 2e-6
-                linear._true_norms.assign(norms)
-                linear._gap_norms.assign(gap)
-                test.assertEqual(linear._should_restart(_pcg_config()), 1)
-                gap[group] = 0
-                linear._gap_norms.assign(gap)
-                test.assertEqual(linear._should_restart(_pcg_config()), 0)
+                config = _pcg_config()
+                floors = wp.array(group_policy(linear.layout, config)[0], dtype=float, device=device)
+                true = np.full(linear.group_count, 10.0, dtype=np.float32)
+                gap = np.zeros_like(true)
+                true[group], gap[group], gap[0] = 1e-5, 2e-6, 2e-6
+                for drift, expected in ((gap[group], 1), (0.0, 0)):
+                    gap[group] = drift
+                    error, decision = wp.zeros(1, dtype=int, device=device), wp.zeros(1, dtype=int, device=device)
+                    wp.launch(
+                        decide_restart,
+                        1,
+                        [
+                            wp.array(gap, dtype=float, device=device),
+                            wp.array(true, dtype=float, device=device),
+                            floors,
+                            wp.float64(config.residual_replacement_threshold),
+                            error,
+                            decision,
+                        ],
+                        device=device,
+                    )
+                    test.assertEqual(int(decision.numpy()[0]), expected)
             test.assertEqual(
                 linear.factor_actor_preconditioner(
                     generation=replace(generation, assembly_sequence=2), pivot_tolerance=0
@@ -328,8 +346,8 @@ def test_rigid_failures_and_reset(test, device):
     original, previous = snapshot(state), snapshot(output)
     evaluate = run._rigid.evaluate
 
-    def nonfinite_tangent(candidate, dt, tangent):
-        evaluate(candidate, dt, tangent)
+    def nonfinite_tangent(candidate, steps, dt, tangent):
+        evaluate(candidate, steps, dt, tangent)
         if tangent:
             run._rigid.tangent.fill_(float("nan"))
 
@@ -369,15 +387,6 @@ def test_rigid_failures_and_reset(test, device):
         with test.assertRaisesRegex(RuntimeError, "output publication"):
             run.step(state, output, control, dt=0.001)
     assert_snapshot(test, output, previous)
-    for mode in ("Armijo", "ArmijoOrResNorm"):
-        denied = rigid_solver(model, globalization=mode)
-        denied_state, denied_out = denied.create_state(dt=0.001), denied.create_state(dt=0.001)
-        apply_wrench(denied, denied_state, control)
-        denied_before, denied_after = snapshot(denied_state), snapshot(denied_out)
-        with test.assertRaisesRegex(ValueError, "allow_nonconservative_energy"):
-            denied.step(denied_state, denied_out, control, dt=0.001)
-        assert_snapshot(test, denied_state, denied_before)
-        assert_snapshot(test, denied_out, denied_after)
     rates = state.joint_qd.numpy()
     rates[run._rigid.dof_indices[0, 3]] = 2000
     state.joint_qd.assign(rates)
@@ -424,8 +433,11 @@ def test_rigid_count_and_trial(test, device):
         if count:
             trial = run._states.copy(state)
             direction = wp.full(run._layout.scalar_dof_count, 0.1, dtype=float, device=device)
-            run._rigid.trial(state, trial, direction, 1)
-            run._rigid.trial(state, trial, direction, 0.5)
+            run._rigid.prepare(state, run.model.control(), 0.001)
+            source = tuple(wp.clone(a) for a in run._rigid.derive_steps(state))
+            target = tuple(wp.empty_like(a) for a in source)
+            run._rigid.trial(source, trial, target, direction, 1)
+            run._rigid.trial(source, trial, target, direction, 0.5)
             for i in range(count):
                 base = transform(np.r_[np.zeros(3), saved["history.rigid_rotation"][i]])[:3, :3]
                 got = transform(np.r_[np.zeros(3), trial._monolithic_coupled.rigid_rotation.numpy()[i]])[:3, :3]
@@ -554,7 +566,7 @@ def test_rigid_checkpoint_rejections(test, device):
             bad = {key: value.copy() for key, value in fields.items()}
             bad["history.schema_version"][:] = version
             np.savez(path, **bad)
-            with test.assertRaisesRegex(ValueError, "canonical A"):
+            with test.assertRaisesRegex(ValueError, "Unsupported checkpoint schema version"):
                 run.load_checkpoint(state, path)
             assert_snapshot(test, state, original)
         del bad["history.rigid_com"]

@@ -153,7 +153,6 @@ def iter_full(
     actors,
     state,
     start,
-    law,
     *,
     radius,
     stiffness=1e7,
@@ -205,7 +204,7 @@ def iter_full(
             kind = mesh_fields[target]
         gap = float(geometry(y, kind, scales[target])[0] - offset)
         e, r, _, b = local(
-            y, yn, kind, scales[target], law, offset=offset, stiffness=stiffness * weight, width=width, mu=mu, a=falloff
+            y, yn, kind, scales[target], offset=offset, stiffness=stiffness * weight, width=width, mu=mu, a=falloff
         )
         if any(not np.isfinite(value).all() for value in (e, r, b)):
             raise ValueError("Nonfinite full-oracle local contribution")
@@ -214,8 +213,7 @@ def iter_full(
             old_rt = initial[target][:3, :3]
             old_geometry = geometry(yn, kind, scales[target])
             gradient = geometry(y, kind, scales[target])[1]
-            direction = old_geometry[1] if law == "C-EE" else gradient
-            masked = np.dot(rt.T @ normal, direction) > 0
+            masked = np.dot(rt.T @ normal, gradient) > 0
             if alignment_policy == "guard":
                 if (old_geometry[0] - offset < 0 and np.dot(old_rt.T @ old_normal, old_geometry[1]) > 0) or (
                     gap < 0 and np.dot(rt.T @ normal, gradient) > 0
@@ -369,7 +367,6 @@ def evaluate_full(
     actors,
     state,
     start,
-    law,
     *,
     radius,
     stiffness=1e7,
@@ -389,7 +386,6 @@ def evaluate_full(
         actors,
         state,
         start,
-        law,
         radius=radius,
         stiffness=stiffness,
         width=width,
@@ -448,7 +444,7 @@ def _errors(reference, selected):
     return errors
 
 
-def evaluate_stream(model, actors, state, start, law, *, candidate_keys=None, admitted_keys=None, **options):
+def evaluate_stream(model, actors, state, start, *, candidate_keys=None, admitted_keys=None, **options):
     """Audit the full system and optional spatial/capacity subsets without dense B.
 
     Missing selections mean the complete set and the candidate set, respectively.
@@ -470,7 +466,7 @@ def evaluate_stream(model, actors, state, start, law, *, candidate_keys=None, ad
     omissions = {name: {"count": 0, "contributing_count": 0} for name in ("spatial_omission", "capacity_omission")}
     hashes = {name: hashlib.sha256() for name in ("full", *omissions)}
     pairs, min_gap = {}, np.inf
-    for record in iter_full(model, actors, state, start, law, **options):
+    for record in iter_full(model, actors, state, start, **options):
         key = record["key"]
         selected = candidates is None or key in candidates
         accepted = selected and (admitted is None or key in admitted)
@@ -528,7 +524,7 @@ def evaluate_stream(model, actors, state, start, law, *, candidate_keys=None, ad
         **{name + "_count": value for name, value in counts.items()},
         **{name + "_contributing_count": value for name, value in active_counts.items()},
         "full_key_sha256": hashes["full"].hexdigest(),
-        "law": law,
+        "law": "C-IE",
         "full_to_admitted_errors": full_to_admitted,
         "min_gap": min_gap if counts["full"] else 0.0,
         "pairs": [{"source": key[0], "target": key[1], **pair} for key, pair in sorted(pairs.items())],

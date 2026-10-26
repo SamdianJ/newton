@@ -17,7 +17,6 @@ from newton._src.geometry.sdf_texture import TextureSDFData
 from newton._src.geometry.soft_contacts_sdf import eval_shape_sdf
 from newton.examples.softbody.monolithic_sharpa_assets import build_contact_hand, load_hand_ball
 from newton.examples.softbody.sharpa_close import load_fixture
-from newton.solvers.experimental.monolithic import MonolithicCollisionPipeline
 from newton.tests.unittest_utils import add_function_test, get_test_devices
 
 
@@ -118,10 +117,6 @@ def test_import(test, device):
                 np.asarray(wp.quat_to_matrix(wp.transform_get_rotation(X))).reshape(3, 3), expected[:3, :3], atol=2e-6
             )
         if wp.get_device(device).is_cuda:
-            pipeline = MonolithicCollisionPipeline(m, soft_contact_gap=0.002)
-            contacts = pipeline.contacts()
-            pipeline.collide(state, contacts)
-            test.assertEqual(pipeline.soft_contact_pair_count, 48 * 26)
             test.assertTrue(np.all(m._shape_sdf_index.numpy()[participating] >= 0))
             rows = json.loads((contact / "manifest.json").read_text())["meshes"]
             by_source = {r["source"]: r for r in rows}

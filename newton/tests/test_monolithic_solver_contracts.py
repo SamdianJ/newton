@@ -30,10 +30,8 @@ def model_and_solver(device, **options):
     model = builder.finalize(device=device)
     solver = SolverMonolithic(
         model,
-        contact_model="C-EE",
         friction_velocity_scale=0.01,
         mass_mode="lumped",
-        globalization="ArmijoOrResNorm",
         **options,
     )
     return model, solver
@@ -68,7 +66,10 @@ def test_final_residual_gate(test, device):
     def changed_candidate(dt):
         status = iterate(dt)
         test.assertEqual(status, solver.Status.SUCCESS)
-        solver._accepted.joint_q.fill_(0.001)
+        # Move the authoritative step and its published coordinates together.
+        step = solver._joint_step(solver._accepted)
+        step.fill_(0.001)
+        solver._accepted.joint_q.assign(solver._objective.qn.numpy() + step.numpy())
         return status
 
     with patch.object(solver, "_iterate_articulation", side_effect=changed_candidate):
@@ -85,7 +86,9 @@ def test_muscle_scope(test, device):
     model.muscle_count = 1
     with test.assertRaisesRegex(ValueError, "muscle"):
         SolverMonolithic(
-            model, contact_model="C-EE", friction_velocity_scale=0.01, mass_mode="lumped", globalization="Armijo"
+            model,
+            friction_velocity_scale=0.01,
+            mass_mode="lumped",
         )
 
 
@@ -100,10 +103,8 @@ def test_zero_effective_inertia(test, device):
     with test.assertRaisesRegex(ValueError, "inertia"):
         SolverMonolithic(
             model,
-            contact_model="C-EE",
             friction_velocity_scale=0.01,
             mass_mode="lumped",
-            globalization="Armijo",
             joint_terms=terms,
         )
 
@@ -128,18 +129,14 @@ def test_body_flags_scope(test, device):
             with test.assertRaisesRegex(ValueError, "[Kk]inematic"):
                 SolverMonolithic(
                     model,
-                    contact_model="C-EE",
                     friction_velocity_scale=0.01,
                     mass_mode="lumped",
-                    globalization="ArmijoOrResNorm",
                 )
             continue
         solver = SolverMonolithic(
             model,
-            contact_model="C-EE",
             friction_velocity_scale=0.01,
             mass_mode="lumped",
-            globalization="ArmijoOrResNorm",
         )
         state = solver.create_state(dt=0.001)
         state.body_f.assign([[0, 0, 0, 0, 0, 0], [1, 0, 0, 0, 0, 0]])
@@ -153,10 +150,8 @@ def test_body_flags_scope(test, device):
         with test.assertRaisesRegex(ValueError, "flags"):
             SolverMonolithic(
                 model,
-                contact_model="C-EE",
                 friction_velocity_scale=0.01,
                 mass_mode="lumped",
-                globalization="ArmijoOrResNorm",
             )
 
 
@@ -176,10 +171,8 @@ def pose_dependent_inertia_solver(device):
     model.joint_target_mode.assign([int(newton.JointTargetMode.POSITION_VELOCITY), int(newton.JointTargetMode.NONE)])
     solver = SolverMonolithic(
         model,
-        contact_model="C-EE",
         friction_velocity_scale=0.01,
         mass_mode="lumped",
-        globalization="ArmijoOrResNorm",
         joint_terms=SolverMonolithic.JointTerms(implicit_pd=True),
     )
     return model, solver
@@ -294,14 +287,14 @@ def test_linear_postcheck(test, device):
     state = solver.create_state(dt=0.001)
     state.body_f.assign([[1, 0, 0, 0, 0, 0]])
     original = snapshot(state)
-    recover = solver._linear.recover_delta
+    solve = solver._linear.solve_pcg
 
     def corrupt(*args, **kwargs):
-        status = recover(*args, **kwargs)
-        solver._delta.fill_(float("nan"))
-        return status
+        result = solve(*args, **kwargs)
+        kwargs["delta"].fill_(float("nan"))
+        return result
 
-    with patch.object(solver._linear, "recover_delta", side_effect=corrupt):
+    with patch.object(solver._linear, "solve_pcg", side_effect=corrupt):
         solver.step(state, state, model.control(), dt=0.001)
     test.assertFalse(solver.last_stats.converged)
     test.assertTrue(solver.last_stats.rolled_back)
@@ -320,7 +313,7 @@ def test_nonfinite_tangent(test, device):
     def overflow(*args, **kwargs):
         evaluate(*args, **kwargs)
         if kwargs.get("build_tangent", True):
-            solver._objective.tangent32.fill_(float("inf"))
+            solver._objective.tangent.fill_(float("inf"))
 
     with patch.object(solver._objective, "evaluate", side_effect=overflow):
         solver.step(state, state, model.control(), dt=0.001)
@@ -366,10 +359,8 @@ def test_budget_and_last_accepted(test, device):
     for policy in ("strict", "last_accepted"):
         solver = SolverMonolithic(
             model,
-            contact_model="C-EE",
             friction_velocity_scale=0.01,
             mass_mode="lumped",
-            globalization="Armijo",
             publish_policy=policy,
             newton_max_iterations=1,
         )
@@ -406,12 +397,48 @@ def test_checkpoint_cross_device(test, device):
 
 class TestArticulationContracts(unittest.TestCase):
     def test_acceptance_branches(self):
-        """Preserve non-descent residual acceptance and the A/R/OR truth table."""
-        for mode, wanted in (("Armijo", False), ("ResNorm", True), ("ArmijoOrResNorm", True)):
-            passed, a, r, _ = acceptance(
-                mode, 0.0, 1.0, 1.0, 1.0, 1.0, 0.5, energy_noise=0, residual_noise=0, slope_noise=0
-            )
-            self.assertEqual((passed, a, r), (wanted, False, True))
+        """Preserve non-descent residual acceptance under the OR predicate."""
+        passed, a, r, _ = acceptance(0.0, 1.0, 1.0, 1.0, 1.0, 0.5, energy_noise=0, residual_noise=0, slope_noise=0)
+        self.assertEqual((passed, a, r), (True, False, True))
+
+    def test_config_rejects_invalid_values_before_allocation(self):
+        """Validate every option without a Model, before any solver storage exists."""
+        from newton._src.solvers.monolithic.config import MonolithicConfig  # noqa: PLC0415
+
+        valid = MonolithicConfig(friction_velocity_scale=0.01)
+        self.assertEqual(valid.newton_max_iterations, 10)
+        for field, value in (
+            ("newton_max_iterations", 0),
+            ("linear_tolerance", float("nan")),
+            ("contact_stiffness", 0.0),
+            ("publish_policy", "unknown"),
+            ("contact_candidate_capacity", -1),
+            ("contact_factor_capacity", True),
+        ):
+            with self.subTest(field=field), self.assertRaises(ValueError):
+                MonolithicConfig(friction_velocity_scale=0.01, **{field: value})
+        with self.assertRaises(ValueError):
+            MonolithicConfig(friction_velocity_scale=0.01, use_cuda_graph=True)
+
+    def test_config_identity_is_order_independent_and_complete(self):
+        """Bind every numerical option, but not execution mode or resource budgets."""
+        from newton._src.solvers.monolithic.config import MonolithicConfig  # noqa: PLC0415
+
+        a = MonolithicConfig(friction_velocity_scale=0.01).identity_fields()
+        b = MonolithicConfig(friction_velocity_scale=0.01).identity_fields()
+        self.assertEqual(a.keys(), b.keys())
+        for name in a:
+            np.testing.assert_array_equal(a[name], b[name])
+        self.assertIn("publish_policy", a)
+        self.assertEqual(int(a["config_version"][0]), 5)
+        # The linear absolute tolerance option is retired; four iteration budgets remain.
+        self.assertEqual(a["iteration_policy"].size, 4)
+        for name in ("use_cuda_graph", "pcg_mode", "contact_factor_capacity", "contact_candidate_capacity"):
+            self.assertNotIn(name, a)
+        changed = MonolithicConfig(friction_velocity_scale=0.01, publish_policy="last_accepted").identity_fields()
+        self.assertFalse(np.array_equal(changed["publish_policy"], a["publish_policy"]))
+        mode = MonolithicConfig(friction_velocity_scale=0.01, pcg_mode="production").identity_fields()
+        self.assertEqual(_configuration_digest(mode), _configuration_digest(a))
 
     def test_digest_encoding(self):
         """Match a fixed little-endian, length-prefixed configuration digest."""

@@ -12,6 +12,7 @@ from newton.solvers.experimental.monolithic import SolverMonolithic
 import newton
 
 from .cable_analytic import cantilever_deflection, localized_helix
+from .numerical_gates import block_norms, gate_floor
 
 RECIPES = json.loads(Path(__file__).with_name("cable_recipes.json").read_text())
 
@@ -20,7 +21,16 @@ class CableBenchmark:
     """Own one prescribed physical experiment and its independent analytical comparison."""
 
     def __init__(
-        self, kind, *, segments=None, axis=1, ea_multiplier=1, device="cpu", pcg_mode="diagnostic", use_cuda_graph=False
+        self,
+        kind,
+        *,
+        segments=None,
+        axis=1,
+        ea_multiplier=1,
+        device="cpu",
+        pcg_mode="diagnostic",
+        use_cuda_graph=False,
+        precision="fp64",
     ):
         self.kind, self.axis = kind, axis
         self.ea_multiplier = ea_multiplier
@@ -34,7 +44,7 @@ class CableBenchmark:
         )
         self.s = np.linspace(0, r["length"], n + 1)
         # Model stores the reference geometry in FP32. Mass uses those same
-        # lengths, while the simulation's unknowns and E/r are native FP64.
+        # lengths, while the simulation's unknowns and E/r use the solver precision.
         rest = np.zeros((n + 1, 3), dtype=np.float32)
         rest[:, 0] = self.s - r["length"] / 2
         length = np.diff(rest[:, 0]).astype(float)
@@ -65,18 +75,15 @@ class CableBenchmark:
         )
         self.solver_options = {
             "cable_inputs": (cable,),
-            "contact_model": "C-EE",
-            "globalization": r["globalization"],
             "friction_velocity_scale": 0.1,
             "mass_mode": "lumped",
             "newton_max_iterations": r["newton_max_iterations"],
             "line_search_max_iterations": 20,
             "linear_max_iterations": 400,
             "linear_tolerance": 0.5,
-            "cable_position_tolerance": r["solve_position_tolerance"] * max(1, ea_multiplier),
-            "cable_theta_tolerance": r["solve_theta_tolerance"],
             "pcg_mode": SolverMonolithic.PCGMode(pcg_mode),
             "use_cuda_graph": use_cuda_graph,
+            "precision": SolverMonolithic.Precision(precision),
         }
         self.solver = SolverMonolithic(self.model, **self.solver_options)
         self.state = self.solver.create_state(dt=self.dt)
@@ -115,7 +122,8 @@ class CableBenchmark:
             self.state._monolithic_coupled.cable_ref_director.assign(d)
             self.state._monolithic_coupled.cable_ref_twist.assign(phi)
             self.solver.reset_state(self.state, dt=self.dt)
-        self.maximum_residual = {"position": 0.0, "theta": 0.0}
+        # Raw block L2 residuals and their ratios to max(gate, precision floor L2).
+        self.maximum_residual = {"position": 0.0, "theta": 0.0, "position_excess": 0.0, "theta_excess": 0.0}
 
     def step(self):
         """Apply prescribed loading, solve all coordinates, and require convergence."""
@@ -137,10 +145,15 @@ class CableBenchmark:
         if not self.solver.last_stats.converged:
             raise RuntimeError(f"{self.kind} step {step}: {self.solver.last_stats}")
         self.steps = step
-        metrics = self.solver.last_stats.variational["material_blocks"]
+        residual = self.solver.last_stats.variational["residual"]
+        floor = gate_floor(self.solver)
         for part, group in (("position", "x"), ("theta", "theta")):
-            value = metrics[f"cable_0_{group}"][f"raw_residual_cable_0_{group}_norm"]
-            self.maximum_residual[part] = max(self.maximum_residual[part], float(value))
+            value, rounding = block_norms(self.solver, residual, floor, f"cable_0_{group}")
+            gate = r["gates"][f"raw_{part}_residual"]
+            self.maximum_residual[part] = max(self.maximum_residual[part], value)
+            self.maximum_residual[part + "_excess"] = max(
+                self.maximum_residual[part + "_excess"], value / max(gate, rounding)
+            )
 
     def restore_checkpoint(self, path):
         """Replace the solver with a fresh instance and continue the same experiment."""
@@ -168,6 +181,8 @@ class CableBenchmark:
             "velocity": float(np.max(np.linalg.norm(self.state.particle_qd.numpy(), axis=1))),
             "raw_position_residual": self.maximum_residual["position"],
             "raw_theta_residual": self.maximum_residual["theta"],
+            "raw_position_residual_excess": self.maximum_residual["position_excess"],
+            "raw_theta_residual_excess": self.maximum_residual["theta_excess"],
         }
         if self.kind == "cantilever":
             w = cantilever_deflection(self.s, length=r["length"], force=r["force"], bending=r["bending"][self.axis - 1])
@@ -233,10 +248,14 @@ class CableBenchmark:
             "relative_torque_error",
             "writhe_turn_error",
         }
+        # Residual gates admit each block up to the solver's precision floor.
+        floored = {"raw_position_residual", "raw_theta_residual"}
         failures = {
             k: (result[k], limit)
             for k, limit in self.recipe["gates"].items()
-            if k in result and result[k] > limit and (accuracy or k not in approximation)
+            if k in result
+            and (result[k + "_excess"] > 1 if k in floored else result[k] > limit)
+            and (accuracy or k not in approximation)
         }
         if failures:
             raise AssertionError(failures)

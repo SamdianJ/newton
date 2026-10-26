@@ -17,7 +17,7 @@ from newton.tests.test_monolithic_solver_actor_contacts import contact_scene, co
 from newton.tests.test_monolithic_solver_contact_pool import pooled_solver
 from newton.tests.unittest_utils import add_function_test, get_test_devices
 from scripts.monolithic_reference import contact_full_oracle as oracle
-from scripts.monolithic_reference.compare_contact_dataflows import _check_contact, _contact_at
+from scripts.monolithic_reference.contact_audit import _check_contact, _contact_at
 
 
 def dense_tangent(result):
@@ -27,9 +27,9 @@ def dense_tangent(result):
     return matrix
 
 
-def arguments(run, state, start, law):
+def arguments(run, state, start):
     stiffness, mu, velocity, width, radius = run._contact.parameters
-    return (run.model, run._actors, physical(state), start, law), {
+    return (run.model, run._actors, physical(state), start), {
         "radius": radius,
         "stiffness": stiffness,
         "mu": mu,
@@ -83,16 +83,14 @@ def grid_scene(dimension, device="cpu"):
 
 
 def test_streamed_pairs(test, device):
-    """Match dense complete E/r/B and endpoint forces for all laws, pairs and layouts."""
-    for kind, law, permuted in itertools.product(
-        ("A-R", "R-R", "R-T", "R-static"), ("C-EE", "C-IE", "C-II"), (False, True)
-    ):
-        with test.subTest(kind=kind, law=law, permuted=permuted):
-            run = contact_solver(contact_scene(device, kind, before=permuted), law=law, permuted=permuted)
+    """Match dense complete E/r/B and endpoint forces for all pairs and layouts."""
+    for kind, permuted in itertools.product(("A-R", "R-R", "R-T", "R-static"), (False, True)):
+        with test.subTest(kind=kind, permuted=permuted):
+            run = contact_solver(contact_scene(device, kind, before=permuted), permuted=permuted)
             state = contact_state(run, kind)
             start = physical(state)
             perturb(run, state, start, np.linspace(-0.2, 0.3, run._layout.scalar_dof_count), 1e-6)
-            args, options = arguments(run, state, start, law)
+            args, options = arguments(run, state, start)
             full = oracle.evaluate_full(*args, **options)
             # The independent iterator does not consume production counts or samples.
             with patch.object(run._contact, "count", 0):
@@ -117,21 +115,20 @@ def test_projected_sphere_source(test, device):
     kinds[shape], scales[shape] = 3, [0.01, 0, 0]
     model.shape_type.assign(kinds)
     model.shape_scale.assign(scales)
-    for law in ("C-EE", "C-IE", "C-II"):
-        run = pooled_solver(model, law=law, mode="production", graph=device.is_cuda)
-        state = contact_state(run, "R-static")
-        start = physical(state)
-        perturb(run, state, start, np.linspace(-0.2, 0.3, run._layout.scalar_dof_count), 1e-6)
-        args, options = arguments(run, state, start, law)
-        result = oracle.evaluate_stream(*args, **options)
-        test.assertEqual(result["full_count"], 5952)
-        test.assertEqual(result["full_count"], run._contact.count)
-        expected = {**result["full"], "tangent": dense_tangent(result["full"])}
-        actual = _contact_at(run, physical(state), start, 0.001)
-        _check_contact(actual, expected)
-        np.testing.assert_allclose(static_wrenches(run), expected["static_wrench"], rtol=1e-8, atol=1e-10)
-        test.assertGreater(np.linalg.norm(expected["body_wrench"]), 0)
-        test.assertFalse(run._contact._tainted)
+    run = pooled_solver(model, mode="production", graph=device.is_cuda)
+    state = contact_state(run, "R-static")
+    start = physical(state)
+    perturb(run, state, start, np.linspace(-0.2, 0.3, run._layout.scalar_dof_count), 1e-6)
+    args, options = arguments(run, state, start)
+    result = oracle.evaluate_stream(*args, **options)
+    test.assertEqual(result["full_count"], 5952)
+    test.assertEqual(result["full_count"], run._contact.count)
+    expected = {**result["full"], "tangent": dense_tangent(result["full"])}
+    actual = _contact_at(run, physical(state), start, 0.001)
+    _check_contact(actual, expected)
+    np.testing.assert_allclose(static_wrenches(run), expected["static_wrench"], rtol=1e-8, atol=1e-10)
+    test.assertGreater(np.linalg.norm(expected["body_wrench"]), 0)
+    test.assertFalse(run._contact._tainted)
 
 
 def test_mesh_stream(test, device):
@@ -143,16 +140,15 @@ def test_mesh_stream(test, device):
     model = contact_scene(device, "A-R", mesh=True)
     sdf = build_smooth_sdf(model, representation="c2-bspline")
     fields = oracle.export_mesh_fields(model, sdf)
-    for law in ("C-EE", "C-IE", "C-II"):
-        run = pooled_solver(model, law=law, mode="production", graph=True, smooth_sdf=sdf)
-        state = contact_state(run, "A-R")
-        start = physical(state)
-        args, options = arguments(run, state, start, law)
-        result = oracle.evaluate_stream(*args, **options, mesh_fields=fields)
-        expected = {**result["full"], "tangent": dense_tangent(result["full"])}
-        _check_contact(_contact_at(run, physical(state), start, 0.001), expected)
-        with test.assertRaises(ValueError):
-            oracle.evaluate_stream(*args, **options, candidate_keys=[], admitted_keys=[])
+    run = pooled_solver(model, mode="production", graph=True, smooth_sdf=sdf)
+    state = contact_state(run, "A-R")
+    start = physical(state)
+    args, options = arguments(run, state, start)
+    result = oracle.evaluate_stream(*args, **options, mesh_fields=fields)
+    expected = {**result["full"], "tangent": dense_tangent(result["full"])}
+    _check_contact(_contact_at(run, physical(state), start, 0.001), expected)
+    with test.assertRaises(ValueError):
+        oracle.evaluate_stream(*args, **options, candidate_keys=[], admitted_keys=[])
 
 
 class TestContactStreamOracle(unittest.TestCase):
@@ -161,7 +157,7 @@ class TestContactStreamOracle(unittest.TestCase):
         run = pooled_solver(contact_scene("cpu", "R-static"), mode="production")
         state = contact_state(run, "R-static")
         start = physical(state)
-        args, options = arguments(run, state, start, "C-IE")
+        args, options = arguments(run, state, start)
         full = oracle.evaluate_stream(*args, **options)["full"]
         expected = full["static_wrench"]
         _contact_at(run, physical(state), start, 0.001)
@@ -179,7 +175,7 @@ class TestContactStreamOracle(unittest.TestCase):
         run = contact_solver(contact_scene("cpu", "R-T"))
         state = contact_state(run, "R-T")
         start = physical(state)
-        args, options = arguments(run, state, start, "C-IE")
+        args, options = arguments(run, state, start)
         full = oracle.evaluate_full(*args, **options)
         keys = list(full["records"])
         candidates, admitted = keys[::2], keys[::4]
@@ -216,7 +212,7 @@ class TestContactStreamOracle(unittest.TestCase):
         run = contact_solver(contact_scene("cpu", "R-T"))
         state = contact_state(run, "R-T")
         start = physical(state)
-        args, options = arguments(run, state, start, "C-IE")
+        args, options = arguments(run, state, start)
         key = next(iter(oracle.evaluate_full(*args, **options)["records"]))
         for keys in (
             [key, key],
@@ -242,7 +238,7 @@ class TestContactStreamOracle(unittest.TestCase):
         """Return zero totals for an empty complete set and never accumulate across audits."""
         run = contact_solver(contact_scene("cpu", "R-T"))
         state = contact_state(run, "R-T")
-        args, options = arguments(run, state, physical(state), "C-IE")
+        args, options = arguments(run, state, physical(state))
         first = oracle.evaluate_stream(*args, **options)
         repeated = oracle.evaluate_stream(*args, **options)
         for name in ("energy", "residual", "particle_force", "body_wrench", "joint_force"):
@@ -260,7 +256,7 @@ class TestContactStreamOracle(unittest.TestCase):
         """Fail malformed physics even when the spatial or capacity subset is empty."""
         run = contact_solver(contact_scene("cpu", "R-T"))
         state = contact_state(run, "R-T")
-        args, options = arguments(run, state, physical(state), "C-IE")
+        args, options = arguments(run, state, physical(state))
         with patch.object(oracle, "local", return_value=(np.full(2, np.nan), np.zeros(3), np.eye(3), np.eye(3))):
             with self.assertRaisesRegex(ValueError, "Nonfinite full-oracle local contribution"):
                 oracle.evaluate_stream(*args, **options, candidate_keys=[], admitted_keys=[])
@@ -278,7 +274,7 @@ class TestContactStreamOracle(unittest.TestCase):
         """Preserve early native validation before the compatible dense wrapper allocates B."""
         run = contact_solver(contact_scene("cpu", "R-T"))
         state = contact_state(run, "R-T")
-        args, options = arguments(run, state, physical(state), "C-IE")
+        args, options = arguments(run, state, physical(state))
         args[2]["x"][0, 0] = np.nan
         with patch.object(oracle, "_totals", side_effect=AssertionError("allocation before native validation")):
             with self.assertRaisesRegex(ValueError, "finite native states"):
@@ -288,7 +284,7 @@ class TestContactStreamOracle(unittest.TestCase):
         """Fail repeated effective Model pairs even when spatial selection is empty."""
         run = contact_solver(contact_scene("cpu", "A-R"))
         state = contact_state(run, "A-R")
-        args, options = arguments(run, state, physical(state), "C-IE")
+        args, options = arguments(run, state, physical(state))
         pairs = run.model.shape_contact_pairs.numpy()
         repeated = wp.array(np.vstack((pairs, pairs)), dtype=wp.vec2i, device="cpu")
         with patch.object(run.model, "shape_contact_pairs", repeated):
@@ -300,7 +296,7 @@ class TestContactStreamOracle(unittest.TestCase):
         run = contact_solver(contact_scene("cpu", "R-T"))
         state = contact_state(run, "R-T")
         start = physical(state)
-        args, options = arguments(run, state, start, "C-IE")
+        args, options = arguments(run, state, start)
         record = next(oracle.iter_full(*args, **options))
         record["energy"][:] = 0
         record["residual"][:] = 0
@@ -319,23 +315,18 @@ class TestContactStreamOracle(unittest.TestCase):
             self.assertGreater(result[category]["errors"]["tangent"]["l2"], 0)
 
     def test_frozen_load_after_separation(self):
-        """Retain separated C-EE start load and C-IE gap minus g dot displacement."""
+        """Retain the separated C-IE friction load from the start gap minus g dot displacement."""
         run = contact_solver(contact_scene("cpu", "R-static"))
         state = contact_state(run, "R-static")
         start = physical(state)
         com = start["com"].copy()
         com[0] += [0.03, 0.001, 0]
         state._monolithic_coupled.rigid_com.assign(com)
-        for law in ("C-EE", "C-IE", "C-II"):
-            args, options = arguments(run, state, start, law)
-            result = oracle.evaluate_stream(*args, **options, candidate_keys=[])
-            self.assertGreater(result["min_gap"], options["width"])
-            if law == "C-II":
-                np.testing.assert_array_equal(result["full"]["energy"], 0)
-                self.assertEqual(result["spatial_omission"]["contributing_count"], 0)
-            else:
-                self.assertGreater(result["full"]["energy"][1], 0)
-                self.assertGreater(result["spatial_omission"]["contributing_count"], 0)
+        args, options = arguments(run, state, start)
+        result = oracle.evaluate_stream(*args, **options, candidate_keys=[])
+        self.assertGreater(result["min_gap"], options["width"])
+        self.assertGreater(result["full"]["energy"][1], 0)
+        self.assertGreater(result["spatial_omission"]["contributing_count"], 0)
 
     def test_large_native_model_avoids_dense_storage(self):
         """Audit a real connected tet grid using local support and sparse global B."""
@@ -350,7 +341,7 @@ class TestContactStreamOracle(unittest.TestCase):
             return original(shape, *args, **kwargs)
 
         with patch.object(oracle.np, "zeros", bounded_zeros):
-            result = oracle.evaluate_stream(model, actors, state, state, "C-IE", radius=0.001)
+            result = oracle.evaluate_stream(model, actors, state, state, radius=0.001)
         self.assertEqual(result["full_count"], 3 * model.tri_count)
         self.assertGreater(result["full"]["energy"][0], 0)
         self.assertGreater(result["full"]["tangent"]["value"].size, 0)

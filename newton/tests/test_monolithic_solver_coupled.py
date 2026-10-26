@@ -15,8 +15,8 @@ import warp as wp
 import newton
 from newton._src.geometry import GeoType
 from newton._src.geometry.sdf_texture import TextureSDFData, create_sparse_sdf_textures
+from newton._src.solvers.monolithic import convergence
 from newton._src.solvers.monolithic.articulation import ArticulationKinematics
-from newton._src.solvers.monolithic.contact import ContactObjective
 from newton._src.solvers.monolithic.solver_monolithic import SolverMonolithic, _StepFailure
 from newton.tests.test_monolithic_contact_mesh import synthetic
 from newton.tests.unittest_utils import add_function_test, get_test_devices
@@ -107,11 +107,9 @@ def scene(device, *, contact=True, fixed=False, particles=True, articulation=Tru
     return model
 
 
-def solver(model, law="C-EE", *, graph=False, mode="diagnostic", globalization="ResNorm", **kwargs):
+def solver(model, *, graph=False, mode="diagnostic", **kwargs):
     return SolverMonolithic(
         model,
-        contact_model=law,
-        globalization=globalization,
         friction_velocity_scale=0.01,
         tet_rest_density=wp.full(model.tet_count, 1000, dtype=float, device=model.device),
         pcg_mode=mode,
@@ -145,39 +143,38 @@ def assert_snapshot(test, state, expected):
 
 
 def test_joint_particle_step(test, device):
-    """Solve all laws with a nonzero q-x block and publish the complete final state."""
-    for law in ("C-EE", "C-IE", "C-II"):
-        model = scene(device)
-        run = solver(model, law)
-        before = run.create_state(dt=0.001)
-        after = run._states.copy(before)
-        for _ in range(3):
-            old = snapshot(before)
-            run.step(before, after, model.control(), dt=0.001)
-            test.assertTrue(run.last_stats.converged, run.last_stats)
-            assert_snapshot(test, before, old)
-            for name in ("convergence_ratio", "convergence_ratio_q", "convergence_ratio_x"):
-                test.assertLessEqual(getattr(run.last_stats, name), 1)
-            matrix = run._linear.densify_for_test(generation=run._generation).raw_matrix
-            test.assertGreater(np.linalg.norm(matrix[:2, 2:]), 0)
-            test.assertLess(np.linalg.norm(matrix - matrix.T) / np.linalg.norm(matrix), 1e-6)
-            h = after._monolithic_coupled
-            test.assertEqual(h.force_valid.numpy()[0], 1)
-            test.assertEqual(h.force_generation.numpy()[0], run.last_stats.step_generation)
-            np.testing.assert_allclose(
-                h.contact_particle_force.numpy().sum(axis=0) + h.contact_body_force.numpy()[:, :3].sum(axis=0),
-                0,
-                atol=1e-12,
-            )
-            np.testing.assert_allclose(h.contact_joint_force.numpy(), -run._contact.residual.numpy()[:2], atol=1e-12)
-            test.assertTrue(np.isfinite(h.link_vsym.numpy()).all())
-            torque = np.cross(after.particle_q.numpy(), h.contact_particle_force.numpy()).sum(axis=0)
-            torque += (
-                np.cross(run._kinematics.com.numpy(), h.contact_body_force.numpy()[:, :3])
-                + h.contact_body_force.numpy()[:, 3:]
-            ).sum(axis=0)
-            np.testing.assert_allclose(torque, 0, atol=1e-12)
-            before, after = after, before
+    """Solve with a nonzero q-x block and publish the complete final state."""
+    model = scene(device)
+    run = solver(model)
+    before = run.create_state(dt=0.001)
+    after = run._states.copy(before)
+    for _ in range(3):
+        old = snapshot(before)
+        run.step(before, after, model.control(), dt=0.001)
+        test.assertTrue(run.last_stats.converged, run.last_stats)
+        assert_snapshot(test, before, old)
+        for name in ("convergence_ratio", "convergence_ratio_q", "convergence_ratio_x"):
+            test.assertLessEqual(getattr(run.last_stats, name), 1)
+        matrix = run._linear.densify_for_test(generation=run._generation).raw_matrix
+        test.assertGreater(np.linalg.norm(matrix[:2, 2:]), 0)
+        test.assertLess(np.linalg.norm(matrix - matrix.T) / np.linalg.norm(matrix), 1e-6)
+        h = after._monolithic_coupled
+        test.assertEqual(h.force_valid.numpy()[0], 1)
+        test.assertEqual(h.force_generation.numpy()[0], run.last_stats.step_generation)
+        np.testing.assert_allclose(
+            h.contact_particle_force.numpy().sum(axis=0) + h.contact_body_force.numpy()[:, :3].sum(axis=0),
+            0,
+            atol=1e-12,
+        )
+        np.testing.assert_allclose(h.contact_joint_force.numpy(), -run._contact.residual.numpy()[:2], atol=1e-12)
+        test.assertTrue(np.isfinite(h.link_vsym.numpy()).all())
+        torque = np.cross(after.particle_q.numpy(), h.contact_particle_force.numpy()).sum(axis=0)
+        torque += (
+            np.cross(run._kinematics.com.numpy(), h.contact_body_force.numpy()[:, :3])
+            + h.contact_body_force.numpy()[:, 3:]
+        ).sum(axis=0)
+        np.testing.assert_allclose(torque, 0, atol=1e-12)
+        before, after = after, before
 
 
 def test_state_and_rollback(test, device):
@@ -211,63 +208,55 @@ def test_state_and_rollback(test, device):
     with test.assertRaises(ValueError):
         ArticulationKinematics(model)
     with test.assertRaises(ValueError):
-        SolverMonolithic(model, contact_model="C-IE", globalization="Armijo", friction_velocity_scale=0.01)
+        SolverMonolithic(model, friction_velocity_scale=0.01)
 
 
 def test_modes_and_sparse_posterior(test, device):
     """Compare all execution modes and the true sparse posterior against dense FP64."""
-    for law in ("C-EE", "C-IE", "C-II"):
-        reference = None
-        production = None
-        for mode, graph in [("diagnostic", False), ("production", False)] + (
-            [("production", True)] if device.is_cuda else []
-        ):
-            model = scene(device)
-            run = solver(model, law, mode=mode, graph=graph)
-            state = run.create_state(dt=0.001)
-            for dt in (0.001, 0.001, 0.0005):
-                run.step(state, state, model.control(), dt=dt)
-                test.assertTrue(run.last_stats.converged, run.last_stats)
-            coords = np.r_[state.joint_q.numpy(), state.particle_q.numpy().ravel()]
-            if reference is None:
-                reference = coords
-            else:
-                # Different PCG schedules may stop at different valid roots; use
-                # the approved discrete gates, not a machine-equality assertion.
-                np.testing.assert_allclose(coords[:2], reference[:2], atol=5e-4, rtol=0)
-                np.testing.assert_allclose(coords[2:], reference[2:], atol=5e-5, rtol=0)
-            if mode == "production":
-                if production is None:
-                    production = coords
-                else:
-                    np.testing.assert_allclose(coords, production, atol=2e-11, rtol=1e-9)
-            matrix = run._linear.densify_for_test(generation=run._generation).raw_matrix.astype(float)
-            direction = np.linspace(-0.3, 0.7, len(matrix)).astype(np.float32)
-            residual = np.linspace(0.2, -0.1, len(matrix))
-            scale = run._linear.scale.numpy().astype(float)
-            run._delta.assign(direction)
-            actual = run._physical_linear_error(None, direction, residual, scale)
-            np.testing.assert_allclose(
-                actual, scale * (matrix @ direction.astype(float) + residual), atol=2e-12, rtol=2e-14
-            )
-            if graph:
-                test.assertGreater(run._graphs.summary()["segments"]["coupled_objective_owners"]["captures"], 1)
-                test.assertGreater(run._graphs.summary()["segments"]["coupled_posterior"]["replays"], 0)
-            if law != "C-EE":
-                test.assertTrue(all(row.get("Armijo") is None for row in run.last_stats.variational["trials"]))
-    for globalization in ("Armijo", "ArmijoOrResNorm"):
+    reference = None
+    production = None
+    for mode, graph in [("diagnostic", False), ("production", False)] + (
+        [("production", True)] if device.is_cuda else []
+    ):
         model = scene(device)
-        run = solver(model, globalization=globalization)
+        run = solver(model, mode=mode, graph=graph)
         state = run.create_state(dt=0.001)
-        run.step(state, state, model.control(), dt=0.001)
-        test.assertTrue(run.last_stats.converged, run.last_stats)
+        for dt in (0.001, 0.001, 0.0005):
+            run.step(state, state, model.control(), dt=dt)
+            test.assertTrue(run.last_stats.converged, run.last_stats)
+        coords = np.r_[state.joint_q.numpy(), state.particle_q.numpy().ravel()]
+        if reference is None:
+            reference = coords
+        else:
+            # Different PCG schedules may stop at different valid roots; use
+            # the approved discrete gates, not a machine-equality assertion.
+            np.testing.assert_allclose(coords[:2], reference[:2], atol=5e-4, rtol=0)
+            np.testing.assert_allclose(coords[2:], reference[2:], atol=5e-5, rtol=0)
+        if mode == "production":
+            if production is None:
+                production = coords
+            else:
+                np.testing.assert_allclose(coords, production, atol=2e-11, rtol=1e-9)
+        matrix = run._linear.densify_for_test(generation=run._generation).raw_matrix.astype(float)
+        direction = np.linspace(-0.3, 0.7, len(matrix)).astype(np.float32)
+        residual = np.linspace(0.2, -0.1, len(matrix))
+        scale = run._linear.scale.numpy().astype(float)
+        run._delta.assign(direction)
+        actual = run._physical_linear_error(None, direction, residual, scale)
+        np.testing.assert_allclose(
+            actual, scale * (matrix @ direction.astype(float) + residual), atol=2e-12, rtol=2e-14
+        )
+        if graph:
+            test.assertGreater(run._graphs.summary()["segments"]["coupled_objective_owners"]["captures"], 1)
+            test.assertGreater(run._graphs.summary()["segments"]["coupled_posterior"]["replays"], 0)
+        # Frictional C-IE energy is heuristic; no trial may claim an Armijo guarantee.
+        test.assertTrue(all(row.get("Armijo") is None for row in run.last_stats.variational["trials"]))
 
 
 def test_failure_gates(test, device):
     """Preserve capacity policies and roll back hard, linear and nonlinear failures."""
     for failure in (
         "capacity",
-        "legacy_capacity",
         "posterior",
         "budget",
         "trial",
@@ -278,16 +267,10 @@ def test_failure_gates(test, device):
         "postpublish",
     ):
         model = scene(device)
-        options = {"contact_factor_capacity": 0} if failure in ("capacity", "legacy_capacity") else {}
+        options = {"contact_factor_capacity": 0} if failure == "capacity" else {}
         if failure == "budget":
             options["newton_max_iterations"] = 1
-        factory = (
-            patch("newton._src.solvers.monolithic.solver_monolithic.ContactObjective", ContactObjective)
-            if failure == "legacy_capacity"
-            else nullcontext()
-        )
-        with factory:
-            run = solver(model, **options)
+        run = solver(model, **options)
         state = run.create_state(dt=0.001)
         out = run._states.copy(state)
         expected, expected_out = snapshot(state), snapshot(out)
@@ -363,7 +346,7 @@ def test_binding_and_resume(test, device):
     resumed.step(state, state, model.control(), dt=0.001)
     test.assertTrue(resumed.last_stats.converged)
     test.assertEqual(state._monolithic_coupled.force_generation.numpy()[0], 4)
-    for other in (solver(model, "C-II"), solver(model, newton_max_iterations=9)):
+    for other in (solver(model, friction_coefficient=0.4), solver(model, newton_max_iterations=9)):
         with test.assertRaises(ValueError):
             other._states.validate(state)
     state.particle_q = wp.clone(state.particle_q)
@@ -409,8 +392,6 @@ def test_device_step_inputs(test, device):
         model = scene(device)
         run = SolverMonolithic(
             model,
-            contact_model="C-EE",
-            globalization="ResNorm",
             friction_velocity_scale=0.01,
             tet_rest_density=wp.full(model.tet_count, 1000, dtype=float, device=device),
             pcg_mode="production",
@@ -581,7 +562,6 @@ def independent_objective(run, q, x, dt):
                 yn,
                 "plane",
                 np.ones(3),
-                run._contact.contact_model,
                 offset=float(model.particle_radius.numpy()[0] + model.shape_margin.numpy()[0]),
                 stiffness=1e7 * area / 3,
                 a=0.01 * dt,
@@ -594,56 +574,41 @@ def independent_objective(run, q, x, dt):
 
 def test_complete_oracle_and_noise(test, device):
     """Check actual coupled E/r/B and 32-repeat noise at initial, trial and near-root states."""
-    for law in ("C-EE", "C-IE", "C-II"):
-        model = scene(device)
-        run = solver(model, law)
-        state = run.create_state(dt=0.001)
-        run.step(state, state, model.control(), dt=0.001)
-        test.assertTrue(run.last_stats.converged)
-        for kind in ("initial", "trial", "root"):
-            candidate = run._states.copy(run._original if kind == "initial" else state)
-            if kind == "trial":
-                candidate.joint_q.assign(candidate.joint_q.numpy() + np.array([1e-5, -2e-6]))
-                candidate.particle_q.assign(candidate.particle_q.numpy() + np.array([2e-6, -3e-6, 1e-6]))
-            q, x = candidate.joint_q.numpy().copy(), candidate.particle_q.numpy().copy()
-            expected_e, expected_r, expected_b = independent_objective(run, q, x, 0.001)
-            energy_errors = []
-            residual_errors = []
-            for _ in range(32):
-                for device_result in (False, True):
-                    energy, residual, _ = run._evaluate(candidate, 0.001, device_result=device_result)
-                    if device_result:
-                        residual = residual.numpy()
-                    energy_errors.append(abs(energy - expected_e))
-                    residual_errors.append(abs(residual - expected_r))
-            run._assemble(0)
-            scale = run._linear.scale.numpy().astype(float)
-            actual_b = run._linear.densify_for_test(generation=run._generation).raw_matrix
-            np.testing.assert_allclose(actual_b, expected_b, rtol=2e-5, atol=2e-3)
-            test.assertLessEqual(8 * max(energy_errors), 5.820766091346741e-11)
-            envelope = 8 * np.max(residual_errors, axis=0)
-            test.assertLessEqual(envelope.max(), 2.0935893019213836e-9)
-            for name, part in [("global", slice(None)), ("q", slice(0, 2)), ("x", slice(2, None))]:
-                reference = np.linalg.norm(scale[part] * run._reference_residual.numpy()[part]) / np.sqrt(
-                    len(expected_r[part])
-                )
-                goal = (
-                    getattr(run._config, "merit_absolute_" + name)
-                    + getattr(run._config, "merit_relative_" + name) * reference
-                )
-                test.assertLess(
-                    np.linalg.norm(scale[part] * envelope[part]) / np.sqrt(len(expected_r[part])), 0.1 * goal
-                )
-            if law == "C-EE" and kind == "trial":
-                direction = np.linspace(-0.7, 0.9, len(expected_r))
-                direction[:2] *= 0.01
-                for h in (1e-7, 3e-8):
-                    values = []
-                    for sign in (1, -1):
-                        candidate.joint_q.assign(q + sign * h * direction[:2])
-                        candidate.particle_q.assign(x + sign * h * direction[2:].reshape(-1, 3))
-                        values.append(run._evaluate(candidate, 0.001, build_tangent=False)[0])
-                    test.assertAlmostEqual((values[0] - values[1]) / (2 * h), expected_r @ direction, delta=1e-7)
+    model = scene(device)
+    run = solver(model)
+    state = run.create_state(dt=0.001)
+    run.step(state, state, model.control(), dt=0.001)
+    test.assertTrue(run.last_stats.converged)
+    for kind in ("initial", "trial", "root"):
+        candidate = run._states.copy(run._original if kind == "initial" else state)
+        if kind == "trial":
+            candidate.joint_q.assign(candidate.joint_q.numpy() + np.array([1e-5, -2e-6]))
+            candidate.particle_q.assign(candidate.particle_q.numpy() + np.array([2e-6, -3e-6, 1e-6]))
+        q, x = candidate.joint_q.numpy().copy(), candidate.particle_q.numpy().copy()
+        expected_e, expected_r, expected_b = independent_objective(run, q, x, 0.001)
+        energy_errors = []
+        residual_errors = []
+        for _ in range(32):
+            for device_result in (False, True):
+                energy, residual, _ = run._evaluate(candidate, 0.001, device_result=device_result)
+                if device_result:
+                    residual = residual.numpy()
+                energy_errors.append(abs(energy - expected_e))
+                residual_errors.append(abs(residual - expected_r))
+        run._assemble(0)
+        actual_b = run._linear.densify_for_test(generation=run._generation).raw_matrix
+        np.testing.assert_allclose(actual_b, expected_b, rtol=2e-5, atol=2e-3)
+        test.assertLessEqual(8 * max(energy_errors), 5.820766091346741e-11)
+        envelope = 8 * np.max(residual_errors, axis=0)
+        test.assertLessEqual(envelope.max(), 2.0935893019213836e-9)
+        # Evaluation error stays an order below every row's physical tolerance (rounding term excluded).
+        rows = run._criterion.rows
+        reference = run._reference_residual
+        reference = reference.numpy() if hasattr(reference, "numpy") else np.asarray(reference)
+        _, physical = convergence.tolerances(
+            reference, np.zeros(rows.units.size), rows, run._config.convergence, np.float64
+        )
+        test.assertTrue(np.all(envelope < 0.1 * physical), (envelope / physical).max())
 
 
 def test_mesh_binding_graph(test, device):

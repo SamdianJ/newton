@@ -10,17 +10,14 @@ import warp as wp
 import warp.sparse as sparse
 from warp.optim.linear import LinearOperator
 
-from . import bsr, pcg, preconditioner
+from . import bsr, preconditioner
 from .bsr import (
+    ASSEMBLY_STRUCTS,
     MonolithicLinearAssembly,
     _create_triplets,
     _monolithic_scaled_matvec,
-    _MonolithicContactFactors,
-    _MonolithicMat33Triplets,
-    _MonolithicScalarTriplets,
     _pack_assembly_counts,
     _pack_assembly_result,
-    _scale_vector,
     _validate_aq_finite,
     _validate_bsr_finite,
     _validate_triplets,
@@ -44,8 +41,8 @@ from .linear_types import (
     MonolithicPcgConfig,
     MonolithicPcgWarmStart,
 )
-from .pcg import _MonolithicPcgPacket
 from .pcg_common import group_data
+from .pcg_production import solve_pcg_production
 from .preconditioner import _monolithic_preconditioner_matvec
 
 
@@ -68,7 +65,10 @@ class MonolithicLinearWorkspace:
         use_cuda_graph: bool = False,
         contact_support=None,
         cable_row_order=None,
+        dtype=wp.float32,
     ):
+        if dtype not in ASSEMBLY_STRUCTS:
+            raise ValueError("The linear workspace stores float32 or float64 values")
         if any(k == "cable" for k, *_ in layout.material_ranges) and cable_row_order is None:
             raise ValueError("Material layouts require an explicit cable preconditioner ordering")
         if pcg_mode not in ("diagnostic", "production"):
@@ -82,6 +82,11 @@ class MonolithicLinearWorkspace:
         if capacities.global_scalar_triplet_count >= 2**30:
             raise ValueError("Scalar sort scratch exceeds int32 capacity")
         self.use_cuda_graph = use_cuda_graph
+        self.dtype = dtype
+        """Scalar type of every stored matrix, scaling, factor and PCG value."""
+        self.matrix_type = wp.mat33d if dtype == wp.float64 else wp.mat33
+        self._native = np.float64 if dtype == wp.float64 else np.float32
+        structs = ASSEMBLY_STRUCTS[dtype]
         self._pcg_mode = pcg_mode
         self._pcg_active = False
         self._rhs_norms_cached = False
@@ -96,12 +101,12 @@ class MonolithicLinearWorkspace:
         self.capacities = capacities
         self.device = wp.get_device(device)
         self._cable_preconditioner = (
-            CablePreconditioner(layout, cable_row_order, device=self.device)
+            CablePreconditioner(layout, cable_row_order, device=self.device, dtype=dtype)
             if any(k == "cable" for k, *_ in layout.material_ranges)
             else None
         )
         self._cloth_preconditioner = (
-            ClothPreconditioner(layout, device=self.device)
+            ClothPreconditioner(layout, device=self.device, dtype=dtype)
             if any(k == "cloth" for k, *_ in layout.material_ranges)
             else None
         )
@@ -117,12 +122,12 @@ class MonolithicLinearWorkspace:
         ):
             raise ValueError("particle_to_dynamic must map each dynamic particle exactly once")
         self.particle_to_dynamic = particle_to_dynamic
-        self.aq_actor_dense = wp.zeros((layout.q_dof_count, layout.q_dof_count), dtype=float, device=device)
+        self.aq_actor_dense = wp.zeros((layout.q_dof_count, layout.q_dof_count), dtype=dtype, device=device)
         self.k_global_scalar_bsr = sparse.bsr_zeros(
-            layout.scalar_dof_count, layout.scalar_dof_count, float, device=device
+            layout.scalar_dof_count, layout.scalar_dof_count, dtype, device=device
         )
         self.ax_internal_bsr3 = sparse.bsr_zeros(
-            layout.dynamic_particle_count, layout.dynamic_particle_count, wp.mat33, device=device
+            layout.dynamic_particle_count, layout.dynamic_particle_count, self.matrix_type, device=device
         )
         self._active_token = wp.zeros(1, dtype=int, device=device)
         self._segment_graphs = None
@@ -133,27 +138,27 @@ class MonolithicLinearWorkspace:
         self._fixed_patterns = None
         self._fixed_bsr = None
         self._global = _create_triplets(
-            _MonolithicScalarTriplets,
+            structs.scalar,
             capacities.global_scalar_triplet_count,
             layout.scalar_dof_count,
-            float,
+            dtype,
             device,
             self._active_token,
             0,
         )
         self._scalar_reduction = _ScalarBsrReduction(
-            capacities.global_scalar_triplet_count, self.device, use_cuda_graph=use_cuda_graph
+            capacities.global_scalar_triplet_count, self.device, use_cuda_graph=use_cuda_graph, dtype=dtype
         )
         self._internal = _create_triplets(
-            _MonolithicMat33Triplets,
+            structs.mat33,
             capacities.internal_mat33_triplet_count,
             layout.dynamic_particle_count,
-            wp.mat33,
+            self.matrix_type,
             device,
             self._active_token,
             0,
         )
-        factors = _MonolithicContactFactors()
+        factors = structs.factors()
         if contact_support is None:
             # Standalone component producers declare their own factor support.
             width = layout.q_dof_count + 9
@@ -173,8 +178,8 @@ class MonolithicLinearWorkspace:
         factors.offsets = wp.array(offsets.astype(np.int32), dtype=int, device=device)
         factors.columns = wp.array(columns, dtype=int, device=device)
         factors.local_indices = wp.array(local_indices, dtype=int, device=device)
-        factors.values = wp.zeros(len(columns), dtype=float, device=device)
-        factors.weights = wp.zeros(capacities.contact_factor_count, dtype=float, device=device)
+        factors.values = wp.zeros(len(columns), dtype=dtype, device=device)
+        factors.weights = wp.zeros(capacities.contact_factor_count, dtype=dtype, device=device)
         factors.kind = wp.zeros(capacities.contact_factor_count, dtype=int, device=device)
         factors.candidate_tid = wp.full(capacities.contact_factor_count, -1, dtype=int, device=device)
         factors.count = wp.zeros(1, dtype=int, device=device)
@@ -195,62 +200,31 @@ class MonolithicLinearWorkspace:
             "_scaled_x",
             "_k_scaled",
             "_preconditioned",
-            "_r",
-            "_z",
-            "_p",
-            "_ap",
-            "_true_r",
         ):
-            setattr(self, name, wp.zeros(n, dtype=float, device=device))
-        for name in ("_r_z", "_old_r_z", "_alpha", "_beta"):
-            setattr(self, name, wp.zeros(1, dtype=float, device=device))
-        self._products = wp.zeros(3, dtype=float, device=device)
-        self._true_sums = wp.zeros(2 * self.group_count, dtype=float, device=device)
-        self._true_maxima = wp.zeros(2 * self.group_count, dtype=float, device=device)
-        self._true_norms = wp.zeros(2 * self.group_count, dtype=float, device=device)
-        self._true_residual_norms = self._true_norms[: self.group_count]
-        if self.pcg_mode == "diagnostic":
-            self._diagnostic_vector = wp.zeros(n, dtype=float, device=device)
-            self._diagnostic_zero = wp.zeros(n, dtype=float, device=device)
-            self._diagnostic_maxima = wp.zeros(2 * self.group_count, dtype=float, device=device)
-            self._diagnostic_sums = wp.zeros(2 * self.group_count, dtype=float, device=device)
-            self._diagnostic_norms = wp.zeros(2 * self.group_count, dtype=float, device=device)
-            self._diagnostic_status = wp.zeros(1, dtype=int, device=device)
-            self._diagnostic_summary = wp.zeros(6, dtype=float, device=device)
-        self._gap_vector = wp.zeros(n, dtype=float, device=device)
-        self._gap_zero = wp.zeros(n, dtype=float, device=device)
-        self._gap_maxima = wp.zeros(2 * self.group_count, dtype=float, device=device)
-        self._gap_sums = wp.zeros(2 * self.group_count, dtype=float, device=device)
-        self._gap_norms = wp.zeros(2 * self.group_count, dtype=float, device=device)
-        self._gap_status = wp.zeros(1, dtype=int, device=device)
-        self._restart_decision = wp.zeros(1, dtype=int, device=device)
-        self._pcg_packet = wp.zeros(1, dtype=_MonolithicPcgPacket, device=device)
-        self._rhs_denominator = wp.zeros(1, dtype=wp.float64, device=device)
+            setattr(self, name, wp.zeros(n, dtype=dtype, device=device))
         self.factor_setup_count = 0
         self.factor_failure_count = 0
         self.factor_last_status = None
-        self._ratios = wp.zeros(self.group_count, dtype=float, device=device)
         self._status = wp.zeros(1, dtype=int, device=device)
         self.floor_count = wp.zeros(1, dtype=int, device=device)
         self._q_preconditioner = wp.zeros_like(self.aq_actor_dense)
         self._q_cholesky = wp.zeros_like(self.aq_actor_dense)
-        self._x_preconditioner = wp.zeros(layout.dynamic_particle_count, dtype=wp.mat33, device=device)
+        self._x_preconditioner = wp.zeros(layout.dynamic_particle_count, dtype=self.matrix_type, device=device)
         self._x_cholesky = wp.zeros_like(self._x_preconditioner)
         rigid_rows = np.array([range(start, start + 6) for _, start in layout.rigid_ranges], dtype=np.int32).reshape(
             -1, 6
         )
         self.rigid_rows = wp.array(rigid_rows, dtype=int, device=device)
-        self._rigid_preconditioner = wp.zeros((len(layout.rigid_ranges), 6, 6), dtype=float, device=device)
+        self._rigid_preconditioner = wp.zeros((len(layout.rigid_ranges), 6, 6), dtype=dtype, device=device)
         self._rigid_cholesky = wp.zeros_like(self._rigid_preconditioner)
-        self._study_soft = None  # Private PR8F research entry; no public solver option.
         self._scaling_valid = False
         self._factor_valid = False
         self._factor_binding = None
         self._lambda = 0.0
         self._warm_start_key = None
-        self.operator = LinearOperator((n, n), wp.float32, self.device, partial(_monolithic_scaled_matvec, self))
+        self.operator = LinearOperator((n, n), dtype, self.device, partial(_monolithic_scaled_matvec, self))
         self.preconditioner = LinearOperator(
-            (n, n), wp.float32, self.device, partial(_monolithic_preconditioner_matvec, self)
+            (n, n), dtype, self.device, partial(_monolithic_preconditioner_matvec, self)
         )
 
     def _set_fixed_triplet_pattern(
@@ -297,7 +271,11 @@ class MonolithicLinearWorkspace:
         # Release unused legacy scratch before allocating its fixed replacements.
         self._scalar_reduction = None
         scalar = _FixedScalarBsrReduction(
-            self.layout.scalar_dof_count, self._global.capacity, self.device, use_cuda_graph=self.use_cuda_graph
+            self.layout.scalar_dof_count,
+            self._global.capacity,
+            self.device,
+            use_cuda_graph=self.use_cuda_graph,
+            dtype=self.dtype,
         )
         internal = _FixedInternalBsrReduction(
             self.layout.dynamic_particle_count,
@@ -305,6 +283,7 @@ class MonolithicLinearWorkspace:
             columns.numpy(),
             self.device,
             use_cuda_graph=self.use_cuda_graph,
+            dtype=self.dtype,
         )
         self._fixed_bsr = scalar, internal
         self.k_global_scalar_bsr, self.ax_internal_bsr3 = scalar.matrix, internal.matrix
@@ -329,10 +308,11 @@ class MonolithicLinearWorkspace:
         self._factor_valid = False
         self._warm_start_key = None
         # Copy only struct descriptors: old views retain their captured token.
+        structs = ASSEMBLY_STRUCTS[self.dtype]
         for name, struct_type, fields in [
             (
                 "_global",
-                _MonolithicScalarTriplets,
+                structs.scalar,
                 (
                     "rows",
                     "columns",
@@ -347,7 +327,7 @@ class MonolithicLinearWorkspace:
             ),
             (
                 "_internal",
-                _MonolithicMat33Triplets,
+                structs.mat33,
                 (
                     "rows",
                     "columns",
@@ -362,7 +342,7 @@ class MonolithicLinearWorkspace:
             ),
             (
                 "_factors",
-                _MonolithicContactFactors,
+                structs.factors,
                 (
                     "offsets",
                     "columns",
@@ -585,22 +565,41 @@ class MonolithicLinearWorkspace:
     def _vector_valid(self, vector) -> bool:
         return (
             isinstance(vector, wp.array)
-            and vector.dtype == wp.float32
+            and vector.dtype == self.dtype
             and vector.device == self.device
             and vector.shape == (self.layout.scalar_dof_count,)
             and vector.is_contiguous
         )
 
+    def _require_precision(self, *vectors) -> None:
+        """Reject vectors stored in another precision before any kernel is specialized for them."""
+        if any(vector.dtype != self.dtype for vector in vectors):
+            raise ValueError(f"Linear operator vectors must be {self.dtype.__name__}")
+
     def _read_status(self) -> MonolithicLinearStatus:
         return MonolithicLinearStatus(int(self._status.numpy()[0]))
 
     def build_scaling(
-        self, dynamic_diagonal: wp.array[float], *, epsilon_d: float, generation: MonolithicLinearGeneration
+        self, dynamic_diagonal: wp.array, *, epsilon_d: float, generation: MonolithicLinearGeneration
     ) -> MonolithicLinearStatus:
         return bsr.build_scaling(self, dynamic_diagonal, epsilon_d=epsilon_d, generation=generation)
 
     def _build_scaling_device(self, dynamic_diagonal, epsilon_d):
         return bsr._build_scaling_device(self, dynamic_diagonal, epsilon_d)
+
+    def build_mixed_scaling(
+        self,
+        dynamic_diagonal: wp.array,
+        coordinate_scale: wp.array,
+        coordinate_mask: wp.array[wp.int32],
+        *,
+        epsilon_d: float,
+        generation: MonolithicLinearGeneration,
+    ) -> MonolithicLinearStatus:
+        """Scale diagonal-policy rows from D and masked rows by fixed coordinate units."""
+        return bsr.build_mixed_scaling(
+            self, dynamic_diagonal, coordinate_scale, coordinate_mask, epsilon_d=epsilon_d, generation=generation
+        )
 
     def build_coordinate_scaling(self, scale, *, generation):
         """Bind an explicit positive change of units for massless material angles."""
@@ -609,7 +608,7 @@ class MonolithicLinearWorkspace:
         self._scaling_valid = False
         self._factor_valid = False
         self._warm_start_key = None
-        values = np.asarray(scale, dtype=np.float32)
+        values = np.asarray(scale, dtype=self._native)
         if values.shape != self.scale.shape or not np.isfinite(values).all() or np.any(values <= 0):
             return MonolithicLinearStatus.INVALID_ARGUMENT
         diagonal = 1.0 / values**2
@@ -626,7 +625,7 @@ class MonolithicLinearWorkspace:
     ) -> MonolithicLinearStatus:
         if not self._current(generation) or not self._scaling_valid:
             return MonolithicLinearStatus.STALE_GENERATION
-        if not np.isfinite(lambda_value) or lambda_value < 0 or lambda_value > np.finfo(np.float32).max:
+        if not np.isfinite(lambda_value) or lambda_value < 0 or lambda_value > np.finfo(self._native).max:
             return MonolithicLinearStatus.INVALID_ARGUMENT
         if lambda_value != self._lambda:
             self._factor_valid = False
@@ -646,66 +645,35 @@ class MonolithicLinearWorkspace:
         """Return the immutable execution mode selected at construction."""
         return self._pcg_mode
 
-    def _diagnostic_block_norms(self, vector) -> None:
-        return pcg._diagnostic_block_norms(self, vector)
-
-    def _compute_gap_norms_for_restart(self, gap_vector) -> None:
-        return pcg._compute_gap_norms_for_restart(self, gap_vector)
-
-    def _should_restart(self, config):
-        return pcg._should_restart(self, config)
-
-    def _products_of(self, a, b):
-        return pcg._products_of(self, a, b)
-
-    def _true_residual(self, rhs, y, config):
-        return pcg._true_residual(self, rhs, y, config)
-
     def solve_pcg(
         self,
-        rhs_hat: wp.array[float],
-        y: wp.array[float],
+        rhs_hat: wp.array,
+        y: wp.array,
         *,
         generation: MonolithicLinearGeneration,
         warm_start: MonolithicPcgWarmStart,
         config: MonolithicPcgConfig,
-        delta: wp.array[float] | None = None,
+        delta: wp.array | None = None,
     ) -> MonolithicLinearSolveResult:
         """Solve Khat*y=rhs_hat using the current operator and actor preconditioner.
 
         SAME_GENERATION reuses only the last successful solution array for this
         unchanged K/D/S. Lambda may change, but requires refactorization first.
         Every solve recomputes its initial true residual, including warm starts.
+        Both PCG modes run the same masked kernels; the diagnostic mode only
+        records every checkpoint's true-residual group norms.
         """
-        if self.pcg_mode == "production":
-            from .pcg_production import solve_pcg_production  # noqa: PLC0415 - load only the selected backend
-
-            return solve_pcg_production(
-                self,
-                rhs_hat,
-                y,
-                generation=generation,
-                warm_start=warm_start,
-                config=config,
-                delta=delta,
-                use_graph=self.use_cuda_graph,
-            )
-        return self._solve_pcg_diagnostic(rhs_hat, y, generation=generation, warm_start=warm_start, config=config)
-
-    def _solve_pcg_diagnostic(self, rhs_hat, y, *, generation, warm_start, config):
-        return pcg._solve_pcg_diagnostic(self, rhs_hat, y, generation=generation, warm_start=warm_start, config=config)
-
-    def recover_delta(
-        self, y: wp.array[float], delta: wp.array[float], *, generation: MonolithicLinearGeneration
-    ) -> MonolithicLinearStatus:
-        if not self._current(generation) or not self._scaling_valid:
-            return MonolithicLinearStatus.STALE_GENERATION
-        if not self._vector_valid(y) or not self._vector_valid(delta):
-            return MonolithicLinearStatus.INVALID_ARGUMENT
-        wp.launch(_scale_vector, y.size, [self.scale, y, delta], device=self.device)
-        self._status.zero_()
-        self._products_of(delta, delta)
-        return self._read_status()
+        return solve_pcg_production(
+            self,
+            rhs_hat,
+            y,
+            generation=generation,
+            warm_start=warm_start,
+            config=config,
+            delta=delta,
+            use_graph=self.use_cuda_graph,
+            observe=self.pcg_mode == "diagnostic",
+        )
 
     def densify_for_test(self, *, generation: MonolithicLinearGeneration) -> MonolithicDenseLinearOracle:
         """Copy the finalized production BSR to a host dense debug oracle."""

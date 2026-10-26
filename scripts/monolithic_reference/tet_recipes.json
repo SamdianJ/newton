@@ -1,0 +1,55 @@
+{
+  "version": 2,
+  "status": "FROZEN",
+  "approval": "Approved by the user on 2026-10-18. The cantilever is a P8a diagnostic and a hard P8b acceptance target (open items P8-N1, P8-N2). On 2026-10-25 the user moved its meshes from 10/20/40 to 20/40/80 cells along the beam (one-cell-thick linear tets lock outside the asymptotic range) and raised its PCG budget to 1000 until an AMG preconditioner replaces the diagonal one, which needs about 225 iterations at 40 x 4 x 4.",
+  "patch": {
+    "size": [0.1, 0.1, 0.1],
+    "cells": [[4, 4, 4]],
+    "density": 1000.0,
+    "mu": 38461.53846153846,
+    "lambda": 57692.307692307695,
+    "particle_radius": 0.001,
+    "dt": 1.0,
+    "steps": 20,
+    "perturbation": 0.05,
+    "newton_max_iterations": 50,
+    "models": ["kim_stable_no_log", "smith_log_stabilized"],
+    "cases": {
+      "tension": [[1.3, 0.0, 0.0], [0.0, 0.9, 0.0], [0.0, 0.0, 0.9]],
+      "compression": [[0.7, 0.0, 0.0], [0.0, 1.1, 0.0], [0.0, 0.0, 1.1]],
+      "shear": [[1.0, 0.2, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]
+    },
+    "gates": {"interior_error_over_cell": 1e-5, "velocity_m_s": 1e-6}
+  },
+  "cantilever": {
+    "size": [0.5, 0.05, 0.05],
+    "cells": [[20, 2, 2], [40, 4, 4], [80, 8, 8]],
+    "density": 1000.0,
+    "mu": 1000000.0,
+    "lambda": 0.0,
+    "particle_radius": 0.001,
+    "force": 0.0125,
+    "dt": 0.1,
+    "ramp_steps": 50,
+    "hold_steps": 150,
+    "newton_max_iterations": 50,
+    "linear_max_iterations": 1000,
+    "models": ["smith_log_stabilized"],
+    "gates": {"extrapolated_relative_error": 0.05, "minimum_observed_order": 1.0, "velocity_m_s": 1e-6}
+  },
+  "axial_vibration": {
+    "size": [1.0, 0.05, 0.05],
+    "cells": [[10, 1, 1], [20, 1, 1], [40, 1, 1]],
+    "density": 1000.0,
+    "mu": 1000000.0,
+    "lambda": 0.0,
+    "particle_radius": 0.001,
+    "velocity_amplitude": 0.01,
+    "dt": 0.0002,
+    "periods": 5,
+    "newton_max_iterations": 20,
+    "models": ["smith_log_stabilized"],
+    "mass_modes": ["consistent", "lumped"],
+    "gates": {"finest_period_error": 0.01, "decay_ratio_error": 0.1}
+  }
+}

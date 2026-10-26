@@ -163,16 +163,13 @@ def contact_scene(device, kind="chain", *, before=False, mesh=False):
     return model
 
 
-def contact_solver(
-    model, *, permuted=False, law="C-IE", globalization="ArmijoOrResNorm", mode="diagnostic", graph=False, **kwargs
-):
+def contact_solver(model, *, permuted=False, mode="diagnostic", graph=False, **kwargs):
     """Run the unchanged public solver with an internal layout permutation seam."""
     actors = ActorTable.from_model(model)
     if permuted:
         order = (3, 2, 0, 1) if len(actors.actors) == 4 else (2, 0, 1)
         actors = ActorTable.from_model(model, actor_order=order)
     options = {
-        "allow_nonconservative_energy": True,
         "contact_stiffness": 1e7,
         "friction_coefficient": 0.5,
         "normal_smoothing": 1e-4,
@@ -183,8 +180,6 @@ def contact_solver(
     with patch.object(ActorTable, "from_model", return_value=actors):
         return SolverMonolithic(
             model,
-            contact_model=law,
-            globalization=globalization,
             pcg_mode=mode,
             use_cuda_graph=graph,
             joint_terms=SolverMonolithic.JointTerms(implicit_pd=True),
@@ -298,7 +293,7 @@ def check_contact_step(test, run, state, control, kind, step):
 
 def case_record(run, **values):
     c = run._contact
-    arrays = c.buffers() if run._contact_pool else c.actor_contact.buffers()
+    arrays = c.buffers()
     return {
         **values,
         "device": str(run.model.device),
@@ -312,109 +307,27 @@ def case_record(run, **values):
     }
 
 
-def known_armijo_stop(test, run, kind):
-    """Recognize only the retained slope-floor limitation with strict atomic rollback."""
-    test.assertEqual(run._globalization, "Armijo")
-    test.assertIn(
-        (kind, run._contact.contact_model),
-        (("A-R", "C-II"), ("R-T", "C-EE"), ("R-T", "C-IE"), ("R-T", "C-II"), ("R-static", "C-II")),
-    )
-    stats = run.last_stats
-    test.assertEqual(stats.status, run.Status.REGULARIZATION_EXHAUSTED)
-    test.assertTrue(stats.rolled_back)
-    test.assertFalse(stats.converged)
-    for ratio in (stats.convergence_ratio, stats.convergence_ratio_q, stats.convergence_ratio_x):
-        test.assertLessEqual(ratio, 1)
-    blocks = stats.variational["rigid_blocks"]
-    test.assertTrue(any(v["convergence_ratio_" + name] > 1 for name, v in blocks.items() if name.endswith("_r")))
-    for name, values in blocks.items():
-        if name.endswith("_t"):
-            test.assertLessEqual(values["convergence_ratio_" + name], 1)
-    trials = [t for t in stats.variational["trials"] if t.get("iteration") == stats.nonlinear_iterations]
-    test.assertTrue(trials)
-    for trial in trials:
-        test.assertFalse(trial["accepted"])
-        test.assertFalse(trial["energy_predicate"])
-        test.assertTrue(trial["ResNorm"])
-        test.assertLessEqual(-trial["slope_noise"], trial["acceptance_slope"])
-        test.assertLessEqual(trial["acceptance_slope"], 0)
-    return {
-        "status": stats.status.value,
-        "reason": "armijo_slope_noise",
-        "rigid_blocks": dict(blocks),
-        "final_trials": trials,
-    }
-
-
 def test_pair_matrix(test, device):
-    """Exercise four isolated active pairs across laws, globalization, layout and execution."""
+    """Exercise four isolated active pairs across layout and execution routes."""
     test.integration_cases, test.integration_frames = [], {}
-    test.integration_known_issues = []
-    for kind, law, globalization in itertools.product(
-        ("A-R", "R-R", "R-T", "R-static"), ("C-EE", "C-IE", "C-II"), ("Armijo", "ResNorm", "ArmijoOrResNorm")
-    ):
+    for kind in ("A-R", "R-R", "R-T", "R-static"):
         reference = None
         for (mode, graph), permuted in itertools.product(routes(device), (False, True)):
-            with test.subTest(
-                kind=kind, law=law, globalization=globalization, mode=mode, graph=graph, permuted=permuted
-            ):
-                run = contact_solver(
-                    contact_scene(device, kind),
-                    law=law,
-                    globalization=globalization,
-                    mode=mode,
-                    graph=graph,
-                    permuted=permuted,
-                )
+            with test.subTest(kind=kind, mode=mode, graph=graph, permuted=permuted):
+                run = contact_solver(contact_scene(device, kind), mode=mode, graph=graph, permuted=permuted)
                 state, control = contact_state(run, kind), run.model.control()
                 frames = []
                 for step in range(3):
-                    previous = snapshot(state)
-                    try:
-                        check_contact_step(test, run, state, control, kind, step)
-                    except AssertionError:
-                        if run.last_stats.converged:
-                            raise
-                        issue = known_armijo_stop(test, run, kind)
-                        assert_snapshot(test, state, previous)
-                        test.integration_known_issues.append(
-                            case_record(
-                                run,
-                                matrix="pair",
-                                kind=kind,
-                                law=law,
-                                globalization=globalization,
-                                mode=mode,
-                                graph=graph,
-                                permuted=permuted,
-                                qualification="KNOWN_ISSUE",
-                                completed_steps=len(frames),
-                                failed_step=step + 1,
-                                **issue,
-                            )
-                        )
-                        break
+                    check_contact_step(test, run, state, control, kind, step)
                     frames.append(frame(run, state))
-                if len(frames) != 3:
-                    continue
                 if reference is None:
                     reference = frames
-                    test.integration_frames[f"{kind}/{law}/{globalization}"] = frames
+                    test.integration_frames[kind] = frames
                 else:
                     for current, expected in zip(frames, reference, strict=True):
                         assert_physical(test, current, expected)
                 test.integration_cases.append(
-                    case_record(
-                        run,
-                        matrix="pair",
-                        kind=kind,
-                        law=law,
-                        globalization=globalization,
-                        mode=mode,
-                        graph=graph,
-                        permuted=permuted,
-                        steps=3,
-                    )
+                    case_record(run, matrix="pair", kind=kind, mode=mode, graph=graph, permuted=permuted, steps=3)
                 )
 
 
@@ -463,21 +376,6 @@ def test_chain_matrix(test, device):
             )
 
 
-def test_chain_acceptance(test, device):
-    """Converge the active force chain with every existing law and acceptance rule."""
-    test.integration_cases = []
-    mode, graph = ("production", True) if device.is_cuda else ("diagnostic", False)
-    for law, globalization in itertools.product(("C-EE", "C-IE", "C-II"), ("Armijo", "ResNorm", "ArmijoOrResNorm")):
-        with test.subTest(law=law, globalization=globalization):
-            run = contact_solver(contact_scene(device), law=law, globalization=globalization, mode=mode, graph=graph)
-            state, control = contact_state(run, "chain"), run.model.control()
-            for step in range(3):
-                check_contact_step(test, run, state, control, "chain", step)
-            test.integration_cases.append(
-                case_record(run, matrix="chain_acceptance", law=law, globalization=globalization, steps=3)
-            )
-
-
 def test_contact_transactions(test, device):
     """Roll back all contact actors on query, assembly, posterior and partial final-copy failures."""
     for alias in (False, True):
@@ -506,7 +404,7 @@ def test_contact_transactions(test, device):
         build = reduction.build
 
         def overflow_reduction(triplets, build=build, **kwargs):
-            triplets.values.fill_(np.finfo(np.float32).max)
+            triplets.values.fill_(np.finfo(wp.dtype_to_numpy(triplets.values.dtype)).max)
             return build(triplets, **kwargs)
 
         with patch.object(reduction, "build", overflow_reduction):
@@ -594,9 +492,9 @@ def test_mesh_contact_matrix(test, device):
     for kind in ("A-R", "R-static"):
         model = contact_scene(device, kind, mesh=True)
         field = build_smooth_sdf(model)
-        for law, (mode, graph), permuted in itertools.product(("C-EE", "C-IE", "C-II"), routes(device), (False, True)):
-            with test.subTest(kind=kind, law=law, mode=mode, graph=graph, permuted=permuted):
-                run = contact_solver(model, law=law, mode=mode, graph=graph, permuted=permuted, smooth_sdf=field)
+        for (mode, graph), permuted in itertools.product(routes(device), (False, True)):
+            with test.subTest(kind=kind, mode=mode, graph=graph, permuted=permuted):
+                run = contact_solver(model, mode=mode, graph=graph, permuted=permuted, smooth_sdf=field)
                 state, control = contact_state(run, kind), model.control()
                 for step in range(3):
                     check_contact_step(test, run, state, control, kind, step)
@@ -605,7 +503,6 @@ def test_mesh_contact_matrix(test, device):
                         run,
                         matrix="mesh",
                         kind=kind,
-                        law=law,
                         mode=mode,
                         graph=graph,
                         permuted=permuted,
@@ -668,7 +565,6 @@ for device in get_test_devices():
         test_new_pair_step,
         test_pair_matrix,
         test_chain_matrix,
-        test_chain_acceptance,
         test_contact_transactions,
         test_mesh_contact_matrix,
         test_contact_precision_safety,

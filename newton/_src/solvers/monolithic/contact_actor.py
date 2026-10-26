@@ -10,8 +10,9 @@ import warp as wp
 
 from ...geometry import GeoType
 from ...geometry.sdf_texture import TextureSDFData
-from .contact import _factors, _failure, _geometry_type, _law, _validate_start
+from .contact import _failure
 from .contact_geometry import _shape64
+from .rigid import _rotation_step
 from .smooth_sdf import smooth_query
 
 
@@ -34,6 +35,33 @@ def _body_pose(
         else:
             result = poses[local]
     return result
+
+
+@wp.func
+def _body_step(
+    body: int,
+    kinds: wp.array[int],
+    indices: wp.array[int],
+    body_com: wp.array[Any],
+    rotation: Any,
+    link_translation_steps: wp.array[Any],
+    link_rotation_steps: wp.array[Any],
+    rigid_steps: wp.array[Any],
+    rigid_rotation_steps: wp.array[Any],
+):
+    """Return the body frame origin step and ``E`` with ``R = (I + E) R_n``."""
+    zero = type(body_com[0])(0.0)
+    translation, e = zero, wp.outer(zero, zero)
+    if body >= 0:
+        local = indices[body]
+        if kinds[body] == 1:
+            # The origin is c - R c_local, and R - R_n = -E^T R.
+            e = _rotation_step(rigid_rotation_steps[local])
+            translation = rigid_steps[local] + wp.transpose(e) * (rotation * body_com[body])
+        else:
+            translation = link_translation_steps[local]
+            e = link_rotation_steps[local]
+    return translation, e
 
 
 @wp.func
@@ -73,47 +101,6 @@ def _point_column(
 
 
 @wp.kernel
-def _shape_bounds(
-    selected: wp.array[int],
-    centers: wp.array[Any],
-    extents: wp.array[Any],
-    expansion: wp.array[Any],
-    kinds: wp.array[int],
-    indices: wp.array[int],
-    body_com: wp.array[Any],
-    poses: wp.array[Any],
-    rigid_com: wp.array[Any],
-    rigid_rotation: wp.array[Any],
-    bodies: wp.array[int],
-    transforms: wp.array[Any],
-    lower: wp.array[Any],
-    upper: wp.array[Any],
-):
-    i = wp.tid()
-    shape = selected[i]
-    pose = _body_pose(bodies[shape], kinds, indices, body_com, poses, rigid_com, rigid_rotation) * transforms[shape]
-    center = wp.transform_point(pose, centers[i])
-    rotation = wp.quat_to_matrix(wp.transform_get_rotation(pose))
-    extent = type(center)(expansion[i])
-    for row in range(3):
-        for col in range(3):
-            extent[row] += wp.abs(rotation[row, col]) * extents[i][col]
-    lower[i] = center - extent
-    upper[i] = center + extent
-
-
-@wp.kernel
-def _tet_bounds(x: wp.array[Any], expansion: Any, bounds: wp.array[Any]):
-    lo, hi = x[0] + type(x[0])(0.0), x[0] + type(x[0])(0.0)
-    for i in range(x.shape[0]):
-        for axis in range(3):
-            lo[axis] = wp.min(lo[axis], x[i][axis])
-            hi[axis] = wp.max(hi[axis], x[i][axis])
-    bounds[0] = lo - type(lo)(expansion)
-    bounds[1] = hi + type(hi)(expansion)
-
-
-@wp.kernel
 def _actor_geometry(
     x: wp.array[Any],
     poses: wp.array[Any],
@@ -122,6 +109,14 @@ def _actor_geometry(
     jw: wp.array2d[Any],
     rigid_com: wp.array[Any],
     rigid_rotation: wp.array[Any],
+    x_steps: wp.array[Any],
+    link_translation_steps: wp.array[Any],
+    link_rotation_steps: wp.array[Any],
+    rigid_steps: wp.array[Any],
+    rigid_rotation_steps: wp.array[Any],
+    surface_steps: wp.array[Any],
+    start_y: wp.array[Any],
+    incremental: bool,
     body_com: wp.array[Any],
     kinds: wp.array[int],
     indices: wp.array[int],
@@ -155,9 +150,12 @@ def _actor_geometry(
         return
     source, target = source_shapes[key], target_shapes[key]
     point, normal = type(x[0])(0.0), type(x[0])(0.0)
+    # The point's step from the step start, from increments only.
+    point_step = type(x[0])(0.0)
     if source == -3:
         point = local_points[key] + type(point)(0.0)
         normal = local_normals[key] + type(normal)(0.0)
+        point_step = surface_steps[faces[key]]
     elif source < 0:
         face, quadrature = faces[key], slots[key] % 3
         for node in range(3):
@@ -165,28 +163,65 @@ def _actor_geometry(
             if node == quadrature:
                 bary = type(x[0][0])(2.0) / type(x[0][0])(3.0)
             point += bary * x[triangles[face, node]]
+            point_step += bary * x_steps[triangles[face, node]]
         normal = wp.cross(x[triangles[face, 1]] - x[triangles[face, 0]], x[triangles[face, 2]] - x[triangles[face, 0]])
         if source == -2:
             normal *= local_normals[key][2]
     else:
-        pose = (
-            _body_pose(bodies[source], kinds, indices, body_com, poses, rigid_com, rigid_rotation) * transforms[source]
-        )
+        source_body = _body_pose(bodies[source], kinds, indices, body_com, poses, rigid_com, rigid_rotation)
+        pose = source_body * transforms[source]
         point = wp.transform_point(pose, local_points[key])
         normal = wp.transform_vector(pose, local_normals[key])
+        origin, e = _body_step(
+            bodies[source],
+            kinds,
+            indices,
+            body_com,
+            wp.quat_to_matrix(wp.transform_get_rotation(source_body)),
+            link_translation_steps,
+            link_rotation_steps,
+            rigid_steps,
+            rigid_rotation_steps,
+        )
+        # A body point o + R w moves by the origin step and (R - R_n) w = -E^T R w.
+        point_step = origin - wp.transpose(e) * (point - wp.transform_get_translation(source_body))
     length = wp.length(normal)
     if not wp.isfinite(length) or length <= type(x[0][0])(0.0):
         _failure(flags, key + key_offset, 2)
         return
-    target_pose = (
-        _body_pose(bodies[target], kinds, indices, body_com, poses, rigid_com, rigid_rotation) * transforms[target]
-    )
+    target_body = _body_pose(bodies[target], kinds, indices, body_com, poses, rigid_com, rigid_rotation)
+    target_pose = target_body * transforms[target]
     q = wp.transform_get_rotation(target_pose)
     if not wp.isfinite(wp.length(q)) or wp.abs(wp.length(q) - type(x[0][0])(1.0)) > quaternion_tolerance:
         _failure(flags, key + key_offset, 2)
         return
     rotation = wp.quat_to_matrix(q)
-    y = wp.transpose(rotation) * (point - wp.transform_get_translation(target_pose))
+    relative = point - wp.transform_get_translation(target_pose)
+    target_origin, e = _body_step(
+        bodies[target],
+        kinds,
+        indices,
+        body_com,
+        wp.quat_to_matrix(wp.transform_get_rotation(target_body)),
+        link_translation_steps,
+        link_rotation_steps,
+        rigid_steps,
+        rigid_rotation_steps,
+    )
+    # The shape frame origin moves with its body; its rotation step is the body's.
+    target_step = target_origin - wp.transpose(e) * (
+        wp.transform_get_translation(target_pose) - wp.transform_get_translation(target_body)
+    )
+    # y - y_n = R^T ((I + E)(dp - dt) - E (p - t)): the relative step is a
+    # difference of increments and E multiplies only the relative position.
+    step = point_step - target_step
+    slip = wp.transpose(rotation) * (step + e * step - e * relative)
+    # After the step start the local point is the step-start point plus the
+    # slip, so the gap reads the increments; absolute positions round only y_n,
+    # which is fixed within the step.
+    y = wp.transpose(rotation) * relative
+    if incremental:
+        y = start_y[key] + slip
     d, g = _shape64(types[target], scales[target], y, sdf_indices[target], table)
     out.uncertified[key] = 0
     if types[target] == GeoType.MESH and smooth_table.shape[0] > 0:
@@ -206,6 +241,8 @@ def _actor_geometry(
         return
     world_points[key] = point
     out.y[key] = y
+    out.slip[key] = slip
+    out.rounding[key] = wp.abs(g[0] * y[0]) + wp.abs(g[1] * y[1]) + wp.abs(g[2] * y[2])
     out.gradient[key] = g
     out.distance[key] = d
     out.rotation[key] = rotation
@@ -234,62 +271,6 @@ def _actor_geometry(
             jacobians[index] = value
 
 
-@wp.kernel
-def _actor_forces(
-    geometry: Any,
-    points: wp.array[Any],
-    local_r: wp.array[Any],
-    key_offset: int,
-    source_shapes: wp.array[int],
-    target_shapes: wp.array[int],
-    bodies: wp.array[int],
-    kinds: wp.array[int],
-    indices: wp.array[int],
-    com: wp.array[Any],
-    rigid_com: wp.array[Any],
-    faces: wp.array[int],
-    slots: wp.array[int],
-    triangles: wp.array2d[int],
-    support_offsets: wp.array[int],
-    columns: wp.array[int],
-    jacobians: wp.array[Any],
-    model_dofs: wp.array[int],
-    qforce: wp.array[Any],
-    pforce: wp.array[Any],
-    bforce: wp.array[Any],
-    pairs: wp.array2d[Any],
-):
-    key = wp.tid()
-    p = points[key]
-    local = local_r[key + key_offset]
-    world = geometry.rotation[key] * local
-    for end in range(2):
-        shape = int(source_shapes[key])
-        force = -world
-        if end == 1:
-            shape = int(target_shapes[key])
-            force = world
-        torque = wp.cross(p, force)
-        pairs[key, end] = type(bforce[0])(force[0], force[1], force[2], torque[0], torque[1], torque[2])
-        if shape >= 0:
-            body = bodies[shape]
-            if body >= 0:
-                torque = wp.cross(p - _center(body, kinds, indices, com, rigid_com), force)
-                wp.atomic_add(
-                    bforce, body, type(bforce[0])(force[0], force[1], force[2], torque[0], torque[1], torque[2])
-                )
-        else:
-            for node in range(3):
-                bary = type(p[0])(1.0) / type(p[0])(6.0)
-                if node == slots[key]:
-                    bary = type(p[0])(2.0) / type(p[0])(3.0)
-                wp.atomic_add(pforce, triangles[faces[key], node], bary * force)
-    for index in range(support_offsets[3 * (key + key_offset)], support_offsets[3 * (key + key_offset) + 1]):
-        dof = model_dofs[columns[index]]
-        if dof >= 0:
-            wp.atomic_add(qforce, dof, -wp.dot(jacobians[index], local))
-
-
 def _validate_actor_targets(contact, samples):
     """Apply the actor target SDF contract before either storage path is allocated."""
     for shape in samples.targets_used:
@@ -307,323 +288,3 @@ def _validate_actor_targets(contact, samples):
             scale = contact.values["shape_scale"][shape]
             if not contact._descriptors["scale_baked"][index] and (scale[0] <= 0 or not np.all(scale == scale[0])):
                 raise ValueError("Unbaked actor mesh scale must be positive and uniform")
-
-
-class ActorContact:
-    """Own fixed new-query arrays and native scratch appended to the old contact batch."""
-
-    def __init__(self, contact, samples):
-        _validate_actor_targets(contact, samples)
-        self.contact, self.samples = contact, samples
-        self.count = samples.count
-        self._bound = {}
-
-        def upload(name, values, dtype):
-            value = wp.array(values, dtype=dtype, device=contact.model.device)
-            setattr(self, name, value)
-            self._bound[name] = (value, value.numpy().copy())
-            return value
-
-        for name in ("source_shapes", "targets", "faces", "slots", "body_kind", "body_local"):
-            upload(name, getattr(samples, name), int)
-        for name in ("points", "normals"):
-            upload(name, getattr(samples, name), contact.vector)
-        for name in ("weights", "offsets"):
-            upload(name, getattr(samples, name).astype(contact.numpy_dtype), contact.dtype)
-        upload("body_com", contact.model.body_com.numpy().astype(contact.numpy_dtype), contact.vector)
-        offsets, columns, _ = contact.factor_support
-        upload("support_offsets", offsets, int)
-        upload("columns", columns, int)
-        selector_values = [(0, 0)] * int(offsets[3 * contact.legacy_count])
-        for selectors in samples.selectors:
-            for _ in range(3):
-                selector_values.extend(selectors)
-        upload("selectors", np.asarray(selector_values, dtype=np.int32).reshape(-1, 2), wp.vec2i)
-        self.jacobians = wp.zeros(len(columns), dtype=contact.vector, device=contact.model.device)
-        upload("key_ids", np.arange(self.count, dtype=np.int32), int)
-        mapping = np.full(contact.layout.scalar_dof_count, -1, dtype=np.int32)
-        for i, global_row in enumerate(samples.actors.maps["joint_dof_to_global"]):
-            if global_row >= 0:
-                mapping[global_row] = i
-        upload("model_dofs", mapping, int)
-        self.world_points = wp.zeros(self.count, dtype=contact.vector, device=contact.model.device)
-        self.pairs = wp.zeros(
-            (self.count, 2),
-            dtype=wp.spatial_vectord if contact.dtype == wp.float64 else wp.spatial_vector,
-            device=contact.model.device,
-        )
-        self.current, self.start = self.geometry(), self.geometry()
-        # Bounds are diagnostic only: frozen friction still queries every key.
-        selected, centers, extents, expansion = [], [], [], []
-        used = (set(samples.source_shapes) | set(samples.targets)) - {-1}
-        for shape in sorted(used):
-            geo, scale = contact.values["shape_type"][shape], contact.values["shape_scale"][shape].astype(float)
-            if geo == GeoType.PLANE:
-                continue
-            center, extent = np.zeros(3), scale.copy()
-            if geo == GeoType.SPHERE:
-                extent[:] = scale[0]
-            elif geo == GeoType.MESH:
-                vertices = np.asarray(samples.meshes[shape][1], dtype=float) * scale
-                center = (vertices.max(axis=0) + vertices.min(axis=0)) / 2
-                extent = (vertices.max(axis=0) - vertices.min(axis=0)) / 2
-            selected.append(shape)
-            centers.append(center)
-            extents.append(extent)
-            expansion.append(
-                float(contact.values["shape_margin"][shape]) + contact.parameters[3] + contact.parameters[4]
-            )
-        upload("bounded_shapes", selected, int)
-        upload("bound_centers", np.asarray(centers).reshape(-1, 3), contact.vector)
-        upload("bound_extents", np.asarray(extents).reshape(-1, 3), contact.vector)
-        upload("bound_expansion", expansion, contact.dtype)
-        self.bound_lower = wp.empty(len(selected), dtype=contact.vector, device=contact.model.device)
-        self.bound_upper = wp.empty_like(self.bound_lower)
-        self.tet_bound = wp.empty(2, dtype=contact.vector, device=contact.model.device)
-
-    def geometry(self):
-        c = self.contact
-        value = _geometry_type(c.dtype)()
-        for name in ("y", "gradient", "soft_normal"):
-            setattr(value, name, wp.zeros(self.count, dtype=c.vector, device=c.model.device))
-        value.distance = wp.zeros(self.count, dtype=c.dtype, device=c.model.device)
-        value.rotation = wp.zeros(self.count, dtype=c.matrix, device=c.model.device)
-        value.uncertified = wp.zeros(self.count, dtype=int, device=c.model.device)
-        value.jacobian_q = wp.empty((self.count, 0), dtype=c.vector, device=c.model.device)
-        return value
-
-    def buffers(self):
-        return [
-            value
-            for owner in (self, self.start, self.current)
-            for value in vars(owner).values()
-            if isinstance(value, wp.array)
-        ]
-
-    def validate_identity(self):
-        self.samples.validate_identity()
-        for name, (value, expected) in self._bound.items():
-            if getattr(self, name) is not value or not np.array_equal(value.numpy(), expected):
-                raise ValueError(f"Actor contact map changed: {name}")
-
-    def query(self, x, poses, com, jt, jw, rigid_com, rigid_rotation, output, flags):
-        c = self.contact
-        if rigid_com is None or rigid_rotation is None:
-            raise ValueError("Actor contact requires authoritative native rigid state")
-        for value, dtype, shape in (
-            (rigid_com, c.vector, (len(self.samples.actors.actors) - 2,)),
-            (rigid_rotation, wp.quatd if c.dtype == wp.float64 else wp.quat, (len(self.samples.actors.actors) - 2,)),
-        ):
-            if not isinstance(value, wp.array) or (value.dtype, value.shape, value.device) != (
-                dtype,
-                shape,
-                c.model.device,
-            ):
-                raise ValueError("Invalid native rigid contact state")
-        wp.launch(
-            _shape_bounds,
-            self.bounded_shapes.size,
-            [
-                self.bounded_shapes,
-                self.bound_centers,
-                self.bound_extents,
-                self.bound_expansion,
-                self.body_kind,
-                self.body_local,
-                self.body_com,
-                poses,
-                rigid_com,
-                rigid_rotation,
-                c.bodies,
-                c.transforms,
-                self.bound_lower,
-                self.bound_upper,
-            ],
-            device=c.model.device,
-        )
-        if np.any(self.samples.source_shapes < 0):
-            wp.launch(
-                _tet_bounds, 1, [x, c.dtype(c.parameters[3] + c.parameters[4]), self.tet_bound], device=c.model.device
-            )
-        wp.launch(
-            _actor_geometry,
-            self.count,
-            [
-                x,
-                poses,
-                com,
-                jt,
-                jw,
-                rigid_com,
-                rigid_rotation,
-                self.body_com,
-                self.body_kind,
-                self.body_local,
-                c.bodies,
-                c.transforms,
-                self.source_shapes,
-                self.targets,
-                self.faces,
-                self.slots,
-                self.points,
-                self.normals,
-                c.triangles,
-                c.types,
-                c.scales,
-                c.sdf_indices,
-                c.table,
-                c.smooth_table,
-                self.support_offsets,
-                self.selectors,
-                self.jacobians,
-                c.legacy_count,
-                c.dtype(c.quaternion_norm_tolerance),
-                output,
-                self.world_points,
-                flags,
-                True,
-                flags,
-            ],
-            device=c.model.device,
-        )
-
-    def begin_step(self, *state, rigid_com, rigid_rotation):
-        c = self.contact
-        self.query(*state, rigid_com, rigid_rotation, self.start, c.start_flags)
-        wp.launch(
-            _validate_start,
-            self.count,
-            [
-                self.start,
-                self.key_ids,
-                self.offsets,
-                c.dtype(0),
-                c.dtype(c.parameters[3]),
-                int(c._alignment_policy == "mask"),
-                c.start_flags,
-                False,
-                c.start_flags,
-            ],
-            device=c.model.device,
-        )
-
-    def evaluate(self, *state, rigid_com, rigid_rotation, dt):
-        c = self.contact
-        self.query(*state, rigid_com, rigid_rotation, self.current, c.flags)
-        wp.launch(
-            _law,
-            self.count,
-            [
-                self.current,
-                self.start,
-                self.targets,
-                c.margins,
-                self.weights,
-                c.dtype(0),
-                c.dtype(c.parameters[0]),
-                c.dtype(c.parameters[3]),
-                c.dtype(c.parameters[1]),
-                c.dtype(c.parameters[2] * dt),
-                ("C-EE", "C-IE", "C-II").index(c.contact_model),
-                int(c._alignment_policy == "mask"),
-                c.flags,
-                c.energy,
-                c._residual_terms,
-                c.normal,
-                c.tangent,
-                c.weights,
-                c.local_residual,
-                c.omitted,
-                c.mask_seen,
-                1,
-                c.legacy_count,
-                self.offsets,
-                self.support_offsets,
-                c._support_local,
-                self.jacobians,
-                c.flags,
-            ],
-            device=c.model.device,
-        )
-
-    def assemble(self, assembly):
-        c = self.contact
-        wp.launch(
-            _factors,
-            self.count,
-            [
-                self.current,
-                self.targets,
-                c.normal,
-                c.tangent,
-                c.weights,
-                c.flags,
-                assembly.contact_factors,
-                assembly.global_scalar_triplets,
-                1,
-                c.legacy_count,
-                self.jacobians,
-            ],
-            device=c.model.device,
-        )
-
-    def publish(self, state, kinematics):
-        c, k = self.contact, kinematics
-        history = state._monolithic_coupled
-        wp.launch(
-            _actor_forces,
-            self.count,
-            [
-                self.current,
-                self.world_points,
-                c.local_residual,
-                c.legacy_count,
-                self.source_shapes,
-                self.targets,
-                c.bodies,
-                self.body_kind,
-                self.body_local,
-                k.com,
-                history.rigid_com,
-                self.faces,
-                self.slots,
-                c.triangles,
-                self.support_offsets,
-                self.columns,
-                self.jacobians,
-                self.model_dofs,
-                history.contact_joint_force,
-                history.contact_particle_force,
-                history.contact_body_force,
-                self.pairs,
-            ],
-            device=c.model.device,
-        )
-        return self.diagnostics()
-
-    def diagnostics(self):
-        forces = self.pairs.numpy()
-        result = {}
-        for key, (source, target, _face, _slot) in enumerate(self.samples.keys):
-            label = (source, target) if source < 0 else tuple(sorted((source, target)))
-            reverse = source >= 0 and source != label[0]
-            pair = result.setdefault(label, np.zeros((2, 6)))
-            pair += forces[key, ::-1] if reverse else forces[key]
-        bounds = {
-            int(shape): [lo.tolist(), hi.tolist()]
-            for shape, lo, hi in zip(
-                self.bounded_shapes.numpy(), self.bound_lower.numpy(), self.bound_upper.numpy(), strict=True
-            )
-        }
-        if np.any(self.samples.source_shapes < 0):
-            bounds[-1] = self.tet_bound.numpy().tolist()
-        return [
-            {
-                "source": source,
-                "target": target,
-                "kind": self.samples.pair_kinds[source, target],
-                "world_wrench": value.tolist(),
-                "bounds": {shape: bounds[shape] for shape in (source, target) if shape in bounds},
-            }
-            for (source, target), value in result.items()
-        ]

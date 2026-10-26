@@ -107,13 +107,11 @@ def make_tiny(case, device):
     return builder.finalize(device=device)
 
 
-def make_solver(model, case, law, *, mode="diagnostic", graph=False, globalization="ResNorm"):
-    """Select a law explicitly without modifying frozen physical or stopping parameters."""
+def make_solver(model, case, *, mode="diagnostic", graph=False):
+    """Build the frozen fixture solver without modifying physical or stopping parameters."""
     cube = case.startswith("cube")
     return SolverMonolithic(
         model,
-        contact_model=law,
-        globalization=globalization,
         friction_velocity_scale=0.01,
         friction_coefficient=0.0 if case == "normal_loading" else 0.5,
         normal_smoothing=1e-4 if cube else 0.0,

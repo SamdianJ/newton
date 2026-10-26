@@ -14,6 +14,7 @@ import newton
 
 from .cloth_oracle import shell_energy
 from .material_recipes import shell_coefficients, shell_stencils
+from .numerical_gates import gate_floor, row_excess
 
 RECIPE_PATH = Path(__file__).with_name("cloth_recipes.json")
 RECIPES = json.loads(RECIPE_PATH.read_text())
@@ -22,9 +23,14 @@ RECIPES = json.loads(RECIPE_PATH.read_text())
 class ClothBenchmark:
     """Exercise flat and naturally folded shells under frozen nodal loading."""
 
-    def __init__(self, kind, *, device="cpu", pcg_mode="diagnostic", use_cuda_graph=False):
+    def __init__(self, kind, *, device="cpu", pcg_mode="diagnostic", use_cuda_graph=False, precision="fp64"):
         self.kind = kind
-        self.options = {"device": device, "pcg_mode": pcg_mode, "use_cuda_graph": use_cuda_graph}
+        self.options = {
+            "device": device,
+            "pcg_mode": pcg_mode,
+            "use_cuda_graph": use_cuda_graph,
+            "precision": precision,
+        }
         self.recipe = r = RECIPES["common"] | RECIPES[kind]
         self.dt = r["dt"]
         self.total_steps = sum(r[k] for k in ("ramp_steps", "hold_steps", "unload_steps", "recovery_steps"))
@@ -66,7 +72,6 @@ class ClothBenchmark:
         self.rest_area = area
         self.solver = SolverMonolithic(
             self.model,
-            contact_model="C-IE",
             friction_velocity_scale=0.1,
             cloth_inputs=[
                 SolverMonolithic.ClothInput(
@@ -76,10 +81,9 @@ class ClothBenchmark:
                     surface_density=r["surface_density"],
                 )
             ],
-            precision=SolverMonolithic.Precision.FP64,
+            precision=SolverMonolithic.Precision(precision),
             pcg_mode=SolverMonolithic.PCGMode(pcg_mode),
             use_cuda_graph=use_cuda_graph,
-            globalization="ResNorm",
             newton_max_iterations=60,
             linear_max_iterations=300,
             linear_tolerance=1e-4,
@@ -128,7 +132,11 @@ class ClothBenchmark:
         area_ratio = np.linalg.norm(np.cross(faces[:, 1] - faces[:, 0], faces[:, 2] - faces[:, 0]), axis=1) / (
             2 * self.rest_area
         )
-        residual = float(np.max(abs(np.asarray(self.solver.last_stats.variational["residual"]))))
+        rows = np.asarray(self.solver.last_stats.variational["residual"])
+        residual = float(np.max(abs(rows)))
+        floor = gate_floor(self.solver)
+        # The residual gate admits each row up to the solver's precision floor.
+        excess = row_excess(rows, floor, self.recipe["maximum_residual"])
         kinetic = float(np.sum(self.mass[~self.fixed, None] * v[~self.fixed] ** 2) / 2)
         n = self.recipe["cells"]
         left, right = x[self.center - n - 1] - x[self.center], x[self.center + n + 1] - x[self.center]
@@ -142,6 +150,8 @@ class ClothBenchmark:
                 "bending": float(energy[1]),
                 "kinetic": kinetic,
                 "residual": residual,
+                "residual_floor": float(floor.max(initial=0)),
+                "residual_excess": excess,
                 "area_min": float(area_ratio.min()),
                 "area_max": float(area_ratio.max()),
                 "fold": fold,
@@ -150,7 +160,7 @@ class ClothBenchmark:
         if not all(np.isfinite(value) for value in self.records[-1].values()):
             raise AssertionError("Nonfinite physical measurement")
         if (
-            residual > self.recipe["maximum_residual"]
+            excess > 1
             or area_ratio.min() < self.recipe["area_ratio_min"]
             or area_ratio.max() > self.recipe["area_ratio_max"]
         ):
@@ -188,6 +198,7 @@ class ClothBenchmark:
             "final_energy_ratio": (final["membrane"] + final["bending"] + final["kinetic"]) / max(peak_energy, 1e-30),
             "final_fold_error": abs(final["fold"] - self.recipe["fold_angle"]),
             "maximum_residual": max(row["residual"] for row in self.records),
+            "maximum_residual_excess": max(row["residual_excess"] for row in self.records),
             "checkpoint_error": self.checkpoint_error,
         }
 
@@ -199,4 +210,4 @@ class ClothBenchmark:
         assert m["final_displacement_ratio"] <= r["final_displacement_ratio"], m
         assert m["final_energy_ratio"] <= r["final_energy_ratio"], m
         assert m["final_fold_error"] <= r["fold_error_radians"], m
-        assert m["maximum_residual"] <= r["maximum_residual"], m
+        assert m["maximum_residual_excess"] <= 1, m

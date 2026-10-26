@@ -24,6 +24,7 @@ from scripts.monolithic_reference.run_regression import (
     ROOT,
     aggregate,
     finalize_case,
+    qualify_robot,
     reference_binding,
     select_cases,
     worker,
@@ -41,13 +42,14 @@ class TestSceneRunner(unittest.TestCase):
             patch(
                 "scripts.monolithic_reference.run_rigid_stack.record_run",
                 return_value={"status": "PASS", "scene_input_sha256": "changed"},
-            ),
+            ) as record,
         ):
             output = Path(directory) / "case"
-            self.assertEqual(worker(case, output), 1)
+            self.assertEqual(worker(case, output, precision="fp32"), 1)
             receipt = json.loads((output / "receipt.json").read_text())
-            self.assertEqual(receipt["status"], "FAIL")
+            self.assertEqual((receipt["status"], receipt["precision"]), ("FAIL", "fp32"))
             self.assertIn("fixture changed", receipt["exception"])
+            self.assertEqual(record.call_args.kwargs["precision"], "fp32")
 
     def test_recording_retention(self):
         """Drop only passed output recordings; preserve failures, summaries and opt-in full data."""
@@ -80,6 +82,7 @@ class TestSceneRunner(unittest.TestCase):
             output = Path(folder)
             summary = {
                 "profile": "nightly",
+                "precision": "fp32",
                 "status": "FAIL",
                 "complete": True,
                 "cases": [
@@ -94,6 +97,7 @@ class TestSceneRunner(unittest.TestCase):
             write_report(output, summary)
             report = (output / "RESULTS.md").read_text()
             self.assertIn("NOT_RUN_BY_SCENE_RUNNER", report)
+            self.assertIn("precision: fp32", report)
             self.assertIn("case1 | FAIL | 1 | 2 | True", report)
 
     def test_relocated_input_identity(self):
@@ -119,6 +123,22 @@ class TestSceneRunner(unittest.TestCase):
             (root / "references.json").write_text("[]")
             with patch("scripts.monolithic_reference.run_regression.ASSET_ROOT", root):
                 with self.assertRaisesRegex(ValueError, "exact ten"):
+                    reference_binding(select_cases("full")[0])
+
+    def test_current_cases_bind_to_historical_index(self):
+        """Bind the current cases to the ten-recording historical index, not to its full size."""
+        current = [f"{c['id']}--fp64" for c in select_cases("full")]
+        historical = [f"retired-{i}--fp64" for i in range(10 - len(current))]
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            rows = [{"case": name, "retained_path": "../outside"} for name in current + historical]
+            (root / "references.json").write_text(json.dumps(rows))
+            with patch("scripts.monolithic_reference.run_regression.ASSET_ROOT", root):
+                # The index passes; the entry then fails on its location.
+                with self.assertRaisesRegex(ValueError, "outside retained directory"):
+                    reference_binding(select_cases("full")[0])
+                (root / "references.json").write_text(json.dumps([*rows[1:], {"case": "retired-x--fp64"}]))
+                with self.assertRaisesRegex(ValueError, "lacks a current case"):
                     reference_binding(select_cases("full")[0])
 
     def test_native_reference_alignment_and_corruption(self):
@@ -179,24 +199,74 @@ class TestSceneRunner(unittest.TestCase):
                 list(native_frames(root, controls))
 
     def test_profiles(self):
-        """Add the rigid nightly case while retaining the ten references and two dev cases."""
+        """Run only the retained production robot scenes, adding the rigid stack nightly."""
         full, dev = select_cases("full"), select_cases("dev")
-        self.assertEqual(len(full), 10)
+        self.assertEqual(
+            [case["id"] for case in full],
+            [
+                "franka-cube--ArmijoOrResNorm--C-IE--production--graph1",
+                "sharpa-recorded-10mm--ArmijoOrResNorm--C-IE--production--graph1",
+            ],
+        )
         nightly = select_cases("nightly")
-        self.assertEqual(nightly[:10], full)
-        self.assertEqual(len(nightly), 11)
+        self.assertEqual(nightly[:2], full)
+        self.assertEqual(len(nightly), 3)
         self.assertEqual(nightly[-1]["id"], "rigid-stack-64--C-IE--ArmijoOrResNorm")
         self.assertEqual(select_cases("nightly", [nightly[-1]["id"]]), [nightly[-1]])
-        self.assertEqual(dev, [full[0], full[-1]])
-        self.assertEqual(select_cases("full", [full[2]["id"]]), [full[2]])
+        self.assertEqual(dev, full)
+        self.assertEqual(select_cases("full", [full[1]["id"]]), [full[1]])
         self.assertEqual(aggregate([{"status": "PASS"}], True), "PARTIAL")
         self.assertEqual(aggregate([{"status": "PASS"}], False), "PASS")
         self.assertEqual(aggregate([{"status": "FAIL"}], True), "FAIL")
         self.assertEqual(
             aggregate([{"status": "PASS", "commit": "a"}, {"status": "PASS", "commit": "b"}], False), "FAIL"
         )
+        self.assertEqual(
+            aggregate([{"status": "PASS", "precision": "fp64"}, {"status": "PASS", "precision": "fp32"}], False), "FAIL"
+        )
         with self.assertRaises(ValueError):
-            select_cases("dev", [full[2]["id"]])
+            select_cases("dev", ["franka-cube--Armijo--C-EE--production--graph1"])
+
+    def test_physical_gates_qualify_robot_runs(self):
+        """Gate on physical plausibility; trajectory comparison is only reported."""
+        scene_gates = {
+            "hard_failures_max": 0,
+            "stopped_fraction_max": 0.01,
+            "penetration_max_m": 0.001,
+            "det_f_min": 0.2,
+            "grasp": {
+                "window_steps": 2,
+                "ground_weight_fraction_max": 0.05,
+                "com_rise_min_edge_fraction": 0.25,
+                "required": True,
+            },
+        }
+        grasp = {
+            "window_first_step": 99,
+            "window_last_step": 100,
+            "window_steps": 2,
+            "min_com_rise_m": 0.02,
+            "max_ground_force_N": 0.0,
+            "weight_N": 0.64,
+            "object_min_edge_m": 0.04,
+            "held": True,
+        }
+        summary = {
+            "complete": True,
+            "counts": {"CONVERGED": 100, "STOPPED_ACCEPTED": 0, "HARD_FAILURE": 0},
+            "maximum_penetration_m": 0.0,
+            "minimum_det_f": 1.0,
+            "grasp": grasp,
+        }
+        frozen = {"version": 2, "status": "FROZEN", "robot": {"franka-cube": scene_gates}}
+        result = qualify_robot("franka-cube", summary, {"status": "NOT_READY_TOLERANCE"}, gates=frozen)
+        self.assertEqual(result["status"], "PASS")
+        self.assertEqual(result["diagnostic_comparison"], "NOT_READY_TOLERANCE")
+        proposed = {**frozen, "status": "PROPOSED"}
+        self.assertEqual(qualify_robot("franka-cube", summary, {}, gates=proposed)["status"], "PARTIAL")
+        dropped = {**summary, "grasp": {**grasp, "min_com_rise_m": 0.0}}
+        failed = qualify_robot("franka-cube", dropped, {}, gates=frozen)
+        self.assertEqual((failed["status"], failed["failures"]), ("FAIL", ["grasp"]))
 
     def test_list(self):
         """List the frozen matrix without initializing a GPU or loading scenes."""
@@ -222,15 +292,11 @@ class TestSceneRunner(unittest.TestCase):
         )
 
     def test_matrix(self):
-        """Keep exactly nine Franka variants and one reuse-only Sharpa case."""
+        """List the production Franka case and the reuse-only Sharpa case."""
         cases = baseline.cases()
-        self.assertEqual(len({c["id"] for c in cases}), 10)
-        franka = [c for c in cases if not c.get("reuse_only")]
-        self.assertEqual(
-            {(c["law"], c["globalization"]) for c in franka},
-            {(law, g) for law in baseline.LAWS for g in baseline.GLOBALIZATIONS},
-        )
-        self.assertEqual(sum(c["steps"] for c in cases), 55917)
+        self.assertEqual([(c["law"], c["globalization"]) for c in cases], [("C-IE", "ArmijoOrResNorm")] * 2)
+        self.assertEqual([bool(c.get("reuse_only")) for c in cases], [False, True])
+        self.assertEqual(sum(c["steps"] for c in cases), 13917)
 
     def test_wrong_import_origin_rejected(self):
         """Reject an imported solver from a different checkout."""
@@ -261,9 +327,7 @@ class TestManualAcceptance(unittest.TestCase):
     def test_collection_and_failures(self):
         """Preserve failure receipts and launch nightly only after complete actor qualification."""
         identity = {"commit": "tested", "dirty": False}
-        expected_count = (
-            11 if (ROOT / "scripts/monolithic_reference/fixtures/rigid_stack_large_v1.json").is_file() else 10
-        )
+        nightly = [case["id"] for case in select_cases("nightly")]
         for failure in (
             None,
             "actor_exit",
@@ -293,7 +357,7 @@ class TestManualAcceptance(unittest.TestCase):
                     if destination.name == "actor_coupling":
                         summary = {
                             "status": "FAIL" if failure == "actor_summary" else "PASS",
-                            "cases": {n: {"status": "PASS"} for n in ("primary", "restored", "reordered")},
+                            "cases": {n: {"status": "PASS"} for n in ("primary", "restored", "reordered", "complete")},
                         }
                     else:
                         self.assertIn("nightly", command)
@@ -304,10 +368,8 @@ class TestManualAcceptance(unittest.TestCase):
                             "filtered": failure == "nightly_filtered",
                             "complete": True,
                             "cases": [
-                                {"status": "PASS"}
-                                for _ in range(
-                                    expected_count - 1 if failure == "nightly_incomplete" else expected_count
-                                )
+                                {"case": name, "status": "PASS"}
+                                for name in (nightly[:-1] if failure == "nightly_incomplete" else nightly)
                             ],
                         }
                     if failure != "missing":

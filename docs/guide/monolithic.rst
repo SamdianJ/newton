@@ -8,31 +8,26 @@ Monolithic Coupled Solver
 
 .. experimental::
 
-   :mod:`newton.solvers.experimental.monolithic` supports one articulation and
-   one connected tetrahedral body, with optional single-body world-root FREE
-   rigid actors. Independent cloth/open cables and mixed material scenes support
-   contact with articulation, free rigid and static shapes; see
-   :doc:`monolithic_cloth` and :doc:`monolithic_cable`. Its interfaces may change
-   without the normal deprecation period. The old BE, q-only and tet-only solver entry points and
+   :mod:`newton.solvers.experimental.monolithic` supports one world with at
+   most one articulation, at most one connected tetrahedral body, single-body
+   world-root FREE rigid actors and independent cloth/open cables. Any of these
+   may be absent, but the scene needs at least one dynamic degree of freedom.
+   Every scene uses the same step pipeline and contact path; see
+   :doc:`monolithic_cloth` and :doc:`monolithic_cable` for material inputs. Its
+   interfaces may change without the normal deprecation period. The old BE, q-only and tet-only solver entry points and
    their examples have been retired.
 
-For scenes without cloth/cable, spatial contact is the default. Candidates refresh at each Newton boundary and
-remain frozen during its trials, using zero additional law margin [m]. This
+Every scene, including cloth/cable scenes, uses spatial contact. Candidates
+refresh at each Newton boundary and remain frozen during its trials. This
 approximation can omit contacts reached by a trial outside the frozen bounds;
 it does not provide continuous collision detection or automatic correction.
 The step-start convergence reference still uses complete contact enumeration.
 
-Candidate capacity defaults to the model's complete static sample upper bound;
-``contact_factor_capacity=None`` reserves three times that bound. These are
-fixed capacities, not active contact counts. Explicitly reducing the factor
-budget can discard whole contacts; overflow is reported and taints the result.
-Existing checkpoints from the previous complete-contact default have a different
-configuration identity and cannot be loaded into the new default. Use the offline
-legacy recording tools to inspect those records, or start a new spatial run.
-
-Material scenes use complete contact enumeration in the deterministic pool.
-Their capacity overflow rolls back the step without publishing partial forces.
-This separate material policy is described in :doc:`monolithic_cloth`.
+``contact_candidate_capacity=None`` reserves the model's complete static sample
+upper bound, and ``contact_factor_capacity=None`` reserves three times that
+bound. These are fixed capacities, not active contact counts. Explicitly
+reducing either budget can discard whole contacts; candidate or factor overflow
+fails the step and rolls it back without publishing partial forces.
 
 Use the public API
 ------------------
@@ -47,8 +42,6 @@ used directly for continuation.
 
    solver = SolverMonolithic(
        model,
-       contact_model="C-EE",
-       globalization="ResNorm",
        friction_velocity_scale=0.01,
        tet_rest_density=rest_density,
    )
@@ -60,7 +53,38 @@ used directly for continuation.
    solver.load_checkpoint(state, "checkpoint.npz")
 
 The default solver uses FP64 nonlinear arithmetic, strict publication, diagnostic
-PCG and no CUDA graph.
+PCG and no CUDA graph. Both PCG modes run the same solver; the diagnostic mode
+also records every checkpoint's true residual norms and cannot be captured in a
+CUDA graph. PCG has no stagnation exit: it iterates until its tolerance or
+``linear_max_iterations``. Constructor options are validated before the Model is
+inspected. Regularized direction retries use the same schedule for every scene,
+starting without regularization.
+
+A step converges when every residual row lies within its own tolerance: the
+largest of an absolute target (1e-11 N for force rows, 1e-13 N m for torque
+rows), a relative tolerance times the largest step-start residual of the same
+block and unit (1e-6 in FP64, 1e-4 in FP32), and 32 times the precision's
+machine epsilon times the row's rounding magnitude. The rounding magnitude sums
+the row's absolute contributions and the tangent-weighted magnitudes of the
+step increments; shell bending and cable bending and twist contribute the
+componentwise products their strains cancel near rest, so such rows are judged
+at their actual rounding level. Rows are never pooled into a norm, so a small
+local load is resolved regardless of model size. ``Stats.convergence_ratio*``
+report each block's largest residual-to-tolerance ratio, and
+``Stats.variational["convergence_groups"]`` counts the rows that passed only
+within their rounding allowance. FP32 keeps the looser relative tolerance
+because its rounding magnitude does not yet bound near-rest tet elasticity,
+whose stresses cancel in ``F - I``. The step-start residual is evaluated
+before the inertial prediction, so it contains each body's momentum over the
+time step: a fast-moving body widens the relative tolerance of its whole block,
+and a step whose prediction already lies within that tolerance is accepted
+without a Newton update. The rounding term likewise can exceed small loads; in
+FP32 a cable that is not aligned with the coordinate axes may be accepted at
+its prediction and not respond to a load near rest. Both are known limitations.
+Each Newton direction reduces the scaled residual by ``linear_tolerance`` or
+reaches half of every row tolerance; a direction whose residual reaches the
+rounding of ``|A| |y|`` is also accepted, capped at 1e-2 of the right-hand
+side.
 Force results are independent read-only NumPy snapshots; check ``force_valid``
 and ``force_generation`` before using them. Stopped publication under an opt-in
 production policy is not convergence. Reset with ``reset_state(state, dt=...)``.
@@ -84,25 +108,42 @@ coordinates externally, use ``reset_state`` before continuation.
 
 The experimental constructor parameter ``precision`` accepts
 ``SolverMonolithic.Precision.FP64`` / ``FP32`` or ``"fp64"`` / ``"fp32"``.
-It cannot change after construction. FP32 selects native state, history,
-contact forces, E/r, posterior checks and host acceptance arithmetic; B/PCG
-arrays remain FP32 in both modes. Nonmaterial delivered directions remain
-FP32; material scenes accumulate direction corrections in native precision. Existing PCG scalar threshold
-and restart checks retain their original FP64 arithmetic in both modes.
-Global scalar B assembly orders duplicate contributions by row, column and
-unsigned FP32 value bits, then sums them with a fixed pairwise FP32 tree on CPU
-and CUDA. This removes insertion-order dependence for identical triplet values;
-it does not guarantee bitwise determinism of residuals, forces or full trajectories.
-FP32 numerical qualification is pending: unchanged
-physical guards and noise envelopes may reject a candidate.
+It cannot change after construction and selects one precision for every
+solver array: state, history, contact forces, energy and residual, the global
+matrix and its scaling, preconditioner factors, and PCG vectors and scalars.
+There is no mixed-precision correction or higher-precision accumulation; the
+only exception is the PCG stopping test, whose per-block thresholds are stored
+in FP32 and compared with the residual norms in FP64.
+Reductions use fixed orders: global matrix assembly orders duplicate
+contributions by row, column and value bits and sums them with a fixed pairwise
+tree, residual, energy and PCG reductions use fixed trees, and the solve path
+uses no floating-point atomic additions (only order-independent atomic maxima).
+On one device, repeated runs and CUDA graph replay give bitwise identical
+trajectories. Changing the Model numbering of bodies, joints and shapes while
+keeping the actor layout (articulation, rigid bodies in creation order, tets,
+materials) also gives bitwise identical trajectories; reordering actors of the
+same kind or static shapes changes the summation order and differs by rounding.
+CPU and CUDA, and the two precisions, differ by rounding.
+
+FP32 qualification is per scene and rests on physical gates; an FP32 residual
+gate only confirms the solver's own stopping rule. FP32 meets the physical
+gates for the Franka and Sharpa robot scenes (the Sharpa grasp is a
+diagnostic in both precisions), the 64-box stack, the material scenes, cloth and the tet patch and
+vibration benchmarks. FP32 cable cantilevers and the finest tet cantilever are
+not yet qualified, and the localized helix is outside the acceptance set in
+both precisions (see :doc:`monolithic_cable`).
 
 The precision-tagged state uses schema 4, including actor ownership, layout
 identity and native rigid continuation fields. Cross-layout and cross-precision
-checkpoint loads are rejected. Schema-2 FP64 and schema-3 checkpoints are
-validated against their original complete fields and physical digest in scratch
-before migration to a matching canonical articulation-plus-tet model; failed
-loads preserve the destination. A plain initialization source
-is a new start, not a conversion of integration history.
+checkpoint loads are rejected. The configuration identity covers every option
+that changes the solution, the resolved contact resources and the physical,
+material and SDF digests; PCG mode and CUDA graph use are excluded. CPU and
+CUDA resolve the same contact batch size, so checkpoints move between devices.
+Only the current schema loads: older schemas are not migrated, and checkpoints
+written before the current configuration version are rejected; start a new
+run. Failed loads preserve the
+destination. A plain initialization source is a new start, not a conversion of
+integration history.
 
 FREE actors use native world COM position, rotation, velocity and integration
 history. ``body_q`` and ``body_qd`` are derived FP32 displays. The FREE coordinate
@@ -118,17 +159,14 @@ endpoints contribute to the coupled residual, tangent and published COM wrench.
 Box, sphere and mesh sources are supported; mesh targets require CUDA and a
 bound C2 SDF. New plane targets must be infinite and static. Changing collision
 flags, pair storage or participating geometry requires rebuilding the solver.
-Mixed-contact numerical qualification remains partial. Some Armijo cases stop
-at the existing descent-slope noise floor while a rigid rotation residual still
-exceeds its target. Strict publication rolls back those steps; they are a known
-limitation, not converged results. Existing numerical and publication gates
-apply. Articulation-tet and tet-static contact keep their original sampling and
+Mixed-contact numerical qualification remains partial. Existing numerical and
+publication gates apply. Articulation-tet and tet-static contact keep their original sampling and
 behavior.
 FREE PD, limit gains, friction, damping and armature must be zero.
 Rigid ``body_f`` and FREE ``control.joint_f`` each contribute a world COM wrench
 [N, N·m] once. Convert off-center loads to COM wrenches before calling ``step``.
-Nonzero rigid torque with Armijo or ArmijoOrResNorm requires explicit
-``allow_nonconservative_energy=True``; ResNorm supports that torque directly.
+Nonzero rigid torque is accepted through the residual-norm predicate; its
+energy acceptance is reported as heuristic.
 
 Smooth SDF construction still produces common offline FP64 coefficients.
 The FP32 solver derives a separately identified coefficient copy and retains
@@ -140,8 +178,8 @@ For mesh contact, attach the official mesh SDF before model finalization and use
 source can instead be supplied through ``qualified_directory``; failed
 qualification is rejected without falling back to resampling.
 
-``MonolithicCollisionPipeline`` remains independently available, but the coupled
-solver does not accept external Contacts or collision scheduling configuration.
+The coupled solver evaluates contact internally and does not accept external
+Contacts or collision scheduling configuration.
 
 Examples and validation
 -----------------------
@@ -168,7 +206,7 @@ Every step must converge; Stopped and hard failures stop the dependent runs.
 The final 100 hold steps require all three interfaces to carry at least 0.1 N,
 tet displacement of at least 2 mm and relative force variation of at most 5%.
 Native state, determinant, penetration, per-actor residual and reaction balance
-guards also apply. Known Armijo limitations do not waive these gates.
+guards also apply.
 The recording audit recomputes box gaps, tet determinants, native/display
 bindings and force balance. It uses the promoted Model rest matrices and
 normalized joint anchors; device-specific BVH caches are excluded from physical
@@ -198,21 +236,38 @@ Historical manifest hashes remain unchanged; recorded paths are resolved through
    uv run --no-sync python -m scripts.monolithic_reference.run_regression --profile nightly --list
    uv run --no-sync python -m scripts.monolithic_reference.run_regression --profile nightly --output /path/to/new-output
 
-The nightly profile contains nine Franka configurations and one Sharpa configuration
-and is triggered manually for overnight regression. The full profile selects the
-same ten cases; dev selects the default configuration of each scene and still runs
-two complete trajectories. Routine development and ordinary CI use functional
-component and small integration tests instead. The Monolithic project policy is
+The nightly profile runs the production Franka and recorded Sharpa FP64
+trajectories (C-IE, ArmijoOrResNorm, CUDA production graphs) and the 64-box
+rigid collision scene; it is triggered manually for overnight regression. The
+dev and full profiles run the two robot trajectories. Routine development and
+ordinary CI use functional component and small integration tests instead. The Monolithic project policy is
 in the workspace file ``dev/monolithic/project.md``; repository ``AGENTS.md``
 links to that project-specific policy. The runner binds each case
 to ``asset/monolithic/references.json``, verifies retained file hashes and frozen
-controls, and rejects a changed physical configuration before stepping. Franka
-uses its existing frozen comparison envelopes. The rebuilt Sharpa reference uses
-native state chunks, read without conversion on disk; comparison includes the
-initial frame, complete history, publication labels and frozen control frames.
-Sharpa requires exact equality because no repeatability envelope has been
-qualified for the rebuilt generation. Missing or differing data produces FAIL;
-filtered profiles remain PARTIAL.
+controls, and rejects a changed physical configuration before stepping. Robot
+cases qualify on the frozen physical plausibility gates in
+``scripts/monolithic_reference/fixtures/physical_gates_v2.json``: no hard
+failures, at most 1% Stopped steps, sampled penetration of at most 2 mm, a
+minimum tet determinant of 0.2 and, for Franka, a successful grasp. A grasp
+succeeds when, over the final 500 steps at the top of the lift, every published
+step keeps the ground support within 5% of the cube weight and the cube center
+of mass at least a quarter of its smallest edge above rest. Sharpa reports the
+same grasp result as a diagnostic: its recorded hand closure does not lift the
+cube. Comparison with the
+retained reference trajectories is reported as a diagnostic only; new results
+need not match them. Missing frozen inputs produce FAIL; filtered profiles
+remain PARTIAL. Pass ``--precision fp32`` to run every case in FP32: the cases
+qualify on the same physical gates and complete-candidate contact audit, skip
+the comparison with the FP64 reference trajectories, and their receipts record
+the precision. The material, cable, cloth and tet runners accept the same
+option. Their residual gates admit each row up to a precision floor: in FP64
+the solver's rounding term, far below the frozen values; in FP32 the solver's
+complete row tolerance, so an FP32 residual gate confirms the stopping rule
+rather than certifying it independently. Contact force and moment balance gates
+admit 32 times the precision's machine epsilon times the summed contact force
+magnitude (times the largest contact lever for moments). Physical gates such as
+displacement, energy, analytic error, velocity and penetration never use a
+floor.
 
 After completion, review ``summary.json``, ``RESULTS.md`` and per-case receipts.
 By default, successful new recordings are removed after their summaries and
@@ -225,8 +280,8 @@ checks for stage qualification. Retired driver snapshots, hashes and migration
 notes are documented in the workspace file
 ``dev/monolithic/P4/script_records/legacy_retirement.md``.
 
-The precision experiment runner uses the same ten configurations, defaults to
-FP32, and accepts ``--precision both``. The retained controls already match the
+The precision experiment runner uses the same two robot configurations,
+defaults to FP32, and accepts ``--precision both``. The retained controls already match the
 rebuilt manifest; they do not need to be generated again::
 
    uv run --no-sync python -m scripts.monolithic_reference.run_precision --list

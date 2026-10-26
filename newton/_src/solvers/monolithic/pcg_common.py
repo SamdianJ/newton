@@ -2,8 +2,36 @@
 # SPDX-License-Identifier: Apache-2.0
 """Shared layout groups, residual acceptance and gap policies."""
 
+from typing import Any
+
 import numpy as np
 import warp as wp
+
+LINEAR_ROUNDING_MULTIPLIER = 4.0
+"""Multiplier ``c`` of the attainable linear residual ``c eps |A| |y|`` in the solver precision.
+
+A direction ``y`` stored in a precision with unit ``eps`` leaves a residual of
+up to about ``eps |A| |y|`` even when it is the exact solution; finite-precision
+PCG reaches about that floor. The value matches the nonlinear rounding
+multiplier and covers the measured FP32 floors of ill-conditioned tet systems.
+"""
+
+
+LINEAR_ROUNDING_CAP = 1e-2
+"""Largest residual, relative to a block's right-hand side, that the rounding floor may accept.
+
+Inexact Newton needs a direction whose residual is a fixed fraction of the
+right-hand side. A nearly singular block can return a huge ``y`` whose
+``|A| |y|`` rounding would excuse any residual; such a block still fails.
+"""
+
+_ROUNDING_CAP = wp.constant(LINEAR_ROUNDING_CAP)
+
+
+def linear_rounding(dtype):
+    """Return ``c eps`` of the attainable linear residual for a native dtype."""
+    native = np.float64 if dtype in (wp.float64, np.float64) else np.float32
+    return LINEAR_ROUNDING_MULTIPLIER * float(np.finfo(native).eps)
 
 
 def group_data(layout):
@@ -42,47 +70,43 @@ def group_policy(layout, config, *, require_limits=True):
 
 @wp.func
 def residual_converged(
-    norms: wp.array[float], rhs_offset: int, floors: wp.array[float], rtol: float, atol: float, limits: wp.array[float]
+    norms: wp.array[Any],
+    rhs_offset: int,
+    floors: wp.array[float],
+    rtol: float,
+    atol: float,
+    limits: wp.array[float],
+    rounding_offset: int,
+    rounding: float,
 ):
     accepted = bool(True)
     for k in range(floors.shape[0]):
-        target = wp.max(wp.float64(rtol) * wp.float64(wp.max(norms[rhs_offset + k], floors[k])), wp.float64(atol))
+        target = wp.max(
+            wp.float64(rtol) * wp.max(wp.float64(norms[rhs_offset + k]), wp.float64(floors[k])), wp.float64(atol)
+        )
         target = wp.min(target, wp.float64(limits[k]))
+        # No stored solution resolves its residual below the rounding of |A| |y|,
+        # which may relax the target to at most a fixed fraction of the rhs.
+        floor = wp.min(
+            wp.float64(rounding) * wp.float64(norms[rounding_offset + k]),
+            wp.float64(_ROUNDING_CAP) * wp.float64(norms[rhs_offset + k]),
+        )
+        target = wp.max(target, floor)
         if not wp.isfinite(norms[k]) or wp.float64(norms[k]) > target:
             accepted = False
     return accepted
 
 
 @wp.func
-def block_drift(gap: float, true_norm: float, floor: float):
-    return wp.float64(gap) / wp.float64(wp.max(true_norm, floor))
+def block_drift(gap: Any, true_norm: Any, floor: float):
+    return wp.float64(gap) / wp.max(wp.float64(true_norm), wp.float64(floor))
 
 
 @wp.func
-def max_block_drift(norms: wp.array[float], gap_offset: int, floors: wp.array[float]):
+def max_block_drift(norms: wp.array[Any], gap_offset: int, floors: wp.array[float]):
     drift = wp.float64(0.0)
     for k in range(floors.shape[0]):
         if not wp.isfinite(norms[gap_offset + k]) or not wp.isfinite(norms[k]):
             return wp.float64(wp.nan)
         drift = wp.max(drift, block_drift(norms[gap_offset + k], norms[k], floors[k]))
     return drift
-
-
-@wp.kernel
-def decide_restart(
-    gap: wp.array[float],
-    true_norm: wp.array[float],
-    floors: wp.array[float],
-    threshold: wp.float64,
-    error: wp.array[int],
-    result: wp.array[int],
-):
-    drift = wp.float64(0.0)
-    for k in range(floors.shape[0]):
-        if not wp.isfinite(gap[k]) or not wp.isfinite(true_norm[k]):
-            error[0] = 16
-        drift = wp.max(drift, block_drift(gap[k], true_norm[k], floors[k]))
-    if error[0] != 0 or not wp.isfinite(drift):
-        result[0] = -1
-    else:
-        result[0] = int(drift >= threshold)

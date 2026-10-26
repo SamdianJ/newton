@@ -190,10 +190,7 @@ class FrankaGrasp:
         cache,
         device="cuda:0",
         *,
-        law="C-IE",
-        globalization="ArmijoOrResNorm",
         precision="fp64",
-        fp32_absolute_tolerance=None,
         solver_factory=SolverMonolithic,
     ):
         cache = Path(cache)
@@ -213,11 +210,8 @@ class FrankaGrasp:
         widths = (0.01,) * 7 + (0.001,) * 2
         self.solver = solver_factory(
             self.model,
-            contact_model=law,
-            globalization=globalization,
             alignment_policy="mask",
             publish_policy="current_iterate",
-            allow_nonconservative_energy=True,
             friction_velocity_scale=0.01,
             contact_stiffness=1e7,
             friction_coefficient=0.5,
@@ -232,7 +226,6 @@ class FrankaGrasp:
             use_cuda_graph=True,
             smooth_sdf=smooth,
             precision=precision,
-            fp32_absolute_tolerance=fp32_absolute_tolerance,
         )
         source = self.model.state()
         source.joint_q.assign(self.high.astype(np.float32))

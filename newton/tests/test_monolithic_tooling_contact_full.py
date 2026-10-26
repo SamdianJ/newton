@@ -11,22 +11,29 @@ import numpy as np
 import warp as wp
 
 from newton.solvers.experimental.monolithic import build_smooth_sdf
-from newton.tests.test_monolithic_contact_actor_pairs import contact_matrix, perturb, physical, query
+from newton.tests.test_monolithic_contact_actor_pairs import native_batch, perturb, physical, query
+from newton.tests.test_monolithic_contact_components import batch_matrix
 from newton.tests.test_monolithic_solver_actor_contacts import contact_scene, contact_solver, contact_state
 from newton.tests.unittest_utils import add_function_test, get_test_devices
 from scripts.monolithic_reference.contact_full_oracle import audit_keys, evaluate_full, export_mesh_fields
 from scripts.monolithic_reference.coupled_fixtures import make_solver, make_tiny
 
 
-def compare(test, run, state, start, law, *, mesh_fields=None):
+def native_terms(source):
+    """Return E, r and raw B of a native producer's latest evaluation."""
+    batch = getattr(source, "_batch", source)
+    return batch.pool.energy.result.numpy()[:2].copy(), batch.pool.residual.result.numpy().copy(), batch_matrix(batch)
+
+
+def compare(test, run, terms, state, start, *, mesh_fields=None):
     c = run._contact
+    energy, residual, matrix = terms
     stiffness, mu, velocity, width, radius = c.parameters
     full = evaluate_full(
         run.model,
         run._actors,
         physical(state),
         start,
-        law,
         radius=radius,
         stiffness=stiffness,
         mu=mu,
@@ -35,11 +42,8 @@ def compare(test, run, state, start, law, *, mesh_fields=None):
         mesh_fields=mesh_fields,
     )
     test.assertEqual(len(full["records"]), c.count)
-    np.testing.assert_allclose(c.energy.numpy().sum(axis=0), full["energy"], rtol=1e-8, atol=1e-12)
-    np.testing.assert_allclose(c.residual.numpy(), full["residual"], rtol=1e-8, atol=1e-10)
-    linear, generation, _ = contact_matrix(run)
-    test.assertEqual(int(linear.finalize_assembly(generation=generation).status), 0)
-    matrix = linear.densify_for_test(generation=generation).raw_matrix
+    np.testing.assert_allclose(energy, full["energy"], rtol=1e-8, atol=1e-12)
+    np.testing.assert_allclose(residual, full["residual"], rtol=1e-8, atol=1e-10)
     test.assertLess(np.linalg.norm(matrix - full["tangent"]) / max(1, np.linalg.norm(full["tangent"])), 1e-5)
     keys = list(full["records"])
     test.assertFalse(audit_keys(full, keys)["missing_keys"])
@@ -53,7 +57,6 @@ def compare(test, run, state, start, law, *, mesh_fields=None):
             run._actors,
             physical(state),
             start,
-            law,
             radius=radius,
             stiffness=stiffness,
             mu=mu,
@@ -67,38 +70,37 @@ def compare(test, run, state, start, law, *, mesh_fields=None):
 
 
 def test_complete_pairs(test, device):
-    """Compare all new pairs and all laws under two scalar layouts against dense E/r/B."""
-    for kind, law, permuted in itertools.product(
-        ("A-R", "R-R", "R-T", "R-static"), ("C-EE", "C-IE", "C-II"), (False, True)
-    ):
-        with test.subTest(kind=kind, law=law, permuted=permuted):
-            run = contact_solver(contact_scene(device, kind, before=permuted), law=law, permuted=permuted)
+    """Compare all new pairs under two scalar layouts against dense E/r/B."""
+    for kind, permuted in itertools.product(("A-R", "R-R", "R-T", "R-static"), (False, True)):
+        with test.subTest(kind=kind, permuted=permuted):
+            run = contact_solver(contact_scene(device, kind, before=permuted), permuted=permuted)
+            batch = native_batch(run)
             state = contact_state(run, kind)
             start = physical(state)
-            query(run, state, start=True)
+            query(batch, run, state, start=True)
             perturb(run, state, start, np.linspace(-0.2, 0.3, run._layout.scalar_dof_count), 1e-6)
-            query(run, state)
-            compare(test, run, state, start, law)
+            query(batch, run, state)
+            compare(test, run, native_terms(batch), state, start)
 
 
 def test_legacy_and_published_force(test, device):
-    """Check legacy A-T enumeration and native two-endpoint published forces."""
-    for law in ("C-EE", "C-IE", "C-II"):
-        model = make_tiny("normal_loading", device)
-        model.joint_q.fill_(0.005)
-        run = make_solver(model, "normal_loading", law, mode="production", graph=device.is_cuda)
-        state = run.create_state(dt=0.001)
-        start = physical(state)
-        query(run, state, start=True)
-        query(run, state)
-        compare(test, run, state, start, law)
+    """Check particle-shape enumeration and native two-endpoint published forces."""
+    model = make_tiny("normal_loading", device)
+    model.joint_q.fill_(0.005)
+    run = make_solver(model, "normal_loading", mode="production", graph=device.is_cuda)
+    batch = native_batch(run)
+    state = run.create_state(dt=0.001)
+    start = physical(state)
+    query(batch, run, state, start=True)
+    query(batch, run, state)
+    compare(test, run, native_terms(batch), state, start)
     for kind in ("chain", "R-static"):
         run = contact_solver(contact_scene(device, kind), mode="production", graph=device.is_cuda)
         state = contact_state(run, kind)
         start = physical(state)
         run.step(state, state, run.model.control(), dt=0.001)
         test.assertTrue(run.last_stats.converged)
-        full = compare(test, run, state, start, "C-IE")
+        full = compare(test, run, native_terms(run._contact), state, start)
         force = run.get_contact_forces(state)
         np.testing.assert_allclose(force.particle_force, full["particle_force"], rtol=1e-8, atol=1e-10)
         np.testing.assert_allclose(force.body_wrench, full["body_wrench"], rtol=1e-8, atol=1e-10)
@@ -113,7 +115,7 @@ class TestContactFullOracle(unittest.TestCase):
         start = {name: value.copy() for name, value in state.items()}
         state["x"][0, 0] = np.nan
         with self.assertRaisesRegex(ValueError, "finite native states"):
-            evaluate_full(run.model, run._actors, state, start, "C-IE", radius=0.001)
+            evaluate_full(run.model, run._actors, state, start, radius=0.001)
 
     def test_invalid_candidate_identity(self):
         """Reject malformed keys before coercion can hide an omitted contact."""
@@ -142,38 +144,39 @@ def test_mesh_input(test, device):
     model = contact_scene(device, "A-R", mesh=True)
     sdf = build_smooth_sdf(model, representation="c2-bspline")
     run = contact_solver(model, smooth_sdf=sdf)
+    batch = native_batch(run)
     state = contact_state(run, "A-R")
     start = physical(state)
-    query(run, state, start=True)
+    query(batch, run, state, start=True)
     perturb(run, state, start, np.linspace(-0.2, 0.3, run._layout.scalar_dof_count), 1e-6)
-    query(run, state)
+    query(batch, run, state)
     fields = export_mesh_fields(model, sdf)
-    compare(test, run, state, start, "C-IE", mesh_fields=fields)
+    compare(test, run, native_terms(batch), state, start, mesh_fields=fields)
     with test.assertRaises(ValueError):
-        evaluate_full(model, run._actors, physical(state), start, "C-IE", radius=0.001)
+        evaluate_full(model, run._actors, physical(state), start, radius=0.001)
 
 
 def test_curved_target(test, device):
-    """Compare sphere target curvature and local transforms for all supported laws."""
-    for law in ("C-EE", "C-IE", "C-II"):
-        model = contact_scene(device, "R-T")
-        kinds = model.shape_type.numpy()
-        scales = model.shape_scale.numpy()
-        shape = int(np.flatnonzero(model.shape_body.numpy() == model.body_label.index("rigid_0"))[0])
-        kinds[shape] = 3
-        scales[shape] = [0.02, 0, 0]
-        model.shape_type.assign(kinds)
-        model.shape_scale.assign(scales)
-        transforms = model.shape_transform.numpy()
-        transforms[shape] = np.asarray(wp.transform((0, 0.001, 0.002), wp.quat_identity()))
-        model.shape_transform.assign(transforms)
-        run = contact_solver(model, law=law)
-        state = contact_state(run, "R-T")
-        start = physical(state)
-        query(run, state, start=True)
-        perturb(run, state, start, np.linspace(-0.2, 0.3, run._layout.scalar_dof_count), 1e-6)
-        query(run, state)
-        compare(test, run, state, start, law)
+    """Compare sphere target curvature and local transforms."""
+    model = contact_scene(device, "R-T")
+    kinds = model.shape_type.numpy()
+    scales = model.shape_scale.numpy()
+    shape = int(np.flatnonzero(model.shape_body.numpy() == model.body_label.index("rigid_0"))[0])
+    kinds[shape] = 3
+    scales[shape] = [0.02, 0, 0]
+    model.shape_type.assign(kinds)
+    model.shape_scale.assign(scales)
+    transforms = model.shape_transform.numpy()
+    transforms[shape] = np.asarray(wp.transform((0, 0.001, 0.002), wp.quat_identity()))
+    model.shape_transform.assign(transforms)
+    run = contact_solver(model)
+    batch = native_batch(run)
+    state = contact_state(run, "R-T")
+    start = physical(state)
+    query(batch, run, state, start=True)
+    perturb(run, state, start, np.linspace(-0.2, 0.3, run._layout.scalar_dof_count), 1e-6)
+    query(batch, run, state)
+    compare(test, run, native_terms(batch), state, start)
 
 
 add_function_test(TestContactFullOracle, "test_complete_pairs", test_complete_pairs, devices=get_test_devices())

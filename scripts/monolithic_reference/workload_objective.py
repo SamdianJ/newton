@@ -15,7 +15,7 @@ from scripts.monolithic_reference.workload_scene import build_scene, compare_arr
 
 # These are numerical owners, not a recursively serialized object graph.
 OWNERS = ("_objective", "_kinematics", "_tet", "_contact", "_tet_assembly")
-SOLVER_ARRAYS = ("_frozen_force", "_frozen_gravity", "_complete_r", "_diagonal", "_tet_r32")
+SOLVER_ARRAYS = ("_frozen_force", "_frozen_gravity", "_complete_r", "_diagonal", "_tet_assembly_residual")
 HANDLES = {"table", "smooth_table"}
 TOPOLOGY = {
     "_tet.ids",
@@ -28,6 +28,14 @@ TOPOLOGY = {
     "_contact.bodies",
     "_contact.sdf_indices",
 }
+
+
+def replay_dataflow(metadata):
+    """Return the recorded pooled/spatial dataflow; legacy recordings are no longer replayable."""
+    dataflow = metadata.get("contact_dataflow", "legacy")
+    if dataflow not in ("pooled", "spatial"):
+        raise ValueError("Legacy contact dataflow recordings can no longer be replayed")
+    return dataflow
 
 
 def arrays_for(run):
@@ -55,19 +63,8 @@ def arrays_for(run):
             )
             for name, array in zip(("rows", "ids", "local", "values", "count"), batch.reference_inputs, strict=True):
                 arrays["contact.reference.input." + name] = array
-    else:
-        owners.update({"contact.start": run._contact.start, "contact.current": run._contact.current})
     if not run._device_iteration or run._contact_pool:
         owners["_rigid"] = run._rigid
-        actor_contact = run._contact.actor_contact
-        if actor_contact is not None:
-            owners.update(
-                {
-                    "actor_contact": actor_contact,
-                    "actor_contact.start": actor_contact.start,
-                    "actor_contact.current": actor_contact.current,
-                }
-            )
     for state_name in ("_original", "_accepted", "_trial"):
         state = getattr(run, state_name)
         owners[state_name] = state
@@ -129,7 +126,6 @@ def capture_input(run, boundary, args, kwargs):
         metadata["contact_dataflow"] = "spatial"
         metadata["spatial"] = {
             "candidate_capacity": c.candidate_capacity,
-            "law_margin": c.law_margin,
             "selection_ready": c._selection_ready,
             "reference_mode": c._reference_mode,
             "refreshes": c._refreshes,
@@ -167,16 +163,11 @@ def capture_output(run, boundary, result):
         for name in ("identities", "source_slots", "pairs"):
             arrays["contact." + name] = getattr(records, name).numpy()[:count].copy()
         arrays["contact_force"] = c.pool.force.result.numpy().copy()
-    else:
-        arrays.update(
-            contact_weights=run._contact.weights.numpy().copy(),
-            contact_local_r=run._contact.local_residual.numpy().copy(),
-        )
     if boundary == "objective":
         arrays.update(
             energy=np.asarray([result[0], result[2]]),
             returned_residual=result[1].numpy().copy() if isinstance(result[1], wp.array) else result[1].copy(),
-            tangent=run._objective.tangent32.numpy().copy(),
+            tangent=run._objective.tangent.numpy().copy(),
             tet_parts=run._tet.parts.numpy().copy(),
             contact_energy=run._contact.energy.numpy().copy(),
         )
@@ -274,8 +265,12 @@ def replay_objective(arrays, metadata, expected, *, scene, device, graph, repeat
         scene,
         device=device,
         graph=graph,
-        contact_dataflow=metadata.get("contact_dataflow", "legacy"),
-        spatial={name: metadata.get("spatial", {}).get(name) for name in ("candidate_capacity", "law_margin")}
+        contact_dataflow=replay_dataflow(metadata),
+        spatial={
+            name: value
+            for name, value in metadata.get("spatial", {}).items()
+            if name in ("candidate_capacity", "law_margin")
+        }
         if metadata.get("contact_dataflow") == "spatial"
         else None,
     )
@@ -322,10 +317,10 @@ def replay_objective(arrays, metadata, expected, *, scene, device, graph, repeat
     if run._contact_spatial:
         spatial = metadata["spatial"]
         if (
-            set(spatial)
+            spatial.get("law_margin", 0) != 0
+            or set(spatial) - {"law_margin"}
             != {
                 "candidate_capacity",
-                "law_margin",
                 "selection_ready",
                 "reference_mode",
                 "refreshes",
@@ -346,8 +341,6 @@ def replay_objective(arrays, metadata, expected, *, scene, device, graph, repeat
             raise ValueError(f"Hotspot live-in shape/dtype differs: {name}")
         if not np.isfinite(arrays[name]).all():
             raise ValueError(f"Nonfinite hotspot live-in: {name}")
-        actor_contact = run._contact.actor_contact
-        static_actor = actor_contact is not None and name in {"actor_contact." + key for key in actor_contact._bound}
         static_rigid = name in {
             "_rigid." + key for key in ("rows", "qs", "vs", "bodies", "mass", "second", "xp", "xc", "local_com")
         }
@@ -404,7 +397,6 @@ def replay_objective(arrays, metadata, expected, *, scene, device, graph, repeat
         )
         if (
             name in TOPOLOGY
-            or static_actor
             or static_rigid
             or static_pool
             or static_spatial

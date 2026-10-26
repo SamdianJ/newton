@@ -74,30 +74,28 @@ isotropic gauge are eliminated when contact is absent. A temporary common
 angle mode is rechecked at each assembly and released when bending or contact
 constrains it.
 
-B and PCG vectors remain FP32. Per-cable band Cholesky uses interleaved vertex
-and angle rows only in the preconditioner; cross-object entries remain in the
-global operator. The fixed angle unit scale is the inverse median rest-edge
-length. Cancellation-prone sparse products accumulate in FP64 before rounding
-to FP32. FP32 correction solves accumulate into a native delivered direction,
-which must pass a separate physical posterior check. A rounded matrix that
-loses positive definiteness can retry with diagonal regularization; the original
-energy and residual remain the convergence criteria. Nonmaterial numerical
-policies are unchanged.
+The matrix, preconditioner and PCG vectors use the solver precision. Per-cable
+band Cholesky uses interleaved vertex and angle rows only in the
+preconditioner; cross-object entries remain in the global operator. The fixed
+angle unit scale is the inverse median rest-edge length. A matrix that loses
+positive definiteness can retry with diagonal regularization; the original
+energy and residual remain the convergence criteria. The tangent omits the
+stress-weighted second derivatives of the strains, so strongly loaded or
+twisted cables converge linearly. Each published reference director is
+projected onto the normal plane of its edge and normalized, so transport
+rounding does not accumulate across steps.
 
-Material ``ResNorm`` line search combines block residuals normalized by their
-frozen convergence goals, including the omitted gauge equation. This keeps
-position roundoff from hiding unresolved torque. Independent original-unit
-convergence checks remain unchanged; checkpoint identity records this policy.
+The residual-norm predicate normalizes every row by its own tolerance, so
+position roundoff cannot hide unresolved torque.
 
-Each cable must satisfy independent original-unit L2 force and free-angle torque
-residuals, with default limits of 1e-9 N and 1e-11 N m. The experimental
-``cable_position_tolerance`` and ``cable_theta_tolerance`` solver options set
-these limits and are included in checkpoint identity. Smaller physical scales
-may need tighter tolerances, subject to native coordinate roundoff. The torque
-check includes an eliminated gauge
-equation. Prescribed boundary reactions are excluded from free equilibrium.
-These accuracy requirements can reject FP32 native runs or poorly conditioned
-inputs. Stopped publication is never analytical convergence. The material
+Every cable position and free-angle row must satisfy the solver's per-row force
+[N] and torque [N m] tolerance described in :doc:`monolithic`. A common-angle
+null mode additionally requires the net free-angle torque to stay within the
+absolute torque target. Prescribed boundary reactions are excluded from free equilibrium.
+FP32 cables are not yet qualified: the cantilever's terminal velocity and
+axial strain gates lie at FP32 coordinate resolution, and a generally oriented
+cable can stop before it resolves a small load. These accuracy requirements
+can also reject poorly conditioned inputs. Stopped publication is never analytical convergence. The material
 nonlinear driver uses host acceptance; CUDA graph mode captures the linear
 solve and supported segments, not the entire material step.
 Band factorization and triangular solves are sequential within each chain;

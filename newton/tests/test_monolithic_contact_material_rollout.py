@@ -22,7 +22,6 @@ def rollout(test, *, cable, device, mode, graph):
         "body": True,
         "device": device,
         "mu": 0.4,
-        "law": "C-IE",
         "pcg_mode": mode,
         "use_cuda_graph": graph,
     }

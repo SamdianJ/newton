@@ -1,6 +1,7 @@
 {
-  "version": 9,
+  "version": 11,
   "status": "FROZEN_BEFORE_FINAL_MATRIX",
+  "change": "v11 (P8b): the solver judges every residual row against its own physical tolerance; the per-recipe solve_position_tolerance and solve_theta_tolerance options are removed. Physical parameters, loads and gates are unchanged.",
   "cantilever": {
     "length": 1.0,
     "bending": [
@@ -35,9 +36,6 @@
       "raw_position_residual": 1e-09,
       "raw_theta_residual": 1e-11
     },
-    "solve_position_tolerance": 1e-10,
-    "solve_theta_tolerance": 1e-11,
-    "globalization": "ResNorm",
     "newton_max_iterations": 1000
   },
   "localized_helix": {
@@ -82,10 +80,7 @@
       "finite_EA_refinement_ratio": 0.5
     },
     "finite_EA_policy": "All EA samples retain every single-case analytical and physical gate. Low-to-baseline EA shape change is an error-decay sample; baseline-to-high EA shape change must be <=1% and <=half the low-to-baseline change.",
-    "solve_position_tolerance": 1e-10,
-    "solve_theta_tolerance": 1e-13,
     "loading": "Rotate one end; shorten both ends equally towards the fixed center. No axial localization fit.",
-    "globalization": "ResNorm",
     "newton_max_iterations": 5000
   }
 }

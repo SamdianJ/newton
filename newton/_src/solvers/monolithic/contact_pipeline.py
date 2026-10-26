@@ -1,7 +1,11 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 The Newton Developers
 # SPDX-License-Identifier: Apache-2.0
 
-"""Complete-candidate pooled contact adapter for coupled assembly and publication."""
+"""Pooled contact adapter and the production spatial objective built on it.
+
+The complete-candidate pooled objective is an offline audit oracle; the solver
+always constructs the spatial objective.
+"""
 
 import warnings
 from typing import Any
@@ -10,18 +14,18 @@ import numpy as np
 import warp as wp
 
 from . import state_checks
-from .bsr import _MonolithicScalarTriplets
 from .contact import ContactObjective
 from .contact_batch import _ContactBatch
 from .contact_pool import _CONTACT_WORKERS
 from .contact_spatial import _ContactSpatial
 from .segment_graph import _SegmentGraphCache
 
+# Contact samples per batch on every device; CUDA geometry needs more than one row-reduction block.
+CONTACT_BATCH_CAPACITY = 8192
+
 
 @wp.kernel
-def _reserve_pool_triplets(
-    records: Any, flags: wp.array[int], triplets: _MonolithicScalarTriplets, base: wp.array[int]
-):
+def _reserve_pool_triplets(records: Any, flags: wp.array[int], triplets: Any, base: wp.array[int]):
     base[0] = -1
     if triplets.active_token[0] != triplets.token:
         triplets.status[0] = 2
@@ -37,7 +41,7 @@ def _reserve_pool_triplets(
 
 
 @wp.kernel
-def _copy_pool_triplets(records: Any, triplets: _MonolithicScalarTriplets, base: wp.array[int], workers: int):
+def _copy_pool_triplets(records: Any, triplets: Any, base: wp.array[int], workers: int):
     i = wp.tid()
     if base[0] < 0 or triplets.status[0] != 0:
         return
@@ -78,7 +82,7 @@ class _PooledContactObjective(ContactObjective):
     """
 
     def __init__(self, *args, **kwargs):
-        super().__init__(*args, _metadata_only=True, **kwargs)
+        super().__init__(*args, **kwargs)
         self._evaluated = False
         self.evaluation_generation = 0
         self.candidate_generation = 0
@@ -89,11 +93,11 @@ class _PooledContactObjective(ContactObjective):
 
     def initialize_pool(self, factor_capacity, *, use_cuda_graph):
         actors = self.actor_samples.actors
-        # CUDA geometry needs larger batches than a single row-reduction block.
-        batch_capacity = 8192 if self.model.device.is_cuda else 256
+        # Chunked reductions follow the batch size, so every device uses the
+        # same one; the resource identity, and checkpoints, are then portable.
         self._batch = _ContactBatch(
             self,
-            batch_capacity=min(self.count, batch_capacity),
+            batch_capacity=min(self.count, CONTACT_BATCH_CAPACITY),
             capacity=None,
             contact_factor_capacity=factor_capacity,
             use_cuda_graph=use_cuda_graph,
@@ -108,6 +112,11 @@ class _PooledContactObjective(ContactObjective):
             [self.pool.capacity, self.pool.max_support, self._batch.batch_capacity, factor_capacity],
             dtype=np.int64,
         )
+        # Snapshots must not serialize uninitialized reduction scratch as
+        # nonfinite live-in data. Evaluations overwrite only the active range.
+        for owner in (self.pool._identity, self.pool.energy, self.pool.residual, self.pool.force):
+            for array in owner.buffers():
+                array.zero_()
 
     @property
     def flags(self):
@@ -175,6 +184,8 @@ class _PooledContactObjective(ContactObjective):
         triplets = assembly.global_scalar_triplets
         if triplets.row_count != self.layout.scalar_dof_count or triplets.values.device != self.model.device:
             raise ValueError("Contact assembly requires the matching linear layout")
+        if triplets.values.dtype != self.pool.records.triplet_values.dtype:
+            raise ValueError("Contact assembly requires a linear workspace in the contact precision")
         # Exactly one reservation and append per assembly invocation. Capture
         # warmup/replay may only derive from the complete immutable pool.
         wp.launch(
@@ -257,14 +268,12 @@ class _PooledContactObjective(ContactObjective):
 class _SpatialContactObjective(_PooledContactObjective):
     """Refresh at Newton boundaries and freeze candidates through trials and final checks."""
 
-    def __init__(self, *args, candidate_capacity=None, law_margin=0.0, **kwargs):
+    def __init__(self, *args, candidate_capacity=None, **kwargs):
         if candidate_capacity is not None and (
             type(candidate_capacity) is not int or not 0 <= candidate_capacity < 2**31
         ):
             raise ValueError("Invalid spatial candidate capacity")
-        if isinstance(law_margin, (bool, np.bool_)) or not np.isfinite(law_margin) or law_margin < 0:
-            raise ValueError("Invalid experimental law margin")
-        self.candidate_capacity, self.law_margin = candidate_capacity, float(law_margin)
+        self.candidate_capacity = candidate_capacity
         self._spatial = None
         self._selection_ready = self._reference_mode = False
         super().__init__(*args, **kwargs)
@@ -276,21 +285,14 @@ class _SpatialContactObjective(_PooledContactObjective):
     def initialize_pool(self, factor_capacity, *, use_cuda_graph):
         super().initialize_pool(factor_capacity, use_cuda_graph=use_cuda_graph)
         self._batch.initialize_reference()
-        # Cold reference snapshots must not serialize uninitialized reduction
-        # scratch as nonfinite live-in data. Later evaluations overwrite it.
-        for owner in (
-            self.pool._identity,
-            self.pool.energy,
-            self.pool.residual,
-            self.pool.force,
-            self._batch.reference_rows,
-        ):
-            for array in owner.buffers():
-                array.zero_()
+        # The pool scratch is cleared by the base; clear the reference rows too.
+        for array in self._batch.reference_rows.buffers():
+            array.zero_()
         self.query_graphs = _SegmentGraphCache(self.model.device, enabled=use_cuda_graph and self.model.device.is_cuda)
         self.dataflow_identity = np.frombuffer(b"spatial-pool/newton-frozen/v1", dtype=np.uint8)
         self.resource_identity = np.append(self.resource_identity, self.candidate_capacity)
-        self.spatial_identity = np.array([self.law_margin], dtype=np.float64)
+        # The former experimental law margin is fixed at zero; keep its identity slot.
+        self.spatial_identity = np.zeros(1, dtype=np.float64)
 
     @property
     def residual(self):
@@ -320,7 +322,6 @@ class _SpatialContactObjective(_PooledContactObjective):
                 state[1],
                 rigid_com=options.get("rigid_com"),
                 capacity=self.candidate_capacity,
-                law_margin=self.law_margin,
             )
         else:
             if kinematics is not self._spatial.kinematics:

@@ -13,7 +13,7 @@ import numpy as np
 
 from newton.examples.softbody.monolithic_recording import serial, state_arrays
 from newton.tests.test_monolithic_solver_coupled import scene, solver
-from scripts.monolithic_reference.audit_precision import audit
+from scripts.monolithic_reference.audit_precision import audit, goals
 from scripts.monolithic_reference.build_smooth_sdf import build_coefficients
 from scripts.monolithic_reference.observe_precision import Observer
 from scripts.monolithic_reference.run_precision import sha
@@ -25,47 +25,39 @@ class TestSceneAudit(unittest.TestCase):
     def test_promoted_history(self):
         """Recover coupled residuals with real prior histories and detect history corruption."""
         model = scene("cpu")
-        for law in ("C-EE", "C-IE", "C-II"):
-            run = solver(model, law)
-            state = run.create_state(dt=0.001)
+        run = solver(model)
+        state = run.create_state(dt=0.001)
+        run.step(state, state, model.control(), dt=0.001)
+        self.assertTrue(run.last_stats.converged)
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory)
+            observer = Observer(run, path)
             run.step(state, state, model.control(), dt=0.001)
             self.assertTrue(run.last_stats.converged)
-            with tempfile.TemporaryDirectory() as directory:
-                path = Path(directory)
-                observer = Observer(run, path)
-                run.step(state, state, model.control(), dt=0.001)
-                self.assertTrue(run.last_stats.converged)
 
-                def load(name, path=path):
-                    with np.load(path / (name + ".npz")) as source:
-                        return dict(source)
+            def load(name, path=path):
+                with np.load(path / (name + ".npz")) as source:
+                    return dict(source)
 
-                oracle = SceneOracle(
-                    load("model"), load("physics"), load("contact"), {}, json.loads((path / "physics.json").read_text())
-                )
-                row = observer.rows[-1]
-                data = dict(np.load(path / row["file"]))
-                data["dt"] = row["dt"]
-                result = oracle.evaluate(data)
-                np.testing.assert_allclose(result["residual"], data["native.residual"], atol=1e-9, rtol=1e-7)
-                self.assertAlmostEqual(result["energy"], float(data["native.energy"]), delta=1e-10)
-                if law == "C-EE":
-                    h = 1e-7
-                    direction = np.array([0.3, -0.2])
-                    shifted = dict(data)
-                    shifted["state.joint_q"] = data["state.joint_q"] + h * direction
-                    plus = oracle.evaluate(shifted)["energy"]
-                    shifted["state.joint_q"] = data["state.joint_q"] - h * direction
-                    minus = oracle.evaluate(shifted)["energy"]
-                    self.assertAlmostEqual((plus - minus) / (2 * h), result["residual"][:2] @ direction, delta=1e-7)
-                data["original.history.link_v_com"] = data["original.history.link_v_com"] + 0.01
-                changed = oracle.evaluate(data)
-                self.assertGreater(np.linalg.norm(changed["residual"] - result["residual"]), 1)
+            oracle = SceneOracle(
+                load("model"), load("physics"), load("contact"), {}, json.loads((path / "physics.json").read_text())
+            )
+            row = observer.rows[-1]
+            data = dict(np.load(path / row["file"]))
+            data["dt"] = row["dt"]
+            result = oracle.evaluate(data)
+            np.testing.assert_allclose(result["residual"], data["native.residual"], atol=1e-9, rtol=1e-7)
+            self.assertAlmostEqual(result["energy"], float(data["native.energy"]), delta=1e-10)
+            data["original.history.link_v_com"] = data["original.history.link_v_com"] + 0.01
+            changed = oracle.evaluate(data)
+            self.assertGreater(np.linalg.norm(changed["residual"] - result["residual"]), 1)
 
     def test_audit_archive(self):
         """Audit a captured successful transaction end to end, including trial and B32 checks."""
         model = scene("cpu")
-        run = solver(model, globalization="ArmijoOrResNorm")
+        run = solver(
+            model,
+        )
         state = run.create_state(dt=0.001)
         with tempfile.TemporaryDirectory() as folder:
             path = Path(folder)
@@ -87,6 +79,27 @@ class TestSceneAudit(unittest.TestCase):
             self.assertFalse(result["publications"][0]["false_convergence"])
             self.assertTrue(result["linear"])
             self.assertFalse(result["accepted_but_independent_rejects"])
+
+    def test_goals_use_native_relative_tolerance(self):
+        """Judge an FP32 step against the FP32 relative tolerance the solver applied."""
+        model = scene("cpu")
+        run = solver(model, precision="fp32")
+        state = run.create_state(dt=0.001)
+        run.step(state, state, model.control(), dt=0.001)
+        rows = run._criterion.rows
+        config = {
+            "config": serial(run._config),
+            "precision": run.precision.value,
+            "row_units": rows.units.tolist(),
+            "row_groups": rows.groups.tolist(),
+            "row_group_names": list(rows.names),
+        }
+        reference = np.asarray(run._reference_residual.numpy(), dtype=float)
+        physical = run._criterion.physical.numpy().astype(float)
+        result = goals(0.999 * physical, reference, model.joint_dof_count, config)
+        self.assertLessEqual(result["global"]["ratio"], 1.0)
+        result = goals(1.01 * physical, reference, model.joint_dof_count, config)
+        self.assertGreater(result["global"]["ratio"], 1.0)
 
     def test_spline_reference(self):
         """Match an independent natural spline at interior, boundary and exterior points."""

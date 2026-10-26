@@ -55,14 +55,12 @@ def performance_case(scene, precision):
         and c["law"] == "C-IE"
         and c["precision"] == precision
     )
-    if precision == "fp32":
-        case["fp32_absolute_tolerance"] = 1e-6
     return case
 
 
 def build_performance_scene(case, *, contact_dataflow, input_manifest=FROZEN, device="cuda:0", graph=True):
-    """Reuse frozen constructors and controls with one explicit contact route."""
-    if contact_dataflow not in ("legacy", "spatial"):
+    """Reuse frozen constructors and controls with the spatial contact route."""
+    if contact_dataflow != "spatial":
         raise ValueError("Unsupported performance contact route")
     if case["scene"] == "actor-coupling":
         from scripts.monolithic_reference.run_actor_coupling import build_model, make_solver, targets  # noqa: PLC0415
@@ -72,8 +70,8 @@ def build_performance_scene(case, *, contact_dataflow, input_manifest=FROZEN, de
             model,
             graph=graph,
             contact_dataflow=contact_dataflow,
-            spatial={"candidate_capacity": 720, "law_margin": 0.0} if contact_dataflow == "spatial" else None,
-            contact_factor_capacity=2160 if contact_dataflow == "spatial" else None,
+            spatial={"candidate_capacity": 720},
+            contact_factor_capacity=2160,
         )
         control = model.control()
         position = np.tile(control.joint_target_q.numpy(), (case["steps"] + 1, 1))
@@ -88,11 +86,10 @@ def build_performance_scene(case, *, contact_dataflow, input_manifest=FROZEN, de
     if device != "cuda:0" or not graph:
         raise ValueError("The frozen Franka recipe requires CUDA0 graph")
     factory = None
-    if contact_dataflow == "spatial":
+    if case["precision"] == "fp64":
         from scripts.monolithic_reference.robot_contact_acceptance import FrozenRobotFactory  # noqa: PLC0415
 
-        if case["precision"] != "fp64":
-            raise ValueError("The spatial Franka experiment requires FP64")
+        # FP32 uses the solver's default spatial resources until P8b requalifies it.
         factory = FrozenRobotFactory("franka-cube", dataflow="spatial")
     return build(case, input_manifest=input_manifest, solver_factory=factory)
 
@@ -221,8 +218,7 @@ def worker(args):
         receipt["config_digest"] = run._kinematics.digest.hex()
         receipt["sdf_identity"] = run._contact.smooth_sdf.identity if run._contact.smooth_sdf is not None else None
         receipt["numerical_policy"] = dataclasses.asdict(run._config)
-        receipt["resources"] = run._contact.resource_identity.tolist() if run._contact_pool else None
-        receipt["law_margin"] = run._contact.law_margin if run._contact_spatial else None
+        receipt["resources"] = run._contact.resource_identity.tolist()
         initial = state_arrays(state)
         run.save_checkpoint(state, args.output / "initial.npz")
         control = model.control()
@@ -365,7 +361,6 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--precision", choices=("fp64", "fp32"), required=True)
     parser.add_argument("--scene", choices=("franka-cube", "actor-coupling"), default="franka-cube")
-    parser.add_argument("--contact-dataflow", choices=("legacy", "spatial"), default="legacy")
     parser.add_argument("--no-contact-diagnostics", action="store_true")
     parser.add_argument("--device", choices=("cpu", "cuda:0"), default="cuda:0")
     parser.add_argument("--no-graph", action="store_true", help="CPU actor smoke checks only; not formal GPU timing")
@@ -375,14 +370,13 @@ def main():
     parser.add_argument("--kernel-cache", type=Path)
     parser.add_argument("--steps", type=int)
     args = parser.parse_args()
+    args.contact_dataflow = "spatial"
     try:
         case = performance_case(args.scene, args.precision)
     except ValueError as error:
         parser.error(str(error))
     if args.steps is None:
         args.steps = case["steps"]
-    if args.contact_dataflow == "spatial" and args.precision != "fp64":
-        parser.error("Spatial performance recipes require FP64")
     if args.scene == "franka-cube" and (args.device != "cuda:0" or args.no_graph):
         parser.error("The frozen Franka recipe requires CUDA0 graph")
     if not 1 <= args.steps <= case["steps"]:

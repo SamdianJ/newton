@@ -110,7 +110,7 @@ def main():
 
     with patch.object(monolithic_franka, "SolverMonolithic", ConfiguredSolver):
         case = FrankaGrasp(
-            Path("asset/monolithic/data/inputs/franka/sdf-cache"), law="C-EE", globalization="ArmijoOrResNorm"
+            Path("asset/monolithic/data/inputs/franka/sdf-cache"),
         )
     migration = restore(case, frame, allow_policy_migration=args.allow_policy_migration)
     case.steps = args.frame

@@ -5,9 +5,7 @@
 
 import hashlib
 import json
-from contextlib import nullcontext
 from dataclasses import asdict
-from functools import partial
 from unittest.mock import patch
 
 import numpy as np
@@ -15,8 +13,7 @@ import numpy as np
 import newton
 from newton._src.solvers.monolithic import solver_monolithic
 from newton._src.solvers.monolithic.articulation import _configuration_digest, _TreeKinematics
-from newton._src.solvers.monolithic.contact import ContactObjective
-from newton._src.solvers.monolithic.contact_pipeline import _PooledContactObjective, _SpatialContactObjective
+from scripts.monolithic_reference.contact_routes import pooled_audit_route
 from scripts.monolithic_reference.contact_system_audit import ContactSystemAudit
 from scripts.monolithic_reference.coupled_fixtures import NORMAL
 
@@ -26,7 +23,7 @@ def check_robot_reports(directory, run, expected_steps):
     import gzip  # noqa: PLC0415
     import json  # noqa: PLC0415
 
-    from newton._src.solvers.monolithic.iteration import _block_policy, blocks  # noqa: PLC0415
+    from newton._src.solvers.monolithic.iteration import blocks  # noqa: PLC0415
     from scripts.monolithic_reference.check_recording import sha  # noqa: PLC0415
 
     counts = {"full_converged": 0, "stopped": 0}
@@ -53,19 +50,11 @@ def check_robot_reports(directory, run, expected_steps):
             all_full = True
             for name, part in blocks(run):
                 value = report["blocks"][name]
-                goal = (
-                    _block_policy(run._config, "merit_absolute", name)
-                    + _block_policy(run._config, "merit_relative", name) * value["reference_merit"]
-                )
                 if (
                     value["size"] != part.stop - part.start
-                    or value["goal"] != goal
-                    or any(
-                        not np.isfinite(value[n]) or value[n] < 0
-                        for n in ("clipped_merit", "full_merit", "reference_merit")
-                    )
-                    or value["full_pass"] is not bool(value["full_merit"] <= goal)
-                    or value["clipped_pass"] is not bool(value["clipped_merit"] <= goal)
+                    or any(not np.isfinite(value[n]) or value[n] < 0 for n in ("clipped_ratio", "full_ratio"))
+                    or value["full_pass"] is not bool(value["full_ratio"] <= 1)
+                    or value["clipped_pass"] is not bool(value["clipped_ratio"] <= 1)
                 ):
                     raise ValueError("Robot contact report changed an original physical gate")
                 all_full &= value["full_pass"]
@@ -87,81 +76,52 @@ def check_robot_reports(directory, run, expected_steps):
     }
 
 
-def certify_configuration(run, fields, reference_digest):
-    """Reproduce the actual hash, then project only reviewed policy/resource fields."""
-    if _configuration_digest(fields) != run._kinematics.digest or run._states.precision_bits != 64:
+def certify_configuration(run, fields, reference_digest, *, precision_bits=64):
+    """Bind the actual constructor identity and report whether it equals the frozen reference.
+
+    Robot runs qualify on physical gates (D11), so a frozen-reference trajectory
+    comparison is diagnostic. The actual digest must reproduce from the
+    recorded fields; a differing reference only leaves the certificate
+    unauthenticated.
+    """
+    if _configuration_digest(fields) != run._kinematics.digest or run._states.precision_bits != precision_bits:
         raise ValueError("Actual constructor configuration digest differs")
-    projected = {name: np.asarray(value).copy() for name, value in fields.items()}
-    direction = projected.pop("direction_policy")
-    if direction.dtype != np.int32 or not np.array_equal(direction, np.array([1], np.int32)):
-        raise ValueError("Unreviewed Q1 direction policy")
-    removed = ["direction_policy=int32[1]"]
-    c = run._contact
-    algorithm = {"contact_dataflow", "contact_resources", "contact_spatial"}
-    if run._contact_spatial:
-        if c.law_margin != 0:
-            raise ValueError("Frozen experimental recipe requires zero law margin")
-        expected = {
-            "contact_dataflow": np.frombuffer(b"spatial-pool/newton-frozen/v1", np.uint8),
-            "contact_resources": np.array(
-                [
-                    c.pool.capacity,
-                    c.pool.max_support,
-                    c._batch.batch_capacity,
-                    run._coupled_config["guard_capacity"][1],
-                    c.candidate_capacity,
-                ],
-                np.int64,
-            ),
-            "contact_spatial": np.array([c.law_margin], np.float64),
-        }
-        for name, value in expected.items():
-            actual = projected.pop(name)
-            if actual.dtype != value.dtype or not np.array_equal(actual, value):
-                raise ValueError("Contact algorithm/resource identity differs")
-        guard = projected["guard_capacity"]
-        if guard.shape != (2,) or guard[1] != c.resource_identity[3]:
-            raise ValueError("Contact factor budget differs")
-        # The frozen constructor used the full static factor budget. Preserve its physical guard.
-        guard[1] = 3 * c.count
-        removed += [*sorted(algorithm), "guard_capacity[1]: full static factor budget"]
-    elif run._contact_pool or projected.keys() & algorithm:
-        raise ValueError("Frozen robot comparison supports legacy Q1 or explicit B3")
-    if _configuration_digest(projected).hex() != reference_digest:
-        raise ValueError("Projected configuration differs from frozen reference")
-    return _ConfigurationCertificate(run, fields, reference_digest, removed)
+    authenticated = run._kinematics.digest.hex() == reference_digest
+    reason = None if authenticated else "Configuration identity differs from the frozen reference"
+    return _ConfigurationCertificate(run, fields, reference_digest, authenticated, reason)
 
 
 class _ConfigurationCertificate:
-    def __init__(self, run, fields, reference, changes):
+    def __init__(self, run, fields, reference, authenticated, reason):
         self.run = run
         self.fields = {name: np.asarray(value).copy() for name, value in fields.items()}
         self.actual, self.reference = run._kinematics.digest.hex(), reference
-        self.changes = changes
+        self.authenticated, self.reason = authenticated, reason
 
     def validate(self):
-        if self.run._kinematics.digest.hex() != self.actual:
+        if self.run._kinematics.digest.hex() != self.actual or _configuration_digest(self.fields).hex() != self.actual:
             raise ValueError("Certified actual configuration digest changed")
-        certify_configuration(self.run, self.fields, self.reference)
         return self.reference, self.actual
 
     def receipt(self):
         self.validate()
         return {
-            "adapter": "frozen-robot-q1-b3/v1",
+            "adapter": "frozen-robot-identity/v2",
             "reference_digest": self.reference,
             "actual_digest": self.actual,
-            "authenticated_changes": self.changes,
+            "authenticated": self.authenticated,
+            "reason": self.reason,
         }
 
 
 class FrozenRobotFactory:
     """Select a bounded experiment at construction without changing the solver API/default."""
 
-    def __init__(self, scene, *, dataflow="legacy"):
-        if scene not in ("franka-cube", "sharpa-recorded-10mm") or dataflow not in ("legacy", "spatial", "default"):
+    def __init__(self, scene, *, dataflow="spatial", precision="fp64"):
+        if scene not in ("franka-cube", "sharpa-recorded-10mm") or dataflow not in ("spatial", "default"):
             raise ValueError("Unsupported frozen robot recipe")
         self.scene, self.dataflow = scene, dataflow
+        self.precision = solver_monolithic.SolverMonolithic.Precision(precision)
         self.fields, self.run, self.recorder = None, None, None
 
     def __call__(self, model, **options):
@@ -170,41 +130,41 @@ class FrozenRobotFactory:
         def capture(k, *args, **kwargs):
             original(k, *args, **kwargs)
             fields = {**k._source_values, **kwargs.get("extra_config", {})}
+            if self.precision == solver_monolithic.SolverMonolithic.Precision.FP32:
+                # FP32 kinematics add their native width to the digested fields.
+                fields["native_precision"] = np.array([32], dtype=np.int32)
             if _configuration_digest(fields) != k.digest:
                 raise ValueError("Captured constructor fields differ")
             captured.append({name: np.asarray(value).copy() for name, value in fields.items()})
 
         if self.run is not None or "contact_factor_capacity" in options:
             raise ValueError("Robot recipe cannot be reused or override resources")
-        if self.dataflow != "legacy":
-            # Sharpa retains the complete static resource bounds; calibration may reduce them later.
-            # Derive the exact supported enumeration from compact metadata, not a shape-count guess.
-            with patch.object(solver_monolithic, "ContactObjective", _PooledContactObjective):
-                complete = solver_monolithic.SolverMonolithic(model, contact_factor_capacity=0, **options)
-            context, resources = nullcontext(), {}
-            if self.dataflow == "spatial":
-                query = 8192 if self.scene == "franka-cube" else complete._contact.count
-                factory = partial(_SpatialContactObjective, candidate_capacity=query, law_margin=0.0)
-                resources["contact_factor_capacity"] = (
-                    24576 if self.scene == "franka-cube" else 3 * complete._contact.count
-                )
-                context = patch.object(solver_monolithic, "ContactObjective", factory)
-            with context, patch.object(_TreeKinematics, "__init__", capture):
-                run = solver_monolithic.SolverMonolithic(model, **resources, **options)
-            self.recorder = RobotContactRecorder(run, complete)
-        else:
-            with (
-                patch.object(solver_monolithic, "ContactObjective", ContactObjective),
-                patch.object(_TreeKinematics, "__init__", capture),
-            ):
-                run = solver_monolithic.SolverMonolithic(model, **options)
+        if solver_monolithic.SolverMonolithic.Precision(options.get("precision", "fp64")) != self.precision:
+            raise ValueError("Robot scene precision differs from its recipe")
+        # Sharpa retains the complete static resource bounds; calibration may reduce them later.
+        # Derive the exact supported enumeration from compact metadata, not a shape-count guess.
+        with pooled_audit_route():
+            complete = solver_monolithic.SolverMonolithic(model, contact_factor_capacity=0, **options)
+        resources = {}
+        if self.dataflow == "spatial":
+            # The reduced Franka bounds were calibrated in FP64. FP32 candidate envelopes are wider
+            # (Franka needs about 21000 of 23328 candidates), so FP32 keeps the complete bounds.
+            calibrated = (
+                self.scene == "franka-cube" and self.precision == solver_monolithic.SolverMonolithic.Precision.FP64
+            )
+            resources["contact_candidate_capacity"] = 8192 if calibrated else complete._contact.count
+            resources["contact_factor_capacity"] = 24576 if calibrated else 3 * complete._contact.count
+        with patch.object(_TreeKinematics, "__init__", capture):
+            run = solver_monolithic.SolverMonolithic(model, **resources, **options)
+        self.recorder = RobotContactRecorder(run, complete)
         if len(captured) != 1:
             raise ValueError("Expected one robot constructor configuration")
         self.run, self.fields = run, captured[0]
         return run
 
     def certify(self, reference_digest):
-        return certify_configuration(self.run, self.fields, reference_digest)
+        bits = 64 if self.precision == solver_monolithic.SolverMonolithic.Precision.FP64 else 32
+        return certify_configuration(self.run, self.fields, reference_digest, precision_bits=bits)
 
     def measure(self, run, state):
         if run is not self.run or self.recorder is None:
@@ -220,11 +180,10 @@ class FrozenRobotFactory:
         }
         return {
             "scene": self.scene,
-            "dataflow": "spatial" if self.run._contact_spatial else "legacy",
-            "precision": "fp64",
+            "dataflow": "spatial",
+            "precision": self.precision.value,
             "production_default": self.dataflow == "default",
-            "resources": c.resource_identity.tolist() if self.run._contact_pool else None,
-            "law_margin": c.law_margin if self.run._contact_spatial else None,
+            "resources": c.resource_identity.tolist(),
             "zero_overflow_required": True,
             "additional_approximation_budget": None,
             "numerical_policy": policy,
@@ -245,7 +204,16 @@ class RobotContactRecorder:
         report = self.audit.evaluate()
         k, b = complete._kinematics, complete._contact._batch
         h = self.audit.state._monolithic_coupled
-        args = b._state(self.audit.state.particle_q, k.poses, k.com, k.jt, k.jw, h.rigid_com, h.rigid_rotation)
+        args = b._state(
+            self.audit.state.particle_q,
+            k.poses,
+            k.com,
+            k.jt,
+            k.jw,
+            h.rigid_com,
+            h.rigid_rotation,
+            run._contact_steps(run._accepted),
+        )
         penetration, masked_penetration, slip_max, work, load = 0.0, 0.0, 0.0, 0.0, 0.0
         keys, omitted_sum = [], np.zeros(4)
         for mode in b._chunks():
@@ -257,7 +225,7 @@ class RobotContactRecorder:
             gap = b.current.distance.numpy()[:n] - b.samples.gaps.numpy()[:n]
             penetration = max(penetration, float(np.maximum(-gap, 0).max(initial=0)))
             normal = b.normal.numpy()[:n]
-            slide = b.current.y.numpy()[:n] - b._start_chunk.y.numpy()[:n]
+            slide = b.current.slip.numpy()[:n]
             slip = slide - np.einsum("ni,ni->n", normal, slide)[:, None] * normal
             friction = b.weights.numpy()[:n, 1, None] * slip
             gradient = b.current.gradient.numpy()[:n]

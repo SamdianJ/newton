@@ -16,6 +16,7 @@ import warp as wp
 import newton
 
 from .cable_benchmarks import CableBenchmark
+from .numerical_gates import loaded_reference_modules
 
 
 def main():
@@ -28,6 +29,7 @@ def main():
     parser.add_argument("--device", default="cpu")
     parser.add_argument("--pcg-mode", choices=("diagnostic", "production"), default="diagnostic")
     parser.add_argument("--use-cuda-graph", action="store_true")
+    parser.add_argument("--precision", choices=("fp64", "fp32"), default="fp64")
     parser.add_argument("--max-steps", type=int)
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--output", type=Path, required=True)
@@ -38,9 +40,7 @@ def main():
         raise RuntimeError("Benchmark imported Newton outside the tested checkout")
     files = [
         *sorted((source / "newton/_src/solvers/monolithic").glob("*.py")),
-        Path(__file__),
-        Path(__file__).with_name("cable_benchmarks.py"),
-        Path(__file__).with_name("cable_analytic.py"),
+        *loaded_reference_modules(),
         Path(__file__).with_name("cable_recipes.json"),
     ]
     receipt = {
@@ -82,7 +82,9 @@ def main():
             device=args.device,
             pcg_mode=args.pcg_mode,
             use_cuda_graph=args.use_cuda_graph,
+            precision=args.precision,
         )
+        receipt["precision"] = case.solver.precision.value
         if progress is not None:
             case.solver.load_checkpoint(case.state, args.output / "progress.npz")
             case.steps = progress["step"]

@@ -14,8 +14,7 @@ from .cloth import ClothObjective
 
 @wp.kernel
 def _residual(
-    x: wp.array[Any],
-    xn: wp.array[Any],
+    step: wp.array[Any],
     vn: wp.array[Any],
     forces: wp.array[wp.vec3],
     gravity: wp.vec3,
@@ -24,27 +23,34 @@ def _residual(
     offsets: wp.array[int],
     entries: wp.array[int],
     local: wp.array2d[Any],
+    rounding: wp.array2d[Any],
     rows: wp.array[int],
     dt: Any,
     raw: wp.array[Any],
+    absolute: wp.array[Any],
     output: wp.array[Any],
     energy: wp.array[Any],
 ):
     row = wp.tid()
     vertex, axis = row // 3, row % 3
     value = type(dt)(0.0)
+    magnitude = type(dt)(0.0)
     for i in range(offsets[row], offsets[row + 1]):
         entry = entries[i]
         value += local[entry // 18, entry % 18]
+        magnitude += rounding[entry // 18, entry % 18]
     force = type(dt)(forces[vertex][axis]) + mass[vertex] * type(dt)(gravity[axis])
-    displacement = x[vertex][axis] - xn[vertex][axis]
+    displacement = step[vertex][axis]
     difference = displacement - dt * vn[vertex][axis]
     value -= force
+    magnitude += wp.abs(force)
     e = -force * displacement
     if fixed[vertex] == 0:
         value += mass[vertex] * difference / (dt * dt)
+        magnitude += wp.abs(mass[vertex] * difference / (dt * dt))
         e += type(dt)(0.5) * mass[vertex] * difference * difference / (dt * dt)
     raw[row] = value
+    absolute[row] = magnitude
     energy[row] = e
     if rows[row] >= 0:
         output[rows[row]] = value
@@ -54,16 +60,16 @@ def _residual(
 def _tangent(
     entries: wp.array[int],
     mass: wp.array[Any],
-    matrix: wp.array3d[float],
+    matrix: wp.array3d[Any],
     dt: Any,
     offset: int,
-    output: wp.array[float],
+    output: wp.array[Any],
 ):
     i = wp.tid()
     entry = entries[i]
-    value = float(0.0)
+    value = output.dtype(0.0)
     if entry < 0:
-        value = float(mass[-entry - 1] / (dt * dt))
+        value = mass[-entry - 1] / (dt * dt)
     else:
         value = matrix[entry // 324, (entry % 324) // 18, entry % 18]
     output[offset + i] = value
@@ -82,19 +88,22 @@ def _candidate(
     predict: bool,
     trial: wp.array[Any],
     trial_velocity: wp.array[Any],
+    trial_step: wp.array[Any],
 ):
+    """Advance the exact step displacement; positions and velocity are formed once from it."""
     i = wp.tid()
     p = ids[i]
-    x = original[p]
+    step = type(original[0])()
     if rows[3 * i] >= 0:
-        x = accepted[p]
+        step = accepted[p]
         if predict:
-            x = original[p] + dt * velocity[p]
+            step = dt * velocity[p]
         elif alpha != type(dt)(0.0):
             for axis in range(3):
-                x[axis] += alpha * type(dt)(delta[rows[3 * i + axis]])
-    trial[p] = x
-    trial_velocity[p] = (x - original[p]) / dt
+                step[axis] += alpha * type(dt)(delta[rows[3 * i + axis]])
+    trial_step[p] = step
+    trial[p] = original[p] + step
+    trial_velocity[p] = step / dt
 
 
 @wp.kernel
@@ -102,14 +111,17 @@ def _path(
     triangles: wp.array2d[int],
     ids: wp.array[int],
     original: wp.array[Any],
+    accepted: wp.array[Any],
     trial: wp.array[Any],
     areas: wp.array2d[Any],
     status: wp.array[int],
 ):
     face = wp.tid()
     a, b, c = ids[triangles[face, 0]], ids[triangles[face, 1]], ids[triangles[face, 2]]
-    e, f = original[b] - original[a], original[c] - original[a]
-    de, df = trial[b] - trial[a] - e, trial[c] - trial[a] - f
+    e = (original[b] - original[a]) + (accepted[b] - accepted[a])
+    f = (original[c] - original[a]) + (accepted[c] - accepted[a])
+    de = (trial[b] - trial[a]) - (accepted[b] - accepted[a])
+    df = (trial[c] - trial[a]) - (accepted[c] - accepted[a])
     normal = wp.cross(e, f)
     length = wp.length(normal)
     n = normal / length
@@ -146,11 +158,12 @@ class ClothBlock:
         self.ids = wp.array(ids, dtype=int, device=device)
         self.mass = wp.array(obj["mass"], dtype=dtype, device=device)
         self.fixed = wp.array(obj["fixed"], dtype=int, device=device)
-        self.positions = wp.zeros(len(ids), dtype=vector, device=device)
-        self.original_x = wp.zeros_like(self.positions)
-        self.original_v = wp.zeros_like(self.positions)
+        self.step = wp.zeros(len(ids), dtype=vector, device=device)
+        self.original_x = wp.zeros_like(self.step)
+        self.original_v = wp.zeros_like(self.step)
         self.forces = wp.zeros(len(ids), dtype=wp.vec3, device=device)
         self.raw = wp.zeros(len(rows), dtype=dtype, device=device)
+        self.absolute = wp.zeros(len(rows), dtype=dtype, device=device)
         self.external_energy = wp.zeros_like(self.raw)
         contributions = [[] for _ in rows]
         rr, cc, values = [], [], []
@@ -185,18 +198,20 @@ class ClothBlock:
         ):
             wp.launch(_gather, self.ids.size, [source, self.ids, target], device=self.device)
 
-    def evaluate(self, state, gravity, dt, complete, *, build_tangent):
-        """Combine exact internal forces, external work and positional inertia."""
-        wp.launch(_gather, self.ids.size, [state.particle_q, self.ids, self.positions], device=self.device)
-        self.objective.evaluate(self.positions, build_tangent=build_tangent)
+    def evaluate(self, step, gravity, dt, complete, *, build_tangent):
+        """Combine exact internal forces, external work and positional inertia.
+
+        ``step`` is the state's particle displacement from the step start.
+        """
+        wp.launch(_gather, self.ids.size, [step, self.ids, self.step], device=self.device)
+        self.objective.evaluate(self.original_x, build_tangent=build_tangent, step=self.step)
         if self.objective.flags.numpy()[0]:
             raise ValueError("Invalid cloth geometry or membrane projection")
         wp.launch(
             _residual,
             self.raw.size,
             [
-                self.positions,
-                self.original_x,
+                self.step,
                 self.original_v,
                 self.forces,
                 gravity,
@@ -205,9 +220,11 @@ class ClothBlock:
                 self.offsets,
                 self.entries,
                 self.objective.residual,
+                self.objective.rounding,
                 self.rows,
                 self.dtype(dt),
                 self.raw,
+                self.absolute,
                 complete,
                 self.external_energy,
             ],
@@ -234,15 +251,19 @@ class ClothBlock:
             device=self.device,
         )
 
-    def candidate(self, accepted, original, trial, delta, alpha, dt, *, predict=False):
-        """Update free positions in the common trial and retain prescribed vertices."""
+    def candidate(self, accepted_step, original, trial, trial_step, delta, alpha, dt, *, predict=False):
+        """Update free positions in the common trial and retain prescribed vertices.
+
+        The trial step displacement is advanced exactly from the accepted one,
+        and the trial positions and velocities are formed from it.
+        """
         wp.launch(
             _candidate,
             self.ids.size,
             [
                 self.ids,
                 self.rows,
-                accepted.particle_q,
+                accepted_step,
                 original.particle_q,
                 original.particle_qd,
                 delta,
@@ -251,11 +272,12 @@ class ClothBlock:
                 predict,
                 trial.particle_q,
                 trial.particle_qd,
+                trial_step,
             ],
             device=self.device,
         )
 
-    def path_valid(self, accepted, trial):
+    def path_valid(self, original, accepted_step, trial_step):
         """Reject triangle collapse along the entire actual trial segment."""
         self.path_status.zero_()
         wp.launch(
@@ -264,8 +286,9 @@ class ClothBlock:
             [
                 self.objective.stencils,
                 self.ids,
-                accepted.particle_q,
-                trial.particle_q,
+                original.particle_q,
+                accepted_step,
+                trial_step,
                 self.objective.areas,
                 self.path_status,
             ],

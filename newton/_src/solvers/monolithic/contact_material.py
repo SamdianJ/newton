@@ -27,6 +27,10 @@ def _surface(
     directions: wp.array[Any],
     jacobian: wp.array2d[Any],
     flags: wp.array[int],
+    x_steps: wp.array[Any],
+    start_offsets: wp.array[Any],
+    begin: bool,
+    point_steps: wp.array[Any],
 ):
     i = wp.tid()
     a, b, angle = edges[i][0], edges[i][1], edges[i][2]
@@ -47,7 +51,12 @@ def _surface(
     perpendicular = wp.cross(t, d)
     axial = coordinates[i][0]
     zero = type(t)(0.0)
-    points[i] = (type(length)(1.0) - axial) * x[a] + axial * x[b] + u * d + v * perpendicular
+    offset = u * d + v * perpendicular
+    points[i] = (type(length)(1.0) - axial) * x[a] + axial * x[b] + offset
+    # The point's step: the axis step plus the change of its radius-size offset.
+    if begin:
+        start_offsets[i] = offset
+    point_steps[i] = (type(length)(1.0) - axial) * x_steps[a] + axial * x_steps[b] + (offset - start_offsets[i])
     directions[i] = (normals[i][1] * c - normals[i][2] * s) * d + (
         normals[i][1] * s + normals[i][2] * c
     ) * perpendicular
@@ -67,6 +76,12 @@ def _surface(
         column[j % 3] += bary
         jacobian[i, j] = column
     jacobian[i, 6] = -v * d + u * perpendicular
+
+
+@wp.kernel
+def _difference(a: wp.array[Any], b: wp.array[Any], out: wp.array[Any]):
+    i = wp.tid()
+    out[i] = a[i] - b[i]
 
 
 @wp.kernel
@@ -114,9 +129,10 @@ def _project_surface(
     if weights[i, 1] > type(weights[0, 0])(0.0) and wp.length(t) == type(weights[0, 0])(0.0):
         t = wp.normalize(wp.cross(n, axis))
     transverse = wp.cross(n, t)
-    candidates.weights[i, 0] = float(weights[i, 0])
-    candidates.weights[i, 1] = float(weights[i, 2])
-    candidates.weights[i, 2] = float(weights[i, 1])
+    candidates.weights[i, 0] = weights[i, 0]
+    candidates.weights[i, 1] = weights[i, 2]
+    candidates.weights[i, 2] = weights[i, 1]
+    candidates.rounding[i] = geometry.rounding[i]
     r, k = local_r[i], int(0)
     world = rotation * r
     for j in range(7):
@@ -204,17 +220,27 @@ class _MaterialSurface:
         self.theta_rows = wp.array(np.asarray(a.actors.maps["theta_to_global"]), dtype=int, device=batch.device)
         self.points = wp.zeros(len(a.cable_edges), dtype=batch.vector, device=batch.device)
         self.directions = wp.zeros_like(self.points)
+        self.start_offsets = wp.zeros_like(self.points)
+        self.point_steps = wp.zeros_like(self.points)
         self.jacobian = wp.zeros((len(a.cable_edges), 7), dtype=batch.vector, device=batch.device)
         self.anchor_x = wp.zeros(c.model.particle_count, dtype=batch.vector, device=batch.device)
+        self.x_steps = wp.zeros_like(self.anchor_x)
         self.anchor_d = wp.zeros(c._materials.theta_count, dtype=batch.vector, device=batch.device)
         self.flags = wp.zeros(2, dtype=int, device=batch.device)
 
-    def update(self, state, *, begin=False):
+    def update(self, state, x_steps=None, *, begin=False):
+        """Form the cable surface points and their steps from the particle steps ``x_steps``.
+
+        Without exact steps they are derived from the step-start positions.
+        """
         if not self.edges.size:
             return
         if begin:
             wp.copy(self.anchor_x, state.particle_q)
             wp.copy(self.anchor_d, state._monolithic_coupled.cable_ref_director)
+        if x_steps is None:
+            x_steps = self.x_steps
+            wp.launch(_difference, x_steps.size, [state.particle_q, self.anchor_x, x_steps], device=self.batch.device)
         wp.launch(_reset_flags, 1, [self.flags], device=self.batch.device)
         wp.launch(
             _surface,
@@ -231,6 +257,10 @@ class _MaterialSurface:
                 self.directions,
                 self.jacobian,
                 self.flags,
+                x_steps,
+                self.start_offsets,
+                begin,
+                self.point_steps,
             ],
             device=self.batch.device,
         )

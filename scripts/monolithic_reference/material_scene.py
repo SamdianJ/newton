@@ -9,7 +9,7 @@ from newton.solvers.experimental.monolithic import SolverMonolithic
 
 import newton
 
-from .material_recipes import RECIPE_PATH, build_case, shell_coefficients
+from .material_recipes import MATERIAL_RECIPE_PATH, build_case, shell_coefficients
 
 
 def load_fraction(step, common):
@@ -25,9 +25,24 @@ def load_fraction(step, common):
 class MaterialScene:
     """Keep scene construction and controls identical across device and restart paths."""
 
-    def __init__(self, name, *, recipe=RECIPE_PATH, device="cpu", pcg_mode="diagnostic", use_cuda_graph=False):
+    def __init__(
+        self,
+        name,
+        *,
+        recipe=MATERIAL_RECIPE_PATH,
+        device="cpu",
+        pcg_mode="diagnostic",
+        use_cuda_graph=False,
+        precision="fp64",
+    ):
         self.name = name
-        self.options = {"recipe": recipe, "device": device, "pcg_mode": pcg_mode, "use_cuda_graph": use_cuda_graph}
+        self.options = {
+            "recipe": recipe,
+            "device": device,
+            "pcg_mode": pcg_mode,
+            "use_cuda_graph": use_cuda_graph,
+            "precision": precision,
+        }
         self.case = case = build_case(name, recipe=recipe)
         self.common, self.recipe = c, r = case["common"], case["recipe"]
         self.dt, self.steps = c["dt"], 0
@@ -105,24 +120,24 @@ class MaterialScene:
             builder.add_triangle(*face, tri_ke=material[1], tri_ka=material[0], tri_kd=0, tri_drag=0, tri_lift=0)
         self.model = builder.finalize(device=device)
         self.rest = self.model.particle_q.numpy().astype(float)
+        retired = {"joint_residual_tolerance", "cloth_position_tolerance", "linear_absolute_tolerance"} & c.keys()
+        if retired:
+            raise ValueError(f"Recipe sets retired solver options {sorted(retired)}; use material_acceptance_v8.json")
+        if "precision" in c:
+            raise ValueError("Recipe fixes the precision; the runner selects it")
         self.solver = SolverMonolithic(
             self.model,
             cloth_inputs=cloth,
             cable_inputs=cables,
             mass_mode="lumped",
             joint_terms=SolverMonolithic.JointTerms(implicit_pd=True),
-            precision=SolverMonolithic.Precision.FP64,
+            precision=SolverMonolithic.Precision(precision),
             pcg_mode=SolverMonolithic.PCGMode(pcg_mode),
             use_cuda_graph=use_cuda_graph,
-            allow_nonconservative_energy=True,
-            joint_residual_tolerance=c.get("joint_residual_tolerance"),
-            cloth_position_tolerance=c.get("cloth_position_tolerance"),
             contact_stiffness=r.get("contact_stiffness", c["contact_stiffness"]),
             **{
                 key: c[key]
                 for key in (
-                    "contact_model",
-                    "globalization",
                     "publish_policy",
                     "friction_coefficient",
                     "friction_velocity_scale",
@@ -131,7 +146,6 @@ class MaterialScene:
                     "line_search_max_iterations",
                     "linear_max_iterations",
                     "linear_tolerance",
-                    "linear_absolute_tolerance",
                 )
             },
         )

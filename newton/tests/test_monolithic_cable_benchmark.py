@@ -14,6 +14,26 @@ from pathlib import Path
 import numpy as np
 
 
+def imported_reference_modules(name):
+    """Return the repository paths of every reference module a fresh import of ``name`` loads."""
+    root = Path(__file__).resolve().parents[2]
+    code = (
+        "import importlib, json, sys; importlib.import_module(sys.argv[1]); "
+        "print(json.dumps([m.__file__ for m in list(sys.modules.values()) if getattr(m, '__file__', None)]))"
+    )
+    result = subprocess.run(
+        [sys.executable, "-B", "-c", code, name],
+        cwd=root,
+        env={**os.environ, "CUDA_VISIBLE_DEVICES": ""},
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    package = root / "scripts/monolithic_reference"
+    paths = (Path(p).resolve() for p in json.loads(result.stdout.splitlines()[-1]))
+    return {str(p.relative_to(root)) for p in paths if p.parent == package and p.name != "__init__.py"}
+
+
 class TestMonolithicCableBenchmark(unittest.TestCase):
     def test_progress_resume_and_identity_rejection(self):
         """Resume actual steps exactly and reject mismatched, corrupt or failed evidence."""
@@ -52,11 +72,17 @@ class TestMonolithicCableBenchmark(unittest.TestCase):
             self.assertEqual(record["status"], "PARTIAL")
             self.assertEqual(record["metrics"]["steps"], 101)
             self.assertEqual(record["resumed_from_step"], 100)
+            self.assertEqual(record["precision"], "fp64")
+            # The receipt identity covers every reference module the benchmark imports.
+            self.assertLessEqual(
+                imported_reference_modules("scripts.monolithic_reference.cable_benchmarks"), record["sha256"].keys()
+            )
             with np.load(root / "resumed/final.npz") as resumed, np.load(root / "continuous/final.npz") as continuous:
                 for key in resumed.files:
                     np.testing.assert_array_equal(resumed[key], continuous[key])
-            error = run("resumed", "--resume", "--ea-multiplier", "10", success=False)
-            self.assertIn("identical source, recipe and execution arguments", error)
+            for options in (("--ea-multiplier", "10"), ("--precision", "fp32")):
+                error = run("resumed", "--resume", *options, success=False)
+                self.assertIn("identical source, recipe and execution arguments", error)
             self.assertEqual(receipt.read_bytes(), original)
             record["status"] = "FAIL"
             receipt.write_text(json.dumps(record))

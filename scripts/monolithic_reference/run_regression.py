@@ -1,7 +1,11 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 The Newton Developers
 # SPDX-License-Identifier: Apache-2.0
 
-"""Manually run retained FP64 regressions and the large rigid collision nightly case."""
+"""Manually run the production robot scenes and the large rigid collision nightly case.
+
+Robot cases qualify on physical-plausibility gates; comparison with the
+recorded reference trajectories is reported as a diagnostic only.
+"""
 
 import argparse
 import hashlib
@@ -25,14 +29,14 @@ from scripts.monolithic_reference.retained_assets import validate_inputs as vali
 from scripts.monolithic_reference.run_baseline import cases, module_origins, sha
 
 ROOT = Path(__file__).resolve().parents[2]
+RETAINED_REFERENCE_COUNT = 10
 
 
 def select_cases(profile, filters=()):
-    """Expand the shared T0 case definitions before applying explicit filters."""
-    full = cases()
+    """Select the production robot scenes, adding the rigid stack nightly, then apply filters."""
     if profile not in ("dev", "full", "nightly"):
         raise ValueError(f"Unknown scene profile: {profile}")
-    selected = full if profile in ("full", "nightly") else [full[0], full[-1]]
+    selected = cases()
     if profile == "nightly":
         path = ROOT / "scripts/monolithic_reference/fixtures/rigid_stack_large_v1.json"
         rigid = json.loads(path.read_text())
@@ -61,12 +65,30 @@ def aggregate(results, filtered):
     if any(row["status"] not in ("PASS", "PARTIAL") for row in results):
         return "FAIL"
     identities = {
-        (row.get("commit"), row.get("source_sha256"), row.get("input_manifest_sha256"), row.get("contact_dataflow"))
+        (
+            row.get("commit"),
+            row.get("source_sha256"),
+            row.get("input_manifest_sha256"),
+            row.get("contact_dataflow"),
+            row.get("precision"),
+        )
         for row in results
     }
     if len(identities) > 1:
         return "FAIL"
     return "PARTIAL" if filtered or any(row["status"] == "PARTIAL" for row in results) else "PASS"
+
+
+def qualify_robot(scene, summary, comparison, *, gates):
+    """Gate on physical plausibility; proposed gates and trajectory comparison are diagnostics."""
+    from scripts.monolithic_reference.physical_gates import evaluate_robot  # noqa: PLC0415
+
+    result = evaluate_robot(summary, gates["robot"][scene])
+    result["gate_status"] = gates["status"]
+    result["diagnostic_comparison"] = comparison.get("status")
+    if result["status"] == "PASS" and gates["status"] != "FROZEN":
+        result["status"] = "PARTIAL"
+    return result
 
 
 def finalize_case(destination, receipt, exit_code, retention):
@@ -93,7 +115,8 @@ def write_report(output, summary):
     lines = [
         "# Monolithic scene regression",
         "",
-        f"Profile: {summary['profile']}; status: {summary['status']}; complete: {summary['complete']}.",
+        f"Profile: {summary['profile']}; precision: {summary['precision']}; status: {summary['status']}; "
+        f"complete: {summary['complete']}.",
         "Component tests: NOT_RUN_BY_SCENE_RUNNER. Stopped is not convergence.",
         "",
         "| Case | Result | Converged | Stopped | Recording retained | Median ms | Steps/s | Receipt |",
@@ -130,9 +153,13 @@ def validate_inputs():
 def reference_binding(case):
     """Verify the selected reference before building a scene or taking any steps."""
     rows = json.loads((ASSET_ROOT / "references.json").read_text())
-    expected = {f"{c['id']}--fp64" for c in cases()}
-    if len(rows) != len(expected) or {row["case"] for row in rows} != expected:
+    # The immutable index keeps the ten historical FP64 recordings; the current
+    # cases bind to a subset of them.
+    indexed = {row["case"] for row in rows}
+    if len(rows) != RETAINED_REFERENCE_COUNT or len(indexed) != len(rows):
         raise ValueError("Retained reference index must contain the exact ten FP64 cases")
+    if not {f"{c['id']}--fp64" for c in cases()} <= indexed:
+        raise ValueError("Retained reference index lacks a current case")
     entry = next(row for row in rows if row["case"] == f"{case['id']}--fp64")
     directory = ASSET_ROOT / entry["retained_path"]
     if not directory.resolve().is_relative_to((ASSET_ROOT / "data/reference").resolve()):
@@ -182,10 +209,13 @@ def reference_binding(case):
     return reference, controls, native_controls, envelopes, {**entry, "comparison_policy": policy}
 
 
-def worker(case, output, *, contact_dataflow="legacy", max_steps=None):
-    """Run a complete scene and validate recordings against the frozen envelopes."""
+def worker(case, output, *, max_steps=None, precision="fp64"):
+    """Run a complete scene and validate recordings against the frozen envelopes.
+
+    The retained references are FP64, so an FP32 run skips the diagnostic trajectory comparison.
+    """
     output.mkdir(parents=True, exist_ok=False)
-    receipt = {"case": case, "status": "FAIL", "source_root": str(ROOT)}
+    receipt = {"case": case, "status": "FAIL", "source_root": str(ROOT), "precision": precision}
     source_hashes = {
         str(p.relative_to(ROOT)): sha(p)
         for folder in ("newton", "scripts/monolithic_reference")
@@ -199,7 +229,7 @@ def worker(case, output, *, contact_dataflow="legacy", max_steps=None):
         if case.get("kind") == "rigid_stack":
             from scripts.monolithic_reference.run_rigid_stack import record_run  # noqa: PLC0415
 
-            scene = record_run(output, max_steps=max_steps)
+            scene = record_run(output, max_steps=max_steps, precision=precision)
             receipt.update({name: value for name, value in scene.items() if name != "status"})
             if receipt["scene_input_sha256"] != case["input_sha256"]:
                 raise ValueError("Rigid fixture changed after case selection")
@@ -219,7 +249,7 @@ def worker(case, output, *, contact_dataflow="legacy", max_steps=None):
             check_robot_reports,
         )
 
-        factory = FrozenRobotFactory(case["id"].split("--")[0], dataflow=contact_dataflow)
+        factory = FrozenRobotFactory(case["id"].split("--")[0], dataflow="spatial", precision=precision)
         certificate = None
         limit = min(max_steps, case["steps"]) if max_steps is not None else case["steps"]
 
@@ -241,11 +271,10 @@ def worker(case, output, *, contact_dataflow="legacy", max_steps=None):
                 device="cuda:0",
                 output=recording,
                 asset_cache=INPUTS / "franka/sdf-cache",
-                law=case["law"],
-                globalization=case["globalization"],
                 solver_factory=factory,
-                contact_recorder=factory.measure if contact_dataflow == "spatial" else None,
+                contact_recorder=factory.measure,
                 max_steps=max_steps,
+                precision=precision,
             )
             example = Example(ViewerNull(), args)
             certificate = factory.certify(binding["config_digest"])
@@ -270,8 +299,9 @@ def worker(case, output, *, contact_dataflow="legacy", max_steps=None):
                 trajectory=INPUTS / "sharpa/recorded-control.json",
                 expected_controls=controls,
                 solver_factory=factory,
-                contact_recorder=factory.measure if contact_dataflow == "spatial" else None,
+                contact_recorder=factory.measure,
                 max_steps=max_steps,
+                precision=precision,
             )
 
             def certify(solver):
@@ -287,20 +317,22 @@ def worker(case, output, *, contact_dataflow="legacy", max_steps=None):
             if not complete and max_steps is None:
                 raise ValueError("Sharpa did not publish its complete trajectory")
         receipt["recording"] = check(recording, limit, require_complete=max_steps is None)
-        if contact_dataflow == "spatial":
-            receipt["full_system"] = check_robot_reports(recording, factory.run, limit)
-        if max_steps is None:
-            receipt["comparison"] = compare(
-                reference,
-                recording,
-                envelopes,
-                legacy_fp64=True,
-                native_controls=native_controls,
-                actor_layout_migration=True,
-                configuration_certificate=certificate,
-            )
-            if receipt["comparison"]["status"] not in ("PASS_EXACT", "PASS_FROZEN_ENVELOPE"):
-                raise ValueError("Recording differs outside the frozen envelope")
+        receipt["full_system"] = check_robot_reports(recording, factory.run, limit)
+        if precision != "fp64":
+            receipt["comparison"] = {"status": "NOT_RUN_PRECISION"}
+        elif max_steps is None:
+            try:
+                receipt["comparison"] = compare(
+                    reference,
+                    recording,
+                    envelopes,
+                    legacy_fp64=True,
+                    native_controls=native_controls,
+                    actor_layout_migration=True,
+                    configuration_certificate=certificate,
+                )
+            except Exception as error:
+                receipt["comparison"] = {"status": "DIAGNOSTIC_ERROR", "error": str(error)}
         else:
             receipt["comparison"] = {"status": "NOT_RUN_PREFIX_ONLY"}
         actual = json.loads((recording / "configuration.json").read_text())
@@ -309,7 +341,16 @@ def worker(case, output, *, contact_dataflow="legacy", max_steps=None):
         receipt["modules"] = module_origins(ROOT, source_hashes)
         if any(not (ROOT / name).is_file() or sha(ROOT / name) != value for name, value in source_hashes.items()):
             raise ValueError("Source changed during robot acceptance")
-        receipt["status"] = "PASS" if max_steps is None else "PARTIAL"
+        if max_steps is None:
+            from scripts.monolithic_reference.physical_gates import GATES_PATH, load_gates  # noqa: PLC0415
+
+            summary = json.loads((recording / "summary.json").read_text())
+            gates = load_gates(allow_proposed=True)
+            receipt["physical_gate_sha256"] = sha(GATES_PATH)
+            receipt["physical"] = qualify_robot(case["id"].split("--")[0], summary, receipt["comparison"], gates=gates)
+            receipt["status"] = receipt["physical"]["status"]
+        else:
+            receipt["status"] = "PARTIAL"
     except Exception:
         receipt["exception"] = traceback.format_exc()
     finally:
@@ -333,14 +374,10 @@ def main():
         help="Keep compact success receipts and full failure recordings by default",
     )
     parser.add_argument("--worker", action="store_true", help=argparse.SUPPRESS)
-    parser.add_argument(
-        "--contact-dataflow",
-        choices=("legacy", "spatial"),
-        default="legacy",
-        help="Robot recipe: legacy Q1 or frozen B3; the added rigid nightly case always uses B3/lambda-zero",
-    )
     parser.add_argument("--max-steps", type=int, help="Bounded smoke only; always PARTIAL, no trajectory qualification")
+    parser.add_argument("--precision", choices=("fp64", "fp32"), default="fp64", help="Solver precision of every case")
     args = parser.parse_args()
+    args.contact_dataflow = "spatial"
     if args.max_steps is not None and args.max_steps <= 0:
         parser.error("--max-steps must be positive")
     try:
@@ -355,9 +392,7 @@ def main():
     if args.worker:
         if len(selected) != 1:
             parser.error("Worker requires exactly one case")
-        return worker(
-            selected[0], args.output.resolve(), contact_dataflow=args.contact_dataflow, max_steps=args.max_steps
-        )
+        return worker(selected[0], args.output.resolve(), max_steps=args.max_steps, precision=args.precision)
     args.output.mkdir(parents=True, exist_ok=False)
     results = []
     for case in selected:
@@ -374,8 +409,8 @@ def main():
             "--worker",
             "--output",
             str(destination),
-            "--contact-dataflow",
-            args.contact_dataflow,
+            "--precision",
+            args.precision,
         ]
         if args.max_steps is not None:
             command += ["--max-steps", str(args.max_steps)]
@@ -398,6 +433,7 @@ def main():
                 ).hexdigest(),
                 "input_manifest_sha256": receipt.get("input_manifest_sha256"),
                 "contact_dataflow": args.contact_dataflow,
+                "precision": receipt.get("precision"),
                 "effective_contact_dataflow": receipt.get("effective_contact_dataflow", args.contact_dataflow),
                 "scene_input_sha256": receipt.get("scene_input_sha256"),
                 "performance": receipt.get("performance", {}),
@@ -406,6 +442,7 @@ def main():
         )
         summary = {
             "profile": args.profile,
+            "precision": args.precision,
             "status": aggregate(results, bool(args.case)),
             "complete": len(results) == len(selected),
             "filtered": bool(args.case),

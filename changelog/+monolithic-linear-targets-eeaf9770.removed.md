@@ -1,0 +1,1 @@
+Remove the `linear_absolute_tolerance` option of experimental `SolverMonolithic`: each linear solve now stops at the physical limits that its direction must meet, so the absolute scaled tolerance no longer applies. Material acceptance recipes before `material_acceptance_v8.json` are rejected.

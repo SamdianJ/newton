@@ -16,6 +16,7 @@ import warp as wp
 import newton
 
 from .cloth_benchmarks import ClothBenchmark
+from .numerical_gates import loaded_reference_modules
 
 
 def main():
@@ -25,6 +26,7 @@ def main():
     parser.add_argument("--device", default="cpu")
     parser.add_argument("--pcg-mode", choices=("diagnostic", "production"), default="diagnostic")
     parser.add_argument("--use-cuda-graph", action="store_true")
+    parser.add_argument("--precision", choices=("fp64", "fp32"), default="fp64")
     parser.add_argument("--max-steps", type=int)
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
@@ -34,11 +36,8 @@ def main():
         raise RuntimeError("Benchmark imported Newton outside tested checkout")
     files = [
         *sorted((source / "newton/_src/solvers/monolithic").glob("*.py")),
-        Path(__file__),
-        *[
-            Path(__file__).with_name(name)
-            for name in ("cloth_benchmarks.py", "cloth_recipes.json", "cloth_oracle.py", "material_recipes.py")
-        ],
+        *loaded_reference_modules(),
+        Path(__file__).with_name("cloth_recipes.json"),
     ]
     receipt = {
         "status": "INCOMPLETE",
@@ -56,7 +55,14 @@ def main():
     path.write_text(json.dumps(receipt, indent=2) + "\n")
     start, case = time.perf_counter(), None
     try:
-        case = ClothBenchmark(args.kind, device=args.device, pcg_mode=args.pcg_mode, use_cuda_graph=args.use_cuda_graph)
+        case = ClothBenchmark(
+            args.kind,
+            device=args.device,
+            pcg_mode=args.pcg_mode,
+            use_cuda_graph=args.use_cuda_graph,
+            precision=args.precision,
+        )
+        receipt["precision"] = case.solver.precision.value
         stop = min(args.max_steps or case.total_steps, case.total_steps)
         while case.steps < stop:
             if case.steps == case.recipe["checkpoint_step"] and case.steps + 1 <= stop:

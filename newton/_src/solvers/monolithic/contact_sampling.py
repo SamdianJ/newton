@@ -66,6 +66,17 @@ def _surface_samples(geo, scale, mesh=None, *, _return_triangles=False):
     return (*result, tri) if _return_triangles else result
 
 
+def _canonical_shapes(actors, shapes):
+    """Order shapes by owning actor and actor-local index, then unowned shapes in Model order.
+
+    Contact sample identities, and so the order in which reductions add contact
+    terms, follow this order rather than Model shape creation order.
+    """
+    owner, local = actors.maps["shape_owner"], actors.maps["shape_local"]
+    unowned = len(actors.actors)
+    return sorted((int(s) for s in shapes), key=lambda s: (owner[s], local[s]) if owner[s] >= 0 else (unowned, s))
+
+
 def _checked_contact_capacity(count, support, triplets, base=0):
     if min(count, support, triplets, base) < 0 or max(3 * count + 1, support, base + triplets) >= 2**31:
         raise ValueError("Actor contact capacity exceeds int32")
@@ -159,10 +170,12 @@ class ContactSamples:
             )
             / 2
         )
-        tet_targets = sorted(s for s in self.rigid_shapes if flags[s] & int(ShapeFlags.COLLIDE_PARTICLES))
+        tet_targets = _canonical_shapes(
+            actors, [s for s in self.rigid_shapes if flags[s] & int(ShapeFlags.COLLIDE_PARTICLES)]
+        )
         cloth_faces = set() if _materials is None else {int(f) for obj in _materials.cloth for f in obj["triangle_ids"]}
         if _materials is not None:
-            tet_targets = np.flatnonzero(flags & int(ShapeFlags.COLLIDE_PARTICLES)).tolist()
+            tet_targets = _canonical_shapes(actors, np.flatnonzero(flags & int(ShapeFlags.COLLIDE_PARTICLES)))
         particle_world = model.particle_world.numpy() if _materials is not None else None
         for face, tri in enumerate(triangles):
             if face in cloth_faces:
@@ -199,8 +212,12 @@ class ContactSamples:
                     )
         surfaces, seen = {}, set()
         targets_used = set(tet_targets)
-        for model_pair in pairs:
-            a, b = map(int, model_pair)
+        # Pairs, and each pair's two directions, follow the canonical shape order.
+        rank = {s: i for i, s in enumerate(_canonical_shapes(actors, range(model.shape_count)))}
+        ordered = sorted(
+            (sorted(map(int, pair), key=rank.get) for pair in pairs), key=lambda p: (rank[p[0]], rank[p[1]])
+        )
+        for a, b in ordered:
             if owner[a] == owner[b] or not (a in self.rigid_shapes or b in self.rigid_shapes):
                 continue
             pair = tuple(sorted((a, b)))

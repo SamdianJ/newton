@@ -53,8 +53,6 @@ class TestMonolithicCableSolver(unittest.TestCase):
                 solver = SolverMonolithic(
                     model,
                     cable_inputs=cables,
-                    contact_model="C-EE",
-                    globalization="ResNorm",
                     friction_velocity_scale=0.1,
                     mass_mode="lumped",
                     pcg_mode=self.pcg_mode,
@@ -73,24 +71,9 @@ class TestMonolithicCableSolver(unittest.TestCase):
                 np.testing.assert_array_equal(state.particle_q.numpy()[:-1], target[:-1])
                 self.assertAlmostEqual(state.particle_q.numpy()[-1, 0] - 1, float(force[-1, 0]) / 60, delta=1e-10)
 
-    def test_physical_residual_tolerances(self):
-        """Honor tighter physical force caps and bind them to checkpoint identity."""
-        for name in ("cable_position_tolerance", "cable_theta_tolerance"):
-            for value in (0, -1, float("nan"), float("inf"), True):
-                with self.subTest(name=name, value=value), self.assertRaises(ValueError):
-                    self.scene(cloth=False, cables=1, **{name: value})
-        for value in (1e-300, 1e300):
-            with self.assertRaises(ValueError):
-                self.scene(
-                    cloth=False, cables=1, precision=SolverMonolithic.Precision.FP32, cable_position_tolerance=value
-                )
-        _, solver = self.scene(
-            cloth=False,
-            cables=1,
-            fixed_theta=(True, False),
-            cable_position_tolerance=1e-11,
-            cable_theta_tolerance=1e-13,
-        )
+    def test_tiny_loads_resolved_per_row(self):
+        """Resolve sub-nanonewton forces and picometre torques row by row instead of accepting rest."""
+        _, solver = self.scene(cloth=False, cables=1, fixed_theta=(True, False))
         state = solver.create_state(dt=0.1)
         force = state.particle_f.numpy().copy()
         force[-1, 2] = 2e-10
@@ -101,35 +84,11 @@ class TestMonolithicCableSolver(unittest.TestCase):
         self.assertTrue(solver.last_stats.converged, solver.last_stats.status)
         self.assertGreater(state.particle_q.numpy()[-1, 2], 0.0)
         self.assertGreater(state._monolithic_coupled.cable_theta.numpy()[1], 7.2)
-        groups = solver.last_stats.variational["material_blocks"]
-        self.assertLessEqual(groups["cable_0_x"]["raw_residual_cable_0_x_norm"], 1e-11)
-        self.assertLessEqual(groups["cable_0_theta"]["raw_residual_cable_0_theta_norm"], 1e-13)
-        _, other = self.scene(cloth=False, cables=1, fixed_theta=(True, False))
-        target = other.create_state(dt=0.1)
-        with tempfile.TemporaryDirectory() as tmp:
-            path = Path(tmp) / "state.npz"
-            solver.save_checkpoint(state, path)
-            with self.assertRaises(ValueError):
-                other.load_checkpoint(target, path)
-
-    def test_fp32_scaled_goal_keeps_independent_cable_caps(self):
-        """Apply the explicit FP32 global goal without overriding physical cable caps."""
-        for tolerance, moves in ((1e-5, False), (1e-8, True)):
-            _, solver = self.scene(
-                cloth=False,
-                cables=1,
-                fixed_theta=(True, True),
-                precision=SolverMonolithic.Precision.FP32,
-                fp32_absolute_tolerance=2e-5,
-                cable_position_tolerance=tolerance,
-            )
-            state = solver.create_state(dt=0.1)
-            force = state.particle_f.numpy().copy()
-            force[-1, 2] = 5e-6
-            state.particle_f.assign(force)
-            solver.step(state, state, solver.create_control(), dt=0.1)
-            self.assertTrue(solver.last_stats.converged, solver.last_stats.status)
-            self.assertEqual(bool(state.particle_q.numpy()[-1, 2] > 0), moves)
+        residual = np.asarray(solver.last_stats.variational["residual"])
+        rows = solver._criterion.rows
+        for unit, load in ((0, 2e-10), (1, 2e-12)):
+            # Every row lies within its own tolerance, far below the applied load.
+            self.assertLess(np.abs(residual[rows.units == unit]).max(), 0.5 * load)
 
     def test_transverse_force_and_theta_boundary(self):
         """Advance positions and massless theta together through ordinary step()."""
@@ -211,13 +170,20 @@ class TestMonolithicCableSolver(unittest.TestCase):
         state = solver.create_state(dt=0.01)
         solver.step(state, state, solver.create_control(), dt=0.01)
         accepted, trial = solver._accepted, solver._trial
+        start = solver._original.particle_q.numpy()
+
+        def place(target, x):
+            # The solver advances positions only through their step displacement.
+            target.particle_q.assign(x)
+            solver._displacement(target).assign(x - start)
+
         x = state.particle_q.numpy().copy()
         x[1] = x[0] + [0, 1, 0]
         x[2] = x[1] + [1, 0, 0]
-        accepted.particle_q.assign(x)
+        place(accepted, x)
         x[1] = x[0] + [0, -1, 0]
         x[2] = x[1] + [1, 0, 0]
-        trial.particle_q.assign(x)
+        place(trial, x)
         self.assertFalse(solver._domain(trial))
 
     def test_permanent_gauge_checks_omitted_torque(self):
@@ -233,7 +199,7 @@ class TestMonolithicCableSolver(unittest.TestCase):
             np.testing.assert_array_equal(values, before[name], err_msg=name)
 
     def test_slender_cantilever_direction(self):
-        """Qualify corrected native directions despite FP32 slender-beam conditioning."""
+        """Qualify slender-beam directions by one true-residual check per solve."""
         case = CableBenchmark(
             "cantilever",
             segments=128,
@@ -253,8 +219,6 @@ class TestMonolithicCableSolver(unittest.TestCase):
             cloth=False,
             cables=1,
             fixed_theta=(False, False),
-            globalization="Armijo",
-            contact_model="C-EE",
             newton_max_iterations=200,
             linear_tolerance=0.5,
         )
@@ -282,6 +246,94 @@ class TestMonolithicCableSolver(unittest.TestCase):
         detail = solver.last_stats.variational
         self.assertEqual(detail["publication_status"], "STOPPED_ACCEPTED")
         self.assertIn("cable_0_theta", detail["stopped_candidate"]["final_ratios"])
+
+    def test_fp32_frames_follow_exact_edges(self):
+        """Admit FP32 frames that follow the exact edges of rounded far, short-edged coordinates."""
+        from newton._src.solvers.monolithic.material_inputs import _cable_geometry  # noqa: PLC0415
+
+        case = CableBenchmark("cantilever", segments=256, precision="fp32", device=self.device)
+        states = case.solver._states
+        state = states.copy(case.state)
+        history = state._monolithic_coupled
+        # A helix 4 m from the origin: rounding the stored coordinates tilts its 6 mm edges
+        # by ~1e-5, while the frames follow the exact increment-form edges.
+        s = np.linspace(0.0, 1.0, 257)
+        x = np.c_[4.0 + s, 0.3 * np.cos(4 * s), 0.3 * np.sin(4 * s)]
+        tangent = np.diff(x, axis=0)
+        tangent /= np.linalg.norm(tangent, axis=1)[:, None]
+        director = np.cross(tangent, [1.0, 0.0, 0.0])
+        director /= np.linalg.norm(director, axis=1)[:, None]
+        twist = _cable_geometry(x, director)[3]
+        state.particle_q.assign(x.astype(np.float32))
+        history.bound_x.assign(x.astype(np.float32))
+
+        def frames(director, twist):
+            for prefix in ("cable_", "cable_bound_"):
+                getattr(history, prefix + "ref_director").assign(director.astype(np.float32))
+                getattr(history, prefix + "ref_twist").assign(twist.astype(np.float32))
+
+        frames(director, twist)
+        states.validate(state)
+        # A frame tilted beyond the rounding bound is still rejected.
+        tilted = director.copy()
+        tilted[100] = np.cos(1e-3) * director[100] + np.sin(1e-3) * tangent[100]
+        frames(tilted, twist)
+        with self.assertRaisesRegex(ValueError, "perpendicular"):
+            states.validate(state)
+        changed = twist.copy()
+        changed[100] += 1e-3
+        frames(director, changed)
+        with self.assertRaisesRegex(ValueError, "twist"):
+            states.validate(state)
+
+    def test_fp32_published_frames_stay_unit(self):
+        """Keep FP32 reference directors unit across steps instead of accumulating transport rounding."""
+        case = CableBenchmark("cantilever", segments=32, precision="fp32", device=self.device)
+        for _ in range(120):
+            case.step()
+        directors = case.state._monolithic_coupled.cable_ref_director.numpy().astype(float)
+        self.assertLess(np.abs(np.linalg.norm(directors, axis=1) - 1).max(), np.finfo(np.float32).eps)
+
+    def test_published_frames_stay_perpendicular(self):
+        """Publish each director perpendicular to its step's exact edge, so transport rounding cannot accumulate."""
+        from newton._src.solvers.monolithic.cable_system import _publish_frame  # noqa: PLC0415
+
+        rng = np.random.default_rng(4)
+        tangent = rng.standard_normal((16, 3))
+        tangent /= np.linalg.norm(tangent, axis=1)[:, None]
+        director = np.cross(tangent, rng.standard_normal((16, 3)))
+        director /= np.linalg.norm(director, axis=1)[:, None]
+        # A transported director a little off its edge's normal plane and unit length.
+        drifted = (director + 1e-5 * tangent) * (1 + 1e-6)
+        published = wp.zeros(16, dtype=wp.vec3, device=self.device)
+        twist = wp.zeros(15, dtype=float, device=self.device)
+        wp.launch(
+            _publish_frame,
+            16,
+            [
+                wp.array(drifted, dtype=wp.vec3, device=self.device),
+                wp.array(tangent, dtype=wp.vec3, device=self.device),
+                wp.zeros(15, dtype=float, device=self.device),
+                0,
+                0,
+                published,
+                twist,
+            ],
+            device=self.device,
+        )
+        result = published.numpy().astype(float)
+        eps = np.finfo(np.float32).eps
+        self.assertLess(np.abs(np.sum(result * tangent, axis=1)).max(), 4 * eps)
+        self.assertLess(np.abs(np.linalg.norm(result, axis=1) - 1).max(), 4 * eps)
+        np.testing.assert_allclose(result, director, atol=1e-4)
+
+    def test_fp32_straight_rod_responds_to_small_load(self):
+        """Resolve a small load on an axis-aligned FP32 rod instead of accepting it under the rounding floor."""
+        case = CableBenchmark("cantilever", segments=128, precision="fp32", device=self.device)
+        for _ in range(3):
+            case.step()
+            self.assertGreater(case.solver.last_stats.nonlinear_iterations, 0)
+        self.assertGreater(abs(case.state.particle_q.numpy()[-1, case.axis]), 0.0)
 
     def test_consistent_tet_mass_excludes_cable_particles(self):
         """Assemble a consistent-mass tet and a line-density cable in one solve."""

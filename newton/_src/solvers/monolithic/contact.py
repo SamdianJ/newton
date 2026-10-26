@@ -3,7 +3,7 @@
 
 """Private full-pair contact components; no step or publication policy.
 
-C-EE/C-IE/C-II use current and frozen start geometry, not historical spring/Huber
+The C-IE law uses current and frozen start geometry, not historical spring/Huber
 xi state. Contact factors are shared through linear; geometry and smooth SDF
 queries do not depend on the historical contact module.
 """
@@ -18,16 +18,9 @@ import warp as wp
 
 from ...geometry import GeoType, ShapeFlags
 from ...geometry.sdf_texture import TextureSDFData
-from .bsr import (
-    _append_monolithic_contact_factor_triplets,
-    _MonolithicContactFactors,
-    _MonolithicScalarTriplets,
-)
-from .contact_geometry import _shape64
-from .contact_sampling import ContactSamples, _checked_contact_capacity
+from .contact_sampling import ContactSamples, _canonical_shapes, _checked_contact_capacity
 from .linear_types import MonolithicLinearLayout
-from .residual import _accumulate_rows, _row_gather_map
-from .smooth_sdf import _sdf_type, smooth_query
+from .smooth_sdf import _sdf_type
 
 
 class ContactStatus(enum.IntEnum):
@@ -47,6 +40,10 @@ def _geometry_type(dtype):
     @wp.struct
     class Geometry:
         y: wp.array[vector]
+        # Target-local slip y - y_n formed from the step increments.
+        slip: wp.array[vector]
+        # Length by which rounding the local point y can move the gap.
+        rounding: wp.array[dtype]
         gradient: wp.array[vector]
         distance: wp.array[dtype]
         rotation: wp.array[matrix]
@@ -89,82 +86,6 @@ def _reset_flags(flags: wp.array[int]):
 
 
 @wp.kernel
-def _geometry(
-    x: wp.array[Any],
-    poses: wp.array[Any],
-    com: wp.array[Any],
-    jt: wp.array2d[Any],
-    jw: wp.array2d[Any],
-    triangles: wp.array2d[int],
-    shapes: wp.array[int],
-    bodies: wp.array[int],
-    transforms: wp.array[Any],
-    types: wp.array[int],
-    scales: wp.array[Any],
-    sdf_indices: wp.array[int],
-    table: wp.array[TextureSDFData],
-    smooth_table: wp.array[Any],
-    quaternion_tolerance: Any,
-    out: Any,
-    flags: wp.array[int],
-):
-    key = wp.tid()
-    shape = shapes[key % shapes.shape[0]]
-    face = key / (3 * shapes.shape[0])
-    slot = (key / shapes.shape[0]) % 3
-    a, b, c = x[triangles[face, 0]], x[triangles[face, 1]], x[triangles[face, 2]]
-    normal = wp.cross(b - a, c - a)
-    length = wp.length(normal)
-    if not wp.isfinite(length) or length == type(x[0][0])(0.0):
-        _failure(flags, key, 2)
-        return
-    sample = type(x[0])(0.0)
-    for node in range(3):
-        weight = type(x[0][0])(1.0) / type(x[0][0])(6.0)
-        if node == slot:
-            weight = type(x[0][0])(2.0) / type(x[0][0])(3.0)
-        sample += weight * x[triangles[face, node]]
-    transform = transforms[shape]
-    body = bodies[shape]
-    if body >= 0:
-        transform = poses[body] * transform
-    quaternion = wp.transform_get_rotation(transform)
-    norm = wp.length(quaternion)
-    if not wp.isfinite(norm) or wp.abs(norm - type(x[0][0])(1.0)) > quaternion_tolerance:
-        _failure(flags, key, 2)
-        return
-    rotation = wp.quat_to_matrix(wp.transform_get_rotation(transform))
-    y = wp.transpose(rotation) * (sample - wp.transform_get_translation(transform))
-    d, g = _shape64(types[shape], scales[shape], y, sdf_indices[shape], table)
-    out.uncertified[key] = 0
-    if types[shape] == GeoType.MESH and smooth_table.shape[0] > 0:
-        index = sdf_indices[shape]
-        field = smooth_table[index]
-        query = y
-        if not table[index].scale_baked:
-            query /= scales[shape][0]
-        d, g, _unused_hessian = smooth_query(field, query)
-        if not table[index].scale_baked:
-            d *= scales[shape][0]
-        for axis in range(3):
-            if query[axis] <= field.lower[axis] or query[axis] >= field.upper[axis]:
-                out.uncertified[key] = 1
-    if not wp.isfinite(d) or not wp.isfinite(wp.length(g)) or not wp.isfinite(wp.length(y)):
-        _failure(flags, key, 1)
-        return
-    out.y[key] = y
-    out.distance[key] = d
-    out.gradient[key] = g
-    out.rotation[key] = rotation
-    out.soft_normal[key] = wp.transpose(rotation) * normal / length
-    for j in range(out.jacobian_q.shape[1]):
-        jacobian = type(x[0])(0.0)
-        if body >= 0:
-            jacobian = wp.transpose(rotation) * (-jt[body, j] - wp.cross(jw[body, j], sample - com[body]))
-        out.jacobian_q[key, j] = jacobian
-
-
-@wp.kernel
 def _validate_start(
     geometry: Any,
     shapes: wp.array[int],
@@ -202,7 +123,6 @@ def _law(
     smoothing: Any,
     mu: Any,
     falloff: Any,
-    model: int,
     alignment_mask: int,
     flags: wp.array[int],
     energy: wp.array2d[Any],
@@ -231,28 +151,21 @@ def _law(
     shape = shapes[key % shapes.shape[0]]
     k = stiffness * area[face] / type(radius)(3.0)
     gap = current.distance[key] - radius - margins[shape]
-    old_gap = start.distance[key] - radius - margins[shape]
     if direct != 0:
         k = stiffness * area[key]
         gap = current.distance[key] - gap_offsets[key]
-        old_gap = start.distance[key] - gap_offsets[key]
         if direct == 2:
             # Bounded legacy geometry keeps the original multiply/divide and
             # two subtractions; changing these would also change the law.
             k /= type(radius)(3.0)
             gap = current.distance[key] - radius - margins[shape]
-            old_gap = start.distance[key] - radius - margins[shape]
     output_key = key + key_offset
     g = current.gradient[key]
-    u = current.y[key] - start.y[key]
+    u = current.slip[key]
     en, load_normal, curvature = _penalty64(gap, k, smoothing)
-    load = load_normal
     direction = g
-    if model == 0:
-        direction = start.gradient[key]
-        _unused, load, _unused_curvature = _penalty64(old_gap, k, smoothing)
-    elif model == 1:
-        _unused, load, _unused_curvature = _penalty64(gap - wp.dot(g, u), k, smoothing)
+    # C-IE: friction load from the gap linearized about the frozen start point.
+    _unused, load, _unused_curvature = _penalty64(gap - wp.dot(g, u), k, smoothing)
     if mu == type(radius)(0.0):
         load = type(radius)(0.0)
     if load_normal > type(radius)(0.0) or load > type(radius)(0.0):
@@ -346,106 +259,6 @@ def _law(
         terms[first / 3 + (index - first)] = value
 
 
-@wp.kernel
-def _factors(
-    current: Any,
-    shapes: wp.array[int],
-    normal: wp.array[Any],
-    tangent: wp.array[Any],
-    weights: wp.array2d[Any],
-    flags: wp.array[int],
-    factors: _MonolithicContactFactors,
-    triplets: _MonolithicScalarTriplets,
-    direct: int,
-    key_offset: int,
-    jacobians: wp.array[Any],
-):
-    key = wp.tid()
-    if flags[0] != 0:
-        return
-    quadrature = (key / shapes.shape[0]) % 3
-    output_key = key + key_offset
-    n = normal[output_key]
-    axis = type(normal[0])(1.0, 0.0, 0.0)
-    if wp.abs(n[1]) < wp.abs(n[0]) and wp.abs(n[1]) <= wp.abs(n[2]):
-        axis = type(normal[0])(0.0, 1.0, 0.0)
-    elif wp.abs(n[2]) < wp.abs(n[0]):
-        axis = type(normal[0])(0.0, 0.0, 1.0)
-    t = tangent[output_key]
-    if weights[output_key, 1] > type(weights[0, 0])(0.0) and wp.length(t) == type(weights[0, 0])(0.0):
-        # At zero slip both tangent eigenvalues coincide; any basis is valid.
-        t = wp.normalize(wp.cross(n, axis))
-    for component in range(3):
-        direction = current.gradient[key]
-        weight = weights[output_key, 0]
-        if component > 0:
-            direction = t
-            weight = weights[output_key, 2]
-            if component == 2:
-                direction = wp.cross(n, t)
-                weight = weights[output_key, 1]
-        slot = 3 * output_key + component
-        if slot >= factors.capacity:
-            wp.atomic_max(factors.status, 0, 6)
-            _failure(flags, key, 3)
-            return
-        if factors.active_token[0] != factors.token or triplets.active_token[0] != triplets.token:
-            _failure(flags, key, 4)
-            return
-        # Materialize values so Warp can reassign bounds on the next component.
-        begin, end = factors.offsets[slot] + 0, factors.offsets[slot + 1] + 0
-        if begin < 0 or end < begin or end > factors.values.shape[0] or end > factors.local_indices.shape[0]:
-            wp.atomic_max(factors.status, 0, 6)
-            _failure(flags, key, 3)
-            return
-        factors.weights[slot] = float(weight)
-        factors.kind[slot] = 1
-        if component > 0:
-            factors.kind[slot] = 2
-        factors.candidate_tid[slot] = output_key
-        if weight > type(weights[0, 0])(0.0):
-            wp.atomic_add(factors.count, 0, 1)
-        world = current.rotation[key] * direction
-        for index in range(begin, end):
-            if direct != 0:
-                factors.values[index] = float(wp.dot(jacobians[index], direction))
-                continue
-            local = factors.local_indices[index]
-            if local >= current.jacobian_q.shape[1] or local < -9:
-                wp.atomic_max(factors.status, 0, 3)
-                _failure(flags, key, 4)
-                return
-            value = type(weights[0, 0])(0.0)
-            if local >= 0:
-                value = wp.dot(current.jacobian_q[key, local], direction)
-            else:
-                component_index = -local - 1
-                a, j = component_index / 3, component_index % 3
-                bary = type(weights[0, 0])(1.0) / type(weights[0, 0])(6.0)
-                if a == quadrature:
-                    bary = type(weights[0, 0])(2.0) / type(weights[0, 0])(3.0)
-                value = bary * world[j]
-            factors.values[index] = float(value)
-        _append_monolithic_contact_factor_triplets(factors, slot, triplets)
-
-
-@wp.kernel
-def _check_assembly(factors: _MonolithicContactFactors, triplets: _MonolithicScalarTriplets, flags: wp.array[int]):
-    if factors.active_token[0] != factors.token or triplets.active_token[0] != triplets.token:
-        _failure(flags, -1, 4)
-    elif factors.status[0] != 0 or triplets.status[0] != 0:
-        if factors.status[0] == 6 or triplets.status[0] == 4:
-            _failure(flags, -1, 3)
-        else:
-            _failure(flags, -1, 4)
-
-
-@wp.kernel
-def _check_residual(residual: wp.array[Any], flags: wp.array[int]):
-    if not wp.isfinite(residual[wp.tid()]):
-        _failure(flags, -1, 1)
-
-
 class ContactObjective:
     """Validate complete contact inputs, optionally retaining only bounded-generator metadata.
 
@@ -460,7 +273,6 @@ class ContactObjective:
         particle_to_dynamic,
         *,
         q_dof_count,
-        contact_model,
         normal_stiffness,
         friction_coefficient,
         friction_velocity_scale,
@@ -473,15 +285,9 @@ class ContactObjective:
         articulation_actor=None,
         base_triplet_count=0,
         actors=None,
-        _metadata_only=False,
         _materials=None,
     ):
-        if type(_metadata_only) is not bool:
-            raise ValueError("Contact metadata mode must be boolean")
-        self._metadata_only = _metadata_only
         self._materials = _materials
-        if _materials is not None and not _metadata_only:
-            raise ValueError("Material surfaces require the bounded contact producer")
         if dtype not in (wp.float64, wp.float32):
             raise ValueError("Contact requires float64 or float32")
         self.dtype = dtype
@@ -493,8 +299,6 @@ class ContactObjective:
             raise ValueError("Unknown contact alignment policy")
         self.alignment_policy = alignment_policy
         self._alignment_policy = alignment_policy
-        if contact_model not in ("C-EE", "C-IE", "C-II"):
-            raise ValueError("An explicit C-EE, C-IE or C-II contact model is required")
         parameters = (normal_stiffness, friction_coefficient, friction_velocity_scale, smoothing_width, particle_radius)
         native_parameters = np.asarray(parameters, dtype=self.numpy_dtype)
         if not np.isfinite(native_parameters).all() or any(
@@ -551,13 +355,14 @@ class ContactObjective:
                 actors,
                 radius=particle_radius,
                 base_triplet_count=base_triplet_count,
-                _expand_support=not _metadata_only,
+                _expand_support=False,
                 _materials=_materials,
             )
         )
         shapes = np.flatnonzero(v["shape_flags"] & int(ShapeFlags.COLLIDE_PARTICLES)).astype(np.int32)
         if self.actor_samples is not None:
             shapes = shapes[~np.isin(shapes, self.actor_samples.rigid_shapes)]
+            shapes = np.asarray(_canonical_shapes(actors, shapes), dtype=np.int32)
         if not np.isin(
             v["shape_type"][shapes], [int(GeoType.PLANE), int(GeoType.SPHERE), int(GeoType.BOX), int(GeoType.MESH)]
         ).all():
@@ -660,57 +465,26 @@ class ContactObjective:
             )
             count += samples.count
             triplet_count += samples.triplet_capacity
-        if not _metadata_only:
-            support_columns, support_local, support_offsets = [], [], [0]
-            for face in triangles:
-                for _slot in range(3):
-                    for shape in shapes:
-                        body = int(v["shape_body"][shape])
-                        q = ancestors.get(body, list(range(q_dof_count))) if body >= 0 else []
-                        columns = [self.layout.q_scalar_offset + i for i in q]
-                        local = list(q)
-                        for a, particle in enumerate(face):
-                            node = int(mapping[particle])
-                            if node >= 0:
-                                columns.extend(self.layout.x_scalar_offset + 3 * node + j for j in range(3))
-                                local.extend(-(3 * a + j + 1) for j in range(3))
-                        for _component in range(3):
-                            support_columns.extend(columns)
-                            support_local.extend(local)
-                            support_offsets.append(len(support_columns))
-            if samples is not None:
-                for columns in samples.supports:
-                    for _component in range(3):
-                        support_columns.extend(columns)
-                        support_local.extend([0] * len(columns))
-                        support_offsets.append(len(support_columns))
-            self.factor_support = tuple(
-                np.asarray(a, dtype=np.int32) for a in (support_offsets, support_columns, support_local)
-            )
-            offsets, columns, local = self.factor_support
-            residual_columns = (
-                np.concatenate([columns[offsets[3 * key] : offsets[3 * key + 1]] for key in range(count)])
-                if count
-                else np.empty(0, dtype=np.int32)
-            )
-            self._residual_offsets, self._residual_slots = _row_gather_map(
-                residual_columns, self.layout.scalar_dof_count, model.device
-            )
-            self._residual_terms = wp.zeros(len(residual_columns), dtype=self.dtype, device=model.device)
-            self._support_offsets = wp.array(offsets, dtype=int, device=model.device)
-            self._support_local = wp.array(local, dtype=int, device=model.device)
         self.triplet_capacity = triplet_count
-        self.model, self.contact_model = model, contact_model
+        self.model, self.contact_model = model, "C-IE"
+        # Solver actor tables own articulation bodies; a standalone owner uses every body.
         self.body_count = (
-            (model.body_count if _materials is None else 0)
-            if articulation_actor is None
-            else len(articulation_actor.body_indices)
+            len(articulation_actor.body_indices)
+            if articulation_actor is not None
+            else model.body_count
+            if actors is None and _materials is None
+            else 0
         )
         self.parameters, self.nq, self.count = parameters, q_dof_count, count
         self._descriptors = descriptors.copy() if descriptors is not None else None
-        self.conservative_energy = contact_model == "C-EE" and alignment_policy == "guard"
-        if _materials is not None and samples.material_start < samples.count:
-            self.conservative_energy = False
+        # C-IE lags only the friction load at the frozen start. Without contact
+        # samples, or with zero friction on guarded normals and no material face
+        # selection, the remaining normal penalty is a true potential.
+        self.conservative_energy = count == 0 or (
+            parameters[1] == 0
+            and alignment_policy == "guard"
+            and (_materials is None or samples.material_start == samples.count)
+        )
         self.table = table if table is not None else wp.empty(0, dtype=TextureSDFData, device=model.device)
         self.smooth_sdf = smooth_sdf
         if smooth_sdf is not None:
@@ -747,215 +521,12 @@ class ContactObjective:
         self.margins = wp.array(v["shape_margin"].astype(self.numpy_dtype), dtype=self.dtype, device=model.device)
         self.area = wp.array(areas, dtype=self.dtype, device=model.device)
         self._started, self._evaluated = False, False
-        self.actor_contact = None
-        if _metadata_only:
-            if samples is not None and samples.count:
-                from .contact_actor import _validate_actor_targets  # noqa: PLC0415
-
-                _validate_actor_targets(self, samples)
-            return
-        self.current, self.start = self._geometry_storage(), self._geometry_storage()
-        self.flags = wp.zeros(2, dtype=int, device=model.device)
-        self.start_flags = wp.zeros_like(self.flags)
-        self.residual = wp.zeros(self.layout.scalar_dof_count, dtype=self.dtype, device=model.device)
-        self.energy = wp.zeros((count, 2), dtype=self.dtype, device=model.device)
-        self.normal = wp.zeros(count, dtype=self.vector, device=model.device)
-        self.tangent = wp.zeros_like(self.normal)
-        self.local_residual = wp.zeros_like(self.normal)
-        self.weights = wp.zeros((count, 3), dtype=self.dtype, device=model.device)
-        self.omitted = wp.zeros((count, 4), dtype=self.dtype, device=model.device)
-        self.mask_seen = wp.zeros(count, dtype=int, device=model.device)
         if samples is not None and samples.count:
-            from .contact_actor import ActorContact  # noqa: PLC0415
+            from .contact_actor import _validate_actor_targets  # noqa: PLC0415
 
-            self.actor_contact = ActorContact(self, samples)
+            _validate_actor_targets(self, samples)
 
     @property
     def quaternion_norm_tolerance(self):
         """Unit-quaternion guard selected by native arithmetic precision."""
         return 1e-6 if self.dtype == wp.float32 else 1e-10
-
-    def _geometry_storage(self):
-        value = _geometry_type(self.dtype)()
-        value.y = wp.zeros(self.legacy_count, dtype=self.vector, device=self.model.device)
-        value.gradient = wp.zeros_like(value.y)
-        value.soft_normal = wp.zeros_like(value.y)
-        value.uncertified = wp.zeros(self.legacy_count, dtype=int, device=self.model.device)
-        value.distance = wp.zeros(self.legacy_count, dtype=self.dtype, device=self.model.device)
-        value.rotation = wp.zeros(self.legacy_count, dtype=self.matrix, device=self.model.device)
-        value.jacobian_q = wp.zeros((self.legacy_count, self.nq), dtype=self.vector, device=self.model.device)
-        return value
-
-    def _query(self, x, poses, com, jt, jw, output, flags):
-        for array, dtype, shape in (
-            (x, self.vector, (self.model.particle_count,)),
-            (poses, self.transform, (self.body_count,)),
-            (com, self.vector, (self.body_count,)),
-            (jt, self.vector, (self.body_count, self.nq)),
-            (jw, self.vector, (self.body_count, self.nq)),
-        ):
-            if not isinstance(array, wp.array) or (array.dtype, array.shape, array.device) != (
-                dtype,
-                shape,
-                self.model.device,
-            ):
-                raise ValueError("Contact geometry requires native state and Jacobians on the model device")
-        if self.legacy_count:
-            wp.launch(
-                _geometry,
-                self.legacy_count,
-                [
-                    x,
-                    poses,
-                    com,
-                    jt,
-                    jw,
-                    self.triangles,
-                    self.shapes,
-                    self.target_bodies,
-                    self.transforms,
-                    self.types,
-                    self.scales,
-                    self.sdf_indices,
-                    self.table,
-                    self.smooth_table,
-                    self.dtype(self.quaternion_norm_tolerance),
-                    output,
-                    flags,
-                ],
-                device=self.model.device,
-            )
-
-    def begin_step(self, x, poses, com, jt, jw, *, rigid_com=None, rigid_rotation=None):
-        """Freeze geometry for the complete deterministic key set, including inactive pairs."""
-        if self._metadata_only:
-            raise ValueError("Contact metadata requires the bounded batch evaluator")
-        self.mask_seen.zero_()
-        wp.launch(_reset_flags, 1, [self.start_flags], device=self.model.device)
-        self._query(x, poses, com, jt, jw, self.start, self.start_flags)
-        if self.legacy_count:
-            wp.launch(
-                _validate_start,
-                self.legacy_count,
-                [
-                    self.start,
-                    self.shapes,
-                    self.margins,
-                    self.dtype(self.parameters[4]),
-                    self.dtype(self.parameters[3]),
-                    int(self._alignment_policy == "mask"),
-                    self.start_flags,
-                    False,
-                    self.start_flags,
-                ],
-                device=self.model.device,
-            )
-        if self.actor_contact is not None:
-            self.actor_contact.begin_step(x, poses, com, jt, jw, rigid_com=rigid_com, rigid_rotation=rigid_rotation)
-        self._started, self._evaluated = True, False
-
-    def evaluate(self, x, poses, com, jt, jw, *, dt, rigid_com=None, rigid_rotation=None):
-        """Overwrite trial E/r without changing step-start geometry or tangent storage."""
-        if self._metadata_only:
-            raise ValueError("Contact metadata requires the bounded batch evaluator")
-        if not self._started or not math.isfinite(dt) or dt <= 0:
-            raise ValueError("A frozen step and positive finite dt are required")
-        stiffness, mu, velocity, smoothing, radius = map(self.numpy_dtype, self.parameters)
-        dt = self.numpy_dtype(dt)
-        if not np.isfinite(dt) or dt <= 0:
-            raise ValueError("Unrepresentable contact dt")
-        falloff = velocity * dt
-        if mu > 0 and (not math.isfinite(falloff) or falloff <= 0):
-            raise ValueError("Invalid friction displacement scale")
-        wp.copy(self.flags, self.start_flags)
-        self.energy.zero_()
-        self.residual.zero_()
-        self._residual_terms.zero_()
-        self.weights.zero_()
-        self.local_residual.zero_()
-        self.omitted.zero_()
-        self._query(x, poses, com, jt, jw, self.current, self.flags)
-        if self.legacy_count:
-            wp.launch(
-                _law,
-                self.legacy_count,
-                [
-                    self.current,
-                    self.start,
-                    self.shapes,
-                    self.margins,
-                    self.area,
-                    self.dtype(radius),
-                    self.dtype(stiffness),
-                    self.dtype(smoothing),
-                    self.dtype(mu),
-                    self.dtype(falloff),
-                    ("C-EE", "C-IE", "C-II").index(self.contact_model),
-                    int(self._alignment_policy == "mask"),
-                    self.flags,
-                    self.energy,
-                    self._residual_terms,
-                    self.normal,
-                    self.tangent,
-                    self.weights,
-                    self.local_residual,
-                    self.omitted,
-                    self.mask_seen,
-                    0,
-                    0,
-                    self.margins,
-                    self._support_offsets,
-                    self._support_local,
-                    self.normal,
-                    self.flags,
-                ],
-                device=self.model.device,
-            )
-        if self.actor_contact is not None:
-            self.actor_contact.evaluate(
-                x, poses, com, jt, jw, rigid_com=rigid_com, rigid_rotation=rigid_rotation, dt=dt
-            )
-        if self.residual.size:
-            wp.launch(
-                _accumulate_rows,
-                self.residual.size,
-                [self._residual_offsets, self._residual_slots, self._residual_terms, self.residual],
-                device=self.model.device,
-            )
-            wp.launch(_check_residual, self.residual.size, [self.residual, self.flags], device=self.model.device)
-        self._evaluated = True
-
-    def assemble_tangent(self, assembly):
-        """Append normal/radial/transverse PSD factors with frozen load/normal; B is FP32."""
-        if self._metadata_only:
-            raise ValueError("Contact metadata requires the bounded batch evaluator")
-        if not self._evaluated or assembly.contact_factors.scalar_dof_count != self.residual.size:
-            raise ValueError("Evaluate contact first and use the matching linear layout")
-        if self.legacy_count:
-            wp.launch(
-                _factors,
-                self.legacy_count,
-                [
-                    self.current,
-                    self.shapes,
-                    self.normal,
-                    self.tangent,
-                    self.weights,
-                    self.flags,
-                    assembly.contact_factors,
-                    assembly.global_scalar_triplets,
-                    0,
-                    0,
-                    self.normal,
-                ],
-                device=self.model.device,
-            )
-        if self.actor_contact is not None:
-            self.actor_contact.assemble(assembly)
-
-        wp.launch(
-            _check_assembly,
-            1,
-            [assembly.contact_factors, assembly.global_scalar_triplets, self.flags],
-            device=self.model.device,
-        )

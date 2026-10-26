@@ -89,6 +89,71 @@ class TestClothObjective(unittest.TestCase):
             with self.assertRaises(ValueError):
                 obj.evaluate_host(x)
 
+    def test_far_step_in_float32(self):
+        """Resolve a small FP32 step of a stencil far from the origin from its exact displacement."""
+        material = (-15.0, 40.0, 0.02, 0.07)
+        rest = folded_stencil(0.4)
+        # At 1 km, FP32 positions round at 6e-5 m, comparable to this step.
+        offset = np.array([1000.0, -700.0, 400.0])
+        start = (rest + offset).astype(np.float32).astype(float)
+        step = (1e-4 * np.sin(np.arange(18).reshape(6, 3) * [1.3, 2.1, 2.9])).astype(np.float32).astype(float)
+        exact = start + step
+        boundary = (False, False, False)
+        obj = ClothObjective(rest, np.arange(6)[None, :], [material], dtype=wp.float32, device="cpu")
+        energy, residual, _ = obj.evaluate_host(start, step)
+        expected = np.sum(shell_energy(rest, exact, material, boundary=boundary))
+        np.testing.assert_allclose(energy[0].sum(), expected, rtol=2e-3)
+        expected = shell_residual(rest, exact, material, boundary=boundary)
+        np.testing.assert_allclose(residual[0].reshape(6, 3), expected, atol=2e-3 * np.abs(expected).max())
+
+    def test_near_rest_noise_in_float32(self):
+        """Keep FP32 membrane forces near rest free of unit-size cancellation noise."""
+        material = (30.0, 40.0, 0.02, 0.07)
+        rest = folded_stencil(0.4)
+        start = rest.astype(np.float32).astype(float)
+        step = (1e-6 * np.sin(np.arange(18).reshape(6, 3) * [1.3, 2.1, 2.9])).astype(np.float32).astype(float)
+        boundary = (False, False, False)
+        obj = ClothObjective(rest, np.arange(6)[None, :], [material], dtype=wp.float32, device="cpu")
+        base = obj.evaluate_host(start, step)[1][0].copy()
+        expected = shell_residual(rest, start + step, material, boundary=boundary).ravel()
+        rng = np.random.default_rng(1)
+        noise = 0.0
+        for _ in range(20):
+            jittered = (step + 1e-9 * rng.standard_normal(step.shape)).astype(np.float32).astype(float)
+            change = obj.evaluate_host(start, jittered)[1][0] - base
+            exact = shell_residual(rest, start + jittered, material, boundary=boundary).ravel() - expected
+            noise = max(noise, np.abs(change - exact).max())
+        # Forces formed as differences of unit-size terms vary by ~mu eps32 here.
+        self.assertLess(noise, 0.05 * material[1] * np.finfo(np.float32).eps)
+
+    def test_rounding_bound_covers_float32_error(self):
+        """Bound the FP32 residual response to steps near rest by the noise floor of its rounding magnitude.
+
+        A step-independent rounding bias is a fixed offset that Newton steps remove;
+        what the convergence floor must cover is the error in the response.
+        """
+        from newton._src.solvers.monolithic.convergence import ConvergencePolicy  # noqa: PLC0415
+
+        multiplier = ConvergencePolicy().noise[1]
+        eps = np.finfo(np.float32).eps
+        rng = np.random.default_rng(2)
+        boundary = (False, False, False)
+        for angle, material in ((0.4, (30.0, 40.0, 0.02, 0.07)), (np.pi / 2, (30.0, 40.0, 3.0, 5.0))):
+            rest = folded_stencil(angle)
+            start = rest.astype(np.float32).astype(float)
+            obj = ClothObjective(rest, np.arange(6)[None, :], [material], dtype=wp.float32, device="cpu")
+            base = obj.evaluate_host(start, np.zeros((6, 3)))[1][0].copy()
+            exact_base = shell_residual(rest, start, material, boundary=boundary).ravel()
+            for scale in (1e-7, 1e-5):
+                with self.subTest(angle=angle, material=material, scale=scale):
+                    step = (scale * rng.standard_normal((6, 3))).astype(np.float32).astype(float)
+                    residual = obj.evaluate_host(start, step)[1][0]
+                    rounding = obj.rounding.numpy()[0]
+                    exact = shell_residual(rest, start + step, material, boundary=boundary).ravel()
+                    error = np.abs((residual - base) - (exact - exact_base))
+                    bound = multiplier * eps * (np.abs(residual) + rounding)
+                    self.assertTrue(np.all(error <= bound), error / bound)
+
 
 if __name__ == "__main__":
     unittest.main()

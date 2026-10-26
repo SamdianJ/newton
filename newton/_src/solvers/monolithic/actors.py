@@ -5,6 +5,7 @@
 
 import hashlib
 import json
+from collections import Counter, defaultdict
 from collections.abc import Mapping
 from dataclasses import asdict, dataclass, replace
 from types import MappingProxyType
@@ -12,8 +13,88 @@ from types import MappingProxyType
 import numpy as np
 import warp as wp
 
-from ...sim import BodyFlags, JointType
-from .collision import _validate_and_collect_boundary_faces
+from ...sim import BodyFlags, JointType, Model
+
+
+class TetBoundaryError(ValueError):
+    """Report an invalid tet boundary with a specific subreason."""
+
+    def __init__(self, subreason: str):
+        self.subreason = subreason
+        super().__init__(f"INVALID_BOUNDARY: {subreason}")
+
+
+def _validate_and_collect_boundary_faces(model: Model, *, excluded_triangle_ids=()) -> tuple[np.ndarray, np.ndarray]:
+    """Return deterministic model face indices and all referenced particle ids."""
+    tets = model.tet_indices.numpy()
+    positions = model.particle_q.numpy().astype(np.float64)
+    if len(tets) == 0 or tets.shape[1:] != (4,) or np.any(tets < 0) or np.any(tets >= len(positions)):
+        raise TetBoundaryError("invalid_tets")
+    if any(len(set(tet)) != 4 for tet in tets) or len({tuple(sorted(tet)) for tet in tets}) != len(tets):
+        raise TetBoundaryError("duplicate_or_degenerate_tet")
+    referenced = np.unique(tets).astype(np.int32)
+    if not np.isfinite(positions[referenced]).all():
+        raise TetBoundaryError("nonfinite_reference_positions")
+    connected = set(tets[0])
+    remaining = list(tets[1:])
+    while remaining:
+        pending = []
+        for tet in remaining:
+            if connected.intersection(tet):
+                connected.update(tet)
+            else:
+                pending.append(tet)
+        if len(pending) == len(remaining):
+            raise TetBoundaryError("disconnected_tets")
+        remaining = pending
+    incidence = Counter()
+    for tet in tets:
+        for opposite in range(4):
+            incidence[tuple(sorted(np.delete(tet, opposite)))] += 1
+    if any(count > 2 for count in incidence.values()):
+        raise TetBoundaryError("nonmanifold_tet_face")
+    boundary = sorted(face for face, count in incidence.items() if count == 1)
+    edges = Counter()
+    vertex_links = defaultdict(list)
+    for a, b, c in boundary:
+        edges.update(((a, b), (a, c), (b, c)))
+        vertex_links[a].append({b, c})
+        vertex_links[b].append({a, c})
+        vertex_links[c].append({a, b})
+    if not boundary or any(count != 2 for count in edges.values()):
+        raise TetBoundaryError("nonmanifold_boundary_edge")
+    # Each boundary vertex must have one connected ring, including at pinched vertices.
+    for edges_at_vertex in vertex_links.values():
+        incident = list(edges_at_vertex)
+        ring = incident.pop()
+        while incident:
+            pending = []
+            for edge in incident:
+                if ring.intersection(edge):
+                    ring.update(edge)
+                else:
+                    pending.append(edge)
+            if len(pending) == len(incident):
+                raise TetBoundaryError("nonmanifold_boundary_vertex")
+            incident = pending
+    triangles = model.tri_indices.numpy()
+    triangle_ids = np.delete(np.arange(len(triangles)), excluded_triangle_ids)
+    triangles = triangles[triangle_ids]
+    if triangles.shape != (len(boundary), 3):
+        raise TetBoundaryError("missing_or_extra_faces")
+    face_to_index = {}
+    for index, face in enumerate(triangles):
+        key = tuple(sorted(face))
+        if len(set(face)) != 3 or key in face_to_index:
+            raise TetBoundaryError("duplicate_or_repeated_vertices")
+        face_to_index[key] = int(triangle_ids[index])
+    if set(face_to_index) != set(boundary):
+        raise TetBoundaryError("boundary_set_mismatch")
+    for face in boundary:
+        a, b, c = positions[list(face)]
+        if np.linalg.norm(np.cross(b - a, c - a)) == 0.0:
+            raise TetBoundaryError("zero_area")
+    return np.asarray([face_to_index[face] for face in boundary], dtype=np.int32), referenced
 
 
 def _checked_dof_count(counts):
@@ -116,7 +197,7 @@ class ActorTable:
         if not model.joint_enabled.numpy().all() or not np.isin(flags, [BodyFlags.DYNAMIC, BodyFlags.KINEMATIC]).all():
             raise ValueError("Actors require enabled joints and supported body flags")
         material_mode = materials is not None and bool(materials.cloth or materials.cable)
-        actor_worlds = np.r_[worlds, model.particle_world.numpy()] if material_mode else worlds
+        actor_worlds = np.r_[worlds, model.particle_world.numpy()]
         if (
             len(actor_worlds) == 0
             or len(np.unique(actor_worlds)) != 1
@@ -181,12 +262,14 @@ class ActorTable:
                 )
             )
         arm_count = sum(a.kind == "articulation" for a in actors)
-        if len(owned) != model.body_count or arm_count > 1 or (not material_mode and arm_count != 1):
+        if len(owned) != model.body_count or arm_count > 1:
             raise ValueError("Monolithic requires uniquely owned bodies and at most one mechanical articulation")
         inv_mass = model.particle_inv_mass.numpy()
         dynamic = np.flatnonzero(inv_mass > 0)
         actors.sort(key=lambda a: (a.kind != "articulation", a.source_index))
-        if model.tet_count or not material_mode:
+        if not model.tet_count and not material_mode and dynamic.size:
+            raise ValueError("Dynamic particles require a tet, cloth or cable owner")
+        if model.tet_count:
             if material_mode:
                 # Validate only the native tet boundary; cloth faces are independently owned.
                 selected = np.concatenate([obj["triangle_ids"] for obj in materials.cloth]) if materials.cloth else []

@@ -1,0 +1,1 @@
+Replace the Franka-only held-cube rule of the experimental Monolithic robot scene gates with one grasp definition for both robot scenes: over the final 500 steps at the top of the lift, the ground supports at most 5% of the object weight and the object's center of mass stays at least a quarter of its smallest edge above rest. Franka requires it; Sharpa reports it as a diagnostic.

@@ -9,7 +9,8 @@ import numpy as np
 import warp as wp
 
 from .articulation import _inner
-from .articulation_state import _initial_symmetric, _predict, _recover_history, _skew
+from .articulation_state import _initial_symmetric, _predict, _skew, _store_rates
+from .convergence import abs3, axial_absolute
 
 
 @wp.kernel
@@ -95,39 +96,85 @@ def _publish(
     body_qd[bodies[i]] = wp.spatial_vector(wp.vec3(v[i]), wp.vec3(omega[i]))
 
 
+@wp.func
+def _rotation_step(q: Any):
+    """Return ``R(q) - I`` of a unit quaternion near identity without cancellation."""
+    v = type(q[0])(2.0) * wp.skew(wp.vector(q[0], q[1], q[2]))
+    return q[3] * v + type(q[0])(0.5) * (v * v)
+
+
 @wp.kernel
 def _trial(
-    com: wp.array[Any],
-    rotation: wp.array[Any],
+    step: wp.array[Any],
+    rotation_step: wp.array[Any],
     rows: wp.array2d[int],
     direction: wp.array[Any],
     alpha: Any,
+    tn: wp.array[Any],
+    quat_n: wp.array[Any],
+    out_step: wp.array[Any],
+    out_rotation_step: wp.array[Any],
     out_com: wp.array[Any],
     out_rotation: wp.array[Any],
 ):
     i = wp.tid()
-    dc = type(com[0])(
+    dc = type(tn[0])(
         type(alpha)(direction[rows[i, 0]]), type(alpha)(direction[rows[i, 1]]), type(alpha)(direction[rows[i, 2]])
     )
-    dr = alpha * type(com[0])(
+    dr = alpha * type(tn[0])(
         type(alpha)(direction[rows[i, 3]]), type(alpha)(direction[rows[i, 4]]), type(alpha)(direction[rows[i, 5]])
     )
     angle = wp.length(dr)
-    increment = type(rotation[0])(type(alpha)(0.0), type(alpha)(0.0), type(alpha)(0.0), type(alpha)(1.0))
+    increment = type(quat_n[0])(type(alpha)(0.0), type(alpha)(0.0), type(alpha)(0.0), type(alpha)(1.0))
     if angle != type(alpha)(0.0):
         increment = wp.quat_from_axis_angle(dr / angle, angle)
-    out_com[i] = com[i] + alpha * dc
-    out_rotation[i] = wp.normalize(increment * rotation[i])
+    # Advance the exact step and the rotation from the step start, then form
+    # the pose from them once.
+    out_step[i] = step[i] + alpha * dc
+    out_rotation_step[i] = wp.normalize(increment * rotation_step[i])
+    out_com[i] = tn[i] + out_step[i]
+    out_rotation[i] = wp.normalize(out_rotation_step[i] * quat_n[i])
+
+
+@wp.kernel
+def _derive_steps(
+    com: wp.array[Any],
+    rotation: wp.array[Any],
+    tn: wp.array[Any],
+    quat_n: wp.array[Any],
+    step: wp.array[Any],
+    rotation_step: wp.array[Any],
+):
+    i = wp.tid()
+    step[i] = com[i] - tn[i]
+    q = rotation[i] * wp.quat_inverse(quat_n[i])
+    if q[3] < type(q[3])(0.0):
+        q = -q
+    rotation_step[i] = q
+
+
+@wp.kernel
+def _recover(
+    step: wp.array[Any],
+    rotation_step: wp.array[Any],
+    h: Any,
+    v: wp.array[Any],
+    omega: wp.array[Any],
+    sym: wp.array2d[Any],
+):
+    i = wp.tid()
+    _store_rates(step[i], _rotation_step(rotation_step[i]), h, i, v, omega, sym)
 
 
 @wp.kernel
 def _terms(
-    com: wp.array[Any],
+    step: wp.array[Any],
+    rotation_step: wp.array[Any],
     rotation: wp.array[Any],
     rotations: wp.array[Any],
-    tn: wp.array[Any],
     rn: wp.array[Any],
-    predicted_t: wp.array[Any],
+    step_t: wp.array[Any],
+    step_r: wp.array[Any],
     predicted_r: wp.array[Any],
     mass: wp.array[Any],
     second: wp.array[Any],
@@ -137,31 +184,38 @@ def _terms(
     tangent: bool,
     energy: wp.array[Any],
     residual: wp.array2d[Any],
-    b: wp.array3d[float],
+    absolute: wp.array2d[Any],
+    b: wp.array3d[Any],
     diagonal: wp.array2d[Any],
 ):
     i = wp.tid()
     r = wp.quat_to_matrix(rotation[i])
     rotations[i] = r
-    dt, dr = com[i] - predicted_t[i], r - predicted_r[i]
+    e = _rotation_step(rotation_step[i])
+    # Differences from the prediction are formed between increments.
+    dt, dr = step[i] - step_t[i], (e - step_r[i]) * rn[i]
     rs = dr * second[i]
-    energy[i] = (mass[i] * wp.dot(dt, dt) + _inner(rs, dr)) / (type(h)(2.0) * h * h) - wp.dot(force[i], com[i] - tn[i])
-    energy[i] += type(h)(0.5) * wp.trace(_skew(torque[i]) * r * wp.transpose(rn[i]))
+    energy[i] = (mass[i] * wp.dot(dt, dt) + _inner(rs, dr)) / (type(h)(2.0) * h * h) - wp.dot(force[i], step[i])
+    energy[i] = energy[i] + type(h)(0.5) * wp.trace(_skew(torque[i]) * e)
     a = rs * wp.transpose(r) / (h * h)
     rt = mass[i] * dt / (h * h) - force[i]
-    rr = type(com[0])(a[2, 1] - a[1, 2], a[0, 2] - a[2, 0], a[1, 0] - a[0, 1]) - torque[i]
+    rr = type(dt)(a[2, 1] - a[1, 2], a[0, 2] - a[2, 0], a[1, 0] - a[0, 1]) - torque[i]
+    at = abs3(mass[i] * dt / (h * h)) + abs3(force[i])
+    ar = axial_absolute(a) + abs3(torque[i])
     inertia = wp.trace(second[i]) * wp.identity(n=3, dtype=type(h)) - second[i]
     world = r * inertia * wp.transpose(r)
     for j in range(3):
         residual[i, j] = rt[j]
         residual[i, j + 3] = rr[j]
+        absolute[i, j] = at[j]
+        absolute[i, j + 3] = ar[j]
         diagonal[i, j] = mass[i] / (h * h)
         diagonal[i, j + 3] = world[j, j] / (h * h)
     if tangent:
         c = r * second[i] * wp.transpose(predicted_r[i])
         raw = (wp.trace(c) * wp.identity(n=3, dtype=type(h)) - (c + wp.transpose(c)) * type(h)(0.5)) / (h * h)
         vectors, values = wp.eig3(raw)
-        positive = type(com[0])(
+        positive = type(dt)(
             wp.max(values[0], type(h)(0.0)), wp.max(values[1], type(h)(0.0)), wp.max(values[2], type(h)(0.0))
         )
         projected = vectors * wp.diag(positive) * wp.transpose(vectors)
@@ -172,28 +226,28 @@ def _terms(
                     value = mass[i] / (h * h)
                 elif j >= 3 and k >= 3:
                     value = projected[j - 3, k - 3]
-                b[i, j, k] = float(value)
+                b[i, j, k] = value
 
 
 @wp.kernel
 def _scatter_residual(rows: wp.array2d[int], local: wp.array2d[Any], out: wp.array[Any]):
     i, j = wp.tid()
-    out[rows[i, j]] += local[i, j]
+    out[rows[i, j]] = out[rows[i, j]] + local[i, j]
 
 
 @wp.kernel
 def _scatter_tangent(
-    b: wp.array3d[float],
+    b: wp.array3d[Any],
     rows: wp.array2d[int],
     diagonal: wp.array2d[Any],
     offset: int,
-    values: wp.array[float],
-    out_diagonal: wp.array[float],
+    values: wp.array[Any],
+    out_diagonal: wp.array[Any],
 ):
     i, j, k = wp.tid()
     values[offset + 36 * i + 6 * j + k] = b[i, j, k]
     if j == k:
-        out_diagonal[rows[i, j]] = float(diagonal[i, j])
+        out_diagonal[rows[i, j]] = diagonal[i, j]
 
 
 class RigidObjective:
@@ -207,6 +261,7 @@ class RigidObjective:
         self.vector = wp.vec3d if dtype == wp.float64 else wp.vec3
         self.matrix = wp.mat33d if dtype == wp.float64 else wp.mat33
         self.transform = wp.transformd if dtype == wp.float64 else wp.transform
+        self.quaternion = wp.quatd if dtype == wp.float64 else wp.quat
         self.body_indices = [a.body_indices[0] for a in self.actors]
         joint_indices = [a.joint_indices[0] for a in self.actors]
         self.coord_indices = np.array([a.coord_indices for a in self.actors], dtype=np.int32).reshape(-1, 7)
@@ -251,13 +306,22 @@ class RigidObjective:
         inertia = model.body_inertia.numpy()[self.body_indices].astype(self.numpy_dtype)
         second = np.trace(inertia, axis1=1, axis2=2)[:, None, None] / 2 * np.eye(3) - inertia
         self.second = wp.array(second, dtype=self.matrix, device=self.device)
-        for name in ("tn", "predicted_t", "force", "torque"):
+        # Step-start poses and the exact predicted increments h v and
+        # step_r with R_p = (I + step_r) R_n.
+        for name in ("tn", "predicted_t", "step_t", "force", "torque"):
             setattr(self, name, wp.zeros(self.count, dtype=self.vector, device=self.device))
-        for name in ("rn", "predicted_r", "rotations"):
+        for name in ("rn", "predicted_r", "step_r", "rotations"):
             setattr(self, name, wp.zeros(self.count, dtype=self.matrix, device=self.device))
+        self.quat_n = wp.zeros(self.count, dtype=self.quaternion, device=self.device)
+        # Increments of states the solver does not own, derived from their poses.
+        self.external_steps = (
+            wp.zeros(self.count, dtype=self.vector, device=self.device),
+            wp.zeros(self.count, dtype=self.quaternion, device=self.device),
+        )
         self.energy = wp.zeros(self.count, dtype=dtype, device=self.device)
         self.residual = wp.zeros((self.count, 6), dtype=dtype, device=self.device)
-        self.tangent = wp.zeros((self.count, 6, 6), dtype=float, device=self.device)
+        self.absolute = wp.zeros((self.count, 6), dtype=dtype, device=self.device)
+        self.tangent = wp.zeros((self.count, 6, 6), dtype=dtype, device=self.device)
         self.diagonal = wp.zeros((self.count, 6), dtype=dtype, device=self.device)
         self.mirror_q = wp.zeros((self.count, 7), dtype=dtype, device=self.device)
         self.mirror_v = wp.zeros((self.count, 6), dtype=dtype, device=self.device)
@@ -392,6 +456,7 @@ class RigidObjective:
         self.torque.assign(force[:, 3:])
         self.has_torque = bool(np.any(force[:, 3:] != 0))
         wp.copy(self.tn, history.rigid_com)
+        wp.copy(self.quat_n, history.rigid_rotation)
         wp.launch(_matrices, self.count, [history.rigid_rotation, self.rn], device=self.device)
         wp.launch(
             _predict,
@@ -405,11 +470,25 @@ class RigidObjective:
                 self.dtype(dt),
                 self.predicted_t,
                 self.predicted_r,
+                self.step_t,
+                self.step_r,
             ],
             device=self.device,
         )
 
-    def evaluate(self, state, dt, tangent):
+    def derive_steps(self, state):
+        """Return the increments of a state the solver does not own from its rounded pose."""
+        history = state._monolithic_coupled
+        if self.count:
+            wp.launch(
+                _derive_steps,
+                self.count,
+                [history.rigid_com, history.rigid_rotation, self.tn, self.quat_n, *self.external_steps],
+                device=self.device,
+            )
+        return self.external_steps
+
+    def evaluate(self, state, steps, dt, tangent):
         if not self.count:
             return
         history = state._monolithic_coupled
@@ -417,12 +496,12 @@ class RigidObjective:
             _terms,
             self.count,
             [
-                history.rigid_com,
+                *steps,
                 history.rigid_rotation,
                 self.rotations,
-                self.tn,
                 self.rn,
-                self.predicted_t,
+                self.step_t,
+                self.step_r,
                 self.predicted_r,
                 self.mass,
                 self.second,
@@ -432,41 +511,42 @@ class RigidObjective:
                 tangent,
                 self.energy,
                 self.residual,
+                self.absolute,
                 self.tangent,
                 self.diagonal,
             ],
             device=self.device,
         )
 
-    def trial(self, source, target, direction, alpha):
+    def trial(self, source_steps, target, target_steps, direction, alpha):
         if not self.count:
             return
-        a, b = source._monolithic_coupled, target._monolithic_coupled
+        b = target._monolithic_coupled
         wp.launch(
             _trial,
             self.count,
-            [a.rigid_com, a.rigid_rotation, self.rows, direction, self.dtype(alpha), b.rigid_com, b.rigid_rotation],
+            [
+                *source_steps,
+                self.rows,
+                direction,
+                self.dtype(alpha),
+                self.tn,
+                self.quat_n,
+                *target_steps,
+                b.rigid_com,
+                b.rigid_rotation,
+            ],
             device=self.device,
         )
 
-    def recover(self, state, dt):
+    def recover(self, state, steps, dt):
         if not self.count:
             return
         history = state._monolithic_coupled
-        wp.launch(_matrices, self.count, [history.rigid_rotation, self.rotations], device=self.device)
         wp.launch(
-            _recover_history,
+            _recover,
             self.count,
-            [
-                self.tn,
-                self.rn,
-                history.rigid_com,
-                self.rotations,
-                self.dtype(dt),
-                history.rigid_v_com,
-                history.rigid_omega,
-                history.rigid_vsym,
-            ],
+            [*steps, self.dtype(dt), history.rigid_v_com, history.rigid_omega, history.rigid_vsym],
             device=self.device,
         )
         self.publish(state)

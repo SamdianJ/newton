@@ -12,15 +12,14 @@ import numpy as np
 import warp as wp
 import warp.sparse as sparse
 
-from newton._src.solvers.monolithic.contact_pipeline import _PooledContactObjective
 from newton.solvers.experimental.monolithic import SolverMonolithic
 from newton.tests.test_monolithic_contact_actor_pairs import physical
-from newton.tests.test_monolithic_solver_actor_contacts import contact_scene, contact_state
-from newton.tests.test_monolithic_solver_contact_pool import pooled_solver
+from newton.tests.test_monolithic_solver_actor_contacts import contact_scene, contact_solver, contact_state
 from newton.tests.test_monolithic_tooling_contact_stream import grid_scene
 from newton.tests.unittest_utils import add_function_test, get_test_devices
-from scripts.monolithic_reference import compare_contact_dataflows as comparison
+from scripts.monolithic_reference import contact_audit as comparison
 from scripts.monolithic_reference.contact_full_oracle import evaluate_full, evaluate_stream
+from scripts.monolithic_reference.contact_routes import pooled_audit_route
 from scripts.monolithic_reference.workload_scene import build_scene
 
 
@@ -31,7 +30,6 @@ def reference(run, current, start):
         run._actors,
         current,
         start,
-        run._contact.contact_model,
         stiffness=stiffness,
         mu=mu,
         width=width,
@@ -41,28 +39,24 @@ def reference(run, current, start):
     )
 
 
-def native_grid(dimension, device, *, law="C-IE", graph=False):
+def native_grid(dimension, device, *, graph=False):
     """Use the builder's supported lumped grid mass for a native geometry audit."""
     model, _, frame = grid_scene(dimension, device=device)
-    with patch("newton._src.solvers.monolithic.solver_monolithic.ContactObjective", _PooledContactObjective):
-        run = SolverMonolithic(
-            model,
-            mass_mode="lumped",
-            contact_model=law,
-            globalization="ArmijoOrResNorm",
-            friction_velocity_scale=0.01,
-            alignment_policy="mask",
-            allow_nonconservative_energy=True,
-            pcg_mode="production",
-            use_cuda_graph=graph,
-        )
+    run = SolverMonolithic(
+        model,
+        mass_mode="lumped",
+        friction_velocity_scale=0.01,
+        alignment_policy="mask",
+        pcg_mode="production",
+        use_cuda_graph=graph,
+    )
     return run, frame
 
 
 def test_complete_native_audit(test, device):
-    """Compare complete legacy/pool raw CSR, E/r and both endpoint forces under real graph modes."""
+    """Compare complete-candidate and spatial raw CSR, E/r and both endpoint forces under real graph modes."""
     for recipe in ("tiny-contact", "actor-coupling-permuted"):
-        for algorithm in ("legacy", "pooled"):
+        for algorithm in ("pooled", "spatial"):
             for graph in (False, True) if device.is_cuda else (False,):
                 _, run, state, _ = build_scene(recipe, device=device, graph=graph, contact_dataflow=algorithm)
                 frame = physical(state)
@@ -71,17 +65,14 @@ def test_complete_native_audit(test, device):
                     again = comparison.audit_contact_state(run, frame, frame, 0.001)
                 test.assertEqual(result["status"], "PASS_LOCAL_COMPLETE_CONTACT_STATE")
                 test.assertEqual(result["full_count"], run._contact.count)
-                # The original CUDA force publisher uses floating atomics.
-                # Both runs must pass its existing numerical gate; new pool
-                # publication must also retain identical repeated results.
-                if algorithm == "pooled" or device.is_cpu:
-                    test.assertEqual(result["errors"], again["errors"])
+                # Pool publication retains identical repeated results.
+                test.assertEqual(result["errors"], again["errors"])
                 test.assertEqual(result["state_sha256"], again["state_sha256"])
                 test.assertLess(result["errors"]["tangent_relative"], 1e-5)
 
 
 def test_legacy_force_publication(test, device):
-    """Retain the actual legacy A-T kernel when publishing audit force operands."""
+    """Publish particle-shape audit force operands that match the independent oracle."""
     _, run, state, _ = build_scene("tiny-contact", device=device, graph=device.is_cuda)
     frame = physical(state)
     wanted = reference(run, frame, frame)["full"]
@@ -92,40 +83,30 @@ def test_legacy_force_publication(test, device):
 
 
 def test_tet_static_reactions(test, device):
-    """Audit legacy T-static reactions and balance both endpoints about the world origin."""
-    for algorithm in ("legacy", "pooled"):
-        for law in ("C-EE", "C-IE", "C-II"):
-            model, _, start = grid_scene(2, device=device)
-            model.shape_body.assign(np.full(model.shape_count, -1))
-            context = (
-                patch("newton._src.solvers.monolithic.solver_monolithic.ContactObjective", _PooledContactObjective)
-                if algorithm == "pooled"
-                else nullcontext()
+    """Audit T-static reactions and balance both endpoints about the world origin."""
+    for algorithm in ("pooled", "spatial"):
+        model, _, start = grid_scene(2, device=device)
+        model.shape_body.assign(np.full(model.shape_count, -1))
+        context = pooled_audit_route() if algorithm == "pooled" else nullcontext()
+        with context:
+            run = SolverMonolithic(
+                model,
+                mass_mode="lumped",
+                friction_velocity_scale=0.01,
+                alignment_policy="mask",
+                pcg_mode="production",
+                use_cuda_graph=device.is_cuda,
             )
-            with context:
-                run = SolverMonolithic(
-                    model,
-                    mass_mode="lumped",
-                    contact_model=law,
-                    globalization="ArmijoOrResNorm",
-                    friction_velocity_scale=0.01,
-                    alignment_policy="mask",
-                    allow_nonconservative_energy=True,
-                    pcg_mode="production",
-                    use_cuda_graph=device.is_cuda,
-                )
-            frame = {name: value.copy() for name, value in start.items()}
-            frame["x"] += [0.0002, 0, -0.0001]
-            wanted = reference(run, frame, start)["full"]
-            actual = comparison._contact_at(run, frame, start, 0.001, sparse=True)
-            test.assertGreater(np.linalg.norm(wanted["static_wrench"]), 0)
-            comparison._check_contact_sparse(actual, wanted)
-            force = actual["particle_force"].sum(axis=0) + actual["static_wrench"][:, :3].sum(axis=0)
-            torque = np.cross(frame["x"], actual["particle_force"]).sum(axis=0) + actual["static_wrench"][:, 3:].sum(
-                axis=0
-            )
-            np.testing.assert_allclose(force, 0, rtol=0, atol=1e-10)
-            np.testing.assert_allclose(torque, 0, rtol=0, atol=1e-10)
+        frame = {name: value.copy() for name, value in start.items()}
+        frame["x"] += [0.0002, 0, -0.0001]
+        wanted = reference(run, frame, start)["full"]
+        actual = comparison._contact_at(run, frame, start, 0.001, sparse=True)
+        test.assertGreater(np.linalg.norm(wanted["static_wrench"]), 0)
+        comparison._check_contact_sparse(actual, wanted)
+        force = actual["particle_force"].sum(axis=0) + actual["static_wrench"][:, :3].sum(axis=0)
+        torque = np.cross(frame["x"], actual["particle_force"]).sum(axis=0) + actual["static_wrench"][:, 3:].sum(axis=0)
+        np.testing.assert_allclose(force, 0, rtol=0, atol=1e-10)
+        np.testing.assert_allclose(torque, 0, rtol=0, atol=1e-10)
 
 
 def test_sparse_bsr_validation(test, device):
@@ -169,40 +150,33 @@ def test_connected_native_sparse(test, device):
 
 
 def test_independent_alignment_policy(test, device):
-    """Retain all keys while selecting whole E/r/B/force terms with the law's collider normal."""
-    selections = {}
-    for law in ("C-EE", "C-IE", "C-II"):
-        run = pooled_solver(
-            contact_scene(device, "R-R"), law=law, mode="production", graph=device.is_cuda, alignment_policy="mask"
-        )
-        start = physical(contact_state(run, "R-R"))
-        frame = {name: value.copy() for name, value in start.items()}
-        frame["com"][1] -= [0.03, 0.001, 0]
-        c = run._contact
-        stiffness, mu, velocity, width, radius = c.parameters
-        options = {"radius": radius, "stiffness": stiffness, "mu": mu, "width": width, "falloff": velocity * 0.001}
-        raw = evaluate_full(run.model, run._actors, frame, start, law, **options)
-        selected = evaluate_full(run.model, run._actors, frame, start, law, **options, alignment_policy="mask")
-        test.assertEqual(raw["records"].keys(), selected["records"].keys())
-        masked = {key for key, record in selected["records"].items() if record["alignment_masked"]}
-        test.assertTrue(masked)
-        test.assertTrue(any(np.any(raw["records"][key]["tangent"]) for key in masked))
-        for key in masked:
-            for name in ("energy", "residual", "tangent", "world_residual", "body_wrench", "particle_force"):
-                np.testing.assert_array_equal(selected["records"][key][name], 0)
-        result = comparison.audit_contact_state(run, frame, start, 0.001)
-        test.assertEqual(result["full_count"], len(raw["records"]))
-        selections[law] = masked
-        with test.assertRaisesRegex(ValueError, "contact alignment"):
-            evaluate_stream(run.model, run._actors, frame, start, law, **options, alignment_policy="guard")
-    test.assertNotEqual(selections["C-EE"], selections["C-IE"])
-    test.assertEqual(selections["C-IE"], selections["C-II"])
+    """Retain all keys while selecting whole E/r/B/force terms with the C-IE collider normal."""
+    run = contact_solver(contact_scene(device, "R-R"), mode="production", graph=device.is_cuda, alignment_policy="mask")
+    start = physical(contact_state(run, "R-R"))
+    frame = {name: value.copy() for name, value in start.items()}
+    frame["com"][1] -= [0.03, 0.001, 0]
+    c = run._contact
+    stiffness, mu, velocity, width, radius = c.parameters
+    options = {"radius": radius, "stiffness": stiffness, "mu": mu, "width": width, "falloff": velocity * 0.001}
+    raw = evaluate_full(run.model, run._actors, frame, start, **options)
+    selected = evaluate_full(run.model, run._actors, frame, start, **options, alignment_policy="mask")
+    test.assertEqual(raw["records"].keys(), selected["records"].keys())
+    masked = {key for key, record in selected["records"].items() if record["alignment_masked"]}
+    test.assertTrue(masked)
+    test.assertTrue(any(np.any(raw["records"][key]["tangent"]) for key in masked))
+    for key in masked:
+        for name in ("energy", "residual", "tangent", "world_residual", "body_wrench", "particle_force"):
+            np.testing.assert_array_equal(selected["records"][key][name], 0)
+    result = comparison.audit_contact_state(run, frame, start, 0.001)
+    test.assertEqual(result["full_count"], len(raw["records"]))
+    with test.assertRaisesRegex(ValueError, "contact alignment"):
+        evaluate_stream(run.model, run._actors, frame, start, **options, alignment_policy="guard")
 
 
 class TestNativeContactAudit(unittest.TestCase):
     def test_missing_cross_block(self):
         """Reject a missing A-R cross block using all sparse matrix coordinates."""
-        run = pooled_solver(contact_scene("cpu", "A-R"), mode="production")
+        run = contact_solver(contact_scene("cpu", "A-R"), mode="production")
         frame = physical(contact_state(run, "A-R"))
         wanted = reference(run, frame, frame)["full"]
         actual = comparison._contact_at(run, frame, frame, 0.001, sparse=True)
@@ -218,7 +192,7 @@ class TestNativeContactAudit(unittest.TestCase):
 
     def test_capacity_taint_and_nonfinite(self):
         """Reject truncated or invalid complete-state audits without weakening force or B gates."""
-        run = pooled_solver(contact_scene("cpu", "A-R"), contact_factor_capacity=0)
+        run = contact_solver(contact_scene("cpu", "A-R"), contact_factor_capacity=0)
         frame = physical(contact_state(run, "A-R"))
         with warnings.catch_warnings():
             warnings.simplefilter("ignore", RuntimeWarning)

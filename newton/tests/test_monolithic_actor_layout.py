@@ -11,7 +11,12 @@ import numpy as np
 import warp as wp
 
 import newton
-from newton._src.solvers.monolithic.actors import ActorTable, _checked_dof_count
+from newton._src.solvers.monolithic.actors import (
+    ActorTable,
+    TetBoundaryError,
+    _checked_dof_count,
+    _validate_and_collect_boundary_faces,
+)
 from newton._src.solvers.monolithic.articulation import _TreeKinematics
 from newton._src.solvers.monolithic.joint_parameters import JointParameters
 from newton.tests.monolithic_test_utils import add_contact_free_tet
@@ -219,6 +224,69 @@ class TestActorLayout(unittest.TestCase):
 
 for _test in (test_model_maps, test_layout_permutation, test_local_articulation, test_input_rejection):
     add_function_test(TestActorLayout, _test.__name__, _test, devices=get_test_devices())
+
+
+def single_tet_model(points=None, tets=None):
+    """Build one surface-meshed tet, optionally replacing its points or tets."""
+    builder = newton.ModelBuilder()
+    builder.add_soft_mesh(
+        pos=(0.0, 0.0, 0.002),
+        rot=wp.quat_identity(),
+        scale=1.0,
+        vel=(0.0, 0.0, 0.0),
+        vertices=[(0.0, 0.0, 0.0), (0.04, 0.0, 0.0), (0.0, 0.03, 0.0), (0.0, 0.0, 0.02)],
+        indices=[0, 1, 2, 3],
+        density=1000.0,
+        k_mu=1000.0,
+        k_lambda=1000.0,
+        k_damp=0.0,
+        particle_radius=0.001,
+        tri_ke=0.0,
+        tri_ka=0.0,
+        tri_kd=0.0,
+        tri_drag=0.0,
+        tri_lift=0.0,
+        edge_ke=0.0,
+        edge_kd=0.0,
+    )
+    model = builder.finalize(device="cpu")
+    if points is not None:
+        model.particle_q = wp.array(points, dtype=wp.vec3, device="cpu")
+    if tets is not None:
+        model.tet_indices = wp.array(tets, dtype=int, device="cpu")
+    return model
+
+
+class TestTetBoundary(unittest.TestCase):
+    def test_boundary_faces_and_particles(self):
+        faces, particles = _validate_and_collect_boundary_faces(single_tet_model())
+        self.assertEqual((len(faces), particles.tolist()), (4, [0, 1, 2, 3]))
+
+    def test_invalid_boundaries_are_rejected(self):
+        """Reject missing, extra, duplicate, degenerate and non-manifold tet boundaries."""
+        for mode in ("missing", "duplicate", "repeated", "extra", "zero_area"):
+            with self.subTest(mode=mode):
+                model = single_tet_model()
+                faces = model.tri_indices.numpy()
+                if mode == "missing":
+                    faces = faces[:-1]
+                elif mode == "duplicate":
+                    faces[0] = faces[1]
+                elif mode == "repeated":
+                    faces[0, 0] = faces[0, 1]
+                elif mode == "extra":
+                    faces = np.concatenate((faces, faces[:1]))
+                else:
+                    points = model.particle_q.numpy()
+                    points[1] = points[0]
+                    model.particle_q.assign(points)
+                model.tri_indices = wp.array(faces, dtype=int, device="cpu")
+                with self.assertRaisesRegex(TetBoundaryError, "INVALID_BOUNDARY"):
+                    _validate_and_collect_boundary_faces(model)
+        points = np.vstack((single_tet_model().particle_q.numpy(), [0, 0, -0.02], [0.01, 0.01, -0.03]))
+        model = single_tet_model(points, [[0, 1, 2, 3], [0, 2, 1, 4], [0, 1, 2, 5]])
+        with self.assertRaisesRegex(TetBoundaryError, "INVALID_BOUNDARY.*nonmanifold_tet_face"):
+            _validate_and_collect_boundary_faces(model)
 
 
 if __name__ == "__main__":

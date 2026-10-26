@@ -18,13 +18,13 @@ def test_reductions(test, device):
     for dtype, native in ((wp.float32, np.float32), (wp.float64, np.float64)):
         n = 1025
         r, reference, trial, effective = [rng.normal(size=n).astype(native) for _ in range(4)]
-        scale = np.geomspace(0.01, 100, n).astype(np.float32)
-        direction = rng.normal(size=n).astype(np.float32)
+        scale = np.geomspace(0.01, 100, n).astype(native)
+        direction = rng.normal(size=n).astype(native)
         arrays = [wp.array(v, dtype=dtype, device=device) for v in (r, reference, trial, effective)]
-        ds, dd = [wp.array(v, dtype=float, device=device) for v in (scale, direction)]
+        ds, dd = [wp.array(v, dtype=dtype, device=device) for v in (scale, direction)]
         terms = wp.empty((9, n), dtype=dtype, device=device)
         sums = wp.empty((9, 1), dtype=dtype, device=device)
-        rhs = wp.empty(n, dtype=float, device=device)
+        rhs = wp.empty(n, dtype=dtype, device=device)
         tolerance = 32 * np.finfo(native).eps
         for nq in (0, 3, n):
             parts = (slice(0, n), slice(0, nq), slice(nq, n))
@@ -35,7 +35,7 @@ def test_reductions(test, device):
                 for p in parts
             ]
             np.testing.assert_allclose(sums.numpy().reshape(3, 3), expected, rtol=tolerance, atol=0)
-            np.testing.assert_array_equal(rhs.numpy(), (-scale.astype(native) * r).astype(np.float32))
+            np.testing.assert_array_equal(rhs.numpy(), -scale * r)
             wp.launch(kernels.trial_terms, n, [arrays[0], arrays[2], ds, dd, arrays[3], nq, terms], device=device)
             wp.utils.array_sum(terms, out=sums, axis=1)
             d, s = direction.astype(native), scale.astype(native)

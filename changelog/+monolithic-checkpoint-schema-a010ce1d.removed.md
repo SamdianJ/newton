@@ -1,0 +1,1 @@
+Remove migration of schema 2 and 3 checkpoints from experimental `SolverMonolithic`; only checkpoints of the current schema and configuration version 5 load. Recreate older checkpoints by rerunning from the initial state with the current solver.

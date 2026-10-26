@@ -12,7 +12,7 @@ from newton._src.geometry import GeoType
 from newton._src.geometry.sdf_texture import TextureSDFData, create_sparse_sdf_textures
 from newton._src.solvers.monolithic.contact import ContactObjective, ContactStatus
 from newton._src.solvers.monolithic.smooth_sdf import SmoothSDF, SmoothSDFSet, sample_smooth
-from newton.tests.test_monolithic_contact_components import fixture, state, tangent
+from newton.tests.test_monolithic_contact_components import batch_matrix, energy, fixture, native, residual, state
 from newton.tests.test_monolithic_contact_mesh import synthetic
 from newton.tests.unittest_utils import add_function_test, get_test_devices
 from scripts.monolithic_reference.build_smooth_sdf import build_coefficients
@@ -206,12 +206,11 @@ def test_smooth_contact(test, device):
             build_coefficients(values, [0.0625] * 3, kind), [-0.125] * 3, [0.125] * 3, [5] * 3, kind, device=device
         )
         bundle = SmoothSDFSet([field], source_identity={"asset": "synthetic"})
-        for law in ("C-EE", "C-IE", "C-II"):
-            obj = ContactObjective(
+        batch = native(
+            ContactObjective(
                 model,
                 np.arange(4, dtype=np.int32),
                 q_dof_count=2,
-                contact_model=law,
                 normal_stiffness=1e7,
                 friction_coefficient=0.5,
                 friction_velocity_scale=0.01,
@@ -219,52 +218,44 @@ def test_smooth_contact(test, device):
                 particle_radius=0.001,
                 smooth_sdf=bundle,
             )
-            q = np.array([0.003, 2e-6])
-            current = xn + np.array([1e-6, 2e-6, 1e-6])
-            obj.begin_step(*state(model, xn, np.zeros(2)))
-            obj.evaluate(*state(model, current, q), dt=0.001)
-            test.assertEqual(obj.flags.numpy()[0], 0)
-            oracle_field = {"smooth_grid": values, "lower": [-0.125] * 3, "upper": [0.125] * 3, "representation": kind}
-            oracle = contact_oracle(model, q, current, np.zeros(2), xn, law, kinds=[oracle_field])
-            np.testing.assert_allclose(obj.energy.numpy(), oracle[0], atol=1e-15)
-            np.testing.assert_allclose(obj.residual.numpy(), oracle[1], atol=1e-12)
-            workspace, generation, _ = tangent(obj)
-            test.assertEqual(workspace.finalize_assembly(generation=generation).status, 0)
-            matrix = workspace.densify_for_test(generation=generation).raw_matrix
-            np.testing.assert_allclose(matrix, oracle[3], rtol=2e-5, atol=2e-4)
-            test.assertGreaterEqual(np.linalg.eigvalsh(matrix).min(), -1e-6 * np.linalg.norm(matrix))
-            direction = np.random.default_rng(187).normal(size=14)
-            direction /= np.linalg.norm(direction)
-            repeated_e, repeated_r = [], []
-            for _ in range(32):
-                obj.evaluate(*state(model, current, q), dt=0.001)
-                repeated_e.append(obj.energy.numpy().sum())
-                repeated_r.append(obj.residual.numpy())
-            errors = np.asarray(repeated_r) - oracle[1]
-            test.assertLessEqual(8 * np.max(abs(np.asarray(repeated_e) - oracle[0].sum())), 5.820766091346741e-11)
-            test.assertLessEqual(8 * np.max(abs(errors)), 2.0935893019213836e-9)
-            test.assertLessEqual(
-                8 * np.max(abs(errors @ direction)), 2.0935893019213836e-9 * np.linalg.norm(direction, 1)
+        )
+        q = np.array([0.003, 2e-6])
+        current = xn + np.array([1e-6, 2e-6, 1e-6])
+        batch.begin_step(*state(model, xn, np.zeros(2)))
+        batch.evaluate(*state(model, current, q), dt=0.001)
+        test.assertEqual(int(batch.flags.numpy()[0]), 0)
+        oracle_field = {"smooth_grid": values, "lower": [-0.125] * 3, "upper": [0.125] * 3, "representation": kind}
+        oracle = contact_oracle(model, q, current, np.zeros(2), xn, kinds=[oracle_field])
+        np.testing.assert_allclose(energy(batch), oracle[0].sum(axis=0), atol=1e-15)
+        np.testing.assert_allclose(residual(batch), oracle[1], atol=1e-12)
+        matrix = batch_matrix(batch)
+        np.testing.assert_allclose(matrix, oracle[3], rtol=2e-5, atol=2e-4)
+        test.assertGreaterEqual(np.linalg.eigvalsh(matrix).min(), -1e-6 * np.linalg.norm(matrix))
+        direction = np.random.default_rng(187).normal(size=14)
+        direction /= np.linalg.norm(direction)
+        repeated_e, repeated_r = [], []
+        for _ in range(32):
+            batch.evaluate(*state(model, current, q), dt=0.001)
+            repeated_e.append(energy(batch).sum())
+            repeated_r.append(residual(batch))
+        errors = np.asarray(repeated_r) - oracle[1]
+        test.assertLessEqual(8 * np.max(abs(np.asarray(repeated_e) - oracle[0].sum())), 5.820766091346741e-11)
+        test.assertLessEqual(8 * np.max(abs(errors)), 2.0935893019213836e-9)
+        test.assertLessEqual(8 * np.max(abs(errors @ direction)), 2.0935893019213836e-9 * np.linalg.norm(direction, 1))
+        h = 1e-8
+        residuals = []
+        for sign in (1, -1):
+            batch.evaluate(
+                *state(model, current + sign * h * direction[2:].reshape(4, 3), q + sign * h * direction[:2]),
+                dt=0.001,
             )
-            h = 1e-8
-            energies, residuals = [], []
-            for sign in (1, -1):
-                obj.evaluate(
-                    *state(model, current + sign * h * direction[2:].reshape(4, 3), q + sign * h * direction[:2]),
-                    dt=0.001,
-                )
-                energies.append(obj.energy.numpy().sum())
-                residuals.append(obj.residual.numpy())
-            np.testing.assert_allclose(
-                (residuals[0] - residuals[1]) / (2 * h), oracle[2] @ direction, rtol=1e-5, atol=1e-5
-            )
-            if law == "C-EE":
-                test.assertAlmostEqual((energies[0] - energies[1]) / (2 * h), oracle[1] @ direction, delta=1e-7)
-            # An active contact on an unqualified box face must report coverage failure.
-            outside = xn.copy()
-            outside[:, 2] -= 0.15
-            obj.begin_step(*state(model, outside, np.zeros(2)))
-            test.assertEqual(obj.start_flags.numpy()[0], ContactStatus.UNCERTIFIED_BOUNDARY)
+            residuals.append(residual(batch))
+        np.testing.assert_allclose((residuals[0] - residuals[1]) / (2 * h), oracle[2] @ direction, rtol=1e-5, atol=1e-5)
+        # An active contact on an unqualified box face must report coverage failure.
+        outside = xn.copy()
+        outside[:, 2] -= 0.15
+        batch.begin_step(*state(model, outside, np.zeros(2)))
+        test.assertEqual(int(batch.start_flags.numpy()[0]), ContactStatus.UNCERTIFIED_BOUNDARY)
         test.assertIsNotNone(coarse)
         test.assertIsNotNone(fine)
 

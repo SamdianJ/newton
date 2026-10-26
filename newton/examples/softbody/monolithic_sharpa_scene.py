@@ -28,26 +28,6 @@ def joint_mapping(model, names, *, carriage=True):
     return {name: tuple(int(start[labels.index(name)]) for start in starts) for name in names}
 
 
-def mask_statistics(contact):
-    """Report omitted loads and penetration, including contacts excluded by the mask."""
-    omitted = contact.omitted.numpy()
-    keys = np.flatnonzero(np.any(omitted[:, 2:] > 0, axis=1))
-    seen = contact.mask_seen.numpy()
-    gap = contact.current.distance.numpy() - contact.parameters[4]
-    gap -= contact.margins.numpy()[contact.shapes.numpy()[np.arange(contact.count) % contact.shapes.size]]
-    return {
-        "masked_active_count": len(keys),
-        "masked_active_keys": keys,
-        "switched_active_keys": np.flatnonzero(seen == 3),
-        "omitted_normal_energy": float(omitted[:, 0].sum()),
-        "omitted_friction_energy": float(omitted[:, 1].sum()),
-        "omitted_normal_load_sum": float(omitted[:, 2].sum()),
-        "omitted_friction_load_sum": float(omitted[:, 3].sum()),
-        "max_masked_penetration": float(np.maximum(-gap[keys], 0).max()) if len(keys) else 0.0,
-        "max_all_penetration": float(np.maximum(-gap, 0).max()) if len(gap) else 0.0,
-    }
-
-
 def build(position):
     """Reuse frozen assets, mount, imported inertia corrections and all joint terms."""
     old = ASSETS / f"sharpa/close-{position}"

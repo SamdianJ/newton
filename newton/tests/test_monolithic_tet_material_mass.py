@@ -6,6 +6,7 @@
 import unittest
 from itertools import product
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import patch
 
 import numpy as np
@@ -21,7 +22,9 @@ from newton._src.solvers.monolithic.tet_material import (
     _nodal_hessian,
     _project_element_psd,
     mat99,
+    mat99d,
     mat1212,
+    mat1212d,
 )
 from newton.solvers.experimental.monolithic import SolverMonolithic
 from newton.tests.monolithic_test_utils import build_tiny_cpu_fixture
@@ -32,19 +35,21 @@ from newton.tests.unittest_utils import add_function_test, get_test_devices
 
 @wp.kernel
 def _smith_probe(
-    fs: wp.array[wp.mat33],
-    pose: wp.array[wp.mat33],
-    energy: wp.array[float],
-    stress: wp.array[wp.mat33],
-    raw: wp.array[mat99],
-    projected: wp.array[mat1212],
+    fs: wp.array[Any],
+    pose: wp.array[Any],
+    epsilon: Any,
+    energy: wp.array[Any],
+    stress: wp.array[Any],
+    raw: wp.array[Any],
+    projected: wp.array[Any],
 ):
     i = wp.tid()
-    e, p, h = _evaluate_smith(fs[i], 1.0, 3846.1538, 5769.231)
+    mu, lam = type(epsilon)(wp.float32(3846.1538)), type(epsilon)(wp.float32(5769.231))
+    e, p, h = _evaluate_smith(fs[i], type(epsilon)(1.0), mu, lam)
     energy[i] = e
     stress[i] = p
     raw[i] = h
-    k, success = _project_element_psd(_nodal_hessian(h, pose[0]))
+    k, success = _project_element_psd(_nodal_hessian(h, pose[0]), epsilon)
     projected[i] = k
     wp.expect_eq(success, True)
 
@@ -69,6 +74,23 @@ def smith_stress(f):
     return p
 
 
+def _smith_arrays(fs, pose, dtype, device):
+    scalar, matrix, raw, nodal = (
+        (wp.float64, wp.mat33d, mat99d, mat1212d) if dtype == np.float64 else (wp.float32, wp.mat33, mat99, mat1212)
+    )
+    arrays = [
+        wp.array(fs.astype(dtype), dtype=matrix, device=device),
+        wp.array([pose.astype(dtype)], dtype=matrix, device=device),
+        scalar(np.finfo(dtype).eps),
+        wp.empty(len(fs), dtype=scalar, device=device),
+        wp.empty(len(fs), dtype=matrix, device=device),
+        wp.empty(len(fs), dtype=raw, device=device),
+        wp.empty(len(fs), dtype=nodal, device=device),
+    ]
+    wp.launch(_smith_probe, len(fs), arrays, device=device)
+    return [v.numpy() for v in arrays[3:]]
+
+
 def test_smith_oracle(test, device):
     """Check energy, stress, raw FD and full nodal spectral projection including inversion."""
     fs = np.array(
@@ -81,48 +103,46 @@ def test_smith_oracle(test, device):
         dtype=np.float32,
     )
     pose = np.array([[2, 0.1, 0], [0, 3, 0.2], [0, 0, 4]], dtype=np.float32)
-    arrays = [
-        wp.array(fs, dtype=wp.mat33, device=device),
-        wp.array([pose], dtype=wp.mat33, device=device),
-        wp.empty(4, dtype=float, device=device),
-        wp.empty(4, dtype=wp.mat33, device=device),
-        wp.empty(4, dtype=mat99, device=device),
-        wp.empty(4, dtype=mat1212, device=device),
-    ]
-    wp.launch(_smith_probe, 4, arrays, device=device)
-    e, p, h, k = [v.numpy() for v in arrays[2:]]
-    gradients = np.vstack((-pose.sum(axis=0), pose)).astype(float)
+    gradients = np.vstack((-pose.astype(float).sum(axis=0), pose.astype(float)))
     b = np.zeros((9, 12))
     for a in range(4):
         for row in range(3):
             for col in range(3):
                 b[3 * col + row, 3 * a + row] = gradients[a, col]
-    for i, f32 in enumerate(fs):
-        f = f32.astype(float)
-        test.assertAlmostEqual(float(e[i]), smith_energy(f), delta=0.002)
-        np.testing.assert_allclose(p[i], smith_stress(f), rtol=3e-5, atol=0.003)
-        fd = np.empty((9, 9))
+    # FP64 resolves the spectral projection of its own raw Hessian to roundoff.
+    for dtype, projection in ((np.float32, 2e-5), (np.float64, 1e-12)):
+        e, p, h, k = _smith_arrays(fs, pose, dtype, device)
+        for i, f32 in enumerate(fs):
+            with test.subTest(dtype=dtype.__name__, case=i):
+                f = f32.astype(float)
+                test.assertAlmostEqual(float(e[i]), smith_energy(f), delta=0.002)
+                np.testing.assert_allclose(p[i], smith_stress(f), rtol=3e-5, atol=0.003)
+                fd = np.empty((9, 9))
+                for j in range(9):
+                    d = np.zeros((3, 3))
+                    d[j % 3, j // 3] = 1e-4
+                    fd[:, j] = ((smith_stress(f + d) - smith_stress(f - d)) / 2e-4).ravel(order="F")
+                np.testing.assert_allclose(h[i], fd, rtol=3e-4, atol=0.02)
+                nodal = b.T @ (fd if dtype == np.float32 else h[i]) @ b
+                eig, vec = np.linalg.eigh((nodal + nodal.T) / 2)
+                expected = (vec * np.maximum(eig, 0)) @ vec.T
+                test.assertLess(np.linalg.norm(k[i] - expected) / np.linalg.norm(expected), projection)
+                scale = np.linalg.norm(k[i], 2)
+                test.assertGreaterEqual(np.linalg.eigvalsh(k[i].astype(float)).min(), -2e-6 * scale)
+                for direction in np.random.default_rng(17).normal(size=(100, 12)):
+                    test.assertGreaterEqual(
+                        direction @ k[i].astype(float) @ direction, -1e-6 * np.dot(direction, direction)
+                    )
+        # The small-strain tangent is the input Lame law for both material modes.
+        linear = np.zeros((9, 9))
+        mu = float(np.float32(3846.1538))
+        lam = float(np.float32(5769.231))
         for j in range(9):
-            d = np.zeros((3, 3))
-            d[j % 3, j // 3] = 1e-4
-            fd[:, j] = ((smith_stress(f + d) - smith_stress(f - d)) / 2e-4).ravel(order="F")
-        np.testing.assert_allclose(h[i], fd, rtol=3e-4, atol=0.02)
-        nodal = b.T @ fd @ b
-        eig, vec = np.linalg.eigh((nodal + nodal.T) / 2)
-        expected = (vec * np.maximum(eig, 0)) @ vec.T
-        test.assertLess(np.linalg.norm(k[i] - expected) / np.linalg.norm(expected), 2e-5)
-        test.assertGreaterEqual(np.linalg.eigvalsh(k[i].astype(float)).min(), -2e-6 * np.linalg.norm(k[i], 2))
-        for direction in np.random.default_rng(17).normal(size=(100, 12)):
-            test.assertGreaterEqual(direction @ k[i].astype(float) @ direction, -1e-6 * np.dot(direction, direction))
-    # The small-strain tangent is the input Lame law for both material modes.
-    linear = np.zeros((9, 9))
-    mu = float(np.float32(3846.1538))
-    lam = float(np.float32(5769.231))
-    for j in range(9):
-        delta = np.zeros((3, 3))
-        delta[j % 3, j // 3] = 1
-        linear[:, j] = (mu * (delta + delta.T) + lam * np.trace(delta) * np.eye(3)).ravel(order="F")
-    test.assertLess(np.linalg.norm(h[0] - linear) / np.linalg.norm(linear), 1e-6 if device.is_cpu else 1e-5)
+            delta = np.zeros((3, 3))
+            delta[j % 3, j // 3] = 1
+            linear[:, j] = (mu * (delta + delta.T) + lam * np.trace(delta) * np.eye(3)).ravel(order="F")
+        rest = 1e-14 if dtype == np.float64 else 1e-6 if device.is_cpu else 1e-5
+        test.assertLess(np.linalg.norm(h[0] - linear) / np.linalg.norm(linear), rest)
 
 
 def test_consistent_mass(test, device):
@@ -197,13 +217,14 @@ def test_modes_integration(test, device):
             density = wp.full(model.tet_count, 1000, dtype=float, device=device) if mass == "consistent" else None
             solver = SolverMonolithic(
                 model,
-                contact_model="C-EE",
-                globalization="ArmijoOrResNorm",
                 friction_velocity_scale=0.01,
                 contact_stiffness=1e5,
                 material_model=material,
                 mass_mode=mass,
                 tet_rest_density=density,
+                # Kim's projected tangent converges linearly here (about 0.93 per
+                # iteration, 54 iterations to the row tolerances).
+                newton_max_iterations=60,
             )
             state = solver.create_state(dt=0.01, source=fixture.state)
             out = solver.create_state(dt=0.01, source=fixture.state)
@@ -227,14 +248,14 @@ def test_modes_integration(test, device):
                 workspace.factor_actor_preconditioner(generation=generation, pivot_tolerance=0),
                 MonolithicLinearStatus.SUCCESS,
             )
-            rhs = wp.array(np.linspace(0.1, 1, len(oracle.raw_matrix)).astype(np.float32), device=device)
+            rhs = wp.array(np.linspace(0.1, 1, len(oracle.raw_matrix)), dtype=workspace.dtype, device=device)
             solution = wp.zeros_like(rhs)
             result = workspace.solve_pcg(
                 rhs,
                 solution,
                 generation=generation,
                 warm_start=MonolithicPcgWarmStart.ZERO,
-                config=_pcg_config(linear_tolerance=solver.linear_tolerance, curvature_relative_tolerance=1e-12),
+                config=_pcg_config(linear_tolerance=solver.linear_tolerance),
             )
             test.assertEqual(result.status, MonolithicLinearStatus.SUCCESS, result)
             expected_solution = np.linalg.solve(oracle.scaled_matrix, rhs.numpy())
@@ -255,8 +276,6 @@ def test_density_and_lifecycle(test, device):
     def create(density):
         return SolverMonolithic(
             model,
-            contact_model="C-EE",
-            globalization="ArmijoOrResNorm",
             friction_velocity_scale=0.01,
             contact_stiffness=1e5,
             material_model="smith_log_stabilized",

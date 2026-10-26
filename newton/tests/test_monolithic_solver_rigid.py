@@ -9,6 +9,7 @@ from pathlib import Path
 
 import numpy as np
 
+from newton._src.solvers.monolithic.actors import Actor
 from newton.tests.test_monolithic_rigid_dynamics import apply_wrench, independent_step, rigid_scene, rigid_solver
 from newton.tests.test_monolithic_solver_coupled import assert_snapshot, snapshot
 from newton.tests.unittest_utils import add_function_test, get_test_devices
@@ -17,7 +18,8 @@ from scripts.monolithic_reference.articulation_oracle import transform
 
 def physical_frame(run, state):
     history = state._monolithic_coupled
-    arm = run._articulation_actor
+    # Rigid-only scenes have no articulation; their articulation part is empty.
+    arm = run._articulation_actor or Actor("articulation", 0)
     values = {
         "a_q": state.joint_q.numpy()[list(arm.coord_indices)],
         "a_v": state.joint_qd.numpy()[list(arm.dof_indices)],
@@ -127,14 +129,7 @@ def test_mixed_matrix(test, device):
                 for permuted in (False, True):
                     with test.subTest(contact=contact, mode=mode, graph=graph, before=before, permuted=permuted):
                         model = rigid_scene(device, before=before, contact=contact)
-                        options = {
-                            "law": "C-IE",
-                            "globalization": "ArmijoOrResNorm",
-                            "mode": mode,
-                            "graph": graph,
-                            "allow_nonconservative_energy": True,
-                            "permuted": permuted,
-                        }
+                        options = {"mode": mode, "graph": graph, "permuted": permuted}
                         run = rigid_solver(model, **options)
                         state = run.create_state(dt=0.001)
                         control = model.control()
@@ -185,36 +180,12 @@ def test_mixed_matrix(test, device):
                         )
 
 
-def test_mixed_acceptance(test, device):
-    """Converge active A-T plus torque-driven rigid actors under all laws and acceptance modes."""
-    mode, graph = ("production", True) if device.is_cuda else ("diagnostic", False)
-    test.integration_cases = []
-    for law in ("C-EE", "C-IE", "C-II"):
-        for globalization in ("Armijo", "ResNorm", "ArmijoOrResNorm"):
-            with test.subTest(law=law, globalization=globalization):
-                model = rigid_scene(device)
-                run = rigid_solver(
-                    model,
-                    law=law,
-                    globalization=globalization,
-                    mode=mode,
-                    graph=graph,
-                    allow_nonconservative_energy=True,
-                )
-                state, control = run.create_state(dt=0.001), model.control()
-                for step in range(3):
-                    test.assertTrue(check_step(test, run, state, control, step, True))
-                test.integration_cases.append(
-                    {"device": str(device), "law": law, "globalization": globalization, "steps": 3, "converged": True}
-                )
-
-
 class TestRigidSolver(unittest.TestCase):
     pass
 
 
 for _device in get_test_devices():
-    for _test in (test_mixed_matrix, test_mixed_acceptance):
+    for _test in (test_mixed_matrix,):
         add_function_test(TestRigidSolver, _test.__name__, _test, devices=[_device])
 
 if __name__ == "__main__":

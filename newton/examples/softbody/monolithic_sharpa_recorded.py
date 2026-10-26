@@ -11,6 +11,7 @@ import sys
 import time
 import traceback
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import warp as wp
@@ -18,8 +19,16 @@ from newton.solvers.experimental.monolithic import build_smooth_sdf
 
 import newton
 from newton.examples.softbody.monolithic_grasp_trajectory import RecordedGrasp
-from newton.examples.softbody.monolithic_recording import measure, save, serial, state_arrays
-from newton.examples.softbody.monolithic_sharpa_scene import ASSETS, REPO, build, mask_statistics
+from newton.examples.softbody.monolithic_recording import (
+    GRASP_WINDOW_STEPS,
+    grasp_metrics,
+    measure,
+    object_weight_and_edge,
+    save,
+    serial,
+    state_arrays,
+)
+from newton.examples.softbody.monolithic_sharpa_scene import ASSETS, REPO, build
 
 
 def build_recorded(payload):
@@ -70,26 +79,23 @@ def targets(trajectory, curve, mapping, time_s):
     return target, rate, position, phase
 
 
-def run(args):
-    """Preserve the first failure and record every published complete state."""
-    output = args.output
+def setup(args):
+    """Build the recorded scene, its solver and the checked initial state."""
     payload = json.loads(args.trajectory.read_text())
     model, scene, mapping, curve, terms, trajectory, palm = build_recorded(payload)
     smooth = build_smooth_sdf(model, qualified_directory=ASSETS / "sharpa/geometry-rebuilt")
     solver_factory = getattr(args, "solver_factory", None)
     contact_recorder = getattr(args, "contact_recorder", None)
+    precision = getattr(args, "precision", "fp64")
     if solver_factory is None:
         from scripts.monolithic_reference.robot_contact_acceptance import FrozenRobotFactory  # noqa: PLC0415
 
-        solver_factory = FrozenRobotFactory("sharpa-recorded-10mm", dataflow="default")
+        solver_factory = FrozenRobotFactory("sharpa-recorded-10mm", dataflow="default", precision=precision)
         contact_recorder = solver_factory.measure
     solver = solver_factory(
         model,
-        contact_model="C-IE",
-        globalization="ArmijoOrResNorm",
         alignment_policy="mask",
         publish_policy="current_iterate",
-        allow_nonconservative_energy=True,
         friction_velocity_scale=0.01,
         contact_stiffness=1e7,
         friction_coefficient=0.5,
@@ -100,10 +106,11 @@ def run(args):
         joint_terms=terms,
         pcg_mode="production",
         use_cuda_graph=True,
+        precision=precision,
         smooth_sdf=smooth,
     )
     source, control = model.state(), model.control()
-    q, v, _, _ = targets(trajectory, curve, mapping, 0)
+    q, _, _, _ = targets(trajectory, curve, mapping, 0)
     initial = source.joint_q.numpy()
     for coord, _, slot in mapping.values():
         initial[coord] = q[slot]
@@ -125,10 +132,40 @@ def run(args):
         )
         if not np.array_equal(samples, np.load(expected_controls, allow_pickle=False)):
             raise ValueError("Constructed controls differ from frozen controls")
-    pose = solver._kinematics.poses.numpy()[palm]
-    np.testing.assert_allclose(pose[:3], trajectory.position[0], atol=1e-8, rtol=0)
-    if abs(abs(np.dot(pose[3:], trajectory.quaternion)) - 1) > 1e-12:
+    pose = solver._kinematics.poses.numpy()[palm].astype(float)
+    # The solver evaluates the initial pose in its own precision.
+    position_tolerance, rotation_tolerance = (
+        (1e-8, 1e-12) if solver.precision == solver.Precision.FP64 else (2e-6, 2e-6)
+    )
+    np.testing.assert_allclose(pose[:3], trajectory.position[0], atol=position_tolerance, rtol=0)
+    if abs(abs(np.dot(pose[3:], trajectory.quaternion)) - 1) > rotation_tolerance:
         raise ValueError("Initial palm orientation does not match recording")
+    return SimpleNamespace(
+        payload=payload,
+        model=model,
+        scene=scene,
+        mapping=mapping,
+        curve=curve,
+        terms=terms,
+        trajectory=trajectory,
+        palm=palm,
+        smooth=smooth,
+        solver=solver,
+        contact_recorder=contact_recorder,
+        state=state,
+        control=control,
+        pose=pose,
+    )
+
+
+def run(args):
+    """Preserve the first failure and record every published complete state."""
+    output = args.output
+    s = setup(args)
+    payload, model, scene, mapping, curve, terms = s.payload, s.model, s.scene, s.mapping, s.curve, s.terms
+    trajectory, palm, smooth, solver, contact_recorder = s.trajectory, s.palm, s.smooth, s.solver, s.contact_recorder
+    state, control, pose = s.state, s.control, s.pose
+    q, v, _, _ = targets(trajectory, curve, mapping, 0)
     config = {
         "trajectory": payload,
         "trajectory_sha256": hashlib.sha256(args.trajectory.read_bytes()).hexdigest(),
@@ -198,7 +235,10 @@ def run(args):
     counts = dict.fromkeys(("CONVERGED", "STOPPED_ACCEPTED", "HARD_FAILURE"), 0)
     weights = model.particle_mass.numpy().astype(float)
     initial_com = np.average(state.particle_q.numpy(), axis=0, weights=weights)
+    object_weight, object_edge = object_weight_and_edge(model, state.particle_q.numpy())
     max_penetration, min_det, max_com_rise, last_ground = 0.0, 1.0, 0.0, None
+    # The recording ends at the top of the lift, so its final steps form the grasp window.
+    grasp_window = []
     begin = time.perf_counter()
     calls = []
     zero_accepted_steps = []
@@ -254,7 +294,7 @@ def run(args):
                     slip=fields["slip"],
                     friction_work=fields["friction_work"],
                     force_balance=fields["force_balance"],
-                    mask=fields["mask"] if contact_recorder else mask_statistics(solver._contact),
+                    mask=fields["mask"],
                     **(
                         {name: fields[name] for name in ("full_system", "contact_pool", "contact_spatial")}
                         if contact_recorder
@@ -267,6 +307,8 @@ def run(args):
                 min_det = min(min_det, stats.min_det_f)
                 max_com_rise = max(max_com_rise, com[2] - initial_com[2])
                 last_ground = row["ground_force_on_cube"]
+                if step > trajectory.steps - GRASP_WINDOW_STEPS:
+                    grasp_window.append((step, com[2], last_ground[2]))
                 record(step, label, q, v)
                 if label == "STOPPED_ACCEPTED" and counts[label] == 1:
                     np.savez_compressed(output / "first-stop-input.npz", **before)
@@ -304,7 +346,9 @@ def run(args):
         "final_ground_force": last_ground,
         "elapsed_seconds": time.perf_counter() - begin,
         "strict_complete": counts["CONVERGED"] == trajectory.steps,
-        "physical_grasp_acceptance": "NOT_CERTIFIED",
+        "grasp": grasp_metrics(
+            grasp_window, initial_com_z=float(initial_com[2]), weight=object_weight, edge=object_edge
+        ),
         "missing_phases": config["missing_phases"],
     }
     save(output / "summary.json", summary)
@@ -316,6 +360,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--trajectory", type=Path, default=ASSETS / "sharpa/recorded-control.json")
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--precision", choices=("fp64", "fp32"), default="fp64", help="Solver precision")
     args = parser.parse_args()
     args.output.mkdir(parents=True, exist_ok=False)
     save(args.output / "command.json", {"argv": sys.argv, "cwd": str(Path.cwd())})

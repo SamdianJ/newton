@@ -1,0 +1,1 @@
+Fix rounding-level differences of experimental `SolverMonolithic` results when bodies and shapes of the same scene are created in a different order: contact samples are now enumerated by owning actor and actor-local shape rather than by Model shape index.

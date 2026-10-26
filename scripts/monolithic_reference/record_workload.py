@@ -145,7 +145,7 @@ def record(
     scene="tiny-contact",
     device="cuda:0",
     graph=True,
-    contact_dataflow="legacy",
+    contact_dataflow="spatial",
     spatial=None,
     steps=10,
     windows=None,
@@ -238,9 +238,8 @@ def main():
     )
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--no-graph", action="store_true")
-    parser.add_argument("--contact-dataflow", choices=("legacy", "pooled", "spatial"), default="legacy")
+    parser.add_argument("--contact-dataflow", choices=("pooled", "spatial"), default="spatial")
     parser.add_argument("--candidate-capacity", type=int)
-    parser.add_argument("--law-margin", type=float)
     parser.add_argument("--steps", type=int, default=10)
     parser.add_argument("--start", type=int, default=6)
     parser.add_argument(
@@ -250,12 +249,10 @@ def main():
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
     spatial = None
-    if args.contact_dataflow == "spatial":
-        if args.candidate_capacity is None or args.law_margin is None:
-            parser.error("Spatial experiments require --candidate-capacity and --law-margin")
-        spatial = {"candidate_capacity": args.candidate_capacity, "law_margin": args.law_margin}
-    elif args.candidate_capacity is not None or args.law_margin is not None:
-        parser.error("Spatial parameters require --contact-dataflow spatial")
+    if args.candidate_capacity is not None:
+        if args.contact_dataflow != "spatial":
+            parser.error("--candidate-capacity requires the spatial dataflow")
+        spatial = {"candidate_capacity": args.candidate_capacity}
     selection = json.loads(args.selection.read_text()) if args.selection else {}
     for key, expected in (
         ("schema", "monolithic-workload-selection/1"),

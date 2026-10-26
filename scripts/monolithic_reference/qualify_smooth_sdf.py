@@ -13,8 +13,8 @@ import warp as wp
 
 from newton._src.solvers.monolithic.smooth_sdf import SmoothSDF
 from scripts.monolithic_reference.build_smooth_sdf import build_coefficients, texture_identity
+from scripts.monolithic_reference.sharpa_close_scene import ARTIFACTS, build
 from scripts.monolithic_reference.smooth_sdf_oracle import evaluate
-from scripts.monolithic_reference.verify_close import ARTIFACTS, build
 from scripts.monolithic_reference.verify_coupled import save
 from scripts.monolithic_reference.verify_smooth_sdf import _old, geometry_gate, measure, sample, sha256
 

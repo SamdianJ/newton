@@ -1,0 +1,31 @@
+{
+  "version": 2,
+  "status": "FROZEN",
+  "approval": "Version 1 values approved by the user on 2026-10-17 and frozen on 2026-10-18; penetration is 5% of the smallest grasped object dimension (40 mm cubes), matching the rigid-stack 2 mm gate for 40 mm boxes. The grasp definition replaced the Franka-only held-cube rule on 2026-10-24 (user approved): over the final 500 steps at the top of the lift every published step keeps the ground support within 5% of the object weight and the center of mass at least 25% of the smallest object edge above rest. Franka requires it; Sharpa reports it as a diagnostic because its recorded hand closure cannot lift the cube in any precision.",
+  "robot": {
+    "franka-cube": {
+      "hard_failures_max": 0,
+      "stopped_fraction_max": 0.01,
+      "penetration_max_m": 0.002,
+      "det_f_min": 0.2,
+      "grasp": {
+        "window_steps": 500,
+        "ground_weight_fraction_max": 0.05,
+        "com_rise_min_edge_fraction": 0.25,
+        "required": true
+      }
+    },
+    "sharpa-recorded-10mm": {
+      "hard_failures_max": 0,
+      "stopped_fraction_max": 0.01,
+      "penetration_max_m": 0.002,
+      "det_f_min": 0.2,
+      "grasp": {
+        "window_steps": 500,
+        "ground_weight_fraction_max": 0.05,
+        "com_rise_min_edge_fraction": 0.25,
+        "required": false
+      }
+    }
+  }
+}

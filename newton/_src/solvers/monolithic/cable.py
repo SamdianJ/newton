@@ -3,8 +3,9 @@
 
 """Finite-EA DER strains and analytic first derivatives in a committed frame chart.
 
-The native-precision residual is exact. The FP32 tangent is the full
-strain-Jacobian Gauss-Newton matrix, including all position/theta blocks.
+The native-precision residual is exact. The tangent is the full
+strain-Jacobian Gauss-Newton matrix in the solver precision, including all
+position/theta blocks; it omits the stress-weighted second derivatives.
 No finite differences, numerical differentiation or theta inertia are used.
 """
 
@@ -16,6 +17,29 @@ import warp as wp
 from .material_inputs import _cable_geometry
 
 wp.set_module_options({"enable_backward": False})
+
+
+@wp.func
+def _rotate(angle: Any, increment: Any):
+    """Return the cosine and sine of ``angle + increment``."""
+    c, s = wp.cos(angle), wp.sin(angle)
+    dc, ds = wp.cos(increment), wp.sin(increment)
+    return c * dc - s * ds, s * dc + c * ds
+
+
+@wp.func
+def _abs_cross(a: Any, b: Any):
+    """Return the componentwise sum of absolute products forming ``a x b``."""
+    return type(a)(
+        wp.abs(a[1] * b[2]) + wp.abs(a[2] * b[1]),
+        wp.abs(a[2] * b[0]) + wp.abs(a[0] * b[2]),
+        wp.abs(a[0] * b[1]) + wp.abs(a[1] * b[0]),
+    )
+
+
+@wp.func
+def _abs_dot(a: Any, b: Any):
+    return wp.abs(a[0] * b[0]) + wp.abs(a[1] * b[1]) + wp.abs(a[2] * b[2])
 
 
 @wp.func
@@ -42,8 +66,14 @@ def _transport_differential(a: Any, b: Any, d: Any, da: Any, db: Any, dd: Any):
 
 
 @wp.kernel
+def _difference(x: wp.array[Any], anchor: wp.array[Any], out: wp.array[Any]):
+    i = wp.tid()
+    out[i] = x[i] - anchor[i]
+
+
+@wp.kernel
 def _edges(
-    x: wp.array[Any],
+    step: wp.array[Any],
     anchor_x: wp.array[Any],
     anchor_d: wp.array[Any],
     lengths0: wp.array[Any],
@@ -53,17 +83,19 @@ def _edges(
     lengths: wp.array[Any],
     energy: wp.array[Any],
     residual: wp.array2d[Any],
-    matrix: wp.array3d[float],
+    matrix: wp.array3d[Any],
     flags: wp.array[int],
 ):
     i = wp.tid()
-    edge = x[i + 1] - x[i]
+    anchor_edge = anchor_x[i + 1] - anchor_x[i]
+    change = step[i + 1] - step[i]
+    edge = anchor_edge + change
     length = wp.length(edge)
     if not wp.isfinite(length) or length <= type(ea)(1e-8) * lengths0[i]:
         wp.atomic_max(flags, 0, 1)
         return
     t = edge / length
-    old_t = wp.normalize(anchor_x[i + 1] - anchor_x[i])
+    old_t = wp.normalize(anchor_edge)
     if type(ea)(1.0) + wp.dot(old_t, t) <= type(ea)(1e-10):
         wp.atomic_max(flags, 0, 1)
         return
@@ -71,7 +103,12 @@ def _edges(
     director[i] = _transport(old_t, t, anchor_d[i])
     lengths[i] = length
     stiffness = ea / lengths0[i]
-    extension = length - lengths0[i]
+    # |e| - L0 = (|e|^2 - L0^2) / (|e| + L0) with |e|^2 formed from the
+    # step-start edge, fixed within the step, plus the size of the change.
+    squares = (wp.dot(anchor_edge, anchor_edge) - lengths0[i] * lengths0[i]) + (
+        type(ea)(2.0) * wp.dot(anchor_edge, change) + wp.dot(change, change)
+    )
+    extension = squares / (length + lengths0[i])
     energy[i] = type(ea)(0.5) * stiffness * extension * extension
     for a in range(6):
         gradient = t[a % 3]
@@ -82,12 +119,13 @@ def _edges(
             other = t[b % 3]
             if b < 3:
                 other = -other
-            matrix[i, a, b] = float(stiffness * gradient * other)
+            matrix[i, a, b] = stiffness * gradient * other
 
 
 @wp.kernel
 def _bend_twist(
-    theta: wp.array[Any],
+    anchor_theta: wp.array[Any],
+    theta_step: wp.array[Any],
     anchor_x: wp.array[Any],
     anchor_d: wp.array[Any],
     anchor_phi: wp.array[Any],
@@ -102,7 +140,8 @@ def _bend_twist(
     energy: wp.array[Any],
     jacobian: wp.array3d[Any],
     residual: wp.array2d[Any],
-    matrix: wp.array3d[float],
+    rounding: wp.array2d[Any],
+    matrix: wp.array3d[Any],
     flags: wp.array[int],
 ):
     i = wp.tid()
@@ -125,8 +164,10 @@ def _bend_twist(
         wp.atomic_max(flags, 0, 1)
         return
     phi_out[i] = phi
-    c0, s0 = wp.cos(theta[i]), wp.sin(theta[i])
-    c1, s1 = wp.cos(theta[i + 1]), wp.sin(theta[i + 1])
+    # Angle addition keeps the step-start angle's rounding a fixed bias of the
+    # step; the increment enters exactly however large the accumulated angle.
+    c0, s0 = _rotate(anchor_theta[i], theta_step[i])
+    c1, s1 = _rotate(anchor_theta[i + 1], theta_step[i + 1])
     perpendicular0, perpendicular1 = wp.cross(t0, d0), wp.cross(t1, d1)
     m10, m11 = c0 * d0 + s0 * perpendicular0, c1 * d1 + s1 * perpendicular1
     m20, m21 = -s0 * d0 + c0 * perpendicular0, -s1 * d1 + c1 * perpendicular1
@@ -134,7 +175,7 @@ def _bend_twist(
         type(t0)(
             type(gj)(0.5) * wp.dot(kb, m20 + m21),
             -type(gj)(0.5) * wp.dot(kb, m10 + m11),
-            theta[i + 1] - theta[i] + phi,
+            (anchor_theta[i + 1] - anchor_theta[i]) + (theta_step[i + 1] - theta_step[i]) + phi,
         )
         - rest_strain[i]
     )
@@ -150,6 +191,31 @@ def _bend_twist(
         type(gj)(0.5) * (strain[0] * stress[0] + strain[1] * stress[1]),
         type(gj)(0.5) * strain[2] * stress[2],
         type(gj)(0.0),
+    )
+    # Near rest each strain is a small sum of larger operands: the products forming
+    # kb and its projections on the material frames, and the angle differences plus
+    # the frame angle, whose atan2 rounds with the products forming its sine. The
+    # rounding follows those operands, so bound the stress from them. Componentwise
+    # products keep the bound at zero where a straight axis-aligned rod is exact.
+    curvature = type(gj)(2.0) * _abs_cross(t0, t1) / denominator
+    absolute0, absolute1 = wp.abs(m10) + wp.abs(m11), wp.abs(m20) + wp.abs(m21)
+    sine_operands = _abs_dot(t1, _abs_cross(carried, d1))
+    operands = type(t0)(
+        type(gj)(0.5) * _abs_dot(curvature, absolute1) + wp.abs(rest_strain[i][0]),
+        type(gj)(0.5) * _abs_dot(curvature, absolute0) + wp.abs(rest_strain[i][1]),
+        wp.abs(anchor_theta[i + 1] - anchor_theta[i])
+        + wp.abs(theta_step[i + 1] - theta_step[i])
+        + wp.abs(phi)
+        + sine_operands
+        + wp.abs(rest_strain[i][2]),
+    )
+    stress_bound = (
+        type(t0)(
+            wp.abs(bending[0, 0]) * operands[0] + wp.abs(bending[0, 1]) * operands[1],
+            wp.abs(bending[1, 0]) * operands[0] + wp.abs(bending[1, 1]) * operands[1],
+            wp.abs(gj) * operands[2],
+        )
+        / dual[i]
     )
     old_t0 = wp.normalize(anchor_x[i + 1] - anchor_x[i])
     old_t1 = wp.normalize(anchor_x[i + 2] - anchor_x[i + 1])
@@ -192,18 +258,18 @@ def _bend_twist(
             dtheta1 - dtheta0 + dphi,
         )
         residual[i, a] = wp.dot(ds, stress)
+        rounding[i, a] = wp.abs(residual[i, a]) + (
+            wp.abs(ds[0]) * stress_bound[0] + wp.abs(ds[1]) * stress_bound[1] + wp.abs(ds[2]) * stress_bound[2]
+        )
         for row in range(3):
             jacobian[i, row, a] = ds[row]
     for a in range(11):
         for b in range(11):
-            matrix[i, a, b] = float(
-                (
-                    jacobian[i, 0, a] * (bending[0, 0] * jacobian[i, 0, b] + bending[0, 1] * jacobian[i, 1, b])
-                    + jacobian[i, 1, a] * (bending[1, 0] * jacobian[i, 0, b] + bending[1, 1] * jacobian[i, 1, b])
-                    + gj * jacobian[i, 2, a] * jacobian[i, 2, b]
-                )
-                / dual[i]
-            )
+            matrix[i, a, b] = (
+                jacobian[i, 0, a] * (bending[0, 0] * jacobian[i, 0, b] + bending[0, 1] * jacobian[i, 1, b])
+                + jacobian[i, 1, a] * (bending[1, 0] * jacobian[i, 0, b] + bending[1, 1] * jacobian[i, 1, b])
+                + gj * jacobian[i, 2, a] * jacobian[i, 2, b]
+            ) / dual[i]
 
 
 class CableObjective:
@@ -237,20 +303,36 @@ class CableObjective:
         self.stretch_energy = wp.zeros(ne, dtype=dtype, device=device)
         self.bend_twist_energy = wp.zeros(ni, dtype=self.vector, device=device)
         self.stretch_r = wp.zeros((ne, 6), dtype=dtype, device=device)
-        self.stretch_b = wp.zeros((ne, 6, 6), dtype=float, device=device)
+        self.stretch_b = wp.zeros((ne, 6, 6), dtype=dtype, device=device)
         self.jacobian = wp.zeros((ni, 3, 11), dtype=dtype, device=device)
         self.bend_twist_r = wp.zeros((ni, 11), dtype=dtype, device=device)
-        self.bend_twist_b = wp.zeros((ni, 11, 11), dtype=float, device=device)
+        # Per-entry operand magnitude whose eps multiple bounds the residual rounding.
+        self.bend_twist_rounding = wp.zeros((ni, 11), dtype=dtype, device=device)
+        self.bend_twist_b = wp.zeros((ni, 11, 11), dtype=dtype, device=device)
         self.flags = wp.zeros(1, dtype=int, device=device)
+        self._step = self._theta_step = None
 
     def evaluate(self, positions, theta, anchor_positions, anchor_directors, anchor_twist):
         """Overwrite element terms and candidate frames, leaving all anchors unchanged."""
+        if self._step is None or self._step.size != positions.size:
+            self._step = wp.zeros_like(positions)
+            self._theta_step = wp.zeros_like(theta)
+        wp.launch(_difference, positions.size, [positions, anchor_positions, self._step], device=self.device)
+        self._theta_step.zero_()
+        self.evaluate_step(self._step, theta, self._theta_step, anchor_positions, anchor_directors, anchor_twist)
+
+    def evaluate_step(self, step, anchor_theta, theta_step, anchor_positions, anchor_directors, anchor_twist):
+        """Evaluate the configuration ``anchor + step`` from its exact increments.
+
+        Edges and twist are formed as anchor differences plus step differences,
+        so a small step is not added to large absolute coordinates or angles.
+        """
         self.flags.zero_()
         wp.launch(
             _edges,
             self.lengths.size,
             [
-                positions,
+                step,
                 anchor_positions,
                 anchor_directors,
                 self.lengths0,
@@ -269,7 +351,8 @@ class CableObjective:
             _bend_twist,
             self.phi.size,
             [
-                theta,
+                anchor_theta,
+                theta_step,
                 anchor_positions,
                 anchor_directors,
                 anchor_twist,
@@ -284,25 +367,36 @@ class CableObjective:
                 self.bend_twist_energy,
                 self.jacobian,
                 self.bend_twist_r,
+                self.bend_twist_rounding,
                 self.bend_twist_b,
                 self.flags,
             ],
             device=self.device,
         )
 
-    def evaluate_host(self, positions, theta, frame):
-        """Return dense diagnostic E/r/B for component validation, never for stepping."""
+    def evaluate_host(self, positions, theta, frame, *, step=None, theta_step=None):
+        """Return dense diagnostic E/r/B for component validation, never for stepping.
+
+        With ``step`` and ``theta_step``, ``positions`` and ``theta`` are the
+        step-start values and the configuration is formed from the increments.
+        """
 
         def array(value, dtype):
             return wp.array(value, dtype=dtype, device=self.device)
 
-        self.evaluate(
-            array(positions, self.vector),
-            array(theta, self.dtype),
+        anchors = (
             array(frame.positions, self.vector),
             array(frame.directors, self.vector),
             array(frame.reference_twist, self.dtype),
         )
+        if step is None:
+            self.evaluate(array(positions, self.vector), array(theta, self.dtype), *anchors)
+        else:
+            if not np.array_equal(np.asarray(positions), np.asarray(frame.positions)):
+                raise ValueError("A cable step starts from the committed frame positions")
+            self.evaluate_step(
+                array(step, self.vector), array(theta, self.dtype), array(theta_step, self.dtype), *anchors
+            )
         if self.flags.numpy()[0]:
             raise ValueError("Invalid cable candidate geometry or frame chart")
         count = len(positions) * 3 + len(theta)

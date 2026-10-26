@@ -20,46 +20,66 @@ from newton.tests.test_monolithic_solver_rigid import assert_physical
 from newton.tests.unittest_utils import add_function_test, get_test_devices
 from scripts.monolithic_reference import run_actor_coupling as coupling
 from scripts.monolithic_reference.actor_recording import check_actor, compare_actor
-from scripts.monolithic_reference.compare_contact_dataflows import compare_actor_contact_recordings
+from scripts.monolithic_reference.contact_audit import compare_actor_contact_recordings
 from scripts.monolithic_reference.contact_system_audit import ContactSystemAudit
 
 
 def test_full_system_residual(test, device):
     """Check every active block and preserve production state, diagnostics and candidate generation."""
     for mode, graph in [("diagnostic", False), ("production", device.is_cuda)]:
-        for law in ("C-EE", "C-IE", "C-II"):
-            options = {"mode": mode, "graph": graph, "law": law, "permuted": True}
-            run = spatial_solver(contact_scene(device), **options)
-            full = pooled_solver(contact_scene(device), **options)
-            # The native full stream does not consume the auditor's admission budget.
-            audit_run = pooled_solver(contact_scene(device), contact_factor_capacity=0, **options)
-            audit = ContactSystemAudit(run, audit_run)
-            states = [contact_state(owner, "chain") for owner in (run, full)]
-            for _ in range(2):
-                for owner, state in zip((run, full), states, strict=True):
-                    owner.step(state, state, owner.model.control(), dt=0.001)
-                    test.assertTrue(owner.last_stats.converged, owner.last_stats)
-                before = snapshot(states[0])
-                metrics, variational = serial(run._metrics), serial(run._variational)
-                candidates = run._contact._spatial.identities.numpy().copy()
-                count = run._contact._spatial.count.numpy().copy()
-                generation = run._contact.candidate_generation
-                result = audit.evaluate()
-                test.assertEqual(result["status"], "PASS_FULL_RESIDUAL", result)
-                test.assertEqual(len(result["blocks"]), 7)
-                np.testing.assert_allclose(audit.residual.numpy(), full._complete_r.numpy(), rtol=1e-5, atol=1e-8)
-                assert_physical(test, frame(full, states[1]), frame(run, states[0]))
-                assert_snapshot(test, states[0], before)
-                test.assertEqual(serial(run._metrics), metrics)
-                test.assertEqual(serial(run._variational), variational)
-                np.testing.assert_array_equal(run._contact._spatial.identities.numpy(), candidates)
-                np.testing.assert_array_equal(run._contact._spatial.count.numpy(), count)
-                test.assertEqual(run._contact.candidate_generation, generation)
+        options = {"mode": mode, "graph": graph, "permuted": True}
+        run = spatial_solver(contact_scene(device), **options)
+        full = pooled_solver(contact_scene(device), **options)
+        # The native full stream does not consume the auditor's admission budget.
+        audit_run = pooled_solver(contact_scene(device), contact_factor_capacity=0, **options)
+        audit = ContactSystemAudit(run, audit_run)
+        states = [contact_state(owner, "chain") for owner in (run, full)]
+        for _ in range(2):
+            for owner, state in zip((run, full), states, strict=True):
+                owner.step(state, state, owner.model.control(), dt=0.001)
+                test.assertTrue(owner.last_stats.converged, owner.last_stats)
+            before = snapshot(states[0])
+            metrics, variational = serial(run._metrics), serial(run._variational)
+            candidates = run._contact._spatial.identities.numpy().copy()
+            count = run._contact._spatial.count.numpy().copy()
+            generation = run._contact.candidate_generation
+            result = audit.evaluate()
+            test.assertEqual(result["status"], "PASS_FULL_RESIDUAL", result)
+            test.assertEqual(len(result["blocks"]), 7)
+            np.testing.assert_allclose(audit.residual.numpy(), full._complete_r.numpy(), rtol=1e-5, atol=1e-8)
+            assert_physical(test, frame(full, states[1]), frame(run, states[0]))
+            assert_snapshot(test, states[0], before)
+            test.assertEqual(serial(run._metrics), metrics)
+            test.assertEqual(serial(run._variational), variational)
+            np.testing.assert_array_equal(run._contact._spatial.identities.numpy(), candidates)
+            np.testing.assert_array_equal(run._contact._spatial.count.numpy(), count)
+            test.assertEqual(run._contact.candidate_generation, generation)
+
+
+def test_full_system_precision(test, device):
+    """Audit an FP32 run against an FP32 complete objective; mixed precisions are not comparable."""
+    options = {"mode": "production", "graph": device.is_cuda, "precision": "fp32"}
+    run = spatial_solver(contact_scene(device), **options)
+    audit = ContactSystemAudit(run, pooled_solver(contact_scene(device), contact_factor_capacity=0, **options))
+    state = contact_state(run, "chain")
+    for _ in range(2):
+        run.step(state, state, run.model.control(), dt=0.001)
+        test.assertTrue(run.last_stats.converged, run.last_stats)
+        result = audit.evaluate()
+        test.assertEqual(result["status"], "PASS_FULL_RESIDUAL", result)
+        test.assertEqual(len(result["blocks"]), 7)
+        # Every contributing sample is a candidate, so the complete and clipped contact
+        # residuals differ only by FP32 summation order when both use the exact increments.
+        scale = np.linalg.norm(run._contact.residual.numpy().astype(float))
+        test.assertLess(result["residual_difference_l2"], 1e-5 * scale)
+    mixed = pooled_solver(contact_scene(device), contact_factor_capacity=0, mode="production", graph=device.is_cuda)
+    with test.assertRaisesRegex(ValueError, "one precision"):
+        ContactSystemAudit(run, mixed)
 
 
 def test_full_system_detects_miss(test, device):
     """Reject clipped convergence when a deliberately omitted contact violates the full residual gate."""
-    options = {"mode": "production", "graph": device.is_cuda, "law": "C-II"}
+    options = {"mode": "production", "graph": device.is_cuda}
     run = spatial_solver(contact_scene(device), **options)
     audit = ContactSystemAudit(run, pooled_solver(contact_scene(device), contact_factor_capacity=0, **options))
     state = contact_state(run, "chain")
@@ -88,7 +108,7 @@ def test_actor_system_report(test, device):
     run = coupling.make_solver(
         coupling.build_model(device=device),
         contact_dataflow="spatial",
-        spatial={"candidate_capacity": 4096, "law_margin": 0.0},
+        spatial={"candidate_capacity": 4096},
         **options,
     )
     complete = coupling.make_solver(
@@ -111,7 +131,7 @@ def test_actor_system_report(test, device):
         restored = coupling.make_solver(
             coupling.build_model(device=device),
             contact_dataflow="spatial",
-            spatial={"candidate_capacity": 4096, "law_margin": 0.0},
+            spatial={"candidate_capacity": 4096},
             **options,
         )
         target = restored.create_state(dt=0.001)
@@ -145,7 +165,7 @@ def test_actor_system_report(test, device):
             **rows[0],
             "blocks": {
                 **rows[0]["blocks"],
-                "global": {**rows[0]["blocks"]["global"], "goal": rows[0]["blocks"]["global"]["goal"] * 2},
+                "global": {**rows[0]["blocks"]["global"], "full_ratio": 2.0},
             },
         }
         (path / report["file"]).write_text("".join(json.dumps(row) + "\n" for row in damaged))
@@ -162,7 +182,7 @@ def test_actor_contact_trajectories(test, device):
     spatial = coupling.make_solver(
         coupling.build_model(device=device),
         contact_dataflow="spatial",
-        spatial={"candidate_capacity": 4096, "law_margin": 0.0},
+        spatial={"candidate_capacity": 4096},
         **options,
     )
     audit_run = coupling.make_solver(
@@ -210,6 +230,7 @@ class TestContactSystemAudit(unittest.TestCase):
 for device in get_test_devices():
     for name in (
         "test_full_system_residual",
+        "test_full_system_precision",
         "test_full_system_detects_miss",
         "test_actor_system_report",
         "test_actor_contact_trajectories",

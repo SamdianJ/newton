@@ -87,22 +87,26 @@ def _initial_symmetric(omega: wp.array[Any], h: Any, sym: wp.array2d[Any]):
     _store_symmetric(value, sym, i)
 
 
+@wp.func
+def _store_rates(step: Any, e: Any, h: Any, i: int, v: wp.array[Any], omega: wp.array[Any], sym: wp.array2d[Any]):
+    # R = (I + E) R_n, so (R - R_n) R^T = E (I + E)^T.
+    v[i] = step / h
+    a = e * wp.transpose(e + wp.identity(n=3, dtype=type(h))) / h
+    omega[i] = type(step)(a[2, 1] - a[1, 2], a[0, 2] - a[2, 0], a[1, 0] - a[0, 1]) * type(h)(0.5)
+    _store_symmetric(a, sym, i)
+
+
 @wp.kernel
-def _recover_history(
-    old_t: wp.array[Any],
-    old_r: wp.array[Any],
-    new_t: wp.array[Any],
-    new_r: wp.array[Any],
+def _recover_step(
+    step: wp.array[Any],
+    rotation_step: wp.array[Any],
     h: Any,
     v: wp.array[Any],
     omega: wp.array[Any],
     sym: wp.array2d[Any],
 ):
     i = wp.tid()
-    v[i] = (new_t[i] - old_t[i]) / h
-    a = (new_r[i] - old_r[i]) * wp.transpose(new_r[i]) / h
-    omega[i] = type(v[0])(a[2, 1] - a[1, 2], a[0, 2] - a[2, 0], a[1, 0] - a[0, 1]) * type(h)(0.5)
-    _store_symmetric(a, sym, i)
+    _store_rates(step[i], rotation_step[i], h, i, v, omega, sym)
 
 
 @wp.kernel
@@ -115,10 +119,15 @@ def _predict(
     h: Any,
     predicted_t: wp.array[Any],
     predicted_r: wp.array[Any],
+    step_t: wp.array[Any],
+    step_r: wp.array[Any],
 ):
     i = wp.tid()
-    predicted_t[i] = t[i] + h * v[i]
-    predicted_r[i] = r[i] + h * (_skew(omega[i]) + _load_symmetric(sym, i)) * r[i]
+    # The predicted increments are kept exactly; R_p = (I + step_r) R_n.
+    step_t[i] = h * v[i]
+    step_r[i] = h * (_skew(omega[i]) + _load_symmetric(sym, i))
+    predicted_t[i] = t[i] + step_t[i]
+    predicted_r[i] = r[i] + step_r[i] * r[i]
 
 
 class ArticulationState:

@@ -15,7 +15,7 @@ from newton.examples.softbody.monolithic_recording import state_arrays
 from scripts.monolithic_reference.profiling import SolverProfiler, provenance
 from scripts.monolithic_reference.record_workload import apply_inputs
 from scripts.monolithic_reference.workload_io import digest, load_arrays, open_bundle, write_json
-from scripts.monolithic_reference.workload_objective import replay_objective
+from scripts.monolithic_reference.workload_objective import replay_dataflow, replay_objective
 from scripts.monolithic_reference.workload_pcg import replay_pcg
 from scripts.monolithic_reference.workload_scene import build_scene, compare_arrays
 
@@ -30,10 +30,8 @@ def replay(root, *, mode="window", device="cuda:0", repeat=5, profile=False):
     """Validate the entire bundle before constructing any GPU objects."""
     root = Path(root)
     manifest = open_bundle(root)
-    contact_dataflow = manifest.get("contact_dataflow", "legacy")
-    if (manifest["scene"].startswith("actor-coupling") or contact_dataflow in ("pooled", "spatial")) and manifest[
-        "source"
-    ]["source_hashes"] != provenance()["source_hashes"]:
+    contact_dataflow = replay_dataflow(manifest)
+    if manifest["source"]["source_hashes"] != provenance()["source_hashes"]:
         raise ValueError("Mixed workload source identity differs")
     results = []
     if mode == "hotspot":

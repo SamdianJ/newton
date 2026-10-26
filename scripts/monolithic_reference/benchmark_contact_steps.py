@@ -8,7 +8,7 @@ import gc
 import hashlib
 import json
 import time
-from dataclasses import asdict, replace
+from dataclasses import asdict
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -16,7 +16,7 @@ import numpy as np
 import warp as wp
 
 from newton.examples.softbody.monolithic_recording import serial, state_arrays
-from scripts.monolithic_reference.compare_contact_dataflows import verify_contract
+from scripts.monolithic_reference.contact_audit import verify_contract
 from scripts.monolithic_reference.profiling import capture_count, contact_pair_diagnostics, provenance
 from scripts.monolithic_reference.replay_direction import recorded_frame, restore
 from scripts.monolithic_reference.retained_assets import validate_inputs
@@ -88,9 +88,7 @@ def main():
     _, control_path, _, _, _ = reference_binding(retained)
     np.testing.assert_array_equal(controls, np.load(control_path, allow_pickle=False))
     case = SimpleNamespace(model=model, solver=run, state=state, control=model.control())
-    original = run._config
     complete = factory.recorder.audit.complete
-    run._config = complete._config = replace(original, regularization_values=(0.0,))
     factory.recorder.audit.contract = verify_contract(complete, run)
     policy = {"constructor_digest": run._kinematics.digest.hex(), "effective_config": serial(asdict(run._config))}
     policy_hash = hashlib.sha256(json.dumps(policy, sort_keys=True).encode()).hexdigest()

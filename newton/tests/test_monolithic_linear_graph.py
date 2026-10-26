@@ -227,7 +227,7 @@ def test_conditional_slot_budget(test, device):
 def test_fused_products(test, device):
     """Overwrite a masked dot in one launch, including partial tiles and nonfinite inputs."""
     plan = make_plan(device, np.eye(4), [1, 2, 3, 4])
-    kernel = impl._make_products_kernel(256)
+    kernel = impl._make_products_kernel(256, wp.float32)
     for n in (1, 33, 2051):
         a = np.linspace(-2, 3, n, dtype=np.float32)
         b = np.sin(a).astype(np.float32)

@@ -48,7 +48,23 @@ def _freeze(fields):
     )
 
 
-def _cable_geometry(positions, director):
+def _rounding_tilt(positions, roundoff):
+    """Bound the edge direction change [rad] from rounding stored ``positions`` with unit ``roundoff``.
+
+    Each stored endpoint lies within ``roundoff * |x|`` of the exact increment-form
+    coordinate that the cable frames follow.
+    """
+    positions = np.asarray(positions, dtype=float)
+    norms = np.linalg.norm(positions, axis=1)
+    return roundoff * (norms[:-1] + norms[1:]) / np.linalg.norm(np.diff(positions, axis=0), axis=1)
+
+
+def _cable_geometry(positions, director, *, tilt=0.0):
+    """Return edge lengths, tangents, curvature binormals and the frames' principal twist.
+
+    ``tilt`` bounds each edge's direction error from rounded positions; the
+    orthogonality test admits twice that error.
+    """
     edges = np.diff(positions, axis=0)
     lengths = np.linalg.norm(edges, axis=1)
     if not np.isfinite(lengths).all() or np.any(lengths <= 0):
@@ -58,7 +74,7 @@ def _cable_geometry(positions, director):
         director.shape != tangent.shape
         or not np.isfinite(director).all()
         or np.any(abs(np.linalg.norm(director, axis=1) - 1) > 1e-6)
-        or np.any(abs(np.sum(tangent * director, axis=1)) > 1e-6)
+        or np.any(abs(np.sum(tangent * director, axis=1)) > 1e-6 + 2 * np.asarray(tilt))
     ):
         raise ValueError("Cable directors must be unit and perpendicular to their edges")
     dot = np.sum(tangent[:-1] * tangent[1:], axis=1)

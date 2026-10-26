@@ -9,12 +9,10 @@ import json
 import platform
 import time
 from pathlib import Path
-from unittest.mock import patch
 
 import numpy as np
 import warp as wp
 
-from newton._src.solvers.monolithic.contact import ContactObjective
 from newton.examples.softbody.monolithic_recording import measure, save, serial, state_arrays
 from scripts.monolithic_reference.coupled_fixtures import (
     DIRECTORY,
@@ -92,7 +90,6 @@ def assess(rows, case, expected, load):
 
 def run_case(
     case,
-    law,
     device,
     output,
     *,
@@ -101,7 +98,6 @@ def run_case(
     graph=False,
     reference=False,
     goal_scale=0.1,
-    globalization="ResNorm",
     steps=None,
 ):
     output.mkdir(parents=True, exist_ok=False)
@@ -116,22 +112,21 @@ def run_case(
     else:
         model = make_tiny(case, device)
         duration = PROTOCOL["tiny_fixtures"][case]["duration"]
-    with patch("newton._src.solvers.monolithic.solver_monolithic.ContactObjective", ContactObjective):
-        solver = make_solver(model, case, law, mode=mode, graph=graph, globalization=globalization)
+    solver = make_solver(model, case, mode=mode, graph=graph)
     state = solver.create_state(dt=dt)
     control = model.control()
     expected = round(duration / dt)
     count = expected if steps is None else min(steps, expected)
     configuration = {
         "case": case,
-        "law": law,
+        "law": "C-IE",
         "device": device,
         "dt": dt,
         "mode": mode,
         "graph": graph,
         "reference": reference,
         "goal_scale": goal_scale if reference else None,
-        "globalization": globalization,
+        "globalization": "ArmijoOrResNorm",
         "expected_steps": expected,
         "requested_steps": count,
         "actual_config": solver._config,
@@ -163,7 +158,6 @@ def run_case(
             model,
             solver._tet.physics,
             solver._objective.params.numpy(),
-            law=law,
             mu=0.0 if case == "normal_loading" else 0.5,
             width=0.0,
             goal_scale=goal_scale,
@@ -249,7 +243,7 @@ def run_case(
                     np.savez_compressed(output / "failure-buffers.npz", **buffers)
                 break
             if (step + 1) % 100 == 0:
-                print(case, law, device, "oracle" if reference else mode, dt, step + 1, flush=True)
+                print(case, device, "oracle" if reference else mode, dt, step + 1, flush=True)
     summary = assess(rows, case, expected, load)
     costs = [c["iterations"] for row in rows for c in row.get("pcg_calls", [])]
     summary["pcg_cost"] = {
@@ -259,7 +253,7 @@ def run_case(
     }
     summary.update(
         case=case,
-        law=law,
+        law="C-IE",
         reference=reference,
         goal_scale=goal_scale if reference else None,
         dt=dt,
@@ -302,14 +296,12 @@ def main():
         choices=["normal_loading", "tangent_reversal", "curved_release", "cube1", "cube2", "cube3"],
         required=True,
     )
-    parser.add_argument("--law", choices=["C-EE", "C-IE", "C-II"], required=True)
     parser.add_argument("--device", default="cpu")
     parser.add_argument("--mode", choices=["diagnostic", "production"], default="diagnostic")
     parser.add_argument("--graph", action="store_true")
     parser.add_argument("--reference", action="store_true")
     parser.add_argument("--goal-scale", type=float, choices=[0.1, 0.01], default=0.1)
     parser.add_argument("--dt", type=float, choices=[0.001, 0.0005, 0.00025], default=0.001)
-    parser.add_argument("--globalization", choices=["ResNorm", "Armijo", "ArmijoOrResNorm"], default="ResNorm")
     parser.add_argument("--steps", type=int)
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
@@ -317,7 +309,6 @@ def main():
         parser.error("Dense independent reference is limited to tiny systems")
     result = run_case(
         args.case,
-        args.law,
         args.device,
         args.output,
         dt=args.dt,
@@ -325,7 +316,6 @@ def main():
         graph=args.graph,
         reference=args.reference,
         goal_scale=args.goal_scale,
-        globalization=args.globalization,
         steps=args.steps,
     )
     return 0 if result["complete"] else 1

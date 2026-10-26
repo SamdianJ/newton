@@ -26,23 +26,6 @@ class TestMonolithicTypes(unittest.TestCase):
             check=True,
         )
 
-    def test_collision_import_is_independent(self):
-        """Resolve the public collision pipeline without importing the coupled solver."""
-        subprocess.run(
-            [
-                sys.executable,
-                "-c",
-                "import sys; "
-                "from newton.solvers.experimental.monolithic import MonolithicCollisionPipeline; "
-                "import newton.solvers.experimental.monolithic as module; "
-                "assert module.MonolithicCollisionPipeline is MonolithicCollisionPipeline; "
-                "assert 'SolverMonolithic' in dir(module); "
-                "assert 'newton._src.solvers.monolithic.solver_monolithic' not in sys.modules; "
-                "assert not hasattr(module, 'SolverNonexistent')",
-            ],
-            check=True,
-        )
-
     def test_shared_identity_and_immutable_stats(self):
         """Keep public type access and a single exception identity across current solver components."""
         from dataclasses import FrozenInstanceError, replace  # noqa: PLC0415

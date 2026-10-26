@@ -13,13 +13,10 @@ from newton.tests.unittest_utils import add_function_test, get_test_devices
 
 
 def test_unsupported_contact_inputs(test, device):
-    """Reject spring parameters and laws outside the supported contact-law API."""
+    """Reject spring parameters outside the supported contact API."""
     model = scene(device)
     with test.assertRaisesRegex(TypeError, "tangential_stiffness"):
         solver(model, tangential_stiffness=1e6)
-    for law in ("spring", "Huber", "EE", "IE", "II"):
-        with test.assertRaisesRegex(ValueError, "supported contact law"):
-            solver(model, law)
 
 
 def test_initialization_history_boundary(test, device):
@@ -37,7 +34,7 @@ def test_initialization_history_boundary(test, device):
 
 class TestContactBoundary(unittest.TestCase):
     def test_component_imports(self):
-        """Resolve contact, history and collision without loading the solver implementation."""
+        """Resolve contact and history without loading the solver implementation."""
         subprocess.run(
             [
                 sys.executable,
@@ -45,7 +42,6 @@ class TestContactBoundary(unittest.TestCase):
                 "import sys; "
                 "from newton._src.solvers.monolithic.contact import ContactObjective; "
                 "from newton._src.solvers.monolithic.coupled_state import CoupledState; "
-                "from newton.solvers.experimental.monolithic import MonolithicCollisionPipeline; "
                 "assert not any('newton._src.solvers.monolithic.' + name in sys.modules "
                 "for name in ('solver_monolithic',))",
             ],

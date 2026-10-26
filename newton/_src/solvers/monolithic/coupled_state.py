@@ -3,15 +3,13 @@
 
 """Complete private q/x continuation and final contact-force publication fields."""
 
-import copy
-
 import numpy as np
 import warp as wp
 
 from ...sim import Model
 from . import state_checks
 from .articulation_state import ArticulationState
-from .material_inputs import _cable_geometry, _shell_adjacency
+from .material_inputs import _cable_geometry, _rounding_tilt, _shell_adjacency
 
 
 class CoupledState(ArticulationState):
@@ -127,18 +125,24 @@ class CoupledState(ArticulationState):
                     getattr(history, "cable_" + name).assign(np.concatenate(values).astype(self.kinematics.numpy_dtype))
 
     def _copy_coordinates(self, state, source):
-        if self.materials is not None and not self.model.joint_count:
+        # Model.state() leaves arrays of absent kinds as None; keep complete empty arrays.
+        if not self.model.joint_count:
             state.joint_q = wp.zeros(0, dtype=self.dtype, device=self.device)
             state.joint_qd = wp.zeros(0, dtype=self.dtype, device=self.device)
         else:
             super()._copy_coordinates(state, source)
-        if self.materials is not None and not self.model.body_count:
+        if not self.model.body_count:
             for name, dtype in (
                 ("body_q", wp.transform),
                 ("body_qd", wp.spatial_vector),
                 ("body_f", wp.spatial_vector),
             ):
                 setattr(state, name, wp.zeros(0, dtype=dtype, device=self.device))
+        if not self.model.particle_count:
+            for name in ("particle_q", "particle_qd"):
+                setattr(state, name, wp.zeros(0, dtype=self.vector, device=self.device))
+            state.particle_f = wp.zeros(0, dtype=wp.vec3, device=self.device)
+            return
         for name in ("particle_q", "particle_qd"):
             setattr(state, name, wp.array(getattr(source, name).numpy(), dtype=self.vector, device=self.device))
         if getattr(source, "particle_f", None) is not None:
@@ -221,15 +225,19 @@ class CoupledState(ArticulationState):
         directors, twists = history.cable_ref_director.numpy(), history.cable_ref_twist.numpy()
         cursor = 0
         tolerance = 2e-6 if self.dtype == wp.float32 else 1e-6
+        # Frames follow the exact increment-form edges, not the rounded stored positions.
+        roundoff = np.finfo(self.kinematics.numpy_dtype).eps / 2
         for obj in self.materials.cable:
             offset, count = int(obj["theta_offset"]), len(obj["rest_theta"])
             part = slice(offset, offset + count)
-            lengths, _, _, principal = _cable_geometry(positions[obj["particle_ids"]], directors[part])
+            tilt = _rounding_tilt(positions[obj["particle_ids"]], roundoff)
+            lengths, _, _, principal = _cable_geometry(positions[obj["particle_ids"]], directors[part], tilt=tilt)
             if np.any(lengths / obj["rest_lengths"] <= 1e-8):
                 raise ValueError("Cable state has collapsed edges")
             branch = twists[cursor : cursor + len(principal)]
             error = np.remainder(branch - principal + np.pi, 2 * np.pi) - np.pi
-            if np.any(abs(error) > tolerance):
+            # Each twist compares the frames of two edges.
+            if np.any(abs(error) > tolerance + 2 * (tilt[:-1] + tilt[1:])):
                 raise ValueError("Cable reference twist is inconsistent with its directors")
             if bool(obj["gauge"]) and theta[offset] != obj["rest_theta"][0].astype(self.kinematics.numpy_dtype):
                 raise ValueError("Cable state changed its permanent theta gauge")
@@ -272,44 +280,14 @@ class CoupledState(ArticulationState):
         return 64 if self.dtype == wp.float64 else 32
 
     def load_checkpoint(self, state, path):
-        """Validate the declared old schema before migrating canonical A+T history."""
+        """Accept only this schema version; older schemas are not migrated."""
         with np.load(path, allow_pickle=False) as checkpoint:
             if "history.schema_version" not in checkpoint.files:
                 raise ValueError("Missing checkpoint schema version")
             version = checkpoint["history.schema_version"]
-            if version.shape != (1,) or version.dtype != np.int32 or version[0] not in (2, 3, 4, 5, 6):
+            if version.shape != (1,) or version.dtype != np.int32 or version[0] != self.version:
                 raise ValueError("Unsupported checkpoint schema version")
-            version = int(version[0])
-        if self.materials is not None and version != self.version:
-            raise ValueError("Material checkpoints require complete theta and frame history")
-        if version in (5, 6) and self.materials is None:
-            raise ValueError("Material checkpoint cannot be loaded into an A/R/T solver")
-        if version == self.version:
-            return super().load_checkpoint(state, path)
-        if tuple(actor.kind for actor in self.actors.actors) != ("articulation", "tet"):
-            raise ValueError("Legacy checkpoints require canonical A+T layout")
-        if version == 2 and self.dtype != wp.float64:
-            raise ValueError("Legacy schema 2 checkpoints require FP64")
-        scratch = self.copy(state)
-        history = getattr(scratch, self.namespace)
-        legacy_owner = copy.copy(self)
-        additions = set(self.layout_metadata) | {name for name in self.schema if name.startswith("rigid_")}
-        if version == 2:
-            additions.add("precision")
-        saved = {name: getattr(history, name) for name in additions}
-        for name in additions:
-            delattr(history, name)
-        legacy_owner.schema = {name: item for name, item in self.schema.items() if name not in additions}
-        legacy_owner.version = version
-        history.schema_version.fill_(version)
-        # Original fields, precision and physical digest are checked in scratch.
-        ArticulationState.load_checkpoint(legacy_owner, scratch, path)
-        for name, value in saved.items():
-            setattr(history, name, value)
-        history.precision.fill_(self.precision_bits)
-        history.schema_version.fill_(self.version)
-        self.validate(scratch)
-        state.assign(scratch)
+        return super().load_checkpoint(state, path)
 
     def bind(self, state, *, dt):
         super().bind(state, dt=dt)

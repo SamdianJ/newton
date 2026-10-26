@@ -53,13 +53,13 @@ def test_objective_and_assembly(test, device):
 
         pattern = build_tet_triplet_pattern(model.tet_indices.numpy(), objective.mapping.numpy(), x_dof_start=0)
         workspace = create_tet_assembly_workspace(
-            pattern, tet_count=model.tet_count, device=device, physics=objective.physics
+            pattern, tet_count=model.tet_count, device=device, physics=objective.physics, dtype=wp.float64
         )
         scatter = TetScatterBuffers(
-            wp.empty(len(pattern.ax_rows), dtype=wp.mat33, device=device),
-            wp.empty(len(pattern.global_rows), dtype=float, device=device),
+            wp.empty(len(pattern.ax_rows), dtype=wp.mat33d, device=device),
+            wp.empty(len(pattern.global_rows), dtype=wp.float64, device=device),
         )
-        assembly_residual = wp.empty(objective.ids.size, dtype=wp.vec3, device=device)
+        assembly_residual = wp.empty(objective.ids.size, dtype=wp.vec3d, device=device)
         assemble_tet_residual_tangent(
             model,
             candidate_particle_q=x,
@@ -75,19 +75,20 @@ def test_objective_and_assembly(test, device):
             scatter=scatter,
         )
         test.assertEqual(int(workspace.failure_flags.numpy()[0]), 0)
-        np.testing.assert_allclose(assembly_residual.numpy().ravel(), residual, atol=2e-5, rtol=2e-5)
+        # The FP64 assembly evaluates the same residual as the native objective.
+        np.testing.assert_allclose(assembly_residual.numpy().ravel(), residual, atol=1e-10, rtol=1e-10)
         matrix = np.zeros((len(residual), len(residual)))
         np.add.at(matrix, (pattern.global_rows, pattern.global_columns), scatter.global_values.numpy())
         owner = np.zeros_like(matrix)
         for row, col, block in zip(pattern.ax_rows, pattern.ax_columns, scatter.ax_values.numpy(), strict=True):
             owner[3 * row : 3 * row + 3, 3 * col : 3 * col + 3] += block
         np.testing.assert_array_equal(owner, matrix)
-        np.testing.assert_allclose(matrix, matrix.T, atol=1e-4, rtol=1e-6)
+        np.testing.assert_allclose(matrix, matrix.T, atol=1e-8, rtol=1e-12)
         test.assertGreater(np.linalg.eigvalsh(matrix).min(), 0)
         expected_b = oracle.mass.copy() / 0.001**2
         for ids, pose, params in zip(oracle.indices, oracle.poses, oracle.materials, strict=True):
             deformation = (positions[ids[1:]] - positions[ids[0]]).T @ pose
-            gradients = np.vstack((-pose.sum(axis=0), pose))
+            gradients = np.vstack((-pose.astype(float).sum(axis=0), pose.astype(float)))
             mapping = np.column_stack([np.kron(g[:, None], np.eye(3)) for g in gradients])
             if smith:
                 _, _, tangent = material(deformation, params[0], params[1], True)
@@ -101,7 +102,7 @@ def test_objective_and_assembly(test, device):
                 nodal = (eigenvectors * np.maximum(eigenvalues, 0)) @ eigenvectors.T
             dofs = (3 * ids[:, None] + np.arange(3)).ravel()
             expected_b[np.ix_(dofs, dofs)] += nodal
-        np.testing.assert_allclose(matrix, expected_b[np.ix_(oracle.dofs, oracle.dofs)], atol=2e-3, rtol=2e-5)
+        np.testing.assert_allclose(matrix, expected_b[np.ix_(oracle.dofs, oracle.dofs)], atol=1e-6, rtol=1e-10)
 
 
 class TestTetComponents(unittest.TestCase):

@@ -106,6 +106,11 @@ def test_device_iteration(test, device):
                 run._reference_device,
                 run._effective_device,
                 run._stats_residual,
+                run._complete_a,
+                run._coordinates,
+                run._criterion.magnitude,
+                run._criterion.tau,
+                run._criterion.squares,
             )
         }
 

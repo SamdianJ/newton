@@ -209,18 +209,21 @@ def _validate_candidate_particles(
 
 
 def _validate_evaluation(model, args):
+    """Check one-precision tet inputs and return the NumPy scalar type of that precision."""
     dt, guard, workspace = args["dt"], args["min_det_f_guard"], args["workspace"]
-    with np.errstate(divide="ignore", over="ignore", invalid="ignore", under="ignore"):
-        dt32 = np.float32(dt)
-        inv_dt_sq = np.float32((1.0 / np.float64(dt)) ** 2)
-        guard32 = np.float32(guard)
-    if not np.isfinite(dt32) or dt32 <= 0 or not np.isfinite(inv_dt_sq) or inv_dt_sq <= 0:
-        raise ValueError("dt must be finite, positive and representable in float32 inertia")
-    if not np.isfinite(guard32) or guard32 <= 0:
-        raise ValueError("min_det_f_guard must be finite and positive in runtime float32 arithmetic")
     position_dtype = args["candidate_particle_q"].dtype
     if position_dtype not in (wp.vec3, wp.vec3d):
         raise ValueError("Unsupported tet position dtype")
+    scalar = wp.float64 if position_dtype == wp.vec3d else wp.float32
+    native = np.float64 if scalar == wp.float64 else np.float32
+    with np.errstate(divide="ignore", over="ignore", invalid="ignore", under="ignore"):
+        native_dt = native(dt)
+        inv_dt_sq = native((1.0 / np.float64(dt)) ** 2)
+        native_guard = native(guard)
+    if not np.isfinite(native_dt) or native_dt <= 0 or not np.isfinite(inv_dt_sq) or inv_dt_sq <= 0:
+        raise ValueError("dt must be finite, positive and representable in the tet precision")
+    if not np.isfinite(native_guard) or native_guard <= 0:
+        raise ValueError("min_det_f_guard must be finite and positive in the tet precision")
     specifications = (
         ("candidate_particle_q", position_dtype, (model.particle_count,)),
         ("particle_q_n", position_dtype, (model.particle_count,)),
@@ -228,7 +231,7 @@ def _validate_evaluation(model, args):
         ("frozen_particle_f", wp.vec3, (model.particle_count,)),
         ("particle_to_dynamic", wp.int32, (model.particle_count,)),
         ("dynamic_particle_ids", wp.int32, (args["dynamic_particle_ids"].size,)),
-        ("residual_x", wp.vec3, (args["dynamic_particle_ids"].size,)),
+        ("residual_x", position_dtype, (args["dynamic_particle_ids"].size,)),
     )
     for name, dtype, shape in specifications:
         array = args[name]
@@ -236,9 +239,10 @@ def _validate_evaluation(model, args):
             raise ValueError(f"{name} has incompatible dtype, shape or device")
     for array, dtype, shape in (
         (workspace.elastic_block_slots, wp.int32, (model.tet_count, 16)),
-        (workspace.tet_energy, wp.float32, (model.tet_count,)),
-        (workspace.min_det_f, wp.float32, (1,)),
+        (workspace.tet_energy, scalar, (model.tet_count,)),
+        (workspace.min_det_f, scalar, (1,)),
         (workspace.failure_flags, wp.int32, (1,)),
     ):
         if array.dtype != dtype or array.shape != shape or array.device != model.device:
             raise ValueError("tet workspace has incompatible dtype, shape or device")
+    return native
