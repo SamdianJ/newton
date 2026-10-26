@@ -92,7 +92,7 @@ class SolverMonolithic(SolverBase):
     contacts; the complete step-start residual remains the convergence reference.
     ``contact_candidate_capacity`` defaults to the model's static sample upper bound, and
     factor capacity defaults to three times that bound. Capacity is fixed for
-    the solver lifetime; overflow discards complete contacts and reports taint.
+    the solver lifetime; overflow reports dropped contacts and rolls back the step.
 
     Contact uses the C-IE law and trials use ArmijoOrResNorm acceptance. C-IE
     energy is not a potential, so Armijo acceptance is heuristic, not a
@@ -1025,6 +1025,8 @@ class SolverMonolithic(SolverBase):
         self._graphs.run("coupled_objective_result", key, result_buffers, evaluate_result)
         if not reference_mode:
             self._variational["contact_pool"] = contact.evaluation_diagnostics()
+            if self._variational["contact_pool"]["tainted"]:
+                raise _StepFailure(self.Status.CONTACT_OVERFLOW, "Incomplete contact evaluation")
         self._current_state = state
         if device_result:
             packet = self._evaluation_packet.numpy()
@@ -1138,6 +1140,8 @@ class SolverMonolithic(SolverBase):
         try:
             return self._evaluate(self._trial, dt, build_tangent=False, device_result=device_result)
         except _StepFailure as error:
+            if error.status == self.Status.CONTACT_OVERFLOW:
+                raise
             self._variational["trials"].append({"accepted": False, "domain_failure": str(error)})
             return None
 

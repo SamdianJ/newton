@@ -55,7 +55,8 @@ fixed-angle reactions. It shares the force validity flag, publication generation
 checkpoint and rollback transaction with the existing force fields. This is a
 chart-coordinate torque: for a general transported chart, world torque balance
 uses the full xyz/theta virtual-rotation map rather than only nodal lever arms.
-Material checkpoint schema 6 is required for this history.
+Material checkpoint schema 6, or schema 7 with multiple articulations, is
+required for this history.
 
 Target types, normal selection, energy-acceptance opt-in and capacity behavior
 are described in :doc:`monolithic_cloth`. CPU/CUDA short-contact qualification
