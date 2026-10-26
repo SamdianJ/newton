@@ -204,22 +204,16 @@ class TestActorLayout(unittest.TestCase):
             with self.assertRaises(ValueError):
                 _checked_dof_count(counts)
 
-    def test_multiple_and_floating_trees(self):
-        """Reject multiple mechanical trees and a FREE root with descendant links."""
+    def test_floating_tree(self):
+        """Reject a FREE root with descendant links until coupled floating-base dynamics exist."""
+        builder = newton.ModelBuilder()
         inertia = wp.diag(wp.vec3(0.01))
-        for floating in (False, True):
-            builder = newton.ModelBuilder()
-            first = builder.add_link(mass=1, inertia=inertia)
-            second = builder.add_link(mass=1, inertia=inertia)
-            if floating:
-                joints = [builder.add_joint_free(first), builder.add_joint_revolute(first, second)]
-                builder.add_articulation(joints)
-            else:
-                for body in (first, second):
-                    builder.add_articulation([builder.add_joint_revolute(-1, body)])
-            add_contact_free_tet(builder)
-            with self.assertRaises(ValueError):
-                ActorTable.from_model(builder.finalize(device="cpu"))
+        first = builder.add_link(mass=1, inertia=inertia)
+        second = builder.add_link(mass=1, inertia=inertia)
+        builder.add_articulation([builder.add_joint_free(first), builder.add_joint_revolute(first, second)])
+        add_contact_free_tet(builder)
+        with self.assertRaises(ValueError):
+            ActorTable.from_model(builder.finalize(device="cpu"))
 
 
 for _test in (test_model_maps, test_layout_permutation, test_local_articulation, test_input_rejection):

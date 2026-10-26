@@ -475,6 +475,12 @@ class ContactObjective:
             if actors is None and _materials is None
             else 0
         )
+        arms = () if actors is None else tuple(a for a in actors.actors if a.kind == "articulation")
+        self.jacobian_shape = (
+            (self.body_count, q_dof_count)
+            if len(arms) <= 1
+            else (sum(len(a.body_indices) * a.dof_count for a in arms), 1)
+        )
         self.parameters, self.nq, self.count = parameters, q_dof_count, count
         self._descriptors = descriptors.copy() if descriptors is not None else None
         # C-IE lags only the friction load at the frozen start. Without contact

@@ -73,21 +73,22 @@ def _assemble_monolithic_q_preconditioner(
     offsets: wp.array[int],
     columns: wp.array[int],
     values: wp.array[Any],
-    q_start: int,
+    rows: wp.array[int],
+    cols: wp.array[int],
     scale: wp.array[Any],
     regularization: Any,
-    result: wp.array2d[Any],
+    result: wp.array[Any],
 ):
-    i, j = wp.tid()
-    row, column = q_start + i, q_start + j
+    entry = wp.tid()
+    row, column = rows[entry], cols[entry]
     value = result.dtype(0.0)
     for index in range(offsets[row], offsets[row + 1]):
         if columns[index] == column:
             value = values[index]
     value *= scale[row] * scale[column]
-    if i == j:
+    if row == column:
         value += regularization
-    result[i, j] = value
+    result[entry] = value
 
 
 @wp.kernel
@@ -115,16 +116,19 @@ def _assemble_monolithic_x_preconditioner(
 
 @wp.kernel
 def _factor_monolithic_q_cholesky(
-    matrix: wp.array2d[Any],
-    factor: wp.array2d[Any],
+    matrix: wp.array[Any],
+    factor: wp.array[Any],
+    blocks: wp.array[wp.vec3i],
     tolerance: Any,
     status: wp.array[int],
 ):
-    for i in range(matrix.shape[0]):
+    block = blocks[wp.tid()]
+    n, offset = block[1], block[2]
+    for i in range(n):
         for j in range(i + 1):
-            value = matrix[i, j]
+            value = matrix[offset + i * n + j]
             for k in range(j):
-                value -= factor[i, k] * factor[j, k]
+                value -= factor[offset + i * n + k] * factor[offset + j * n + k]
             if not wp.isfinite(value):
                 wp.atomic_max(status, 0, 16)
                 return
@@ -132,9 +136,9 @@ def _factor_monolithic_q_cholesky(
                 if value <= tolerance:
                     wp.atomic_max(status, 0, 12)
                     return
-                factor[i, j] = wp.sqrt(value)
+                factor[offset + i * n + j] = wp.sqrt(value)
             else:
-                factor[i, j] = value / factor[j, j]
+                factor[offset + i * n + j] = value / factor[offset + j * n + j]
 
 
 @wp.kernel
@@ -165,19 +169,22 @@ def _factor_monolithic_x_cholesky(
 
 
 @wp.kernel
-def _apply_q_preconditioner(factor: wp.array2d[Any], q_start: int, x: wp.array[Any], temporary: wp.array[Any]):
-    n = factor.shape[0]
+def _apply_q_preconditioner(
+    factor: wp.array[Any], blocks: wp.array[wp.vec3i], x: wp.array[Any], temporary: wp.array[Any]
+):
+    block = blocks[wp.tid()]
+    q_start, n, offset = block[0], block[1], block[2]
     for i in range(n):
         value = x[q_start + i]
         for j in range(i):
-            value -= factor[i, j] * temporary[q_start + j]
-        temporary[q_start + i] = value / factor[i, i]
+            value -= factor[offset + i * n + j] * temporary[q_start + j]
+        temporary[q_start + i] = value / factor[offset + i * n + i]
     for reverse_i in range(n):
         i = n - 1 - reverse_i
         value = temporary[q_start + i]
         for j in range(i + 1, n):
-            value -= factor[j, i] * temporary[q_start + j]
-        temporary[q_start + i] = value / factor[i, i]
+            value -= factor[offset + j * n + i] * temporary[q_start + j]
+        temporary[q_start + i] = value / factor[offset + i * n + i]
 
 
 @wp.kernel
@@ -221,8 +228,8 @@ def _monolithic_preconditioner_matvec(workspace, x, y, z, alpha, beta) -> None:
     workspace._require_precision(x, y, z)
     wp.launch(
         _apply_q_preconditioner,
-        1,
-        [workspace._q_cholesky, workspace.layout.q_scalar_offset, x, workspace._preconditioned],
+        workspace.q_blocks.size,
+        [workspace._q_cholesky.flatten(), workspace.q_blocks, x, workspace._preconditioned],
         device=workspace.device,
     )
     wp.launch(
@@ -275,6 +282,9 @@ def factor_actor_preconditioner(
                 self._q_preconditioner,
                 self._x_preconditioner,
                 self._q_cholesky,
+                self.q_blocks,
+                self.q_pair_rows,
+                self.q_pair_columns,
                 self._x_cholesky,
                 self._rigid_preconditioner,
                 self._rigid_cholesky,
@@ -325,15 +335,16 @@ def _factor_actor_device(self, pivot_tolerance):
     )
     wp.launch(
         _assemble_monolithic_q_preconditioner,
-        self.aq_actor_dense.shape,
+        self.aq_actor_dense.size,
         [
             matrix.offsets,
             matrix.columns,
             matrix.values,
-            self.layout.q_scalar_offset,
+            self.q_pair_rows,
+            self.q_pair_columns,
             self.scale,
             regularization,
-            self._q_preconditioner,
+            self._q_preconditioner.flatten(),
         ],
         device=self.device,
     )
@@ -354,8 +365,8 @@ def _factor_actor_device(self, pivot_tolerance):
         )
     wp.launch(
         _factor_monolithic_q_cholesky,
-        1,
-        [self._q_preconditioner, self._q_cholesky, tolerance, self._status],
+        self.q_blocks.size,
+        [self._q_preconditioner.flatten(), self._q_cholesky.flatten(), self.q_blocks, tolerance, self._status],
         device=self.device,
     )
     if self.layout.dynamic_particle_count:

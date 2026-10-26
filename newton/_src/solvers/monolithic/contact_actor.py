@@ -10,6 +10,7 @@ import warp as wp
 
 from ...geometry import GeoType
 from ...geometry.sdf_texture import TextureSDFData
+from .articulation import _packed_column
 from .contact import _failure
 from .contact_geometry import _shape64
 from .rigid import _rotation_step
@@ -90,7 +91,7 @@ def _point_column(
     result = type(point)(0.0)
     local = indices[body]
     if kinds[body] == 0:
-        result = jt[local, column] + wp.cross(jw[local, column], point - com[local])
+        result = _packed_column(jt, column) + wp.cross(_packed_column(jw, column), point - com[local])
     else:
         basis = type(point)(0.0)
         basis[column % 3] = type(point[0])(1.0)

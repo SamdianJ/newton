@@ -6,6 +6,7 @@
 import numpy as np
 
 from ...geometry import GeoType, Mesh, ShapeFlags
+from .actors import articulation_support
 
 
 def _surface_samples(geo, scale, mesh=None, *, _return_triangles=False):
@@ -101,15 +102,13 @@ class ContactSamples:
         self.body_kind = np.full(model.body_count, -1, dtype=np.int32)
         self.body_local = np.full(model.body_count, -1, dtype=np.int32)
         rigids = [a for a in actors.actors if a.kind == "rigid"]
-        if not rigids and _materials is None:
+        arms = tuple(a for a in actors.actors if a.kind == "articulation")
+        if not rigids and _materials is None and len(arms) < 2:
             self.rigid_shapes = ()
             return
-        arm = next((a for a in actors.actors if a.kind == "articulation"), None)
-        arm_bodies = () if arm is None else arm.body_indices
-        arm_joints = () if arm is None else arm.joint_indices
-        arm_dofs = () if arm is None else arm.dof_indices
-        self.body_kind[list(arm_bodies)] = 0
-        self.body_local[list(arm_bodies)] = np.arange(len(arm_bodies))
+        tree_support = articulation_support(model, arms)
+        for body, (local, _) in tree_support.items():
+            self.body_kind[body], self.body_local[body] = 0, local
         for i, actor in enumerate(rigids):
             self.body_kind[actor.body_indices[0]], self.body_local[actor.body_indices[0]] = 1, i
         self.rigid_shapes = tuple(s for a in rigids for s in a.shape_indices)
@@ -127,17 +126,7 @@ class ContactSamples:
             getattr(model, n).numpy() for n in ("shape_body", "shape_type", "shape_scale", "shape_margin")
         )
         margins = margins.astype(np.float64)
-        incoming = {int(model.joint_child.numpy()[j]): j for j in arm_joints}
-        parent, starts = model.joint_parent.numpy(), model.joint_qd_start.numpy()
-        local_dof = {d: i for i, d in enumerate(arm_dofs)}
-        support = {}
-        for b in arm_bodies:
-            js, cursor = [], b
-            while cursor >= 0:
-                joint = incoming[cursor]
-                js.extend(local_dof[d] for d in range(int(starts[joint]), int(starts[joint + 1])))
-                cursor = int(parent[joint])
-            support[b] = [(arm.dof_start + j, j) for j in sorted(js)]
+        support = {body: columns for body, (_, columns) in tree_support.items()}
         for a in rigids:
             support[a.body_indices[0]] = [(a.dof_start + j, j) for j in range(6)]
         points, normals, weights, offsets, source_shapes, targets, faces, slots = [], [], [], [], [], [], [], []
@@ -218,6 +207,13 @@ class ContactSamples:
             (sorted(map(int, pair), key=rank.get) for pair in pairs), key=lambda p: (rank[p[0]], rank[p[1]])
         )
         for a, b in ordered:
+            if (
+                owner[a] != owner[b]
+                and bodies[a] in tree_support
+                and bodies[b] in tree_support
+                and (support[bodies[a]] or support[bodies[b]])
+            ):
+                raise ValueError("Cross-articulation shape contact is not yet supported")
             if owner[a] == owner[b] or not (a in self.rigid_shapes or b in self.rigid_shapes):
                 continue
             pair = tuple(sorted((a, b)))

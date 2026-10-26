@@ -165,6 +165,43 @@ class Actor:
     free_theta_indices: tuple[int, ...] = ()
 
 
+def articulation_view(actors):
+    """Gather mechanical Model indices without adding an owner or a fictitious root."""
+    fields = {
+        name: tuple(index for actor in actors for index in getattr(actor, name))
+        for name in ("body_indices", "joint_indices", "coord_indices", "dof_indices", "target_indices", "shape_indices")
+    }
+    return Actor(
+        "articulation",
+        -1,
+        **fields,
+        dof_count=sum(a.dof_count for a in actors),
+        state_count=sum(a.state_count for a in actors),
+    )
+
+
+def articulation_support(model, actors):
+    """Map each tree body to its packed body index and (global row, Jacobian entry) support."""
+    parent, child, starts = (getattr(model, n).numpy() for n in ("joint_parent", "joint_child", "joint_qd_start"))
+    support, body_start, jac_start = {}, 0, 0
+    for actor in actors:
+        incoming = {int(child[j]): j for j in actor.joint_indices}
+        dofs = {d: i for i, d in enumerate(actor.dof_indices)}
+        for local, body in enumerate(actor.body_indices):
+            selected, cursor = [], body
+            while cursor >= 0:
+                joint = incoming[cursor]
+                selected.extend(dofs[d] for d in range(int(starts[joint]), int(starts[joint + 1])))
+                cursor = int(parent[joint])
+            support[body] = (
+                body_start + local,
+                tuple((actor.dof_start + j, jac_start + local * actor.dof_count + j) for j in sorted(selected)),
+            )
+        body_start += len(actor.body_indices)
+        jac_start += len(actor.body_indices) * actor.dof_count
+    return support
+
+
 @dataclass(frozen=True, slots=True)
 class ActorTable:
     actors: tuple[Actor, ...]
@@ -176,7 +213,7 @@ class ActorTable:
 
     @classmethod
     def from_model(cls, model, *, actor_order=None, materials=None):
-        """Classify at most one tree/tet and independently owned rigid/material actors."""
+        """Classify mechanical trees and independently owned rigid/material actors."""
         types, qs, vs, ts = _joint_layout(model)
         starts, ends = model.articulation_start.numpy(), model.articulation_end.numpy()
         if (
@@ -261,9 +298,8 @@ class ActorTable:
                     state_count=len(coords),
                 )
             )
-        arm_count = sum(a.kind == "articulation" for a in actors)
-        if len(owned) != model.body_count or arm_count > 1:
-            raise ValueError("Monolithic requires uniquely owned bodies and at most one mechanical articulation")
+        if len(owned) != model.body_count:
+            raise ValueError("Monolithic requires uniquely owned bodies")
         inv_mass = model.particle_inv_mass.numpy()
         dynamic = np.flatnonzero(inv_mass > 0)
         actors.sort(key=lambda a: (a.kind != "articulation", a.source_index))

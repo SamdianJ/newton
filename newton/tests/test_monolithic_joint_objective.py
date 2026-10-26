@@ -236,7 +236,7 @@ def test_objective(test, device):
                         [
                             base,
                             direction,
-                            0,
+                            k.dof_map,
                             wp.float64(sign * eps),
                             objective.qn,
                             wp.float64(h),

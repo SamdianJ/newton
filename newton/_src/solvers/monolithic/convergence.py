@@ -93,15 +93,19 @@ def row_groups(layout, joint_units):
     units = np.full(n, -1, dtype=np.int32)
     groups = np.full(n, -1, dtype=np.int32)
     names = []
+    joint_units = np.asarray(joint_units, dtype=np.int32)
+    if joint_units.shape != (layout.q_dof_count,):
+        raise ValueError("Joint units must match the articulation rows")
+    q_units = np.full(n, -1, dtype=np.int32)
+    q_units[layout.articulation_indices()] = joint_units
     for kind, start, count in layout.groups:
         if kind == "global" or not count:
             continue
         rows = np.arange(start, start + count)
-        if kind == "articulation":
-            local = np.asarray(joint_units, dtype=np.int32)
-            if local.shape != (count,):
-                raise ValueError("Joint units must match the articulation rows")
-            parts = [(f"q_{unit.name.lower()}", rows[local == unit], unit) for unit in Unit]
+        if kind == "articulation" or kind.startswith("articulation_"):
+            local = q_units[rows]
+            prefix = "q" if kind == "articulation" else kind.replace("articulation_", "q_")
+            parts = [(f"{prefix}_{unit.name.lower()}", rows[local == unit], unit) for unit in Unit]
         else:
             torque = kind.endswith(("_r", "_theta"))
             parts = [("x" if kind == "tet" else kind, rows, Unit.TORQUE if torque else Unit.FORCE)]

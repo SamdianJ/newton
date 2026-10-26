@@ -10,6 +10,7 @@ import warp as wp
 
 from ...sim import JointType, Model
 from . import state_checks
+from .articulation import _packed_column
 
 
 @wp.func
@@ -48,15 +49,19 @@ def _load_symmetric(values: wp.array2d[Any], i: int):
 def _initial_link_rates(
     jt: wp.array2d[Any],
     jw: wp.array2d[Any],
+    jac_offsets: wp.array[int],
+    body_dof_starts: wp.array[int],
+    body_dof_counts: wp.array[int],
     qd: wp.array[Any],
     v: wp.array[Any],
     omega: wp.array[Any],
 ):
     b = wp.tid()
     linear, angular = type(v[0])(0.0), type(v[0])(0.0)
-    for i in range(qd.shape[0]):
-        linear += jt[b, i] * qd[i]
-        angular += jw[b, i] * qd[i]
+    for local in range(body_dof_counts[b]):
+        i = body_dof_starts[b] + local
+        linear += _packed_column(jt, jac_offsets[b] + local) * qd[i]
+        angular += _packed_column(jw, jac_offsets[b] + local) * qd[i]
     v[b] = linear
     omega[b] = angular
 
@@ -321,7 +326,16 @@ class ArticulationState:
         history = self.validate(state, bound=False)
         # Validate before modifying any published state, including on reset failure.
         local_qd = k.gather_qd(state)
-        omega = np.einsum("bni,n->bi", k.jw.numpy(), local_qd.numpy())
+        jac, velocity = k.jw.numpy().reshape(-1, 3), local_qd.numpy()
+        omega = np.zeros((k.bodies, 3), dtype=k.numpy_dtype)
+        body, dof, offset = 0, 0, 0
+        for bodies, _, count in k._tree_sizes:
+            omega[body : body + bodies] = np.einsum(
+                "bni,n->bi",
+                jac[offset : offset + bodies * count].reshape(bodies, count, 3),
+                velocity[dof : dof + count],
+            )
+            body, dof, offset = body + bodies, dof + count, offset + bodies * count
         if (
             not np.isfinite(omega).all()
             or np.any(dt * np.linalg.norm(omega, axis=1) >= 1)
@@ -333,7 +347,16 @@ class ArticulationState:
         wp.launch(
             _initial_link_rates,
             k.bodies,
-            [k.jt, k.jw, local_qd, history.link_v_com, history.link_omega],
+            [
+                k.jt,
+                k.jw,
+                k.jac_offsets,
+                k.body_dof_starts,
+                k.body_dof_counts,
+                local_qd,
+                history.link_v_com,
+                history.link_omega,
+            ],
             device=self.device,
         )
         wp.launch(
