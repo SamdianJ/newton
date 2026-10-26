@@ -275,13 +275,14 @@ class Criterion:
         self.block.zero_()
         wp.launch(_group_reference, reference.size, [reference, self.groups, self.block], device=self.groups.device)
 
-    def round(self, matrix, coordinates, contributions):
+    def round(self, matrix, coordinates, contributions, operator=None):
         """Set rounding magnitudes to the summed absolute contributions plus ``|B| |u|``.
 
         Args:
             matrix: Assembled physical tangent ``B`` (scalar BSR, unscaled).
             coordinates: Magnitude ``|u|`` of each row's coordinate as represented.
             contributions: Absolute contributions summed into each residual row.
+            operator: Element tangents applied outside ``matrix``, whose ``|B| |u|`` is added.
         """
         wp.launch(
             _rounding,
@@ -289,6 +290,8 @@ class Criterion:
             [matrix.offsets, matrix.columns, matrix.values, coordinates, contributions, self.magnitude],
             device=self.groups.device,
         )
+        if operator is not None:
+            operator.add_abs_coordinates(coordinates, self.magnitude)
         self.update(self.magnitude)
 
     def update(self, magnitude):

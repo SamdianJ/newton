@@ -335,6 +335,31 @@ class TestMonolithicCableSolver(unittest.TestCase):
             self.assertGreater(case.solver.last_stats.nonlinear_iterations, 0)
         self.assertGreater(abs(case.state.particle_q.numpy()[-1, case.axis]), 0.0)
 
+    def test_fp32_rotated_rod_solves_unregularized(self):
+        """Solve a rotated slender FP32 rod's load step without regularizing its direction.
+
+        Assembled FP32 entries of the stiff stretch blocks round by about eps EA/L,
+        far above the soft bending modes: the stored matrix turns indefinite in a
+        general orientation, so directions were only accepted after strong
+        regularization and the tip responded a fraction of its load.
+        """
+        from scripts.monolithic_reference.precision_checks import SolverTrace  # noqa: PLC0415
+
+        tips = {}
+        for precision in ("fp64", "fp32"):
+            case = CableBenchmark("cantilever", segments=64, angle=45.0, precision=precision, device=self.device)
+            direction = case.rotation[:, case.axis]
+            force = np.zeros((65, 3), dtype=np.float32)
+            force[-1] = 3e-6 * direction
+            case.state.particle_f.assign(force)
+            with SolverTrace(case.solver) as trace:
+                step = trace.step(lambda case=case: case.solver.step(case.state, case.state, case.control, dt=case.dt))
+            self.assertTrue(case.solver.last_stats.converged, case.solver.last_stats.status)
+            self.assertFalse(step.regularized, step.attempts)
+            tips[precision] = float((case.state.particle_q.numpy()[-1].astype(float) - case.rest[-1]) @ direction)
+        self.assertGreater(tips["fp64"], 0.0)
+        self.assertLess(abs(tips["fp32"] / tips["fp64"] - 1), 0.02, tips)
+
     def test_consistent_tet_mass_excludes_cable_particles(self):
         """Assemble a consistent-mass tet and a line-density cable in one solve."""
         _, solver = self.scene(cloth=False, cables=1, tet=True, mass_mode="consistent")

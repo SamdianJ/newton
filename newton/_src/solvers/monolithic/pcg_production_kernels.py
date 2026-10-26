@@ -774,3 +774,8 @@ def _publish_delta(candidate: wp.array[Any], delta: wp.array[Any], state: wp.arr
 @wp.kernel
 def _active_mask(state: wp.array[_DeviceResult], active: wp.array[int]):
     active[0] = state[0].enabled
+
+
+@wp.kernel
+def _phase_mask(state: wp.array[_DeviceResult], checkpoint: bool, active: wp.array[int]):
+    active[0] = int(_phase_enabled(state[0], checkpoint))

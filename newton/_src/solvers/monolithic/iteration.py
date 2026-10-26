@@ -100,7 +100,9 @@ def measure(solver, residual, reference, scale):
     criterion = self._criterion
     for producer in self._producers:
         producer.coordinates(self, self._accepted, self._coordinates)
-    criterion.round(self._linear.k_global_scalar_bsr, self._coordinates, self._complete_a)
+    criterion.round(
+        self._linear.k_global_scalar_bsr, self._coordinates, self._complete_a, self._linear._material_operator
+    )
     criterion.assess(self._complete_r)
     rows = criterion.rows
     worst, limited = criterion.worst.numpy(), criterion.limited.numpy()

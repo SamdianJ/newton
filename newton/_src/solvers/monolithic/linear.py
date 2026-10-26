@@ -65,6 +65,7 @@ class MonolithicLinearWorkspace:
         use_cuda_graph: bool = False,
         contact_support=None,
         cable_row_order=None,
+        material_operator=None,
         dtype=wp.float32,
     ):
         if dtype not in ASSEMBLY_STRUCTS:
@@ -100,8 +101,10 @@ class MonolithicLinearWorkspace:
         self.group_limits = wp.full(self.group_count, float("inf"), dtype=float, device=device)
         self.capacities = capacities
         self.device = wp.get_device(device)
+        # Element tangents applied outside the assembled matrix (cable_operator).
+        self._material_operator = material_operator
         self._cable_preconditioner = (
-            CablePreconditioner(layout, cable_row_order, device=self.device, dtype=dtype)
+            CablePreconditioner(layout, cable_row_order, device=self.device, dtype=dtype, operator=material_operator)
             if any(k == "cable" for k, *_ in layout.material_ranges)
             else None
         )
@@ -544,6 +547,8 @@ class MonolithicLinearWorkspace:
             arrays += self._cable_preconditioner.buffers()
         if self._cloth_preconditioner is not None:
             arrays += self._cloth_preconditioner.buffers()
+        if self._material_operator is not None:
+            arrays += self._material_operator.buffers()
         return (
             self._generation,
             y.ptr,
@@ -685,6 +690,8 @@ class MonolithicLinearWorkspace:
         for row in range(matrix.nrow):
             start, end = offsets[row], offsets[row + 1]
             dense[row, columns[start:end]] = values[start:end]
+        if self._material_operator is not None:
+            dense += self._material_operator.dense()
         if not self._scaling_valid:
             return MonolithicDenseLinearOracle(dense)
         diagonal, scale = self.diagonal.numpy().astype(np.float64), self.scale.numpy().astype(np.float64)

@@ -19,6 +19,7 @@ from . import convergence, iteration_device, state_checks
 from . import coupled_kernels as kernels
 from .actors import Actor, ActorTable
 from .articulation import ArticulationObjective, _TreeKinematics
+from .cable_operator import CableOperator
 from .cable_system import CableBlock
 from .cloth_system import ClothBlock
 from .config import GLOBALIZATION, MonolithicConfig
@@ -392,6 +393,9 @@ class SolverMonolithic(SolverBase):
             cable_row_order=np.concatenate([c.order for c in self._cables])
             if self._cables
             else np.empty(0, dtype=np.int32),
+            material_operator=CableOperator(self._cables, layout.scalar_dof_count, dtype=self._dtype, device=device)
+            if self._cables
+            else None,
             dtype=self._dtype,
         )
         self._linear._set_fixed_triplet_pattern(
@@ -415,6 +419,8 @@ class SolverMonolithic(SolverBase):
             "_post_magnitude",
             "_post_original",
             "_post_regularization",
+            "_post_material",
+            "_post_material_magnitude",
         )
         for name in native:
             setattr(self, name, wp.zeros(n, dtype=self._dtype, device=device))
@@ -1301,15 +1307,29 @@ class SolverMonolithic(SolverBase):
             self._post_regularization,
             self._post_error,
             self._post_magnitude,
+            self._post_material,
+            self._post_material_magnitude,
         ]
+        operator = self._linear._material_operator
+
+        def posterior():
+            # Cable element tangents act on the physical direction outside the assembly.
+            self._post_material.zero_()
+            self._post_material_magnitude.zero_()
+            if operator is not None:
+                operator.add_product(
+                    self._delta, operator.ones, self._post_material, magnitude=self._post_material_magnitude
+                )
+            wp.launch(kernels.sparse_posterior, self._post_error.size, buffers, device=self.model.device)
+
         self._graphs.run(
             "coupled_posterior",
             (
                 self._layout.identity,
                 self.precision.value,
             ),
-            buffers,
-            lambda: wp.launch(kernels.sparse_posterior, self._post_error.size, buffers, device=self.model.device),
+            buffers + ([] if operator is None else list(operator.buffers())),
+            posterior,
         )
         return self._post_error if device_result else self._post_error.numpy().copy()
 

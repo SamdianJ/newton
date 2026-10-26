@@ -363,11 +363,44 @@ def _scaled_matvec(
     z[i] = value
 
 
+@wp.kernel
+def _combine_scaled(product: wp.array[Any], y: wp.array[Any], z: wp.array[Any], alpha: float, beta: float):
+    i = wp.tid()
+    value = z.dtype(alpha) * product[i]
+    if beta != 0.0:
+        value += z.dtype(beta) * y[i]
+    z[i] = value
+
+
 def _monolithic_scaled_matvec(workspace, x, y, z, alpha, beta) -> None:
     if not workspace._scaling_valid or workspace.layout != workspace._layout_identity:
         raise ValueError("Scaled operator requires current valid scaling")
     workspace._require_precision(x, y, z)
     b = workspace.k_global_scalar_bsr
+    operator = workspace._material_operator
+    if operator is not None and operator.cables:
+        # z = alpha (S B S x + lambda x) + beta y with the element part added before the combination.
+        product = wp.zeros_like(z)
+        wp.launch(
+            _scaled_matvec,
+            x.size,
+            [
+                b.offsets,
+                b.columns,
+                b.values,
+                workspace.scale,
+                x,
+                y,
+                product,
+                workspace.dtype(workspace._lambda),
+                1.0,
+                0.0,
+            ],
+            device=workspace.device,
+        )
+        operator.add_product(x, workspace.scale, product)
+        wp.launch(_combine_scaled, x.size, [product, y, z, alpha, beta], device=workspace.device)
+        return
     wp.launch(
         _scaled_matvec,
         x.size,
