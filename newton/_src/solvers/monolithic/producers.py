@@ -78,26 +78,26 @@ def _scatter_values(values: wp.array[Any], start: int, output: wp.array[Any]):
 @wp.kernel
 def _add_values(source: wp.array[Any], target: wp.array[Any]):
     i = wp.tid()
-    target[i] += source[i]
+    target[i] = target[i] + source[i]
 
 
 @wp.kernel
 def _add_offset(values: wp.array[Any], start: int, output: wp.array[Any]):
     i = wp.tid()
-    output[start + i] += values[i]
+    output[start + i] = output[start + i] + values[i]
 
 
 @wp.kernel
 def _add_absolute(values: wp.array[Any], output: wp.array[Any]):
     i = wp.tid()
-    output[i] += wp.abs(values[i])
+    output[i] = output[i] + wp.abs(values[i])
 
 
 @wp.kernel
 def _add_rows(values: wp.array[Any], rows: wp.array[int], output: wp.array[Any]):
     i = wp.tid()
     if rows[i] >= 0:
-        output[rows[i]] += values[i]
+        output[rows[i]] = output[rows[i]] + values[i]
 
 
 @wp.kernel

@@ -240,7 +240,7 @@ def _assemble_elastic_residual_tangent(
             ga = _shape_gradient(pose, a)
             index = particle_to_dynamic[tet_indices[tet, a]]
             if index >= 0:
-                residual_terms[4 * tet + a] += stress * ga
+                residual_terms[4 * tet + a] = residual_terms[4 * tet + a] + stress * ga
             for b in range(a, 4):
                 slot = elastic_block_slots[tet, 4 * a + b]
                 if slot >= 0:

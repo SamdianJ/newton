@@ -39,12 +39,12 @@ def _factor(
                 elif values[slot] != values.dtype(0.0):
                     wp.atomic_max(status, 0, 1)
                     return
-        factor[i, 0] += regularization
+        factor[i, 0] = factor[i, 0] + regularization
         # Lift only a verified instantaneous null direction in the PRECONDITIONER.
         # The physical matrix/residual are unchanged; the delivered theta increment
         # is projected to zero mean by the common-angle constraint.
         if row == gauge_rows[actor]:
-            factor[i, 0] += factor.dtype(1.0)
+            factor[i, 0] = factor[i, 0] + factor.dtype(1.0)
         for j in range(wp.max(start, i - 10), i + 1):
             value = factor[i, i - j]
             for k in range(wp.max(start, i - 10), j):

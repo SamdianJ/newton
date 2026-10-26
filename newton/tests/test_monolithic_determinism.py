@@ -34,8 +34,21 @@ def _integer_increment(value):
     return isinstance(value, ast.Call) and ast.unparse(value.func) in _INTEGER_CASTS
 
 
+def _warp_function(function):
+    """Return whether ``function`` is compiled by Warp (``@wp.kernel`` or ``@wp.func``)."""
+    for decorator in function.decorator_list:
+        name = ast.unparse(decorator.func if isinstance(decorator, ast.Call) else decorator)
+        if name in ("wp.kernel", "wp.func"):
+            return True
+    return False
+
+
 def accumulating_atomics():
-    """Return (module, function, target) for every atomic add/sub not proven to be an integer counter."""
+    """Return (module, function, target) for every atomic add/sub not proven to be an integer counter.
+
+    Warp also compiles ``array[i] += value`` and ``array[i] -= value`` into atomic add/sub, so these
+    augmented assignments on array arguments of Warp functions count as atomics.
+    """
     sites = []
     for path in sorted(PACKAGE.glob("*.py")):
         for function in ast.walk(ast.parse(path.read_text())):
@@ -50,6 +63,16 @@ def accumulating_atomics():
                 ):
                     target = ast.unparse(node.args[0])
                     if not _integer_increment(node.args[-1]) and annotations.get(target) not in _INTEGER_ARRAYS:
+                        sites.append((path.name, function.name, target))
+                elif (
+                    _warp_function(function)
+                    and isinstance(node, ast.AugAssign)
+                    and isinstance(node.op, (ast.Add, ast.Sub))
+                    and isinstance(node.target, ast.Subscript)
+                ):
+                    target = ast.unparse(node.target.value)
+                    annotation = annotations.get(target, "")
+                    if annotation.startswith("wp.array") and annotation not in _INTEGER_ARRAYS:
                         sites.append((path.name, function.name, target))
     return sites
 

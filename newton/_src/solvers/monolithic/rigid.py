@@ -196,7 +196,7 @@ def _terms(
     dt, dr = step[i] - step_t[i], (e - step_r[i]) * rn[i]
     rs = dr * second[i]
     energy[i] = (mass[i] * wp.dot(dt, dt) + _inner(rs, dr)) / (type(h)(2.0) * h * h) - wp.dot(force[i], step[i])
-    energy[i] += type(h)(0.5) * wp.trace(_skew(torque[i]) * e)
+    energy[i] = energy[i] + type(h)(0.5) * wp.trace(_skew(torque[i]) * e)
     a = rs * wp.transpose(r) / (h * h)
     rt = mass[i] * dt / (h * h) - force[i]
     rr = type(dt)(a[2, 1] - a[1, 2], a[0, 2] - a[2, 0], a[1, 0] - a[0, 1]) - torque[i]
@@ -232,7 +232,7 @@ def _terms(
 @wp.kernel
 def _scatter_residual(rows: wp.array2d[int], local: wp.array2d[Any], out: wp.array[Any]):
     i, j = wp.tid()
-    out[rows[i, j]] += local[i, j]
+    out[rows[i, j]] = out[rows[i, j]] + local[i, j]
 
 
 @wp.kernel
