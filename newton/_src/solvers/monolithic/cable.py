@@ -76,6 +76,7 @@ def _edges(
     step: wp.array[Any],
     anchor_x: wp.array[Any],
     anchor_d: wp.array[Any],
+    rest_edges: wp.array[Any],
     lengths0: wp.array[Any],
     ea: Any,
     tangent: wp.array[Any],
@@ -83,6 +84,7 @@ def _edges(
     lengths: wp.array[Any],
     energy: wp.array[Any],
     residual: wp.array2d[Any],
+    rounding: wp.array2d[Any],
     matrix: wp.array3d[Any],
     flags: wp.array[int],
 ):
@@ -103,18 +105,26 @@ def _edges(
     director[i] = _transport(old_t, t, anchor_d[i])
     lengths[i] = length
     stiffness = ea / lengths0[i]
-    # |e| - L0 = (|e|^2 - L0^2) / (|e| + L0) with |e|^2 formed from the
-    # step-start edge, fixed within the step, plus the size of the change.
-    squares = (wp.dot(anchor_edge, anchor_edge) - lengths0[i] * lengths0[i]) + (
+    # |e| - L0 = (|e|^2 - L0^2) / (|e| + L0). The step-start part is formed from
+    # the rest edge r with L0^2 = |r|^2 exactly, |a|^2 - |r|^2 = (a - r).(a + r), so
+    # a rod near its rest shape carries no rest-length rounding as a prestress in
+    # any orientation; the step adds its own exact increment.
+    squares = wp.dot(anchor_edge - rest_edges[i], anchor_edge + rest_edges[i]) + (
         type(ea)(2.0) * wp.dot(anchor_edge, change) + wp.dot(change, change)
     )
     extension = squares / (length + lengths0[i])
+    # Only the step's products change between iterates: the step-start part is the
+    # same arithmetic every evaluation of the step, a constant rather than noise.
+    # A transverse change rounds with its products against the edge, so the bound
+    # follows those operands, zero where an axis-aligned product is exact.
+    varying = (type(ea)(2.0) * _abs_dot(anchor_edge, change) + _abs_dot(change, change)) / (length + lengths0[i])
     energy[i] = type(ea)(0.5) * stiffness * extension * extension
     for a in range(6):
         gradient = t[a % 3]
         if a < 3:
             gradient = -gradient
         residual[i, a] = stiffness * extension * gradient
+        rounding[i, a] = wp.abs(residual[i, a]) + stiffness * varying * wp.abs(gradient)
         for b in range(6):
             other = t[b % 3]
             if b < 3:
@@ -126,6 +136,7 @@ def _edges(
 def _bend_twist(
     anchor_theta: wp.array[Any],
     theta_step: wp.array[Any],
+    step: wp.array[Any],
     anchor_x: wp.array[Any],
     anchor_d: wp.array[Any],
     anchor_phi: wp.array[Any],
@@ -153,7 +164,18 @@ def _bend_twist(
     if denominator <= type(gj)(1e-10):
         wp.atomic_max(flags, 0, 1)
         return
-    kb = type(gj)(2.0) * wp.cross(t0, t1) / denominator
+    # Curvature binormal 2 e0 x e1 / (|e0||e1| + e0.e1) with e0 x e1 = e0 x (e1 - e0).
+    # The edge difference is the anchor's second difference plus the step's, each
+    # formed from nearby coordinates, so a small bend is not the difference of two
+    # unit-sized products of nearly parallel tangents in a general orientation.
+    anchor0 = anchor_x[i + 1] - anchor_x[i]
+    anchor1 = anchor_x[i + 2] - anchor_x[i + 1]
+    change0 = step[i + 1] - step[i]
+    change1 = step[i + 2] - step[i + 1]
+    edge0 = anchor0 + change0
+    bend = (anchor1 - anchor0) + (change1 - change0)
+    scale = lengths[i] * lengths[i + 1] + wp.dot(edge0, anchor1 + change1)
+    kb = type(gj)(2.0) * wp.cross(edge0, bend) / scale
     carried = _transport(t0, t1, d0)
     cosine = wp.dot(carried, d1)
     sine = wp.dot(t1, wp.cross(carried, d1))
@@ -192,12 +214,12 @@ def _bend_twist(
         type(gj)(0.5) * strain[2] * stress[2],
         type(gj)(0.0),
     )
-    # Near rest each strain is a small sum of larger operands: the products forming
-    # kb and its projections on the material frames, and the angle differences plus
-    # the frame angle, whose atan2 rounds with the products forming its sine. The
-    # rounding follows those operands, so bound the stress from them. Componentwise
-    # products keep the bound at zero where a straight axis-aligned rod is exact.
-    curvature = type(gj)(2.0) * _abs_cross(t0, t1) / denominator
+    # Each strain rounds with its operands: the products forming kb and its
+    # projections on the material frames, and the angle differences plus the frame
+    # angle, whose atan2 rounds with the products forming its sine. kb's operands
+    # are the edge and the edge difference, so its bound follows the actual bend in
+    # every orientation and vanishes for a straight rod.
+    curvature = type(gj)(2.0) * _abs_cross(edge0, bend) / scale
     absolute0, absolute1 = wp.abs(m10) + wp.abs(m11), wp.abs(m20) + wp.abs(m21)
     sine_operands = _abs_dot(t1, _abs_cross(carried, d1))
     operands = type(t0)(
@@ -292,6 +314,9 @@ class CableObjective:
         )
         self.ea, self.gj = dtype(stiffness[0]), dtype(stiffness[2])
         self.lengths0 = wp.array(lengths, dtype=dtype, device=device)
+        self.rest_edges = wp.array(
+            np.diff(np.asarray(positions, dtype=float), axis=0), dtype=self.vector, device=device
+        )
         self.dual = wp.array((lengths[:-1] + lengths[1:]) / 2, dtype=dtype, device=device)
         self.rest_strain = wp.array(strain, dtype=self.vector, device=device)
         self.bending = wp.array(stiffness[1], dtype=dtype, device=device)
@@ -303,6 +328,7 @@ class CableObjective:
         self.stretch_energy = wp.zeros(ne, dtype=dtype, device=device)
         self.bend_twist_energy = wp.zeros(ni, dtype=self.vector, device=device)
         self.stretch_r = wp.zeros((ne, 6), dtype=dtype, device=device)
+        self.stretch_rounding = wp.zeros_like(self.stretch_r)
         self.stretch_b = wp.zeros((ne, 6, 6), dtype=dtype, device=device)
         self.jacobian = wp.zeros((ni, 3, 11), dtype=dtype, device=device)
         self.bend_twist_r = wp.zeros((ni, 11), dtype=dtype, device=device)
@@ -335,6 +361,7 @@ class CableObjective:
                 step,
                 anchor_positions,
                 anchor_directors,
+                self.rest_edges,
                 self.lengths0,
                 self.ea,
                 self.tangent,
@@ -342,6 +369,7 @@ class CableObjective:
                 self.lengths,
                 self.stretch_energy,
                 self.stretch_r,
+                self.stretch_rounding,
                 self.stretch_b,
                 self.flags,
             ],
@@ -353,6 +381,7 @@ class CableObjective:
             [
                 anchor_theta,
                 theta_step,
+                step,
                 anchor_positions,
                 anchor_directors,
                 anchor_twist,

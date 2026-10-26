@@ -20,6 +20,9 @@ from scripts.monolithic_reference.run_precision_checks import iter_cases
 REQUIRED = (
     "cable_cantilever/0deg/n16/ramp_first",
     "cable_cantilever/0deg/n16/full",
+    # PR-02: split-form curvature and its operand bound (failed at 3b3c7417).
+    "cable_cantilever/30deg/n16/ramp_first",
+    "cable_cantilever/45deg/n16/ramp_first",
     "cable_twist/0deg/n16",
     "cable_twist/45deg/n16",
     "shell_patch/0deg/small",

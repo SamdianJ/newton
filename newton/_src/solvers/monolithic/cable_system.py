@@ -28,6 +28,7 @@ def _residual(
     mass: wp.array[Any],
     fixed: wp.array[int],
     stretch: wp.array2d[Any],
+    stretch_rounding: wp.array2d[Any],
     bend: wp.array2d[Any],
     bend_rounding: wp.array2d[Any],
     rows: wp.array[int],
@@ -46,7 +47,7 @@ def _residual(
         vertex, axis = row // 3, row % 3
         for edge in range(wp.max(0, vertex - 1), wp.min(nv - 1, vertex + 1)):
             value += stretch[edge, 3 * (vertex - edge) + axis]
-            magnitude += wp.abs(stretch[edge, 3 * (vertex - edge) + axis])
+            magnitude += stretch_rounding[edge, 3 * (vertex - edge) + axis]
         for stencil in range(wp.max(0, vertex - 2), wp.min(nv - 2, vertex + 1)):
             value += bend[stencil, 3 * (vertex - stencil) + axis]
             magnitude += bend_rounding[stencil, 3 * (vertex - stencil) + axis]
@@ -319,6 +320,7 @@ class CableBlock:
                 self.mass,
                 self.fixed,
                 objective.stretch_r,
+                objective.stretch_rounding,
                 objective.bend_twist_r,
                 objective.bend_twist_rounding,
                 self.rows,
