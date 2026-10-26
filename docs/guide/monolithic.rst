@@ -20,8 +20,10 @@ Monolithic Coupled Solver
 Each articulation retains its own joint block and force/torque convergence groups
 inside a shared Newton solve. Trees may differ in topology and DoF count.
 FREE roots with descendant links and same-tree self-contact are unsupported.
-Cross-articulation shape contact is currently rejected; articulation contacts
-with FREE actors and materials retain their existing paths.
+Shape contact between distinct articulations projects onto both trees and
+retains their cross blocks in the shared sparse operator. Fixed links can be
+zero-Jacobian endpoints. Articulation contacts with FREE actors and materials
+retain their existing paths.
 
 Every scene, including cloth/cable scenes, uses spatial contact. Candidates
 refresh at each Newton boundary and remain frozen during its trials. This
