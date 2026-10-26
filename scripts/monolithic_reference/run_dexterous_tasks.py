@@ -20,6 +20,7 @@ import warp as wp
 from newton.solvers.experimental.monolithic import SolverMonolithic
 
 import newton
+from scripts.monolithic_reference.articulation_oracle import transform
 
 TASKS = ("pinch-transfer", "turn-knob", "cable-pull")
 DT = 0.002
@@ -52,8 +53,8 @@ def targets(task, t, *, turn_angle=np.pi / 2, initial_yaw=0.0):
         open_gap, closed_gap = 0.04, 0.025
     elif task == "turn-knob":
         center[2] = 0.04
-        angle, angle_v = np.pi / 2 * move, np.pi / 2 * move_v
-        open_gap, closed_gap = 0.04, 0.022
+        angle, angle_v = initial_yaw + turn_angle * move, turn_angle * move_v
+        open_gap, closed_gap = 0.04, 0.0233
     elif task == "cable-pull":
         center[:] = (0.045 * move, 0, 0.07 + 0.025 * move)
         velocity[:] = (0.045 * move_v, 0, 0.025 * move_v)
@@ -87,10 +88,14 @@ class TaskScene:
         turn_angle=np.pi / 2,
         initial_yaw=0.0,
         alignment_policy="mask",
+        remote_tree=False,
     ):
+        if remote_tree and task != "turn-knob":
+            raise ValueError("A remote tree requires the knob task")
         self.task = task
-        self.wrist = wrist and task == "pinch-transfer"
+        self.wrist = wrist and task in ("pinch-transfer", "turn-knob")
         self.turn_angle, self.initial_yaw = turn_angle, initial_yaw
+        self.remote_tree = remote_tree
         builder = newton.ModelBuilder(gravity=(0, 0, -9.81))
         cfg = builder.ShapeConfig(density=0, margin=0.0)
         self.initial, _, _ = targets(task, 0, turn_angle=turn_angle, initial_yaw=initial_yaw)
@@ -156,12 +161,14 @@ class TaskScene:
             )
             builder.add_shape_box(self.object_body, hx=0.015, hy=0.015, hz=0.015, cfg=cfg)
         elif task == "turn-knob":
+            builder.add_articulation(joints)
             pose = wp.transform((0, 0, 0.04), wp.quat_identity())
+            support = builder.add_link(mass=1.0, inertia=wp.diag(wp.vec3(0.01)), label="knob_support")
+            fixed = builder.add_joint_fixed(-1, support, parent_xform=pose)
             self.object_body = builder.add_link(mass=0.03, inertia=wp.diag(wp.vec3(8e-6)), label="knob")
             self.knob_joint = builder.add_joint_revolute(
-                root,
+                support,
                 self.object_body,
-                parent_xform=pose,
                 axis=wp.vec3(0, 0, 1),
                 target_ke=0,
                 target_kd=0,
@@ -170,7 +177,10 @@ class TaskScene:
                 friction=0.001,
                 damping=0,
             )
-            builder.add_articulation([*joints, self.knob_joint])
+            builder.add_articulation([fixed, self.knob_joint])
+            self.knob_coord = builder.joint_q_start[self.knob_joint]
+            self.knob_dof = builder.joint_qd_start[self.knob_joint]
+            builder.joint_q[self.knob_coord] = initial_yaw
             builder.add_shape_box(self.object_body, hx=0.025, hy=0.012, hz=0.012, cfg=cfg)
         else:
             builder.add_articulation(joints)
@@ -192,6 +202,11 @@ class TaskScene:
                     fixed_theta=np.arange(16) == 0,
                 )
             )
+        if remote_tree:
+            self.remote_body, self.remote_coord, self.remote_dof = add_remote_tree(builder)
+        scalar_count = sum(
+            kind in (newton.JointType.REVOLUTE, newton.JointType.PRISMATIC) for kind in builder.joint_type
+        )
         self.model = builder.finalize(device=device)
         self.solver = SolverMonolithic(
             self.model,
@@ -201,7 +216,7 @@ class TaskScene:
             joint_terms=SolverMonolithic.JointTerms(
                 implicit_pd=True,
                 friction=True,
-                friction_velocity_scale=tuple([0.001] * (7 if self.wrist or task == "turn-knob" else 6)),
+                friction_velocity_scale=tuple([0.001] * scalar_count),
             ),
             contact_stiffness=1e7,
             friction_coefficient=friction,
@@ -218,6 +233,18 @@ class TaskScene:
         )
         self.state = self.solver.create_state(dt=DT)
         self.control = self.solver.create_control()
+        if remote_tree:
+            reference = newton.ModelBuilder(gravity=(0, 0, -9.81))
+            add_remote_tree(reference)
+            self.remote_reference = SolverMonolithic(
+                reference.finalize(device=device),
+                friction_velocity_scale=0.001,
+                precision=precision,
+                pcg_mode="production",
+                use_cuda_graph=wp.get_device(device).is_cuda,
+            )
+            self.remote_state = self.remote_reference.create_state(dt=DT)
+            self.remote_control = self.remote_reference.create_control()
 
     def step(self, t):
         """Only update fingertip actuator targets; leave the object unactuated."""
@@ -238,7 +265,83 @@ class TaskScene:
         self.control.joint_target_q.assign(q)
         self.control.joint_target_qd.assign(v)
         self.solver.step(self.state, self.state, self.control, dt=DT)
+        if self.remote_tree:
+            self.remote_reference.step(self.remote_state, self.remote_state, self.remote_control, dt=DT)
+            if not self.remote_reference.last_stats.converged:
+                raise RuntimeError("Independent remote tree did not converge")
         return position, phase
+
+
+def add_remote_tree(builder):
+    """Add an isolated unactuated rotor with nonzero initial velocity for the independence control."""
+    root = builder.add_link(mass=1, inertia=wp.diag(wp.vec3(0.01)), label="remote_support")
+    fixed = builder.add_joint_fixed(-1, root, parent_xform=wp.transform((1, 0, 0.1), wp.quat_identity()))
+    rotor = builder.add_link(mass=0.03, inertia=wp.diag(wp.vec3(8e-6)), label="remote_rotor")
+    joint = builder.add_joint_revolute(
+        root, rotor, axis=newton.Axis.Z, target_ke=0, target_kd=0, limit_ke=0, limit_kd=0, damping=0, friction=0
+    )
+    builder.add_articulation([fixed, joint])
+    coord, dof = builder.joint_q_start[joint], builder.joint_qd_start[joint]
+    builder.joint_q[coord], builder.joint_qd[dof] = 0.17, 0.2
+    builder.add_shape_box(rotor, hx=0.02, hy=0.01, hz=0.01, cfg=builder.ShapeConfig(density=0))
+    return rotor, coord, dof
+
+
+def knob_diagnostics(scene, forces):
+    """Audit sampled penetration and pair balance independently of the nonlinear residual."""
+    run, model = scene.solver, scene.model
+    sample = run._contact.actor_samples
+    if not run.last_stats.converged:
+        run._kinematics.evaluate(run._kinematics.gather_q(scene.state))
+    native = run._kinematics.poses.numpy()
+    frames = {b: transform(p) for b, p in zip(run._articulation_actor.body_indices, native, strict=True)}
+    shape_frames = [
+        frames[int(b)] @ transform(p) if b >= 0 else transform(p)
+        for b, p in zip(model.shape_body.numpy(), model.shape_transform.numpy(), strict=True)
+    ]
+    types, scales = model.shape_type.numpy(), model.shape_scale.numpy().astype(float)
+    penetration = 0.0
+    for source, target in run._contact.actor_samples.pair_kinds:
+        for s, t in ((source, target), (target, source)):
+            ids = (sample.source_shapes == s) & (sample.targets == t)
+            if not ids.any():
+                continue
+            left, right = shape_frames[s], shape_frames[t]
+            world = sample.points[ids] @ left[:3, :3].T + left[:3, 3]
+            y = (world - right[:3, 3]) @ right[:3, :3]
+            if types[t] == int(newton.GeoType.SPHERE):
+                phi = np.linalg.norm(y, axis=1) - scales[t, 0]
+            else:
+                d = np.abs(y) - scales[t]
+                phi = np.linalg.norm(np.maximum(d, 0), axis=1) + np.minimum(d.max(axis=1), 0)
+            penetration = max(penetration, float(np.max(sample.offsets[ids] - phi)))
+    pair_force = pair_moment = 0.0
+    for pair in run.last_stats.variational.get("actor_contact_pairs", []):
+        wrench = np.asarray(pair["world_wrench"])
+        pair_force = max(pair_force, float(np.linalg.norm(wrench[:, :3].sum(axis=0))))
+        pair_moment = max(pair_moment, float(np.linalg.norm(wrench[:, 3:].sum(axis=0))))
+    row = {
+        "knob_angle_rad": float(scene.state.joint_q.numpy()[scene.knob_coord]),
+        "knob_contact_torque_Nm": float(forces.joint_force[scene.knob_dof]),
+        "sample_penetration_m": penetration,
+        "pair_force_imbalance_N": pair_force,
+        "pair_moment_imbalance_Nm": pair_moment,
+        "knob_active_force_Nm": float(
+            abs(scene.control.joint_f.numpy()[scene.knob_dof])
+            + (abs(run.last_stats.joint_pd_force[scene.knob_dof]) if run.last_stats.joint_pd_force is not None else 0)
+        ),
+    }
+    if scene.remote_tree:
+        row.update(
+            remote_angle_error_rad=float(
+                abs(scene.state.joint_q.numpy()[scene.remote_coord] - scene.remote_state.joint_q.numpy()[0])
+            ),
+            remote_velocity_error_rad_s=float(
+                abs(scene.state.joint_qd.numpy()[scene.remote_dof] - scene.remote_state.joint_qd.numpy()[0])
+            ),
+            remote_contact_force_N=float(np.linalg.norm(forces.body_wrench[scene.remote_body])),
+        )
+    return row
 
 
 def task_metrics(scene, rows):
@@ -269,8 +372,34 @@ def task_metrics(scene, rows):
             release_stable=metrics["final_drift_m"] <= 0.002,
         )
     elif scene.task == "turn-knob":
-        metrics["angle_error_deg"] = float(abs(np.degrees(rows[-1]["knob_angle_rad"]) - 90))
-        gates["rotation"] = metrics["angle_error_deg"] <= 10
+        target = getattr(scene, "initial_yaw", 0.0) + getattr(scene, "turn_angle", np.pi / 2)
+        metrics.update(
+            angle_error_deg=float(abs(np.degrees(rows[-1]["knob_angle_rad"] - target))),
+            peak_knob_contact_torque_Nm=max(abs(r["knob_contact_torque_Nm"]) for r in rows if r["phase"] == "move")
+            if any(r["phase"] == "move" for r in rows)
+            else 0.0,
+            max_sample_penetration_m=max(r["sample_penetration_m"] for r in rows),
+            max_pair_force_imbalance_N=max(r["pair_force_imbalance_N"] for r in rows),
+            max_pair_moment_imbalance_Nm=max(r["pair_moment_imbalance_Nm"] for r in rows),
+            max_knob_active_force_Nm=max(abs(r["knob_active_force_Nm"]) for r in rows),
+        )
+        gates.update(
+            contact_present=contact >= 1e-3,
+            rotation=metrics["angle_error_deg"] <= 10,
+            contact_torque=metrics["peak_knob_contact_torque_Nm"] >= 1e-5,
+            penetration=metrics["max_sample_penetration_m"] <= 0.001,
+            pair_force_balance=metrics["max_pair_force_imbalance_N"] <= 1e-8,
+            pair_moment_balance=metrics["max_pair_moment_imbalance_Nm"] <= 1e-8,
+            passive_knob=metrics["max_knob_active_force_Nm"] == 0,
+        )
+        if getattr(scene, "remote_tree", False):
+            for name, limit in (
+                ("remote_angle_error_rad", 1e-6),
+                ("remote_velocity_error_rad_s", 1e-6),
+                ("remote_contact_force_N", 0),
+            ):
+                metrics["max_" + name] = max(r[name] for r in rows)
+                gates[name] = metrics["max_" + name] <= limit
     else:
         metrics.update(
             peak_grab_displacement_m=max(r["grab_displacement_m"] for r in rows),
@@ -299,6 +428,7 @@ def run_case(task, args):
         wrist=not args.translation_only_fingers,
         turn_angle=np.radians(args.turn_angle_deg),
         initial_yaw=np.radians(args.initial_yaw_deg),
+        remote_tree=args.remote_tree,
     )
     frames = {key: [] for key in ("time", "body_q", "particle_q", "joint_q", "target", "phase")}
     rows, error = [], None
@@ -345,7 +475,7 @@ def run_case(task, args):
                 if scene.object_body is not None:
                     row["object_pose"] = body[scene.object_body].tolist()
                 if task == "turn-knob":
-                    row["knob_angle_rad"] = float(scene.state.joint_q.numpy()[6])
+                    row.update(knob_diagnostics(scene, force))
                 if task == "cable-pull":
                     x = scene.state.particle_q.numpy()
                     row["grab_displacement_m"] = float(np.mean(x[-3:, 0]))
@@ -404,6 +534,7 @@ def main():
     )
     parser.add_argument("--turn-angle-deg", type=float, default=90.0)
     parser.add_argument("--initial-yaw-deg", type=float, default=0.0)
+    parser.add_argument("--remote-tree", action="store_true", help="Add an independent passive rotor to the knob task")
     args = parser.parse_args()
     if args.max_steps is not None and args.max_steps <= 0:
         parser.error("--max-steps must be positive")
@@ -413,12 +544,18 @@ def main():
         parser.error("--friction must be finite and nonnegative")
     if not np.isfinite([args.turn_angle_deg, args.initial_yaw_deg]).all():
         parser.error("turn angles must be finite")
-    if args.task != "pinch-transfer" and (
+    if args.task not in ("pinch-transfer", "turn-knob") and (
         args.translation_only_fingers or args.turn_angle_deg != 90 or args.initial_yaw_deg != 0
     ):
-        parser.error("turning variations require --task pinch-transfer")
+        parser.error("turning variations require --task pinch-transfer or turn-knob")
+    if args.remote_tree and args.task != "turn-knob":
+        parser.error("--remote-tree requires --task turn-knob")
     args.output.mkdir(parents=True, exist_ok=False)
-    sources = [Path(__file__), *sorted((REPO / "newton/_src/solvers/monolithic").glob("*.py"))]
+    sources = [
+        Path(__file__),
+        REPO / "scripts/monolithic_reference/articulation_oracle.py",
+        *sorted((REPO / "newton/_src/solvers/monolithic").glob("*.py")),
+    ]
     save_json(
         args.output / "manifest.json",
         {
@@ -433,6 +570,7 @@ def main():
             "translation_only_fingers": args.translation_only_fingers,
             "turn_angle_deg": args.turn_angle_deg,
             "initial_yaw_deg": args.initial_yaw_deg,
+            "remote_tree": args.remote_tree,
             "alignment_policy": "mask",
             "input_kind": "scripted dynamic fingertip proxies; no video or object pose replay",
             "source_sha256": {str(p.relative_to(REPO)): hashlib.sha256(p.read_bytes()).hexdigest() for p in sources},

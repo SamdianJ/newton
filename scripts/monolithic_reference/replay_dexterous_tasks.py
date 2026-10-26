@@ -35,6 +35,7 @@ def render(case):
             turn_angle=np.radians(manifest.get("turn_angle_deg", 90)),
             initial_yaw=np.radians(manifest.get("initial_yaw_deg", 0)),
             alignment_policy=manifest.get("alignment_policy", "guard"),
+            remote_tree=manifest.get("remote_tree", False),
         )
         model = scene.model
         colors = np.tile((0.32, 0.39, 0.46), (model.shape_count, 1))

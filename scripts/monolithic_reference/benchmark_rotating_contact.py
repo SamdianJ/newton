@@ -14,6 +14,7 @@ import subprocess
 import time
 from pathlib import Path
 
+import numpy as np
 import warp as wp
 
 import newton
@@ -30,13 +31,19 @@ def main():
     parser.add_argument("--prepare-step", type=int)
     parser.add_argument("--steps", type=int, default=80)
     parser.add_argument("--repeat", type=int, default=3)
+    parser.add_argument("--newton-iterations", type=int, default=400)
     parser.add_argument("--candidate", action="store_true")
     args = parser.parse_args()
-    if (args.checkpoint is None) == (args.prepare_step is None) or args.steps <= 0 or args.repeat <= 0:
+    if (
+        (args.checkpoint is None) == (args.prepare_step is None)
+        or args.steps <= 0
+        or args.repeat <= 0
+        or args.newton_iterations <= 0
+    ):
         parser.error("Choose a checkpoint or positive preparation step, with positive steps/repeats")
     args.output.mkdir(parents=True, exist_ok=False)
     options = {"wrist": False, "alignment_policy": "guard"} if args.candidate else {}
-    scene = TaskScene(args.task, newton_iterations=400, **options)
+    scene = TaskScene(args.task, newton_iterations=args.newton_iterations, **options)
     run = scene.solver
     run.newton_max_iterations = 80
     check_gpu_idle(scene.model.device)
@@ -61,15 +68,34 @@ def main():
 
     def advance(first, last):
         totals = {"newton": 0, "pcg": 0, "line_search": 0}
+        samples = []
         for step in range(first, last + 1):
+            wp.synchronize_device(scene.model.device)
+            started = time.perf_counter()
             scene.step(step * DT)
+            wp.synchronize_device(scene.model.device)
+            seconds = time.perf_counter() - started
             stats = run.last_stats
             if not stats.converged or stats.rolled_back:
                 raise RuntimeError(f"Step {step}: {stats.status}: {stats.failure_reason}")
             totals["newton"] += stats.nonlinear_iterations
             totals["pcg"] += stats.linear_iterations
             totals["line_search"] += stats.line_search_iterations
-        return totals
+            samples.append(
+                {
+                    "step": step,
+                    "seconds": seconds,
+                    "newton": stats.nonlinear_iterations,
+                    "pcg": stats.linear_iterations,
+                    "line_search": stats.line_search_iterations,
+                }
+            )
+        return {
+            **totals,
+            "step_samples": samples,
+            "median_ms": 1000 * float(np.median([r["seconds"] for r in samples])),
+            "p95_ms": 1000 * float(np.percentile([r["seconds"] for r in samples], 95)),
+        }
 
     if args.prepare_step is not None:
         if args.prepare_step <= 0:
@@ -94,8 +120,19 @@ def main():
                     raise RuntimeError("Timed window still captures CUDA graphs")
                 receipt["samples"].append({"seconds": seconds, "steps": args.steps, **totals})
         receipt["status"] = "MEASURED"
+    receipt["source_unchanged"] = (
+        all(
+            hashlib.sha256((REPO / name).read_bytes()).hexdigest() == digest
+            for name, digest in receipt["source_sha256"].items()
+        )
+        and hashlib.sha256(Path(__file__).read_bytes()).hexdigest() == receipt["script_sha256"]
+    )
+    if not receipt["source_unchanged"]:
+        raise RuntimeError("Source changed during measurement")
     (args.output / "receipt.json").write_text(json.dumps(receipt, indent=2) + "\n")
-    print(receipt["status"], receipt["samples"], flush=True)
+    print(
+        receipt["status"], [{k: v for k, v in r.items() if k != "step_samples"} for r in receipt["samples"]], flush=True
+    )
 
 
 if __name__ == "__main__":

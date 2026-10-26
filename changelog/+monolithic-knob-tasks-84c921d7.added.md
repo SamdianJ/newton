@@ -1,0 +1,1 @@
+Add an independent passive-articulation knob task with signed turns, initial-angle variants, remote-tree comparison, sampled penetration and contact-wrench checks, and fixed-base articulation scaling measurements.
