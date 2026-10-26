@@ -202,6 +202,7 @@ class MaskedPcgPlan:
         layout=None,
         rigid_cholesky=None,
         rigid_rows=None,
+        q_blocks=None,
         cable_preconditioner=None,
         cloth_preconditioner=None,
     ):
@@ -221,9 +222,16 @@ class MaskedPcgPlan:
         # Every bound and owned float array uses the solution's precision.
         self.dtype = y.dtype
         self.matrix_type = wp.mat33d if self.dtype == wp.float64 else wp.mat33
-        self.nq = q_cholesky.shape[0]
+        self.nq = q_cholesky.shape[0] if layout is None else layout.q_dof_count
         self.nx = x_cholesky.size
         self.layout = layout or MonolithicLinearLayout(self.nq, self.nx)
+        self.q_blocks = (
+            wp.array(
+                np.asarray(self.layout.q_blocks, dtype=np.int32).reshape(-1, 3), dtype=wp.vec3i, device=self.device
+            )
+            if q_blocks is None
+            else q_blocks
+        )
         count = len(self.layout.rigid_ranges)
         self.rigid_cholesky = (
             wp.zeros((0, 6, 6), dtype=self.dtype, device=self.device) if rigid_cholesky is None else rigid_cholesky
@@ -248,6 +256,7 @@ class MaskedPcgPlan:
             x_cholesky,
             self.rigid_cholesky,
             self.rigid_rows,
+            self.q_blocks,
             rhs_hat,
             y,
         )
@@ -259,10 +268,11 @@ class MaskedPcgPlan:
             (columns, wp.int32, (columns.size,)),
             (values, self.dtype, (values.size,)),
             (scale, self.dtype, (self.n,)),
-            (q_cholesky, self.dtype, (self.nq, self.nq)),
+            (q_cholesky, self.dtype, self.layout.q_matrix_shape),
             (x_cholesky, self.matrix_type, (self.nx,)),
             (self.rigid_cholesky, self.dtype, (count, 6, 6)),
             (self.rigid_rows, wp.int32, (count, 6)),
+            (self.q_blocks, wp.vec3i, (len(self.layout.articulation_ranges),)),
             (rhs_hat, self.dtype, (self.n,)),
             (y, self.dtype, (self.n,)),
         )
@@ -386,6 +396,7 @@ class MaskedPcgPlan:
             layout=workspace.layout,
             rigid_cholesky=workspace._rigid_cholesky,
             rigid_rows=workspace.rigid_rows,
+            q_blocks=workspace.q_blocks,
             cable_preconditioner=workspace._cable_preconditioner,
             cloth_preconditioner=workspace._cloth_preconditioner,
         )
@@ -444,6 +455,7 @@ class MaskedPcgPlan:
             workspace._x_cholesky,
             workspace._rigid_cholesky,
             workspace.rigid_rows,
+            workspace.q_blocks,
             rhs_hat,
             y,
             self.delta if delta is None else delta,
@@ -558,8 +570,8 @@ class MaskedPcgPlan:
         if self.nq:  # Static layout test, not a device-dependent branch.
             self._launch(
                 _masked_q_solve,
-                1,
-                [self.q_cholesky, self.layout.q_scalar_offset, self.r, self.temporary, self.z, self.state, self.error],
+                self.q_blocks.size,
+                [self.q_cholesky.flatten(), self.q_blocks, self.r, self.temporary, self.z, self.state, self.error],
             )
         if self.nx:
             self._launch(

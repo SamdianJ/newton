@@ -4,6 +4,7 @@
 """Native-precision kinematics for the Monolithic articulation incremental objective."""
 
 import hashlib
+import itertools
 import json
 import struct
 from typing import Any
@@ -13,12 +14,14 @@ import warp as wp
 
 from ...geometry import ShapeFlags
 from ...sim import BodyFlags, JointType
+from .actors import articulation_view
 from .convergence import abs3, axial_absolute
 from .joint_parameters import _validate_joint_coordinate_layout
 
 
 @wp.kernel
 def _forward(
+    tree_joints: wp.array[int],
     types: wp.array[int],
     parents: wp.array[int],
     children: wp.array[int],
@@ -36,8 +39,9 @@ def _forward(
     joint_rotations: wp.array[Any],
     joint_translations: wp.array[Any],
 ):
-    # One tree, in parent-before-child order; no cross-thread FK dependency.
-    for j in range(types.shape[0]):
+    # Each thread owns one tree, in parent-before-child order.
+    tree = wp.tid()
+    for j in range(tree_joints[tree], tree_joints[tree + 1]):
         parent = type(xp[0])(type(axes[0])(0.0), wp.quat_identity(dtype=q.dtype))
         if parents[j] >= 0:
             parent = poses[parents[j]]
@@ -74,6 +78,7 @@ def _axis_rotation_step(axis: Any, angle: Any):
 
 @wp.kernel
 def _forward_step(
+    tree_joints: wp.array[int],
     types: wp.array[int],
     parents: wp.array[int],
     children: wp.array[int],
@@ -96,7 +101,8 @@ def _forward_step(
     # parent-before-child order: R = (I + E) R_n and t = t_n + d. Each update is
     # a sum of increment-size terms, so it keeps the increment's precision.
     zero = type(axes[0])(0.0)
-    for j in range(types.shape[0]):
+    tree = wp.tid()
+    for j in range(tree_joints[tree], tree_joints[tree + 1]):
         parent_e = wp.matrix(dtype=type(step[0]), shape=(3, 3))
         parent_d = zero
         parent_rn = wp.identity(n=3, dtype=type(step[0]))
@@ -128,7 +134,10 @@ def _forward_step(
 
 @wp.kernel
 def _jacobians(
-    ancestors: wp.array2d[int],
+    ancestors: wp.array[int],
+    jac_offsets: wp.array[int],
+    body_dof_starts: wp.array[int],
+    body_dof_counts: wp.array[int],
     dof_joint: wp.array[int],
     types: wp.array[int],
     axes: wp.array[Any],
@@ -137,18 +146,28 @@ def _jacobians(
     jt: wp.array2d[Any],
     jw: wp.array2d[Any],
 ):
-    body, dof = wp.tid()
+    body, local = wp.tid()
+    if local >= body_dof_counts[body]:
+        return
+    dof = body_dof_starts[body] + local
+    entry = jac_offsets[body] + local
     translation = type(com[0])(0.0)
     angular = type(com[0])(0.0)
-    if ancestors[body, dof] != 0:
+    if ancestors[entry] != 0:
         joint = dof_joint[dof]
         if types[joint] == JointType.REVOLUTE:
             angular = axes[joint]
             translation = wp.cross(angular, com[body] - pivots[joint])
         else:
             translation = axes[joint]
-    jt[body, dof] = translation
-    jw[body, dof] = angular
+    jt[entry / jt.shape[1], entry % jt.shape[1]] = translation
+    jw[entry / jw.shape[1], entry % jw.shape[1]] = angular
+
+
+@wp.func
+def _packed_column(values: wp.array2d[Any], entry: int):
+    """Read a scalar column of a packed tree-local rectangular block."""
+    return values[entry / values.shape[1], entry % values.shape[1]]
 
 
 @wp.kernel
@@ -156,6 +175,9 @@ def _body_outputs(
     poses: wp.array[Any],
     jt: wp.array2d[Any],
     jw: wp.array2d[Any],
+    jac_offsets: wp.array[int],
+    body_dof_starts: wp.array[int],
+    body_dof_counts: wp.array[int],
     qd: wp.array[Any],
     body_map: wp.array[int],
     dof_map: wp.array[int],
@@ -164,10 +186,11 @@ def _body_outputs(
 ):
     b = wp.tid()
     linear, angular = type(jt[0, 0])(0.0), type(jt[0, 0])(0.0)
-    for i in range(dof_map.shape[0]):
+    for local in range(body_dof_counts[b]):
+        i = body_dof_starts[b] + local
         rate = type(jt[0, 0][0])(qd[dof_map[i]])
-        linear += jt[b, i] * rate
-        angular += jw[b, i] * rate
+        linear += _packed_column(jt, jac_offsets[b] + local) * rate
+        angular += _packed_column(jw, jac_offsets[b] + local) * rate
     body_q[body_map[b]] = wp.transform(
         wp.vec3(wp.transform_get_translation(poses[b])), wp.quat(wp.transform_get_rotation(poses[b]))
     )
@@ -199,7 +222,7 @@ def _difference(a: wp.array[Any], b: wp.array[Any], out: wp.array[Any]):
 @wp.kernel
 def _gather_native(source: wp.array[Any], mapping: wp.array[int], target: wp.array[Any]):
     i = wp.tid()
-    target[i] = source[mapping[i]]
+    target[i] = target.dtype(source[mapping[i]])
 
 
 class _TreeKinematics:
@@ -239,7 +262,12 @@ class _TreeKinematics:
         "shape_flags",
     )
 
-    def __init__(self, model, *, actor=None, extra_config=None, dtype=wp.float64):
+    def __init__(self, model, *, actor=None, actors=None, extra_config=None, dtype=wp.float64):
+        if actors is not None:
+            if actor is not None:
+                raise ValueError("Specify one mechanical view or a collection of trees")
+            actors = tuple(actors)
+            actor = articulation_view(actors)
         if dtype not in (wp.float64, wp.float32):
             raise ValueError("Articulation requires float64 or float32")
         self.dtype = dtype
@@ -313,8 +341,22 @@ class _TreeKinematics:
         self.count, self.bodies, self.joints = len(dof_ids), len(body_ids), len(joint_ids)
         if not self.count and not empty:
             raise ValueError("Monolithic articulation requires one nonempty tree")
+        sizes = (
+            [(self.bodies, self.joints, self.count)]
+            if actors is None and self.count
+            else [(len(a.body_indices), len(a.joint_indices), a.dof_count) for a in (actors or ())]
+        )
+        self.tree_count = len(sizes)
+        tree_bodies = np.r_[0, np.cumsum([s[0] for s in sizes])].astype(np.int32)
+        tree_joints = np.r_[0, np.cumsum([s[1] for s in sizes])].astype(np.int32)
+        tree_dofs = np.r_[0, np.cumsum([s[2] for s in sizes])].astype(np.int32)
+        body_dof_starts = np.repeat(tree_dofs[:-1], [s[0] for s in sizes]).astype(np.int32)
+        body_dof_counts = np.repeat([s[2] for s in sizes], [s[0] for s in sizes]).astype(np.int32)
+        self._tree_sizes = sizes
+        self.max_dofs = max((s[2] for s in sizes), default=0)
+        jac_offsets = np.r_[0, np.cumsum(body_dof_counts)].astype(np.int32)
         seen, roots = set(), 0
-        ancestors = np.zeros((self.bodies, self.count), dtype=np.int32)
+        ancestors = [np.zeros(count, dtype=np.int32) for count in body_dof_counts]
         dof_joint = np.zeros(self.count, dtype=np.int32)
         for j, (parent, child) in enumerate(zip(v["joint_parent"], v["joint_child"], strict=True)):
             if child < 0 or child >= self.bodies or child in seen or (parent != -1 and parent not in seen):
@@ -322,18 +364,20 @@ class _TreeKinematics:
             roots += int(parent == -1)
             seen.add(int(child))
             if parent >= 0:
-                ancestors[child] = ancestors[parent]
+                if body_dof_starts[parent] != body_dof_starts[child]:
+                    raise ValueError("Mechanical parent must belong to the same articulation")
+                ancestors[child][:] = ancestors[parent]
             if v["joint_type"][j] != JointType.FIXED:
                 dof = v["joint_q_start"][j]
-                ancestors[child, dof] = 1
+                ancestors[child][dof - body_dof_starts[child]] = 1
                 dof_joint[dof] = j
-        if roots != (0 if empty else 1) or len(seen) != self.bodies:
+        if roots != self.tree_count or len(seen) != self.bodies:
             raise ValueError("Monolithic tree must own every body")
         if not np.isin(v["body_flags"], [int(BodyFlags.DYNAMIC), int(BodyFlags.KINEMATIC)]).all():
             raise ValueError(
                 "Monolithic articulation requires dynamic or kinematic body flags; proxies are unsupported"
             )
-        if np.any((v["body_flags"] == int(BodyFlags.KINEMATIC)) & ancestors.any(axis=1)):
+        if np.any((v["body_flags"] == int(BodyFlags.KINEMATIC)) & np.array([a.any() for a in ancestors], dtype=bool)):
             raise ValueError("Monolithic articulation does not support kinematic bodies with movable ancestors")
         for name, value in v.items():
             if not np.isfinite(value).all():
@@ -355,6 +399,14 @@ class _TreeKinematics:
             if np.any(v[name] < 0):
                 raise ValueError(f"Negative {name}")
         fields = dict(self._source_values)
+        coord_ids = list(range(model.joint_coord_count)) if actor is None else list(actor.coord_indices)
+        fields.update(
+            mechanical_bodies=np.asarray(body_ids, dtype=np.int32),
+            mechanical_joints=np.asarray(joint_ids, dtype=np.int32),
+            mechanical_coordinates=np.asarray(coord_ids, dtype=np.int32),
+            mechanical_dofs=np.asarray(dof_ids, dtype=np.int32),
+            mechanical_trees=np.asarray(sizes, dtype=np.int32).reshape(-1, 3),
+        )
         fields.update({} if extra_config is None else extra_config)
         if dtype == wp.float32:
             fields["native_precision"] = np.array([32], dtype=np.int32)
@@ -370,7 +422,21 @@ class _TreeKinematics:
         self.children = array(v["joint_child"], int)
         self.starts = array(v["joint_q_start"], int)
         self.dof_joint = array(dof_joint, int)
-        self.ancestors = array(ancestors, int)
+        self.ancestors = array(np.concatenate(ancestors) if ancestors else np.empty(0, dtype=np.int32), int)
+        self.tree_joints = array(tree_joints, int)
+        self.jac_offsets = array(jac_offsets, int)
+        self.body_dof_starts = array(body_dof_starts, int)
+        self.body_dof_counts = array(body_dof_counts, int)
+        self.dof_body_starts = array(np.repeat(tree_bodies[:-1], [s[2] for s in sizes]), int)
+        self.dof_body_ends = array(np.repeat(tree_bodies[1:], [s[2] for s in sizes]), int)
+        self.matrix_rows = array(
+            [i for start, end in itertools.pairwise(tree_dofs) for i in range(start, end) for _ in range(start, end)],
+            int,
+        )
+        self.matrix_columns = array(
+            [j for start, end in itertools.pairwise(tree_dofs) for _ in range(start, end) for j in range(start, end)],
+            int,
+        )
         axes = v["joint_axis"].astype(self.numpy_dtype)
         norms = np.linalg.norm(axes, axis=1)
         if np.any(abs(norms - 1) > 1e-5):
@@ -399,9 +465,11 @@ class _TreeKinematics:
         self.com_steps = wp.zeros(self.bodies, dtype=self.vector, device=self.device)
         self.joint_rotation_steps = wp.zeros(self.joints, dtype=self.matrix, device=self.device)
         self.joint_translation_steps = wp.zeros(self.joints, dtype=self.vector, device=self.device)
-        self.jt = wp.zeros((self.bodies, self.count), dtype=self.vector, device=self.device)
+        jac_shape = (self.bodies, self.count) if self.tree_count <= 1 else (int(jac_offsets[-1]), 1)
+        self.jt = wp.zeros(jac_shape, dtype=self.vector, device=self.device)
         self.jw = wp.zeros_like(self.jt)
-        coord_ids = list(range(model.joint_coord_count)) if actor is None else list(actor.coord_indices)
+        self._direct_q = coord_ids == list(range(model.joint_coord_count))
+        self._direct_qd = dof_ids == list(range(model.joint_dof_count))
         self.coord_map = array(coord_ids, int)
         self.local_q = wp.zeros(self.count, dtype=self.dtype, device=self.device)
         self.local_qd = wp.zeros_like(self.local_q)
@@ -409,13 +477,13 @@ class _TreeKinematics:
         self.validate_inertia()
 
     def gather_q(self, state):
-        if state.joint_q.size == self.count:
+        if self._direct_q and state.joint_q.dtype == self.dtype:
             return state.joint_q
         wp.launch(_gather_native, self.count, [state.joint_q, self.coord_map, self.local_q], device=self.device)
         return self.local_q
 
     def gather_qd(self, state):
-        if state.joint_qd.size == self.count:
+        if self._direct_qd and state.joint_qd.dtype == self.dtype:
             return state.joint_qd
         wp.launch(_gather_native, self.count, [state.joint_qd, self.dof_map, self.local_qd], device=self.device)
         return self.local_qd
@@ -433,13 +501,18 @@ class _TreeKinematics:
         if not self.count:
             return
         v = self.values
-        jt, jw, rotation = self.jt.numpy(), self.jw.numpy(), self.rotations.numpy()
+        jt, jw, rotation = self.jt.numpy().reshape(-1, 3), self.jw.numpy().reshape(-1, 3), self.rotations.numpy()
         world_inertia = rotation @ v["body_inertia"].astype(self.numpy_dtype) @ rotation.transpose(0, 2, 1)
-        effective_inertia = np.einsum("bni,bmi,b->nm", jt, jt, v["body_mass"])
-        effective_inertia += np.einsum("bni,bij,bmj->nm", jw, world_inertia, jw)
-        effective_inertia += np.diag(v["joint_armature"].astype(self.numpy_dtype))
-        if not np.isfinite(effective_inertia).all() or np.linalg.eigvalsh(effective_inertia).min() <= 0:
-            raise ValueError("Articulation inertia must be positive definite on every free DOF")
+        body, dof, offset = 0, 0, 0
+        for bodies, _, count in self._tree_sizes:
+            t = jt[offset : offset + bodies * count].reshape(bodies, count, 3)
+            w = jw[offset : offset + bodies * count].reshape(bodies, count, 3)
+            effective_inertia = np.einsum("bni,bmi,b->nm", t, t, v["body_mass"][body : body + bodies])
+            effective_inertia += np.einsum("bni,bij,bmj->nm", w, world_inertia[body : body + bodies], w)
+            effective_inertia += np.diag(v["joint_armature"][dof : dof + count].astype(self.numpy_dtype))
+            if not np.isfinite(effective_inertia).all() or np.linalg.eigvalsh(effective_inertia).min() <= 0:
+                raise ValueError("Articulation inertia must be positive definite on every free DOF")
+            body, dof, offset = body + bodies, dof + count, offset + bodies * count
 
     def validate_identity(self):
         """Reject storage replacement and in-place configuration edits."""
@@ -458,8 +531,9 @@ class _TreeKinematics:
             return
         wp.launch(
             _forward,
-            1,
+            self.tree_count,
             [
+                self.tree_joints,
                 self.types,
                 self.parents,
                 self.children,
@@ -481,8 +555,20 @@ class _TreeKinematics:
         )
         wp.launch(
             _jacobians,
-            (self.bodies, self.count),
-            [self.ancestors, self.dof_joint, self.types, self.world_axes, self.pivots, self.com, self.jt, self.jw],
+            (self.bodies, self.max_dofs),
+            [
+                self.ancestors,
+                self.jac_offsets,
+                self.body_dof_starts,
+                self.body_dof_counts,
+                self.dof_joint,
+                self.types,
+                self.world_axes,
+                self.pivots,
+                self.com,
+                self.jt,
+                self.jw,
+            ],
             device=self.device,
         )
         if state is not None:
@@ -493,6 +579,9 @@ class _TreeKinematics:
                     self.poses,
                     self.jt,
                     self.jw,
+                    self.jac_offsets,
+                    self.body_dof_starts,
+                    self.body_dof_counts,
                     state.joint_qd,
                     self.body_map,
                     self.dof_map,
@@ -508,8 +597,9 @@ class _TreeKinematics:
             return
         wp.launch(
             _forward_step,
-            1,
+            self.tree_count,
             [
+                self.tree_joints,
                 self.types,
                 self.parents,
                 self.children,
@@ -701,6 +791,12 @@ def _link_variation(
 def _reduced_variation(
     jt: wp.array2d[Any],
     jw: wp.array2d[Any],
+    jac_offsets: wp.array[int],
+    body_dof_starts: wp.array[int],
+    dof_body_starts: wp.array[int],
+    dof_body_ends: wp.array[int],
+    rows: wp.array[int],
+    columns: wp.array[int],
     mass: wp.array[Any],
     gt: wp.array[Any],
     gr: wp.array[Any],
@@ -715,19 +811,23 @@ def _reduced_variation(
     absolute: wp.array[Any],
     tangent: wp.array2d[Any],
 ):
-    i, j = wp.tid()
+    entry = wp.tid()
+    i, j = rows[entry], columns[entry]
     b = type(h)(0.0)
     r = joint_r[i]
     magnitude = joint_absolute[i]
     if i == j:
         b = joint_b[i]
-    for link in range(mass.shape[0]):
-        b += mass[link] * wp.dot(jt[link, i], jt[link, j]) / (h * h)
-        b += (wp.dot(jw[link, i], kr[link] * jw[link, j]) + wp.dot(jw[link, j], kr[link] * jw[link, i])) * type(h)(0.5)
+    for link in range(dof_body_starts[i], dof_body_ends[i]):
+        base = jac_offsets[link] - body_dof_starts[link]
+        ti, tj = _packed_column(jt, base + i), _packed_column(jt, base + j)
+        wi, wj = _packed_column(jw, base + i), _packed_column(jw, base + j)
+        b += mass[link] * wp.dot(ti, tj) / (h * h)
+        b += (wp.dot(wi, kr[link] * wj) + wp.dot(wj, kr[link] * wi)) * type(h)(0.5)
         if i == j:
-            r += wp.dot(jt[link, i], gt[link]) + wp.dot(jw[link, i], gr[link])
-            magnitude += wp.dot(abs3(jt[link, i]), gta[link]) + wp.dot(abs3(jw[link, i]), gra[link])
-    tangent[i, j] = b
+            r += wp.dot(ti, gt[link]) + wp.dot(wi, gr[link])
+            magnitude += wp.dot(abs3(ti), gta[link]) + wp.dot(abs3(wi), gra[link])
+    tangent[entry / tangent.shape[1], entry % tangent.shape[1]] = b
     if i == j:
         residual[i] = r
         absolute[i] = magnitude
@@ -737,6 +837,10 @@ def _reduced_variation(
 def _reduced_residual(
     jt: wp.array2d[Any],
     jw: wp.array2d[Any],
+    jac_offsets: wp.array[int],
+    body_dof_starts: wp.array[int],
+    dof_body_starts: wp.array[int],
+    dof_body_ends: wp.array[int],
     gt: wp.array[Any],
     gr: wp.array[Any],
     joint_r: wp.array[Any],
@@ -749,9 +853,11 @@ def _reduced_residual(
     i = wp.tid()
     r = joint_r[i]
     magnitude = joint_absolute[i]
-    for link in range(gt.shape[0]):
-        r += wp.dot(jt[link, i], gt[link]) + wp.dot(jw[link, i], gr[link])
-        magnitude += wp.dot(abs3(jt[link, i]), gta[link]) + wp.dot(abs3(jw[link, i]), gra[link])
+    for link in range(dof_body_starts[i], dof_body_ends[i]):
+        entry = jac_offsets[link] + i - body_dof_starts[link]
+        t, w = _packed_column(jt, entry), _packed_column(jw, entry)
+        r += wp.dot(t, gt[link]) + wp.dot(w, gr[link])
+        magnitude += wp.dot(abs3(t), gta[link]) + wp.dot(abs3(w), gra[link])
     residual[i] = r
     absolute[i] = magnitude
 
@@ -789,7 +895,8 @@ class ArticulationObjective:
         self.axes_n = wp.zeros(k.joints, dtype=k.vector, device=device)
         self.step = wp.zeros(n, dtype=k.dtype, device=device)
         self.link_energy = wp.zeros(b, dtype=k.dtype, device=device)
-        self.tangent = wp.zeros((n, n), dtype=k.dtype, device=device)
+        shape = (n, n) if k.tree_count <= 1 else (k.matrix_rows.size, 1)
+        self.tangent = wp.zeros(shape, dtype=k.dtype, device=device)
 
     def begin(self, qn):
         """Freeze the step-start coordinates, link poses and world joint axes at ``qn``."""
@@ -866,6 +973,10 @@ class ArticulationObjective:
                 [
                     k.jt,
                     k.jw,
+                    k.jac_offsets,
+                    k.body_dof_starts,
+                    k.dof_body_starts,
+                    k.dof_body_ends,
                     self.gt,
                     self.gr,
                     self.joint_r,
@@ -880,10 +991,16 @@ class ArticulationObjective:
             return
         wp.launch(
             _reduced_variation,
-            (k.count, k.count),
+            k.matrix_rows.size,
             [
                 k.jt,
                 k.jw,
+                k.jac_offsets,
+                k.body_dof_starts,
+                k.dof_body_starts,
+                k.dof_body_ends,
+                k.matrix_rows,
+                k.matrix_columns,
                 k.mass,
                 self.gt,
                 self.gr,

@@ -76,6 +76,12 @@ def _scatter_values(values: wp.array[Any], start: int, output: wp.array[Any]):
 
 
 @wp.kernel
+def _scatter_rows(values: wp.array[Any], rows: wp.array[int], output: wp.array[Any]):
+    i = wp.tid()
+    output[rows[i]] = values[i]
+
+
+@wp.kernel
 def _add_values(source: wp.array[Any], target: wp.array[Any]):
     i = wp.tid()
     target[i] += source[i]
@@ -101,9 +107,9 @@ def _add_rows(values: wp.array[Any], rows: wp.array[int], output: wp.array[Any])
 
 
 @wp.kernel
-def _write_absolute(values: wp.array[Any], start: int, output: wp.array[Any]):
+def _write_absolute(values: wp.array[Any], rows: wp.array[int], output: wp.array[Any]):
     i = wp.tid()
-    output[start + i] = wp.abs(values[i])
+    output[rows[i]] = wp.abs(values[i])
 
 
 @wp.kernel
@@ -206,7 +212,7 @@ class ArticulationProducer(_Producer):
     begin_rank = 1
 
     def __init__(self, solver):
-        super().__init__("articulation", solver._layout.indices("articulation"))
+        super().__init__("articulation", solver._layout.articulation_indices())
 
     def begin_step(self, solver, state_in):
         k, obj, device = solver._kinematics, solver._objective, solver.model.device
@@ -258,7 +264,7 @@ class ArticulationProducer(_Producer):
             [
                 solver._joint_step(accepted),
                 direction,
-                solver._layout.q_scalar_offset,
+                solver._linear.q_rows,
                 solver._dtype(alpha),
                 solver._objective.qn,
                 solver._dtype(dt),
@@ -276,9 +282,9 @@ class ArticulationProducer(_Producer):
         step = solver._joint_step(state)
         obj.evaluate(k.gather_q(state), dt, build_tangent=build_tangent, step=step)
         wp.launch(
-            _scatter_values,
+            _scatter_rows,
             k.count,
-            [obj.residual, solver._layout.q_scalar_offset, residual],
+            [obj.residual, solver._linear.q_rows, residual],
             device=solver.model.device,
         )
         parts = np.r_[obj.link_energy.numpy(), obj.joint_energy.numpy()]
@@ -287,26 +293,27 @@ class ArticulationProducer(_Producer):
     def magnitude(self, solver, out):
         obj = solver._objective
         wp.launch(
-            _add_offset,
+            _add_rows,
             obj.absolute.size,
-            [obj.absolute, solver._layout.q_scalar_offset, out],
+            [obj.absolute, solver._linear.q_rows, out],
             device=solver.model.device,
         )
 
     def coordinates(self, solver, state, out):
         k = solver._kinematics
         q = solver._joint_step(state)
-        wp.launch(_write_absolute, k.count, [q, solver._layout.q_scalar_offset, out], device=solver.model.device)
+        wp.launch(_write_absolute, k.count, [q, solver._linear.q_rows, out], device=solver.model.device)
 
     def assemble(self, solver, assembly, dt):
-        nq = solver._kinematics.count
         wp.launch(
             kernels._scatter,
-            (nq, nq),
+            solver._objective.tangent.size,
             [
-                solver._objective.tangent,
-                assembly.aq_actor_dense,
+                solver._objective.tangent.flatten(),
+                assembly.aq_actor_dense.flatten(),
                 assembly.global_scalar_triplets.values,
+                solver._linear.q_pair_rows,
+                solver._linear.q_pair_columns,
                 solver._diagonal,
             ],
             device=solver.model.device,
@@ -502,10 +509,10 @@ class TetProducer(_Producer):
         )
 
     def assemble(self, solver, assembly, dt):
-        nq = solver._kinematics.count
+        offset = solver._objective.tangent.size
         scatter = TetScatterBuffers(
             assembly.ax_internal_triplets.values,
-            assembly.global_scalar_triplets.values[nq * nq : nq * nq + 9 * assembly.ax_internal_triplets.capacity],
+            assembly.global_scalar_triplets.values[offset : offset + 9 * assembly.ax_internal_triplets.capacity],
         )
         assemble_tet_residual_tangent(
             solver.model,

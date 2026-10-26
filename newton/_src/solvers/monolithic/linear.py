@@ -122,7 +122,25 @@ class MonolithicLinearWorkspace:
         ):
             raise ValueError("particle_to_dynamic must map each dynamic particle exactly once")
         self.particle_to_dynamic = particle_to_dynamic
-        self.aq_actor_dense = wp.zeros((layout.q_dof_count, layout.q_dof_count), dtype=dtype, device=device)
+        q_rows = layout.articulation_indices()
+        q_local = np.full(layout.scalar_dof_count, -1, dtype=np.int32)
+        q_local[q_rows] = np.arange(layout.q_dof_count)
+        self.q_rows = wp.array(q_rows, dtype=int, device=device)
+        self.q_local = wp.array(q_local, dtype=int, device=device)
+        self.aq_actor_dense = wp.zeros(layout.q_matrix_shape, dtype=dtype, device=device)
+        self.q_blocks = wp.array(
+            np.asarray(layout.q_blocks, dtype=np.int32).reshape(-1, 3), dtype=wp.vec3i, device=device
+        )
+        self.q_pair_rows = wp.array(
+            [i for _, start, n in layout.articulation_ranges for i in range(start, start + n) for _ in range(n)],
+            dtype=int,
+            device=device,
+        )
+        self.q_pair_columns = wp.array(
+            [j for _, start, n in layout.articulation_ranges for _ in range(n) for j in range(start, start + n)],
+            dtype=int,
+            device=device,
+        )
         self.k_global_scalar_bsr = sparse.bsr_zeros(
             layout.scalar_dof_count, layout.scalar_dof_count, dtype, device=device
         )
@@ -535,6 +553,7 @@ class MonolithicLinearWorkspace:
             matrix.values,
             self.scale,
             self._q_cholesky,
+            self.q_blocks,
             self._x_cholesky,
             self._rigid_cholesky,
             self.rigid_rows,
@@ -555,7 +574,16 @@ class MonolithicLinearWorkspace:
         return self._factor_valid and self._factor_binding == self._factor_storage_binding()
 
     def _factor_storage_binding(self):
-        arrays = (self.scale, self._q_cholesky, self._x_cholesky, self._rigid_cholesky, self.rigid_rows)
+        arrays = (
+            self.scale,
+            self._q_cholesky,
+            self.q_blocks,
+            self.q_pair_rows,
+            self.q_pair_columns,
+            self._x_cholesky,
+            self._rigid_cholesky,
+            self.rigid_rows,
+        )
         if self._cable_preconditioner is not None:
             arrays += self._cable_preconditioner.buffers()
         if self._cloth_preconditioner is not None:

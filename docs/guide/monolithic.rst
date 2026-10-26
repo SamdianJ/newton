@@ -8,14 +8,20 @@ Monolithic Coupled Solver
 
 .. experimental::
 
-   :mod:`newton.solvers.experimental.monolithic` supports one world with at
-   most one articulation, at most one connected tetrahedral body, single-body
+   :mod:`newton.solvers.experimental.monolithic` supports one world with
+   independent fixed-base articulations, at most one connected tetrahedral body, single-body
    world-root FREE rigid actors and independent cloth/open cables. Any of these
    may be absent, but the scene needs at least one dynamic degree of freedom.
    Every scene uses the same step pipeline and contact path; see
    :doc:`monolithic_cloth` and :doc:`monolithic_cable` for material inputs. Its
    interfaces may change without the normal deprecation period. The old BE, q-only and tet-only solver entry points and
    their examples have been retired.
+
+Each articulation retains its own joint block and force/torque convergence groups
+inside a shared Newton solve. Trees may differ in topology and DoF count.
+FREE roots with descendant links and same-tree self-contact are unsupported.
+Cross-articulation shape contact is currently rejected; articulation contacts
+with FREE actors and materials retain their existing paths.
 
 Every scene, including cloth/cable scenes, uses spatial contact. Candidates
 refresh at each Newton boundary and remain frozen during its trials. This

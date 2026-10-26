@@ -134,6 +134,7 @@ class MonolithicLinearLayout:
     material_ranges: tuple[tuple[str, int, int, int, int], ...] = ()
     # World segment boundaries: world w owns scalar rows [world_segments[w], world_segments[w + 1]).
     world_segments: tuple[int, ...] = ()
+    articulation_ranges: tuple[tuple[int, int, int], ...] = ()
 
     def __post_init__(self):
         for value in (self.q_dof_count, self.dynamic_particle_count, self.q_scalar_offset, self.x_scalar_offset):
@@ -160,6 +161,28 @@ class MonolithicLinearLayout:
                     ("tet", self.x_scalar_offset, 3 * self.dynamic_particle_count),
                 ),
             )
+        if not self.articulation_ranges:
+            object.__setattr__(
+                self,
+                "articulation_ranges",
+                tuple(
+                    (i, start, count)
+                    for i, (kind, start, count) in enumerate(self.actor_ranges)
+                    if kind == "articulation" and count
+                ),
+            )
+        if (
+            any(
+                isinstance(v, (bool, np.bool_)) or not isinstance(v, (int, np.integer)) or not 0 <= v < 2**31
+                for block in self.articulation_ranges
+                for v in block
+            )
+            or sum(count for _, _, count in self.articulation_ranges) != self.q_dof_count
+            or len({source for source, _, _ in self.articulation_ranges}) != len(self.articulation_ranges)
+            or sorted((start, count) for _, start, count in self.articulation_ranges)
+            != sorted((start, count) for kind, start, count in self.actor_ranges if kind == "articulation" and count)
+        ):
+            raise ValueError("Articulation ranges require unique identities and exact actor blocks")
         cursor = 0
         for _, start, count in sorted(self.actor_ranges, key=lambda item: item[1]):
             if count < 0 or start != cursor:
@@ -212,11 +235,11 @@ class MonolithicLinearLayout:
         """Derive the supported linear view without imposing an actor order."""
         arms = [actor for actor in table.actors if actor.kind == "articulation"]
         tets = [actor for actor in table.actors if actor.kind == "tet"]
-        if len(arms) > 1 or len(tets) > 1:
-            raise ValueError("Coupled entry permits at most one articulation and one tet")
+        if len(tets) > 1:
+            raise ValueError("Coupled entry permits at most one tet")
         arm, tet = next(iter(arms), None), next(iter(tets), None)
         return cls(
-            0 if arm is None else arm.dof_count,
+            sum(a.dof_count for a in arms),
             0 if tet is None else len(tet.dynamic_particle_indices),
             0 if arm is None else arm.dof_start,
             0 if tet is None else tet.dof_start,
@@ -228,6 +251,31 @@ class MonolithicLinearLayout:
                 for a in table.actors
                 if a.kind in ("cloth", "cable")
             ),
+            articulation_ranges=tuple((a.source_index, a.dof_start, a.dof_count) for a in arms),
+        )
+
+    @property
+    def q_matrix_shape(self):
+        """Dense single-tree view, or packed independent blocks for multiple trees."""
+        return (
+            (self.q_dof_count, self.q_dof_count)
+            if len(self.articulation_ranges) <= 1
+            else (sum(count * count for _, _, count in self.articulation_ranges), 1)
+        )
+
+    @property
+    def q_blocks(self):
+        """Global row start, DoF count and packed matrix offset for each tree."""
+        offset, blocks = 0, []
+        for _, start, count in self.articulation_ranges:
+            blocks.append((start, count, offset))
+            offset += count * count
+        return tuple(blocks)
+
+    def articulation_indices(self):
+        """Return all mechanical rows in the packed tree order."""
+        return np.array(
+            [row for _, start, count in self.articulation_ranges for row in range(start, start + count)], dtype=np.int32
         )
 
     @property
@@ -244,6 +292,7 @@ class MonolithicLinearLayout:
         groups = [("global", 0, self.scalar_dof_count)]
         rigid_ids = {start: source for source, start in self.rigid_ranges}
         material_ids = {(kind, start): (source, xyz, theta) for kind, source, start, xyz, theta in self.material_ranges}
+        arm_ids = {start: source for source, start, _ in self.articulation_ranges}
         for kind, start, count in self.actor_ranges:
             if kind == "rigid":
                 groups.extend(
@@ -255,6 +304,8 @@ class MonolithicLinearLayout:
                     groups.append((f"{kind}_{source}_x", start, xyz))
                 if theta:
                     groups.append((f"{kind}_{source}_theta", start + xyz, theta))
+            elif kind == "articulation" and count and len(arm_ids) > 1:
+                groups.append((f"articulation_{arm_ids[start]}", start, count))
             elif count:
                 groups.append((kind, start, count))
         return tuple(groups)
@@ -271,7 +322,16 @@ class MonolithicLinearLayout:
                 raise ValueError("Material indices require one unambiguous actor")
             start, count = matches[0]
         elif kind == "articulation":
-            start, count = self.q_scalar_offset, self.q_dof_count
+            matches = [
+                (start, count)
+                for source, start, count in self.articulation_ranges
+                if source_index is None or source == source_index
+            ]
+            if not matches and not self.q_dof_count and source_index is None:
+                return np.empty(0, dtype=np.int32)
+            if len(matches) != 1:
+                raise ValueError("Articulation indices require one unambiguous actor")
+            start, count = matches[0]
         elif kind == "tet":
             start, count = self.x_scalar_offset, 3 * self.dynamic_particle_count
         else:

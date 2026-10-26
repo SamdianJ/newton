@@ -10,6 +10,7 @@ from typing import Any
 import numpy as np
 import warp as wp
 
+from .actors import articulation_support
 from .contact import _geometry_type, _law, _reset_flags, _validate_start
 from .contact_actor import _actor_geometry, _center, _point_column
 from .contact_pool import _ContactPool, _ContactRows
@@ -359,10 +360,6 @@ def _project_contact_chunk(
                         body, support.local[index], point, support.kinds, support.indices, com, jt, jw, rigid_com
                     )
                     jacobian = wp.transpose(rotation) * (sign * column)
-                    if legacy:
-                        local = support.indices[body]
-                        j = support.local[index]
-                        jacobian = wp.transpose(rotation) * (-jt[local, j] - wp.cross(jw[local, j], point - com[local]))
                     _project_contact_column(
                         candidates,
                         i,
@@ -470,23 +467,10 @@ class _ContactBatch:
         if actors is not None:
             kinds.fill(-1)
             indices = np.full(model.body_count, -1, np.int32)
-            arm = next((a for a in actors.actors if a.kind == "articulation"), None)
-            arm_joints = () if arm is None else arm.joint_indices
-            arm_dofs = () if arm is None else arm.dof_indices
-            arm_bodies = () if arm is None else arm.body_indices
-            parent, child, starts = (
-                getattr(model, n).numpy() for n in ("joint_parent", "joint_child", "joint_qd_start")
-            )
-            incoming = {int(child[j]): j for j in arm_joints}
-            local_dofs = {j: i for i, j in enumerate(arm_dofs)}
-            for local, body in enumerate(arm_bodies):
+            arms = tuple(a for a in actors.actors if a.kind == "articulation")
+            for body, (local, columns) in articulation_support(model, arms).items():
                 kinds[body], indices[body] = 0, local
-                selected, cursor = [], body
-                while cursor >= 0:
-                    joint = incoming[cursor]
-                    selected.extend(local_dofs[j] for j in range(int(starts[joint]), int(starts[joint + 1])))
-                    cursor = int(parent[joint])
-                body_support[body] = [(arm.dof_start + j, j) for j in sorted(selected)]
+                body_support[body] = columns
             for local, actor in enumerate(a for a in actors.actors if a.kind == "rigid"):
                 body = actor.body_indices[0]
                 kinds[body], indices[body] = 1, local
@@ -495,7 +479,7 @@ class _ContactBatch:
         else:
             body_support = {
                 body: [
-                    (contact.layout.q_scalar_offset + j, j)
+                    (contact.layout.q_scalar_offset + j, indices[body] * contact.nq + j)
                     for j in contact._legacy_ancestors.get(body, range(contact.nq))
                 ]
                 for body in range(model.body_count)
@@ -760,8 +744,8 @@ class _ContactBatch:
             (x, self.vector, (c.model.particle_count,)),
             (poses, c.transform, (c.body_count,)),
             (com, self.vector, (c.body_count,)),
-            (jt, self.vector, (c.body_count, c.nq)),
-            (jw, self.vector, (c.body_count, c.nq)),
+            (jt, self.vector, c.jacobian_shape),
+            (jw, self.vector, c.jacobian_shape),
             (rigid_com, self.vector, (nr,)),
             (rigid_rotation, self._empty_rotation.dtype, (nr,)),
         ]

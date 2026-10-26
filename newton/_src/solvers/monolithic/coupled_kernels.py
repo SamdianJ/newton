@@ -7,6 +7,8 @@ from typing import Any
 
 import warp as wp
 
+from .articulation import _packed_column
+
 
 @wp.kernel(module="unique", module_options={"fuse_fp": False})
 def freeze_step_forces(
@@ -50,11 +52,13 @@ def freeze_step_forces(
 
 
 @wp.kernel
-def combine(q: wp.array[Any], x: wp.array[Any], contact: wp.array[Any], q_start: int, x_start: int, out: wp.array[Any]):
+def combine(
+    q: wp.array[Any], x: wp.array[Any], contact: wp.array[Any], q_local: wp.array[int], x_start: int, out: wp.array[Any]
+):
     i = wp.tid()
     value = contact[i]
-    if i >= q_start and i < q_start + q.shape[0]:
-        value += q[i - q_start]
+    if q_local[i] >= 0:
+        value += q[q_local[i]]
     elif i >= x_start and i < x_start + 3 * x.shape[0]:
         j = i - x_start
         value += x[j / 3][j % 3]
@@ -131,22 +135,25 @@ def dynamic_diagonal(
     ids: wp.array[int],
     particle_mass: wp.array[float],
     dt: Any,
-    q_start: int,
+    q_local: wp.array[int],
+    jac_offsets: wp.array[int],
+    body_dof_starts: wp.array[int],
+    dof_body_starts: wp.array[int],
+    dof_body_ends: wp.array[int],
     x_start: int,
     out: wp.array[Any],
 ):
     i = wp.tid()
     value = type(dt)(0.0)
-    nq = armature.shape[0]
-    if i >= q_start and i < q_start + nq:
-        local = i - q_start
+    local = q_local[i]
+    if local >= 0:
         value = armature[local]
-        for body in range(mass.shape[0]):
+        for body in range(dof_body_starts[local], dof_body_ends[local]):
             inertia = wp.trace(second[body]) * wp.identity(n=3, dtype=type(dt)) - second[body]
             world = rotations[body] * inertia * wp.transpose(rotations[body])
-            value += mass[body] * wp.dot(jt[body, local], jt[body, local]) + wp.dot(
-                jw[body, local], world * jw[body, local]
-            )
+            entry = jac_offsets[body] + local - body_dof_starts[body]
+            t, w = _packed_column(jt, entry), _packed_column(jw, entry)
+            value += mass[body] * wp.dot(t, t) + wp.dot(w, world * w)
     elif i >= x_start and i < x_start + 3 * ids.shape[0]:
         value = type(dt)(particle_mass[ids[(i - x_start) / 3]])
     else:
@@ -186,19 +193,26 @@ def sparse_posterior(
 
 
 @wp.kernel
-def _scatter(matrix: wp.array2d[Any], actor: wp.array2d[Any], values: wp.array[Any], diagonal: wp.array[Any]):
-    i, j = wp.tid()
-    actor[i, j] = matrix[i, j]
-    values[i * matrix.shape[0] + j] = matrix[i, j]
-    if i == j:
-        diagonal[i] = matrix[i, i]
+def _scatter(
+    matrix: wp.array[Any],
+    actor: wp.array[Any],
+    values: wp.array[Any],
+    rows: wp.array[int],
+    columns: wp.array[int],
+    diagonal: wp.array[Any],
+):
+    entry = wp.tid()
+    actor[entry] = matrix[entry]
+    values[entry] = matrix[entry]
+    if rows[entry] == columns[entry]:
+        diagonal[rows[entry]] = matrix[entry]
 
 
 @wp.kernel
 def _coordinate_trial(
     accepted_step: wp.array[Any],
     direction: wp.array[Any],
-    q_start: int,
+    rows: wp.array[int],
     alpha: Any,
     qn: wp.array[Any],
     h: Any,
@@ -210,7 +224,7 @@ def _coordinate_trial(
 ):
     i = wp.tid()
     # Advance the exact step; coordinates and rates are formed from it once.
-    step[i] = accepted_step[i] + alpha * type(h)(direction[q_start + i])
+    step[i] = accepted_step[i] + alpha * type(h)(direction[rows[i]])
     out[coords[i]] = qn[i] + step[i]
     vout[dofs[i]] = step[i] / h
 
