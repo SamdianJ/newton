@@ -55,9 +55,10 @@ Contact uses the solver's spatial candidates, refreshed at each Newton
 boundary and stored in the bounded deterministic pool. Insufficient candidate or
 factor capacity rolls back the step; it does not publish a truncated force sum.
 ``get_contact_forces()`` returns particle forces and body/joint reactions from
-the same finally assembled candidate. Material checkpoint schema 6 also carries
-cable contact torque. Earlier material schemas are rejected because they lack
-this history. Checkpoints written before the current configuration version
+the same finally assembled candidate. Material checkpoint schema 6 (schema 7
+with multiple articulations) also carries cable contact torque. Earlier material
+schemas are rejected because they lack this history. Checkpoints written before
+the current configuration version
 are rejected.
 
 Numerical contract

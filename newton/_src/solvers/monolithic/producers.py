@@ -737,12 +737,10 @@ class ContactProducer(_Producer):
         diagnostics = {} if reference_mode else contact.evaluation_diagnostics()
         if not reference_mode:
             solver._variational["contact_pool"] = diagnostics
-        if (
-            contact.flags.numpy()[0]
-            or diagnostics.get("dropped", 0)
-            or (solver._contact_spatial and contact._query_dropped)
-        ):
-            raise _StepFailure(solver.Status.NONFINITE, "Invalid or incomplete contact evaluation")
+        if diagnostics.get("tainted", False):
+            raise _StepFailure(solver.Status.CONTACT_OVERFLOW, "Incomplete contact evaluation")
+        if contact.flags.numpy()[0]:
+            raise _StepFailure(solver.Status.NONFINITE, "Invalid contact evaluation")
         wp.launch(_add_values, residual.size, [contact.residual, residual], device=solver.model.device)
         # Material blocks report their raw residual including the contact reaction.
         forces = contact.pool.force.result.numpy()

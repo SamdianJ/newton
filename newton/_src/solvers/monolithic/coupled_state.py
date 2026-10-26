@@ -24,6 +24,8 @@ class CoupledState(ArticulationState):
         self.materials = materials
         if materials is not None:
             self.version = 6
+        if kinematics.tree_count > 1:
+            self.version = 7
         self.layout_metadata = {
             "layout_version": np.array([2 if materials is not None else 1], dtype=np.int32),
             "layout_digest": np.frombuffer(bytes.fromhex(actors.identity), dtype=np.uint8),

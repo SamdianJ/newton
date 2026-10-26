@@ -14,6 +14,7 @@ import newton
 from newton._src.solvers.monolithic.actors import ActorTable
 from newton._src.solvers.monolithic.contact_spatial import _ContactSpatial
 from newton.solvers.experimental.monolithic import SolverMonolithic
+from newton.tests.monolithic_test_utils import add_contact_free_tet
 from newton.tests.test_monolithic_contact_actor_pairs import native_batch, native_inputs, query
 from newton.tests.test_monolithic_contact_components import batch_matrix
 from newton.tests.unittest_utils import add_function_test, get_test_devices
@@ -22,8 +23,8 @@ from scripts.monolithic_reference.articulation_oracle import Kinematics, transfo
 from scripts.monolithic_reference.contact_oracle import geometry, local
 
 
-def contact_trees(device, *, filtered=False, fixed_target=False, root_shapes=False):
-    """Build two fixed roots, unequal chains and offset box/COM frames, without FREE bodies."""
+def contact_trees(device, *, filtered=False, fixed_target=False, root_shapes=False, mixed=False):
+    """Build two fixed roots and unequal chains, optionally with a FREE actor and tet."""
     builder = newton.ModelBuilder(gravity=(0, 0, 0))
     shapes, roots = [], []
     for tree, x in enumerate((-0.018, 0.018)):
@@ -67,6 +68,20 @@ def contact_trees(device, *, filtered=False, fixed_target=False, root_shapes=Fal
             builder.add_shape_box(
                 root, hx=0.02, hy=0.015, hz=0.012, cfg=builder.ShapeConfig(density=0, has_particle_collision=False)
             )
+    if mixed:
+        rigid = builder.add_body(
+            xform=wp.transform((0.045, 0, 0.1), wp.quat_identity()),
+            mass=0.03,
+            inertia=wp.diag(wp.vec3(0.0001)),
+        )
+        builder.add_shape_box(
+            rigid,
+            hx=0.012,
+            hy=0.012,
+            hz=0.012,
+            cfg=builder.ShapeConfig(density=0, has_particle_collision=False),
+        )
+        add_contact_free_tet(builder)
     return builder.finalize(device=device)
 
 

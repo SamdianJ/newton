@@ -174,8 +174,10 @@ vibration benchmarks. FP32 cable cantilevers and the finest tet cantilever are
 not yet qualified, and the localized helix is outside the acceptance set in
 both precisions (see :doc:`monolithic_cable`).
 
-The precision-tagged state uses schema 4, including actor ownership, layout
-identity and native rigid continuation fields. Cross-layout and cross-precision
+The precision-tagged state uses schema 4, or schema 6 with materials, including
+actor ownership, layout identity and native rigid continuation fields. Multiple
+articulations use schema 7, including their topology and source mappings in the
+configuration identity. Cross-layout and cross-precision
 checkpoint loads are rejected. The configuration identity covers every option
 that changes the solution, the resolved contact resources and the physical,
 material and SDF digests; PCG mode and CUDA graph use are excluded. CPU and
