@@ -13,7 +13,7 @@ import numpy as np
 
 from newton.examples.softbody.monolithic_recording import serial, state_arrays
 from newton.tests.test_monolithic_solver_coupled import scene, solver
-from scripts.monolithic_reference.audit_precision import audit
+from scripts.monolithic_reference.audit_precision import audit, goals
 from scripts.monolithic_reference.build_smooth_sdf import build_coefficients
 from scripts.monolithic_reference.observe_precision import Observer
 from scripts.monolithic_reference.run_precision import sha
@@ -79,6 +79,27 @@ class TestSceneAudit(unittest.TestCase):
             self.assertFalse(result["publications"][0]["false_convergence"])
             self.assertTrue(result["linear"])
             self.assertFalse(result["accepted_but_independent_rejects"])
+
+    def test_goals_use_native_relative_tolerance(self):
+        """Judge an FP32 step against the FP32 relative tolerance the solver applied."""
+        model = scene("cpu")
+        run = solver(model, precision="fp32")
+        state = run.create_state(dt=0.001)
+        run.step(state, state, model.control(), dt=0.001)
+        rows = run._criterion.rows
+        config = {
+            "config": serial(run._config),
+            "precision": run.precision.value,
+            "row_units": rows.units.tolist(),
+            "row_groups": rows.groups.tolist(),
+            "row_group_names": list(rows.names),
+        }
+        reference = np.asarray(run._reference_residual.numpy(), dtype=float)
+        physical = run._criterion.physical.numpy().astype(float)
+        result = goals(0.999 * physical, reference, model.joint_dof_count, config)
+        self.assertLessEqual(result["global"]["ratio"], 1.0)
+        result = goals(1.01 * physical, reference, model.joint_dof_count, config)
+        self.assertGreater(result["global"]["ratio"], 1.0)
 
     def test_spline_reference(self):
         """Match an independent natural spline at interior, boundary and exterior points."""

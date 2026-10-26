@@ -1,0 +1,1 @@
+Run both experimental `SolverMonolithic` PCG modes through one masked PCG implementation. `PCGMode.DIAGNOSTIC` now only adds a record of every checkpoint's true-residual norms and no longer stops early on stagnation; PCG iterates until its tolerance or `linear_max_iterations`.

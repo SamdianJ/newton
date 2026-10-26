@@ -65,6 +65,7 @@ class Observer:
                 "mass": run._tet.physics.mass_mode,
                 "guard": run._guard,
                 "config": serial(run._config),
+                "precision": run.precision.value,
                 "row_units": run._criterion.rows.units.tolist(),
                 "row_groups": run._criterion.rows.groups.tolist(),
                 "row_group_names": list(run._criterion.rows.names),

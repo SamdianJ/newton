@@ -1,1 +1,0 @@
-Raise the rounding multiplier of experimental `SolverMonolithic`'s per-row convergence test from 4 to 32 `eps * a`, so FP32 steps whose residual has reached its rounding floor are reported as converged rather than stopped.

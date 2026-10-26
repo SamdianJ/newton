@@ -57,7 +57,11 @@ def goals(residual, reference, nq, config):
         np.asarray(config["row_groups"], dtype=np.int32),
     )
     policy = config["config"]["convergence"]
-    policy = ConvergencePolicy(tuple(policy["absolute"]), tuple(policy["relative"]), tuple(policy["noise"]))
+    relative = tuple(policy["relative"])
+    if config.get("precision") == "fp32":
+        relative = tuple(policy["relative_fp32"])
+    # Evaluate in FP64 with the relative tolerance of the solver's native precision.
+    policy = ConvergencePolicy(tuple(policy["absolute"]), relative, tuple(policy["noise"]))
     _, physical = tolerances(reference, np.zeros(len(residual)), rows, policy, np.float64)
     ratio = np.abs(residual) / physical
     return {
@@ -337,16 +341,15 @@ def audit(directory):
         }
         groups = (native["stats"].get("variational") or {}).get("convergence_groups", {})
         pub["native_rounding_limited"] = sum(g["rounding_limited"] for g in groups.values())
-        # Rows the solver accepted only within its rounding allowance may exceed the physical tolerance.
+        exceeded = pub["independent_goals"] is not None and any(
+            v["ratio"] > 1 for v in pub["independent_goals"].values()
+        )
+        # Rows the solver accepted only within its rounding allowance may exceed the physical tolerance;
+        # such steps are excused but reported, since the excuse is not attributed to the exceeding rows.
+        pub["rounding_excused"] = bool(native["stats"]["converged"] and exceeded and pub["native_rounding_limited"])
         pub["false_convergence"] = bool(
             native["stats"]["converged"]
-            and (
-                pub["independent_goals"] is None
-                or (
-                    any(v["ratio"] > 1 for v in pub["independent_goals"].values())
-                    and not pub["native_rounding_limited"]
-                )
-            )
+            and (pub["independent_goals"] is None or (exceeded and not pub["native_rounding_limited"]))
         )
         publications.append(pub)
     result = {

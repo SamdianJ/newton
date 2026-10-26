@@ -1,1 +1,0 @@
-Bound the rounding of experimental `SolverMonolithic` cable bending and twist strains from their operands in the convergence noise floor, so strongly twisted FP32 cables near rest are no longer judged against a floor far below their actual rounding.
