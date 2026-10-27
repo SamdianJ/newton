@@ -103,7 +103,7 @@ class ContactSamples:
         self.body_local = np.full(model.body_count, -1, dtype=np.int32)
         rigids = [a for a in actors.actors if a.kind == "rigid"]
         arms = tuple(a for a in actors.actors if a.kind == "articulation")
-        if not rigids and _materials is None and len(arms) < 2:
+        if not rigids and _materials is None and not arms:
             self.rigid_shapes = ()
             return
         tree_support = articulation_support(model, arms)
@@ -208,7 +208,7 @@ class ContactSamples:
         )
         for a, b in ordered:
             mechanical_pair = bodies[a] in tree_support and bodies[b] in tree_support
-            if owner[a] == owner[b] or not (mechanical_pair or a in self.rigid_shapes or b in self.rigid_shapes):
+            if owner[a] == owner[b]:
                 continue
             pair = tuple(sorted((a, b)))
             if pair in seen:
@@ -222,6 +222,8 @@ class ContactSamples:
             self.pair_kinds[pair] = (
                 "A-A"
                 if mechanical_pair
+                else "A-static"
+                if not all(dynamic) and a not in self.rigid_shapes and b not in self.rigid_shapes
                 else "rigid-static"
                 if not all(dynamic)
                 else "R-R"
