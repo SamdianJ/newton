@@ -97,6 +97,7 @@ class ContactHandControl:
         self.stable_time = 0.0
         self.lost_time = 0.0
         self.move_start = 0.0
+        self.move_end = 0.05
         self.brake_position = self.brake_velocity = 0.0
         self.failure = None
         self.completed = False
@@ -236,6 +237,8 @@ class ContactHandControl:
             self.stable_time = self.stable_time + dt if stable else 0.0
             if self.stable_time >= 0.1:
                 self.move_start = self.carriage
+                if self.task == "pull-slider":
+                    self.move_end = self.carriage + self.initial_position[0] + 0.05 - observation.object_position[0]
                 self.transition("move", t)
             elif t >= 2.75:
                 self.failure = "grip-not-established"
@@ -289,8 +292,8 @@ class ContactHandControl:
         if self.phase == "move":
             b, v = self.blend(elapsed, 1.0)
             self.carriage, self.carriage_velocity = (
-                self.move_start + (0.05 - self.move_start) * b,
-                (0.05 - self.move_start) * v,
+                self.move_start + (self.move_end - self.move_start) * b,
+                (self.move_end - self.move_start) * v,
             )
         elif self.phase == "lower":
             b, v = self.blend(elapsed, 1.0)

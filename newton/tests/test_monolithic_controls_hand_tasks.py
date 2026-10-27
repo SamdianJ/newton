@@ -290,6 +290,57 @@ class TestContactHandControls(unittest.TestCase):
         self.assertEqual(support, 0)
         self.assertEqual(hand_object, 0.2)
 
+    def test_slider_move_compensates_for_pregrip_object_motion(self):
+        pushed = 0.007374773267656565
+        for carriage in (0.0, 0.01):
+            control = self.controller("pull-slider")
+            control.phase, control.carriage = "close", carriage
+            control.initial_position = np.array([0.0, 0.0, 0.0202])
+            for step in range(1, 601):
+                observation = self.observation(step, load=0.2)
+                observation.object_position[0] = pushed
+                control.advance(step * 0.002, observation)
+            expected = carriage + 0.05 - pushed
+            self.assertEqual(control.phase, "hold")
+            self.assertAlmostEqual(control.move_end, expected)
+            self.assertAlmostEqual(control.carriage, expected, places=7)
+            self.assertAlmostEqual(control.phase_start, 1.1)
+
+    def test_grasp_move_endpoint_stays_fifty_millimetres(self):
+        for task in ("grasp-rigid", "grasp-soft"):
+            control = self.controller(task)
+            control.phase = "close"
+            control.initial_position = np.array([0.0, 0.0, 0.0202])
+            for step in range(1, 601):
+                observation = self.observation(step, load=1.0)
+                observation.object_position[0] = 0.007
+                control.advance(step * 0.002, observation)
+            self.assertEqual(control.phase, "hold")
+            self.assertEqual(control.move_end, 0.05)
+            self.assertAlmostEqual(control.carriage, 0.05, places=7)
+
+    def test_compensated_endpoint_survives_snapshot_restore(self):
+        control = self.controller("pull-slider")
+        control.phase = "close"
+        control.initial_position = np.array([0.0, 0.0, 0.0202])
+        for step in range(1, 61):
+            observation = self.observation(step, load=0.2)
+            observation.object_position[0] = 0.007
+            control.advance(step * 0.002, observation)
+        self.assertEqual(control.phase, "move")
+        self.assertAlmostEqual(control.move_end, 0.043)
+        snapshot = json.loads(json.dumps(control.snapshot()))
+        restored = ContactHandControl.from_snapshot(snapshot)
+        observation = self.observation(61, load=0.2)
+        observation.object_position[0] = 0.008
+        control.advance(0.122, observation)
+        restored.advance(0.122, observation)
+        self.assertEqual(restored.snapshot(), control.snapshot())
+        self.assertAlmostEqual(control.move_end, 0.043)
+        del snapshot["move_end"]
+        with self.assertRaisesRegex(ValueError, "missing or unexpected"):
+            ContactHandControl.from_snapshot(snapshot)
+
     def test_measure_separates_object_force_in_both_control_modes(self):
         def array(values):
             return SimpleNamespace(numpy=lambda: np.asarray(values))
