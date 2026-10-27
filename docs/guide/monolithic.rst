@@ -25,6 +25,12 @@ retains their cross blocks in the shared sparse operator. Fixed links can be
 zero-Jacobian endpoints. Articulation contacts with FREE actors and materials
 retain their existing paths.
 
+Model-selected articulation contacts with static world shapes also participate
+in the shared solve, including scenes with only one articulation. The dynamic
+surface is sampled at full area and its force is projected through its joint
+support; the static endpoint has no solver degrees of freedom. Model collision
+filters and the same-tree exclusion still apply.
+
 Every scene, including cloth/cable scenes, uses spatial contact. Candidates
 refresh at each Newton boundary and remain frozen during its trials. This
 approximation can omit contacts reached by a trial outside the frozen bounds;
