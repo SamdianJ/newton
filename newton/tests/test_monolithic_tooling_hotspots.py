@@ -98,7 +98,9 @@ def test_hotspot_dependencies(test, device):
                             damaged, metadata, output, scene="tiny-contact", device=device, graph=graph, repeat=1
                         )
             test.assertEqual(flags, {False, True})
-            test.assertTrue({"_original", "_accepted", "_trial"} <= states)
+            # The predictor (first accepted iterate) sets the relative tolerance;
+            # the step-start state itself is no longer evaluated.
+            test.assertTrue({"_accepted", "_trial"} <= states)
 
 
 class TestHotspots(unittest.TestCase):

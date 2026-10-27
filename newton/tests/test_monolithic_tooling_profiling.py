@@ -38,7 +38,7 @@ def test_spatial_solver_profile(test, device):
     baseline.step(expected, expected, baseline.model.control(), dt=0.001)
     compare_arrays(state_arrays(state), state_arrays(expected))
     modules = profiler.report()["modules"]
-    for name in ("initial_reference", "contact.refresh", "contact.begin_step", "contact.publish"):
+    for name in ("contact.refresh", "contact.begin_step", "contact.publish"):
         test.assertGreater(modules[name]["calls"], 0)
 
 

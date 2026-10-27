@@ -30,6 +30,10 @@ REQUIRED = (
     "moving_tet/g0.05/vx0",
     "moving_tet/g9.81/vx0",
     "moving_tet/g9.81/vx1",
+    # PR-05: relative tolerances follow the predictor's residual (failed at 3b3c7417).
+    "moving_tet/g0.05/vx1",
+    "moving_tet/g0.05/vx100",
+    "moving_tet/g9.81/vx100",
     "tet_noise/nu0.3/stretch1",
     "tet_noise/nu0.3/stretch1.2",
     "tet_noise/nu0.49/stretch1",

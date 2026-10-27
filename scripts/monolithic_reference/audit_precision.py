@@ -85,7 +85,7 @@ def audit(directory):
     with gzip.open(directory / "steps.jsonl.gz", "rt") as stream:
         stats = {r["step"]: r for r in map(json.loads, stream)}
     cache, output, last_scale, native_reference, reference = {}, [], None, None, None
-    saved = []
+    saved, current_step = [], None
     for row in records:
         scale_rounding = None
         assert sha(directory / row["file"]) == row["sha256"]
@@ -100,10 +100,14 @@ def audit(directory):
             return cache[key]
 
         result = evaluate("state.")
-        if row["role"] == "original":
+        if row["step"] != current_step:
+            current_step, reference, native_reference, last_scale = row["step"], None, None, None
+        # The relative tolerance follows the step's first evaluated residual: the
+        # predictor (first accepted iterate) since P8b2, the step start in older
+        # archives, which recorded that evaluation first.
+        if reference is None and row["role"] in ("original", "accepted"):
             reference = result["residual"]
             native_reference = data.get("native.residual")
-            last_scale = None
         if "scale" in row:
             assert sha(directory / row["scale"]["file"]) == row["scale"]["sha256"]
             scale_data = load(row["scale"]["file"])

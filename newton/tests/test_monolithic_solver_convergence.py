@@ -108,6 +108,28 @@ def test_nonfinite_tolerance_never_converges(test, device):
             test.assertGreater(criterion.worst.numpy()[0], 1.0)
 
 
+def test_moving_body_resolves_its_load(test, device):
+    """Resolve a small load on a uniformly moving body instead of stopping at the predictor.
+
+    The step-start residual carries the inertia M v / h that the predictor
+    cancels; as a reference for the relative tolerance it would loosen the
+    whole block with the speed, so a fast body converged without moving.
+    """
+    from scripts.monolithic_reference.run_precision_checks import _moving_tet  # noqa: PLC0415
+
+    dt = 1e-3
+    for precision in ("fp64", "fp32"):
+        for g, vx in ((0.05, 1.0), (0.05, 100.0), (9.81, 100.0)):
+            with test.subTest(precision=precision, g=g, vx=vx):
+                model, solver = _moving_tet(vx, g, precision, device)
+                state = solver.create_state(dt=dt)
+                solver.step(state, state, model.control(), dt=dt)
+                test.assertTrue(solver.last_stats.converged, solver.last_stats.status)
+                test.assertGreaterEqual(solver.last_stats.nonlinear_iterations, 1)
+                vz = state.particle_qd.numpy()[:, 2].astype(float).mean()
+                test.assertLess(abs(vz / (-g * dt) - 1), 1e-2)
+
+
 class TestMonolithicConvergence(unittest.TestCase):
     def test_default_policy(self):
         """Keep the approved per-unit targets, relative tolerances and rounding multipliers."""
@@ -165,6 +187,12 @@ add_function_test(
     TestMonolithicConvergence,
     "test_nonfinite_tolerance_never_converges",
     test_nonfinite_tolerance_never_converges,
+    devices=get_test_devices(),
+)
+add_function_test(
+    TestMonolithicConvergence,
+    "test_moving_body_resolves_its_load",
+    test_moving_body_resolves_its_load,
     devices=get_test_devices(),
 )
 add_function_test(

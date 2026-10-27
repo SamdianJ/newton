@@ -273,7 +273,7 @@ def iterate(solver, dt):
     tiny = native(1e-30)
     config = self._config
     device = self._device_iteration
-    reference = self._initial_reference(dt, device_result=True) if device else self._initial_reference(dt)
+    reference = None
     small = False
     for iteration in range(self.newton_max_iterations + 1):
         if getattr(self, "_contact_spatial", False):
@@ -284,6 +284,17 @@ def iterate(solver, dt):
         if device:
             wp.copy(self._accepted_r, evaluated)
         residual = self._accepted_r if device else evaluated
+        if iteration == 0:
+            # Relative tolerances follow the predictor's residual. The step-start
+            # residual r(x_n) carries the inertia M v / h that the predictor
+            # cancels, so a fast body would loosen its whole block's tolerance
+            # and stop at the predictor with its load unresolved.
+            self._criterion.freeze_reference(self._complete_r)
+            if device:
+                wp.copy(self._reference_device, residual)
+                reference = self._reference_device
+            else:
+                reference = np.array(residual, copy=True)
         _, scale = self._assemble(iteration, device_result=True) if device else self._assemble(iteration)
         self._reference_residual = reference
         assessment = measure(self, residual, reference, scale)
