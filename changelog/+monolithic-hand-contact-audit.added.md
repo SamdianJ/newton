@@ -1,0 +1,1 @@
+Add a recorded full-hand contact audit that separates surface/SDF consistency, normal-force area scaling, commanded overclosure, and directed surface quadrature convergence without advancing simulation.
