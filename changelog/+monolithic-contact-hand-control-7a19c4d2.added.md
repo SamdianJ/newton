@@ -1,0 +1,1 @@
+Add optional contact-responsive full-hand task controls with per-finger closure limits, published contact feedback, support-triggered release, explicit contact stiffness, and restorable controller checkpoints.

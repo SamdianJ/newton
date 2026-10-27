@@ -24,6 +24,7 @@ from newton.examples.softbody.sharpa_close import ClosureTrajectory, load_fixtur
 
 from .actor_contact_oracle import box_samples
 from .articulation_oracle import transform
+from .hand_task_control import ContactHandControl, HandObservation, contact_loads, finger_index
 from .run_dexterous_tasks import ramp, save_json
 
 REPO = Path(__file__).resolve().parents[2]
@@ -199,9 +200,22 @@ class HandTask:
     """Apply only hand actuator targets; preserve independent object dynamics."""
 
     def __init__(
-        self, task, assets, *, device="cuda:0", friction=0.5, offset=0.0, surface_source="qualified", height=0.0
+        self,
+        task,
+        assets,
+        *,
+        device="cuda:0",
+        friction=0.5,
+        offset=0.0,
+        surface_source="qualified",
+        height=0.0,
+        control_mode="open-loop",
+        contact_stiffness=1e7,
     ):
+        if control_mode not in ("open-loop", "contact") or not np.isfinite(contact_stiffness) or contact_stiffness <= 0:
+            raise ValueError("Require open-loop/contact control and positive finite contact stiffness")
         self.task = task
+        self.controller = self.feedback = self.feedback_geometry = self.control_before_step = None
         self.model, self.mapping, self.curve, terms, self.identity = build_model(
             task, assets, device=device, offset=offset, surface_source=surface_source, height=height
         )
@@ -216,7 +230,7 @@ class HandTask:
             tet_rest_density=wp.full(self.model.tet_count, 1000.0, dtype=float, device=device)
             if self.model.tet_count
             else None,
-            contact_stiffness=1e7,
+            contact_stiffness=contact_stiffness,
             friction_coefficient=friction,
             friction_velocity_scale=0.01,
             normal_smoothing=1e-4,
@@ -267,8 +281,27 @@ class HandTask:
             )
             errors[entry["source"]] = float(np.max(np.abs(values.numpy()[:, 0])))
         self.identity["surface_sdf_error_m"] = errors
+        self.identity.update(control_mode=control_mode, contact_stiffness_N_m3=contact_stiffness)
+        self.hand_shape_fingers = {r["shape"]: finger_index(r["link"]) for r in self.identity["collision_mapping"]}
+        self.ground_shapes = planes
+        body = self.identity["object_body"]
+        self.object_shapes = set(np.flatnonzero(self.model.shape_body.numpy() == body)) if body is not None else set()
+        if control_mode == "contact":
+            rates = []
+            for finger in range(5):
+                slots = [i for i, name in enumerate(self.curve.names) if finger_index(name) == finger]
+                slope = np.max(np.abs(self.curve.slopes[:, slots]), axis=0)
+                limits = self.model.joint_velocity_limit.numpy()[np.array(self.hand_dofs)[slots]]
+                rates.append(float(np.min(limits / np.maximum(slope, 1e-12))))
+            mass = (
+                float(self.model.body_mass.numpy()[body])
+                if body is not None
+                else float(self.model.particle_mass.numpy().sum())
+            )
+            self.controller = ContactHandControl(task, mass=mass, friction=friction, source_rates=rates)
+            self.identity["contact_control_parameters"] = self.controller.parameters
 
-    def penetration(self):
+    def penetration(self, *, by_finger=None):
         """Sample the published geometry independently of residual and active contact selection.
 
         Body output poses are FP32 even in an FP64 solve; this millimetre-scale
@@ -300,7 +333,9 @@ class HandTask:
                 local = (world - poses[body][:3, 3]) @ poses[body][:3, :3]
                 d = np.abs(local) - 0.02
                 distance = np.linalg.norm(np.maximum(d, 0), axis=1) + np.minimum(d.max(axis=1), 0)
-                penetration["hand_object_m"] = max(penetration["hand_object_m"], float(-distance.min()))
+                depth = max(0.0, float(-distance.min()))
+            else:
+                depth = 0.0
             local = (points - frame[:3, 3]) @ frame[:3, :3]
             field = self.smooth.fields[int(indices[shape])]
             values = wp.empty((len(local), 13), dtype=wp.float64, device=model.device)
@@ -310,26 +345,88 @@ class HandTask:
                 inputs=[field.data, wp.array(local, dtype=wp.vec3d, device=model.device), values],
                 device=model.device,
             )
-            penetration["hand_object_m"] = max(penetration["hand_object_m"], float(radius - values.numpy()[:, 0].min()))
+            depth = max(depth, float(radius - values.numpy()[:, 0].min()))
+            penetration["hand_object_m"] = max(penetration["hand_object_m"], depth)
+            finger = finger_index(entry["link"])
+            if by_finger is not None and finger is not None:
+                by_finger[finger] = max(by_finger[finger], depth)
         return penetration
 
     def targets(self, t):
-        source, rate, move, velocity, phase = schedule(self.task, t)
-        q, v = self.curve.sample(source)
+        if self.controller is None:
+            source, rate, move, velocity, phase = schedule(self.task, t)
+            q, v = self.curve.sample(source)
+            v *= rate
+        else:
+            q, v = np.zeros(22), np.zeros(22)
+            for finger in range(5):
+                values, speeds = self.curve.sample(self.controller.sources[finger])
+                slots = [i for i, name in enumerate(self.curve.names) if finger_index(name) == finger]
+                q[slots], v[slots] = values[slots], speeds[slots] * self.controller.rates[finger]
+            move, velocity, phase = self.controller.carriage, self.controller.carriage_velocity, self.controller.phase
         position, speed = np.zeros(self.model.joint_target_q.shape[0]), np.zeros(self.model.joint_dof_count)
         for i, name in enumerate(self.curve.names):
             _, dof, slot = self.mapping[name]
-            position[slot], speed[dof] = q[i], rate * v[i]
+            position[slot], speed[dof] = q[i], v[i]
         _, dof, slot = self.mapping["monolithic_lift"]
         position[slot], speed[dof] = move, velocity
         return position, speed, phase
 
     def step(self, t):
+        if self.controller is not None:
+            self.control_before_step = {
+                "time": t,
+                "controller": self.controller.snapshot(),
+                "feedback": None if self.feedback is None else self.feedback.snapshot(),
+            }
+            self.controller.advance(t, self.feedback)
         q, v, phase = self.targets(t)
         self.control.joint_target_q.assign(q)
         self.control.joint_target_qd.assign(v)
         self.solver.step(self.state, self.state, self.control, dt=DT)
+        if self.controller is not None and self.solver.last_stats.converged and not self.solver.last_stats.rolled_back:
+            self.feedback = self.observe_contact()
         return phase
+
+    def observe_contact(self):
+        """Read only successfully published pair forces and geometry for the next step."""
+        forces = self.solver.get_contact_forces(self.state)
+        fingers, floor, support, hand_object = contact_loads(
+            self.solver.last_stats.variational.get("actor_contact_pairs", ()),
+            self.hand_shape_fingers,
+            self.object_shapes,
+            self.ground_shapes,
+            material=self.identity["object_body"] is None,
+            generation=forces.force_generation,
+        )
+        depths = np.zeros(5)
+        self.feedback_geometry = self.penetration(by_finger=depths)
+        body = self.identity["object_body"]
+        if body is None:
+            x = self.state.particle_q.numpy().astype(float)
+            mass = self.model.particle_mass.numpy()
+            position = np.average(x, axis=0, weights=mass)
+            velocity = np.average(self.state.particle_qd.numpy(), axis=0, weights=mass)
+            bottom = float(x[:, 2].min() - 0.0002)
+        else:
+            frame = transform(self.state.body_q.numpy()[body])
+            position, velocity = frame[:3, 3], self.state.body_qd.numpy()[body, :3].astype(float)
+            bottom = float(position[2] - 0.02 * np.abs(frame[2, :3]).sum())
+        open_error = float(np.max(np.abs(self.state.joint_q.numpy()[self.hand_coords] - self.curve.q[0])))
+        return HandObservation(
+            forces.force_generation,
+            fingers,
+            floor,
+            depths,
+            support,
+            position,
+            velocity,
+            bottom,
+            valid=forces.force_valid,
+            open_error_rad=open_error,
+            hand_object_force=hand_object,
+            hand_object_penetration=self.feedback_geometry["hand_object_m"],
+        )
 
     def measure(self, t, phase):
         run, state, model = self.solver, self.state, self.model
@@ -339,6 +436,21 @@ class HandTask:
         q, v = state.joint_q.numpy()[self.hand_coords], state.joint_qd.numpy()[dofs]
         lower, upper = model.joint_limit_lower.numpy()[dofs], model.joint_limit_upper.numpy()[dofs]
         pd = stats.joint_pd_force
+        hand_object_force = None
+        if stats.converged and not stats.rolled_back and forces.force_valid:
+            pairs = stats.variational.get("actor_contact_pairs")
+            if pairs is not None:
+                try:
+                    _, _, _, hand_object_force = contact_loads(
+                        pairs,
+                        self.hand_shape_fingers,
+                        self.object_shapes,
+                        self.ground_shapes,
+                        material=self.identity["object_body"] is None,
+                        generation=forces.force_generation,
+                    )
+                except ValueError:
+                    pass  # Missing or invalid published object-force evidence stays unknown.
         row = {
             "time": t,
             "phase": phase,
@@ -347,11 +459,12 @@ class HandTask:
             "newton": stats.nonlinear_iterations,
             "pcg": stats.linear_iterations,
             "contact_force_N": float(np.linalg.norm(forces.body_wrench[list(self.hand_bodies), :3], axis=1).sum()),
+            "hand_object_force_N": hand_object_force,
             "joint_limit_violation_rad": float(max(0, np.max(lower - q), np.max(q - upper))),
             "speed_ratio": float(np.max(np.abs(v) / model.joint_velocity_limit.numpy()[dofs])),
             "effort_ratio": float(np.max(np.abs(np.asarray(pd)[dofs]) / model.joint_effort_limit.numpy()[dofs]))
             if pd is not None
-            else 0,
+            else None,
             "failure_reason": stats.failure_reason,
         }
         body = self.identity["object_body"]
@@ -366,11 +479,22 @@ class HandTask:
             row["object_position"] = state.body_q.numpy()[body, :3].astype(float).tolist()
             row["min_det_f"] = 1.0
         object_dof = self.identity["object_dof"]
-        row["object_active_force_N"] = (
-            float(abs(self.control.joint_f.numpy()[object_dof]) + abs(pd[object_dof]))
-            if object_dof is not None
-            else 0.0
-        )
+        if object_dof is None:
+            row["object_active_force_N"] = 0.0
+        elif pd is None:
+            row["object_active_force_N"] = None
+        else:
+            row["object_active_force_N"] = float(abs(self.control.joint_f.numpy()[object_dof]) + abs(pd[object_dof]))
+        if self.controller is not None:
+            row["contact_control"] = {
+                "sources": self.controller.sources.tolist(),
+                "source_rates": self.controller.rates.tolist(),
+                "carriage_m": self.controller.carriage,
+                "carriage_speed_m_s": self.controller.carriage_velocity,
+                "failure": self.controller.failure,
+                "completed": self.controller.completed,
+                "feedback": None if self.feedback is None else self.feedback.snapshot(),
+            }
         return row
 
 
@@ -385,18 +509,23 @@ def physical_gates(task, rows, *, height=0.0):
         "final_drift_m": float(np.max(np.linalg.norm(late - late[-1], axis=1))) if len(late) else None,
     }
     for key in ("contact_force_N", "joint_limit_violation_rad", "speed_ratio", "effort_ratio", "object_active_force_N"):
-        metrics["max_" + key] = max(r[key] for r in rows)
+        values = [r[key] for r in rows]
+        metrics["max_" + key] = max(values) if all(value is not None for value in values) else None
+    object_forces = [r.get("hand_object_force_N") for r in rows]
+    metrics["max_hand_object_force_N"] = (
+        max(object_forces) if all(value is not None for value in object_forces) else None
+    )
     metrics["min_det_f"] = min(r["min_det_f"] for r in rows)
     measurements = [r["sample_penetration_m"] for r in rows if "sample_penetration_m" in r]
     metrics["max_sample_penetration_m"] = max(measurements) if measurements else None
     gates = {
-        "contact": metrics["max_contact_force_N"] > 0.01,
+        "contact": metrics["max_hand_object_force_N"] is not None and metrics["max_hand_object_force_N"] > 0.01,
         "motion": metrics["final_position_error_m"] <= 0.01 if task == "pull-slider" else metrics["lift_m"] >= 0.03,
         "placement": metrics["final_position_error_m"] <= 0.01,
         "released_stable": metrics["final_drift_m"] is not None and metrics["final_drift_m"] <= 0.002,
         "joint_limits": metrics["max_joint_limit_violation_rad"] <= 0.02,
         "speed": metrics["max_speed_ratio"] <= 1.2,
-        "effort": metrics["max_effort_ratio"] <= 1.2,
+        "effort": metrics["max_effort_ratio"] is not None and metrics["max_effort_ratio"] <= 1.2,
         "passive_object": metrics["max_object_active_force_N"] == 0,
         "material": metrics["min_det_f"] >= 0.2,
         "penetration": metrics["max_sample_penetration_m"] is not None
@@ -422,6 +551,8 @@ def run_case(task, args):
         offset=args.offset,
         surface_source=args.surface_source,
         height=args.height,
+        control_mode=args.control_mode,
+        contact_stiffness=args.contact_stiffness,
     )
     initial_penetration = scene.penetration()
     save_json(
@@ -453,7 +584,12 @@ def run_case(task, args):
                 phase = scene.step(step * DT)
                 row = scene.measure(step * DT, phase)
                 if step == 1 or step % 25 == 0 or step == limit or not row["converged"]:
-                    row["penetration"] = scene.penetration()
+                    row["penetration"] = (
+                        scene.feedback_geometry if scene.feedback_geometry is not None else scene.penetration()
+                    )
+                    row["sample_penetration_m"] = max(*initial_penetration.values(), *row["penetration"].values())
+                if scene.controller is not None and scene.feedback_geometry is not None:
+                    row["penetration"] = scene.feedback_geometry
                     row["sample_penetration_m"] = max(*initial_penetration.values(), *row["penetration"].values())
                 rows.append(row)
                 stream.write(json.dumps(row, allow_nan=False) + "\n")
@@ -462,6 +598,8 @@ def run_case(task, args):
                 if not row["converged"] or row["rolled_back"]:
                     error = f"Step {step}: {scene.solver.last_stats.status}: {row['failure_reason']}"
                     scene.solver.save_checkpoint(scene.state, output / "last-published-state.npz")
+                    if scene.controller is not None:
+                        save_json(output / "control-before-failed-step.json", scene.control_before_step)
                     break
                 if step % 100 == 0:
                     print(
@@ -473,6 +611,9 @@ def run_case(task, args):
     np.savez_compressed(output / "trajectory.npz", **{key: np.array(value) for key, value in frames.items()})
     metrics, gates = physical_gates(task, rows, height=args.height) if rows else ({}, {})
     gates["surface_sdf_consistency"] = max(scene.identity["surface_sdf_error_m"].values()) <= 0.0004
+    if scene.controller is not None:
+        gates["controller_completed"] = scene.controller.completed and scene.controller.failure is None
+        save_json(output / "controller-final.json", scene.controller.snapshot())
     complete = len(rows) == round(DURATION / DT) and error is None
     result = {
         "task": task,
@@ -499,6 +640,8 @@ def main():
     parser.add_argument("--friction", type=float, default=0.5)
     parser.add_argument("--offset", type=float, default=0, help="Initial object offset in world Y [m]")
     parser.add_argument("--height", type=float, default=0, help="Raise hand and slider together [m], pull-slider only")
+    parser.add_argument("--control-mode", choices=("open-loop", "contact"), default="open-loop")
+    parser.add_argument("--contact-stiffness", type=float, default=1e7, help="Normal contact stiffness [N/m^3]")
     parser.add_argument(
         "--surface-source",
         choices=("qualified", "cad"),
@@ -508,14 +651,16 @@ def main():
     parser.add_argument("--max-steps", type=int)
     args = parser.parse_args()
     if (
-        not np.isfinite([args.friction, args.offset, args.height]).all()
+        not np.isfinite([args.friction, args.offset, args.height, args.contact_stiffness]).all()
         or args.friction < 0
         or args.height < 0
+        or args.contact_stiffness <= 0
         or (args.height != 0 and args.task != "pull-slider")
         or (args.max_steps is not None and args.max_steps <= 0)
     ):
         parser.error(
-            "Require finite nonnegative friction/height, finite offset and positive max-steps; height requires pull-slider"
+            "Require finite nonnegative friction/height, positive contact-stiffness, finite offset and positive max-steps; "
+            "height requires pull-slider"
         )
     args.output.mkdir(parents=True, exist_ok=False)
     before = source_identity()
@@ -530,6 +675,8 @@ def main():
             "friction": args.friction,
             "offset": args.offset,
             "height": args.height,
+            "control_mode": args.control_mode,
+            "contact_stiffness_N_m3": args.contact_stiffness,
             "surface_source": args.surface_source,
             "precision": "fp64",
             "device": "cuda:0",
