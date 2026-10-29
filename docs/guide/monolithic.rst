@@ -62,25 +62,43 @@ starting without regularization.
 
 A step converges when every residual row lies within its own tolerance: the
 largest of an absolute target (1e-11 N for force rows, 1e-13 N m for torque
-rows), a relative tolerance times the largest step-start residual of the same
-block and unit (1e-6 in FP64, 1e-4 in FP32), and 32 times the precision's
-machine epsilon times the row's rounding magnitude. The rounding magnitude sums
-the row's absolute contributions and the tangent-weighted magnitudes of the
-step increments; shell bending and cable bending and twist contribute the
-componentwise products their strains cancel near rest, so such rows are judged
-at their actual rounding level. Rows are never pooled into a norm, so a small
-local load is resolved regardless of model size. ``Stats.convergence_ratio*``
-report each block's largest residual-to-tolerance ratio, and
-``Stats.variational["convergence_groups"]`` counts the rows that passed only
-within their rounding allowance. FP32 keeps the looser relative tolerance
-because its rounding magnitude does not yet bound near-rest tet elasticity,
-whose stresses cancel in ``F - I``. The step-start residual is evaluated
-before the inertial prediction, so it contains each body's momentum over the
-time step: a fast-moving body widens the relative tolerance of its whole block,
-and a step whose prediction already lies within that tolerance is accepted
-without a Newton update. The rounding term likewise can exceed small loads; in
-FP32 a cable that is not aligned with the coordinate axes may be accepted at
-its prediction and not respond to a load near rest. Both are known limitations.
+rows), a relative tolerance times the largest residual of the same block and
+unit at the step's first iterate, the inertial prediction (1e-6 in FP64, 1e-4
+in FP32), and 32 times the precision's machine epsilon times the row's rounding
+magnitude. Taking the reference at the prediction keeps the tolerance
+independent of uniform velocity: the step-start residual would contain each
+body's momentum over the time step, which the prediction cancels. The rounding
+magnitude sums the row's absolute contributions, the tangent-weighted
+magnitudes of the step increments, and, for strains that are small differences
+of larger terms, the operands of their step-dependent parts: cable curvature
+and extension, shell bending and membrane area change, and tet volume change
+are each formed from their step-start value, which is constant within a step,
+plus the step's exact increment, so these rows are judged at the rounding of
+the step rather than of the strain. The tet stress is formed from ``F - I``;
+in an element that is turned or strongly deformed its terms are of the size of
+``F - I`` and cancel to a small stress, so the magnitude also counts the size
+of each term. A row whose rounding magnitude is not finite never passes. Rows
+are never pooled into a norm, so a small local load is resolved regardless of
+model size. ``Stats.convergence_ratio*`` report each block's largest
+residual-to-tolerance ratio, and ``Stats.variational["convergence_groups"]``
+counts the rows that passed only within their rounding allowance.
+
+Cable stretch and bend-twist tangents are applied element by element to each
+element's displacements relative to its first vertex, not through the
+assembled matrix; the cable band preconditioner alone is shifted by a growing
+multiple of its diagonal when its FP32 factorization fails.
+
+Known FP32 limitations: the stored FP32 coordinates of a slender cable in a
+general orientation cannot represent its axial strain finely enough to resolve
+a transverse load whose force residual falls below eps EA/L times the step
+(a 128-segment cantilever with EA L^2/EI = 1e6 rotated 30 or 45 degrees is not
+supported in FP32); FP32 does not resolve load increments below about 32
+machine epsilons of an element's prestress (a 1e-6 strain increment on a 20%
+prestretch); and in a tet element that is turned or strongly deformed, FP32
+does not resolve strain increments below about 2e-5 times the norm of
+``F - I`` (about 5e-5 for an element turned by 90 degrees). None of these
+limitations affects FP64.
+
 Each Newton direction reduces the scaled residual by ``linear_tolerance`` or
 reaches half of every row tolerance; a direction whose residual reaches the
 rounding of ``|A| |y|`` is also accepted, capped at 1e-2 of the right-hand
