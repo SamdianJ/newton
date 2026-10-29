@@ -109,6 +109,58 @@ def test_near_rest_displacement(test, device):
             np.testing.assert_allclose(obj.residual.numpy().ravel(), residual, rtol=0, atol=1e-2 * scale)
 
 
+def test_rotated_rest_coverage(test, device):
+    """Cover the FP32 stress rounding of an element turned without strain.
+
+    The stress is formed from ``h = F - I``; for a pure rotation its terms are of
+    the size of the rotation and cancel to zero, so the rounding follows the
+    terms, not the near-zero net force.
+    """
+    model = build_model(device)
+    rest = model.particle_q.numpy().astype(np.float64)
+    axis = np.ones(3) / np.sqrt(3.0)
+    k = np.array([[0.0, -axis[2], axis[1]], [axis[2], 0.0, -axis[0]], [-axis[1], axis[0], 0.0]])
+    rotation = np.eye(3) + k + k @ k  # 90 degrees about (1, 1, 1)
+    xn64 = rest @ rotation.T
+    xn32 = xn64.astype(np.float32)
+    free = model.particle_inv_mass.numpy() > 0
+    rng = np.random.default_rng(0)
+    base = 1e-4 * rng.standard_normal(rest.shape)
+    steps = [(base + 1e-7 * rng.standard_normal(rest.shape)).astype(np.float32) for _ in range(16)]
+    for step in steps:
+        step[~free] = 0.0
+    eps = float(np.finfo(np.float32).eps)
+    for smith in (False, True):
+        with test.subTest(smith=smith):
+            objectives = {
+                dtype: TetObjective(
+                    model,
+                    material_model="smith_log_stabilized" if smith else "kim_stable_no_log",
+                    mass_mode="lumped",
+                    dtype=dtype,
+                )
+                for dtype in (wp.float32, wp.float64)
+            }
+            errors, magnitudes = [], []
+            for step in steps:
+                results = {}
+                for dtype, vector, native in ((wp.float32, wp.vec3, np.float32), (wp.float64, wp.vec3d, np.float64)):
+                    obj = objectives[dtype]
+                    xn = wp.array(xn32.astype(native), dtype=vector, device=device)
+                    x = wp.array((xn32 + step).astype(native), dtype=vector, device=device)
+                    displacement = wp.array(step.astype(native), dtype=vector, device=device)
+                    vn = wp.zeros_like(xn)
+                    forces = wp.zeros(model.particle_count, dtype=wp.vec3, device=device)
+                    obj.evaluate(x, xn, vn, forces, model.gravity, dt=0.01, displacement=displacement)
+                    test.assertEqual(int(obj.flags.numpy()[0]), 0)
+                    results[dtype] = (obj.residual.numpy().astype(np.float64), obj.absolute.numpy().astype(np.float64))
+                errors.append(results[wp.float32][0] - results[wp.float64][0])
+                magnitudes.append(results[wp.float32][1])
+            jitter = np.ptp(np.array(errors), axis=0)
+            allowance = 32.0 * eps * np.max(np.array(magnitudes), axis=0)
+            test.assertLessEqual(float(np.max(jitter / allowance)), 1.0)
+
+
 def test_input_rejection(test, device):
     """Reject mixed coordinates and unrepresentable native timesteps before changing scratch."""
     model = build_model(device)
@@ -155,6 +207,7 @@ class TestTetPrecision(unittest.TestCase):
 for _device in get_test_devices():
     add_function_test(TestTetPrecision, "test_native_objective", test_native_objective, devices=[_device])
     add_function_test(TestTetPrecision, "test_near_rest_displacement", test_near_rest_displacement, devices=[_device])
+    add_function_test(TestTetPrecision, "test_rotated_rest_coverage", test_rotated_rest_coverage, devices=[_device])
     add_function_test(TestTetPrecision, "test_input_rejection", test_input_rejection, devices=[_device])
     if _device.is_cuda:
         add_function_test(TestTetPrecision, "test_graph_replay", test_graph_replay, devices=[_device])

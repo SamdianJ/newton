@@ -12,7 +12,13 @@ import warp as wp
 from .convergence import abs3
 from .residual import _accumulate_rows, _row_gather_map
 from .tet_common import TetPhysicsWorkspace, _validate_candidate_particles, validate_tet_scope
-from .tet_material import _cofactor_offset, _energy_stress_from, _volume_change, _volumetric_modulus
+from .tet_material import (
+    _cofactor_offset,
+    _energy_stress_from,
+    _stress_operands,
+    _volume_change,
+    _volumetric_modulus,
+)
 
 
 @wp.kernel
@@ -107,12 +113,16 @@ def _elements(
     # with the strain, and its bound stays below small loads.
     d, d_size = _volume_change(start - wp.identity(n=3, dtype=type(dt)), step)
     energy, stress = _energy_stress_from(h, d, volume, mu, lam, material)
-    cofactor = wp.identity(n=3, dtype=type(dt)) + _cofactor_offset(h)
+    c1 = _cofactor_offset(h)
+    cofactor = wp.identity(n=3, dtype=type(dt)) + c1
+    # The step's rounding of d, plus the rounding of the stress terms, which
+    # follow h (rotation included) rather than the possibly cancelled stress.
+    operands = _stress_operands(h, c1, d, mu, lam, material)
     stress_bound = wp.matrix(shape=(3, 3), dtype=type(dt))
     scale = volume * _volumetric_modulus(mu, lam, material) * d_size
     for i in range(3):
         for j in range(3):
-            stress_bound[i, j] = scale * wp.abs(cofactor[i, j])
+            stress_bound[i, j] = scale * wp.abs(cofactor[i, j]) + volume * operands[i, j]
     if not wp.isfinite(energy) or not wp.isfinite(wp.ddot(stress, stress)):
         wp.atomic_max(flags, 0, 2)
         return

@@ -312,6 +312,33 @@ def _volumetric_modulus(mu: Any, lam: Any, material: int):
 
 
 @wp.func
+def _stress_operands(h: Any, c1: Any, d: Any, mu: Any, lam: Any, material: int):
+    """Return the entrywise size of the terms summed into the stress of ``_energy_stress_from``.
+
+    For an element turned without strain the terms are of the size of the
+    rotation in ``h`` and cancel to a near-zero stress, so they round with
+    their own size, not with the net stress.
+    """
+    identity = wp.identity(n=3, dtype=type(mu))
+    operands = wp.matrix(shape=(3, 3), dtype=type(mu))
+    if material == 1:
+        trace = h[0, 0] + h[1, 1] + h[2, 2]
+        excess = type(mu)(2.0) * trace + wp.ddot(h, h)
+        mh = type(mu)(4.0) * mu / type(mu)(3.0)
+        delta_a = mh * excess / (type(mu)(4.0) * (excess + type(mu)(4.0)))
+        for i in range(3):
+            for j in range(3):
+                operands[i, j] = wp.abs(delta_a) * (identity[i, j] + wp.abs(h[i, j]))
+    volumetric = wp.abs(_volumetric_modulus(mu, lam, material) * d)
+    for i in range(3):
+        for j in range(3):
+            operands[i, j] += mu * (wp.abs(h[i, j]) + wp.abs(c1[i, j])) + volumetric * (
+                identity[i, j] + wp.abs(c1[i, j])
+            )
+    return operands
+
+
+@wp.func
 def _evaluate_energy_stress(h: Any, volume: Any, mu: Any, lam: Any, material: int):
     """Evaluate energy and first Piola stress from the displacement gradient ``h = F - I``.
 

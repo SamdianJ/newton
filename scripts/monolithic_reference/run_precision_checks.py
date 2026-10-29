@@ -370,8 +370,25 @@ def moving_tet(spec, *, device, representation_ulps):
             )
 
 
-def _tet_grid(nu, stretch, device):
-    """Return a 2x1x1 tet grid stretched isochorically, and an FP32/FP64 residual evaluator."""
+def _rotation(degrees):
+    """Rotation by ``degrees`` about (1, 1, 1): it turns every element and strains none."""
+    axis = np.ones(3) / np.sqrt(3.0)
+    k = np.array([[0.0, -axis[2], axis[1]], [axis[2], 0.0, -axis[0]], [-axis[1], axis[0], 0.0]])
+    angle = np.radians(degrees)
+    return np.eye(3) + np.sin(angle) * k + (1.0 - np.cos(angle)) * k @ k
+
+
+def _rotations(spec):
+    """The unrotated case first, under its original name, then each rotated variant."""
+    return (0.0, *spec.get("rotations", ()))
+
+
+def _rotated(name, degrees):
+    return f"{name}/rot{degrees:g}" if degrees else name
+
+
+def _tet_grid(nu, stretch, device, rotation=0.0):
+    """Return a 2x1x1 tet grid stretched isochorically and turned by ``rotation`` degrees, and an evaluator."""
     vectors = {wp.float32: wp.vec3, wp.float64: wp.vec3d}
     young = 1.0e6
     mu, lam = young / (2 * (1 + nu)), young * nu / ((1 + nu) * (1 - 2 * nu))
@@ -396,7 +413,7 @@ def _tet_grid(nu, stretch, device):
     model = builder.finalize(device=device)
     rest = model.particle_q.numpy().astype(float)
     lateral = 1 / np.sqrt(stretch)
-    xn = (rest @ np.diag([stretch, lateral, lateral])).astype(np.float32)
+    xn = (rest @ np.diag([stretch, lateral, lateral]) @ _rotation(rotation).T).astype(np.float32)
     objectives = {
         dtype: TetObjective(model, material_model="kim_stable_no_log", mass_mode="lumped", dtype=dtype)
         for dtype in (wp.float32, wp.float64)
@@ -423,8 +440,8 @@ def tet_noise(spec, *, device, representation_ulps):
     """Element-level coverage: FP32 residual jitter against the rounding allowance."""
     del representation_ulps
 
-    def run(nu, stretch):
-        xn, evaluate, ratio_moduli = _tet_grid(nu, stretch, device)
+    def run(nu, stretch, rotation):
+        xn, evaluate, ratio_moduli = _tet_grid(nu, stretch, device, rotation)
         rng = np.random.default_rng(0)
         step0 = (spec["scale"] * rng.standard_normal(xn.shape)).astype(np.float32)
         errors, magnitudes = [], []
@@ -446,13 +463,14 @@ def tet_noise(spec, *, device, representation_ulps):
         }
         return {"judgement": judgement}
 
-    for nu in spec["poisson"]:
-        for stretch in spec["stretch"]:
-            yield (
-                f"tet_noise/nu{nu:g}/stretch{stretch:g}",
-                {"poisson": nu, "stretch": stretch},
-                lambda nu=nu, stretch=stretch: run(nu, stretch),
-            )
+    for rotation in _rotations(spec):
+        for nu in spec["poisson"]:
+            for stretch in spec["stretch"]:
+                yield (
+                    _rotated(f"tet_noise/nu{nu:g}/stretch{stretch:g}", rotation),
+                    {"poisson": nu, "stretch": stretch, "rotation_deg": rotation},
+                    lambda nu=nu, stretch=stretch, rotation=rotation: run(nu, stretch, rotation),
+                )
 
 
 def tet_resolution(spec, *, device, representation_ulps):
@@ -464,8 +482,8 @@ def tet_resolution(spec, *, device, representation_ulps):
     """
     del representation_ulps
 
-    def run(nu, stretch, strain):
-        xn, evaluate, ratio_moduli = _tet_grid(nu, stretch, device)
+    def run(nu, stretch, strain, rotation):
+        xn, evaluate, ratio_moduli = _tet_grid(nu, stretch, device, rotation)
         shear = np.zeros(xn.shape)
         shear[:, 0] = strain * xn[:, 1].astype(float)
         step = shear.astype(np.float32)
@@ -486,18 +504,21 @@ def tet_resolution(spec, *, device, representation_ulps):
         }
         return {"judgement": judgement}
 
-    for nu in spec["poisson"]:
-        for stretch in spec["stretch"]:
-            for strain in spec["strains"]:
-                yield (
-                    f"tet_resolution/nu{nu:g}/stretch{stretch:g}/strain{strain:g}",
-                    {"poisson": nu, "stretch": stretch, "strain": strain},
-                    lambda nu=nu, stretch=stretch, strain=strain: run(nu, stretch, strain),
-                )
+    for rotation in _rotations(spec):
+        for nu in spec["poisson"]:
+            for stretch in spec["stretch"]:
+                for strain in spec["strains"]:
+                    yield (
+                        _rotated(f"tet_resolution/nu{nu:g}/stretch{stretch:g}/strain{strain:g}", rotation),
+                        {"poisson": nu, "stretch": stretch, "strain": strain, "rotation_deg": rotation},
+                        lambda nu=nu, stretch=stretch, strain=strain, rotation=rotation: run(
+                            nu, stretch, strain, rotation
+                        ),
+                    )
 
 
-def _shell_element_patch(nu, stretch, device):
-    """Return a flat 2x2 shell patch, area-preservingly stretched, and an FP32/FP64 element evaluator."""
+def _shell_element_patch(nu, stretch, device, rotation=0.0):
+    """Return a 2x2 shell patch, area-preservingly stretched and turned by ``rotation`` degrees, and an evaluator."""
     from newton._src.solvers.monolithic.cloth import ClothObjective  # noqa: PLC0415
 
     cells, width = 2, 0.2
@@ -531,7 +552,7 @@ def _shell_element_patch(nu, stretch, device):
     mu = young * thickness / (2 * (1 + nu))
     lam = young * thickness * nu / (1 - nu**2)
     materials = np.tile([lam, mu, lam * thickness**2 / 12, 2 * mu * thickness**2 / 12], (len(triangles), 1))
-    xn = (rest * np.array([stretch, 1 / stretch, 1.0])).astype(np.float32).astype(float)
+    xn = ((rest * np.array([stretch, 1 / stretch, 1.0])) @ _rotation(rotation).T).astype(np.float32).astype(float)
     objectives = {
         dtype: ClothObjective(rest, stencils, materials, dtype=dtype, device=device)
         for dtype in (wp.float32, wp.float64)
@@ -550,8 +571,8 @@ def shell_noise(spec, *, device, representation_ulps):
     """Element-level coverage of the shell rounding magnitude, membrane included."""
     del representation_ulps
 
-    def run(nu, stretch):
-        xn, evaluate, ratio_moduli = _shell_element_patch(nu, stretch, device)
+    def run(nu, stretch, rotation):
+        xn, evaluate, ratio_moduli = _shell_element_patch(nu, stretch, device, rotation)
         rng = np.random.default_rng(0)
         step0 = (spec["scale"] * rng.standard_normal(xn.shape)).astype(np.float32)
         errors, magnitudes = [], []
@@ -573,21 +594,22 @@ def shell_noise(spec, *, device, representation_ulps):
         }
         return {"judgement": judgement}
 
-    for nu in spec["poisson"]:
-        for stretch in spec["stretch"]:
-            yield (
-                f"shell_noise/nu{nu:g}/stretch{stretch:g}",
-                {"poisson": nu, "stretch": stretch},
-                lambda nu=nu, stretch=stretch: run(nu, stretch),
-            )
+    for rotation in _rotations(spec):
+        for nu in spec["poisson"]:
+            for stretch in spec["stretch"]:
+                yield (
+                    _rotated(f"shell_noise/nu{nu:g}/stretch{stretch:g}", rotation),
+                    {"poisson": nu, "stretch": stretch, "rotation_deg": rotation},
+                    lambda nu=nu, stretch=stretch, rotation=rotation: run(nu, stretch, rotation),
+                )
 
 
 def shell_resolution(spec, *, device, representation_ulps):
     """Element-level resolution: an in-plane shear step's force must exceed the shell allowance."""
     del representation_ulps
 
-    def run(nu, stretch, strain):
-        xn, evaluate, ratio_moduli = _shell_element_patch(nu, stretch, device)
+    def run(nu, stretch, strain, rotation):
+        xn, evaluate, ratio_moduli = _shell_element_patch(nu, stretch, device, rotation)
         shear = np.zeros(xn.shape)
         shear[:, 0] = strain * xn[:, 1]
         step = shear.astype(np.float32)
@@ -608,14 +630,17 @@ def shell_resolution(spec, *, device, representation_ulps):
         }
         return {"judgement": judgement}
 
-    for nu in spec["poisson"]:
-        for stretch in spec["stretch"]:
-            for strain in spec["strains"]:
-                yield (
-                    f"shell_resolution/nu{nu:g}/stretch{stretch:g}/strain{strain:g}",
-                    {"poisson": nu, "stretch": stretch, "strain": strain},
-                    lambda nu=nu, stretch=stretch, strain=strain: run(nu, stretch, strain),
-                )
+    for rotation in _rotations(spec):
+        for nu in spec["poisson"]:
+            for stretch in spec["stretch"]:
+                for strain in spec["strains"]:
+                    yield (
+                        _rotated(f"shell_resolution/nu{nu:g}/stretch{stretch:g}/strain{strain:g}", rotation),
+                        {"poisson": nu, "stretch": stretch, "strain": strain, "rotation_deg": rotation},
+                        lambda nu=nu, stretch=stretch, strain=strain, rotation=rotation: run(
+                            nu, stretch, strain, rotation
+                        ),
+                    )
 
 
 FAMILIES = {

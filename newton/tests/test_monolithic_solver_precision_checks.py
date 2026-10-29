@@ -48,6 +48,29 @@ REQUIRED = (
     *(f"shell_noise/nu{nu}/stretch{t}" for nu in ("0.3", "0.49") for t in ("1", "1.2")),
     *(f"shell_resolution/nu{nu}/stretch1/strain{s}" for nu in ("0.3", "0.49") for s in ("1e-06", "0.0001")),
     *(f"shell_resolution/nu{nu}/stretch1.2/strain0.0001" for nu in ("0.3", "0.49")),
+    # PR-07: elements turned without strain. The tet stress terms round with the
+    # rotation in h, not with the cancelled stress (noise failed at 62fb5f9d up to
+    # 12x); a 1e-6 strain on a turned tet is below that rounding (P8b2-L3).
+    *(
+        f"tet_noise/nu{nu}/stretch{t}/rot{r}"
+        for r in ("30", "90")
+        for nu in ("0.3", "0.49", "0.499")
+        for t in ("1", "1.2")
+    ),
+    *(
+        f"tet_resolution/nu{nu}/stretch{t}/strain0.0001/rot{r}"
+        for r in ("30", "90")
+        for nu in ("0.3", "0.49", "0.499")
+        for t in ("1", "1.2")
+    ),
+    *(f"shell_noise/nu{nu}/stretch{t}/rot{r}" for r in ("30", "90") for nu in ("0.3", "0.49") for t in ("1", "1.2")),
+    *(
+        f"shell_resolution/nu{nu}/stretch1/strain{s}/rot{r}"
+        for r in ("30", "90")
+        for nu in ("0.3", "0.49")
+        for s in ("1e-06", "0.0001")
+    ),
+    *(f"shell_resolution/nu{nu}/stretch1.2/strain0.0001/rot{r}" for r in ("30", "90") for nu in ("0.3", "0.49")),
 )
 
 
