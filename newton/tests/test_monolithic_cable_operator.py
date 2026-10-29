@@ -55,6 +55,23 @@ class TestMonolithicCableOperator(unittest.TestCase):
             translation[: 3 * (width // 3)] = np.tile(shift, width // 3)
             np.testing.assert_allclose(matrix @ translation, 0, atol=1e-12 * np.abs(matrix).max())
 
+    def test_trial_evaluation_keeps_operator(self):
+        """Keep the accepted iterate's element tangents through a trial evaluation.
+
+        A regularization retry after a rejected line search solves again with
+        the same operator; a trial must not replace its tangents.
+        """
+        case, operator, rows = loaded_case("fp64", segments=12, angle=30.0, steps=2, device=self.device)
+        solver = case.solver
+        solver._evaluate(solver._accepted, case.dt)
+        accepted = operator.dense()
+        direction = np.zeros(solver._delta.shape[0])
+        direction[rows] = 1e-4 * np.random.default_rng(3).standard_normal(rows.size)
+        solver._delta.assign(direction.astype(solver._delta.numpy().dtype))
+        solver._take_trial(1.0, case.dt)
+        self.assertIsNotNone(solver._trial_evaluation(case.dt))
+        np.testing.assert_array_equal(operator.dense(), accepted)
+
     def test_float32_soft_mode_is_resolved(self):
         """Keep the FP32 product on a rotated rod's soft bending mode accurate where the assembly is not."""
         case, operator, rows = loaded_case("fp32", segments=128, angle=45.0, steps=1, device=self.device)

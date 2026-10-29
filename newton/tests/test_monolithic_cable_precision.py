@@ -38,6 +38,7 @@ class TestCableOrientation(unittest.TestCase):
         np.testing.assert_array_equal(default.solver_options["cable_inputs"][0].rest_director, cable.rest_director)
 
     def test_only_the_cantilever_rotates(self):
+        """Reject an angle for the helix and a nonfinite angle for the cantilever."""
         with self.assertRaises(ValueError):
             CableBenchmark("localized_helix", segments=8, angle=45.0)
         with self.assertRaises(ValueError):

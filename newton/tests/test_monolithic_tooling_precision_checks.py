@@ -17,8 +17,7 @@ from scripts.monolithic_reference.cable_benchmarks import CableBenchmark
 from scripts.monolithic_reference.precision_checks import SolverTrace, load_margin, relative_error, split_force_error
 
 ROOT = Path(__file__).resolve().parents[2]
-RNG = np.random.default_rng(3)
-MATRIX = RNG.standard_normal((6, 6))
+MATRIX = np.random.default_rng(3).standard_normal((6, 6))
 OFFSET = np.arange(6, dtype=float)  # exactly representable in FP32
 
 
@@ -34,7 +33,7 @@ class TestSplitForceError(unittest.TestCase):
         def linear32(step):
             return (MATRIX.astype(np.float32) @ np.asarray(step, dtype=np.float32) + OFFSET).astype(float) + bias
 
-        step = RNG.standard_normal(6).astype(np.float32)
+        step = np.random.default_rng(4).standard_normal(6).astype(np.float32)
         split = split_force_error(linear32, linear64, step)
         np.testing.assert_allclose(split["bias"], bias, rtol=1e-3)
         np.testing.assert_allclose(split["total"], bias, rtol=1e-3)
@@ -58,6 +57,7 @@ class TestSplitForceError(unittest.TestCase):
 
 class TestMargins(unittest.TestCase):
     def test_load_margin_ignores_unloaded_rows(self):
+        """Take the largest allowance-to-load ratio over loaded rows and refuse rows without load."""
         load = np.array([0.0, 2.0, -4.0, 0.0])
         allowance = np.array([9.0, 1.0, 1.0, 9.0])
         self.assertEqual(load_margin(load, allowance, np.arange(4)), 0.5)
@@ -65,6 +65,7 @@ class TestMargins(unittest.TestCase):
             load_margin(load, allowance, np.array([0, 3]))
 
     def test_relative_error_of_zero_reference(self):
+        """Return zero for two zeros and infinity for a nonzero value against a zero reference."""
         self.assertEqual(relative_error(0.0, 0.0), 0.0)
         self.assertEqual(relative_error(1.0, 0.0), float("inf"))
         self.assertAlmostEqual(relative_error(1.1, 1.0), 0.1)
@@ -126,6 +127,7 @@ class TestSolverTrace(unittest.TestCase):
         self.assertAlmostEqual(step.iterates[0]["residual"][1], -1e-6, delta=1e-12)
 
     def test_restores_after_failure(self):
+        """Restore the iteration module when the traced step raises."""
         originals = (iteration.measure, iteration.solve_direction)
         case = CableBenchmark("cantilever", segments=4)
         with self.assertRaises(ZeroDivisionError):
@@ -136,16 +138,19 @@ class TestSolverTrace(unittest.TestCase):
 
 class TestRunner(unittest.TestCase):
     def test_cases_cover_every_family(self):
+        """Pair every case family in the frozen recipe with exactly one runner family."""
         spec = json.loads(runner.CASES_PATH.read_text())
         self.assertEqual(set(runner.FAMILIES), {k for k in spec if isinstance(spec[k], dict)})
 
     def test_identity_hashes_every_imported_reference_module(self):
+        """Hash every imported reference module and the case recipe in the run receipt."""
         hashes = runner._identity()["source_hashes"]
         modules = imported_reference_modules("scripts.monolithic_reference.run_precision_checks")
         self.assertLessEqual(modules, set(hashes))
         self.assertIn("scripts/monolithic_reference/precision_cases.json", hashes)
 
     def test_rejects_nonempty_output(self):
+        """Refuse to write into an output directory that already holds results."""
         with tempfile.TemporaryDirectory() as directory:
             Path(directory, "old").write_text("x")
             with self.assertRaises(SystemExit):

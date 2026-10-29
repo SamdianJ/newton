@@ -249,11 +249,12 @@ class CableBlock:
         ):
             wp.launch(_gather, self.ids.size, [source, self.ids, output], device=self.device)
 
-    def evaluate(self, state, step, theta_step, original, torque, gravity, dt, complete):
+    def evaluate(self, state, step, theta_step, original, torque, gravity, dt, complete, *, build_tangent=True):
         """Evaluate the same frozen frame chart for every current and trial state.
 
         ``step`` and ``theta_step`` are the state's exact particle and angle
-        increments from the step start ``original``.
+        increments from the step start ``original``. Only an evaluation with
+        ``build_tangent`` replaces the element tangents the linear operator reads.
         """
         objective = self.objective
         ne, ni = objective.lengths.size, objective.phi.size
@@ -268,6 +269,7 @@ class CableBlock:
             self.original_x,
             anchor.cable_ref_director[angles],
             anchor.cable_ref_twist[self.phi_offset : self.phi_offset + ni] if ni else objective.phi,
+            tangent=build_tangent,
         )
         if objective.flags.numpy()[0]:
             raise ValueError("Cable candidate left the committed geometry/frame chart")

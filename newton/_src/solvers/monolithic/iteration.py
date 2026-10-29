@@ -85,9 +85,10 @@ def _block_of(group):
 def measure(solver, residual, reference, scale):
     """Recompute row tolerances at the accepted iterate and assess its residual.
 
-    ``residual`` and ``reference`` are the accepted and step-start residuals;
-    the device copy of the accepted residual is read from the solver. The device
-    iteration reads back only per-group and per-block results.
+    ``residual`` and ``reference`` are the accepted residual and the residual
+    at the step's first iterate; the device copy of the accepted residual is
+    read from the solver. The device iteration reads back only per-group and
+    per-block results. A rounding magnitude that is not finite fails the step.
     """
     self = solver
     device = isinstance(residual, wp.array)
@@ -106,6 +107,9 @@ def measure(solver, residual, reference, scale):
     criterion.assess(self._complete_r)
     rows = criterion.rows
     worst, limited = criterion.worst.numpy(), criterion.limited.numpy()
+    if not np.all(np.isfinite(worst)):
+        # Only a rounding magnitude that is not finite gives an infinite ratio here.
+        raise _StepFailure(self.Status.NONFINITE, "Nonfinite rounding magnitude")
     native = self._numpy_dtype
     ratios = {"global": native(worst.max(initial=0))}
     for group, value in zip(rows.names, worst, strict=True):

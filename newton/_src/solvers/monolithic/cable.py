@@ -337,6 +337,10 @@ class CableObjective:
         self.bend_twist_b = wp.zeros((ni, 11, 11), dtype=dtype, device=device)
         self.flags = wp.zeros(1, dtype=int, device=device)
         self._step = self._theta_step = None
+        # Trial evaluations write their element tangents here: the linear
+        # operator reads stretch_b and bend_twist_b of the accepted iterate.
+        self._trial_stretch_b = wp.zeros_like(self.stretch_b)
+        self._trial_bend_twist_b = wp.zeros_like(self.bend_twist_b)
 
     def evaluate(self, positions, theta, anchor_positions, anchor_directors, anchor_twist):
         """Overwrite element terms and candidate frames, leaving all anchors unchanged."""
@@ -347,12 +351,19 @@ class CableObjective:
         self._theta_step.zero_()
         self.evaluate_step(self._step, theta, self._theta_step, anchor_positions, anchor_directors, anchor_twist)
 
-    def evaluate_step(self, step, anchor_theta, theta_step, anchor_positions, anchor_directors, anchor_twist):
+    def evaluate_step(
+        self, step, anchor_theta, theta_step, anchor_positions, anchor_directors, anchor_twist, *, tangent=True
+    ):
         """Evaluate the configuration ``anchor + step`` from its exact increments.
 
         Edges and twist are formed as anchor differences plus step differences,
         so a small step is not added to large absolute coordinates or angles.
+        Without ``tangent`` the element tangents go to scratch storage and
+        ``stretch_b`` and ``bend_twist_b`` keep the last tangent evaluation.
         """
+        stretch_b, bend_twist_b = (
+            (self.stretch_b, self.bend_twist_b) if tangent else (self._trial_stretch_b, self._trial_bend_twist_b)
+        )
         self.flags.zero_()
         wp.launch(
             _edges,
@@ -370,7 +381,7 @@ class CableObjective:
                 self.stretch_energy,
                 self.stretch_r,
                 self.stretch_rounding,
-                self.stretch_b,
+                stretch_b,
                 self.flags,
             ],
             device=self.device,
@@ -397,7 +408,7 @@ class CableObjective:
                 self.jacobian,
                 self.bend_twist_r,
                 self.bend_twist_rounding,
-                self.bend_twist_b,
+                bend_twist_b,
                 self.flags,
             ],
             device=self.device,

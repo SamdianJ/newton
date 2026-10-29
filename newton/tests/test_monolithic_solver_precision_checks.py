@@ -78,6 +78,7 @@ class TestPrecisionChecks(unittest.TestCase):
     device = "cpu"
 
     def test_required_cases_pass_both_sides(self):
+        """Pass coverage and resolution on every required case of the check set."""
         cases = {name: run for name, _, run in iter_cases(device=self.device)}
         self.assertLessEqual(set(REQUIRED), set(cases))
         for name in REQUIRED:

@@ -86,26 +86,54 @@ def test_criterion_matches_oracle(test, device):
 
 
 def test_nonfinite_tolerance_never_converges(test, device):
-    """Refuse convergence on a row whose rounding magnitude overflowed, in both precisions.
+    """Refuse convergence on a row whose rounding magnitude is not finite, in both precisions.
 
-    An infinite magnitude makes tau infinite and |r| / tau zero: the row would pass
-    whatever its residual. A NaN magnitude is ignored by the maximum and stays safe.
+    An infinite magnitude would make |r| / tau zero and a NaN one would drop out of
+    the maximum, so the row could pass whatever its residual. The oracle and the
+    kernel both give such a row an infinite tau and an infinite ratio.
     """
     rows = convergence.RowGroups(("x",), np.zeros(3, np.int32), np.zeros(3, np.int32))
     policy = ConvergencePolicy()
     for dtype, native in ((wp.float64, np.float64), (wp.float32, np.float32)):
-        with test.subTest(dtype=native.__name__):
-            reference = np.ones(3, dtype=native)
-            magnitude = np.array([0.0, np.inf, 0.0], dtype=native)
-            residual = np.array([0.0, 1.0e3, 0.0], dtype=native)
-            tau, physical = convergence.tolerances(reference, magnitude, rows, policy, native)
-            worst, _ = convergence.assess(residual, tau, physical, rows)
-            test.assertTrue(np.isinf(worst[0]))
-            criterion = Criterion(rows, policy, dtype=dtype, device=device)
-            criterion.freeze_reference(wp.array(reference, dtype=dtype, device=device))
-            criterion.update(wp.array(magnitude, dtype=dtype, device=device))
-            criterion.assess(wp.array(residual, dtype=dtype, device=device))
-            test.assertGreater(criterion.worst.numpy()[0], 1.0)
+        for bad in (np.inf, np.nan):
+            with test.subTest(dtype=native.__name__, magnitude=bad):
+                reference = np.ones(3, dtype=native)
+                magnitude = np.array([0.0, bad, 0.0], dtype=native)
+                residual = np.array([0.0, 1.0e3, 0.0], dtype=native)
+                tau, physical = convergence.tolerances(reference, magnitude, rows, policy, native)
+                worst, _ = convergence.assess(residual, tau, physical, rows)
+                test.assertTrue(np.isposinf(tau[1]))
+                test.assertTrue(np.isinf(worst[0]))
+                criterion = Criterion(rows, policy, dtype=dtype, device=device)
+                criterion.freeze_reference(wp.array(reference, dtype=dtype, device=device))
+                criterion.update(wp.array(magnitude, dtype=dtype, device=device))
+                criterion.assess(wp.array(residual, dtype=dtype, device=device))
+                test.assertTrue(np.isposinf(criterion.tau.numpy()[1]))
+                test.assertTrue(np.isinf(criterion.worst.numpy()[0]))
+
+
+def test_nonfinite_magnitude_fails_the_step(test, device):
+    """End a step whose rounding magnitude overflows with a NONFINITE status, not an exception."""
+    from scripts.monolithic_reference.run_precision_checks import _moving_tet  # noqa: PLC0415
+
+    for precision in ("fp64", "fp32"):
+        with test.subTest(precision=precision):
+            model, solver = _moving_tet(0.0, 9.81, precision, device)
+            criterion = solver._criterion
+            original = criterion.round
+
+            def overflowing(*args, criterion=criterion, original=original, **kwargs):
+                original(*args, **kwargs)
+                magnitude = criterion.magnitude.numpy()
+                magnitude[0] = np.inf
+                criterion.magnitude.assign(magnitude)
+                criterion.update(criterion.magnitude)
+
+            criterion.round = overflowing
+            state, control = solver.create_state(dt=1e-3, source=model.state()), model.control()
+            solver.step(state, state, control, dt=1e-3)
+            test.assertEqual(solver.last_stats.status, solver.Status.NONFINITE)
+            test.assertTrue(solver.last_stats.rolled_back)
 
 
 def test_moving_body_resolves_its_load(test, device):
@@ -187,6 +215,12 @@ add_function_test(
     TestMonolithicConvergence,
     "test_nonfinite_tolerance_never_converges",
     test_nonfinite_tolerance_never_converges,
+    devices=get_test_devices(),
+)
+add_function_test(
+    TestMonolithicConvergence,
+    "test_nonfinite_magnitude_fails_the_step",
+    test_nonfinite_magnitude_fails_the_step,
     devices=get_test_devices(),
 )
 add_function_test(

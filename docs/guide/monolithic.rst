@@ -21,7 +21,8 @@ Every scene, including cloth/cable scenes, uses spatial contact. Candidates
 refresh at each Newton boundary and remain frozen during its trials. This
 approximation can omit contacts reached by a trial outside the frozen bounds;
 it does not provide continuous collision detection or automatic correction.
-The step-start convergence reference still uses complete contact enumeration.
+The convergence reference, the residual at the step's first iterate, is
+evaluated with the same spatial candidates.
 
 ``contact_candidate_capacity=None`` reserves the model's complete static sample
 upper bound, and ``contact_factor_capacity=None`` reserves three times that
@@ -67,7 +68,9 @@ unit at the step's first iterate, the inertial prediction (1e-6 in FP64, 1e-4
 in FP32), and 32 times the precision's machine epsilon times the row's rounding
 magnitude. Taking the reference at the prediction keeps the tolerance
 independent of uniform velocity: the step-start residual would contain each
-body's momentum over the time step, which the prediction cancels. The rounding
+body's momentum over the time step, which the prediction cancels. A free rigid
+body's rotation is the exception: the prediction keeps its step-start
+orientation, so its angular momentum still enters the reference. The rounding
 magnitude sums the row's absolute contributions, the tangent-weighted
 magnitudes of the step increments, and, for strains that are small differences
 of larger terms, the operands of their step-dependent parts: cable curvature
@@ -86,7 +89,7 @@ counts the rows that passed only within their rounding allowance.
 Cable stretch and bend-twist tangents are applied element by element to each
 element's displacements relative to its first vertex, not through the
 assembled matrix; the cable band preconditioner alone is shifted by a growing
-multiple of its diagonal when its FP32 factorization fails.
+multiple of its diagonal when its factorization fails.
 
 Known FP32 limitations: the stored FP32 coordinates of a slender cable in a
 general orientation cannot represent its axial strain finely enough to resolve

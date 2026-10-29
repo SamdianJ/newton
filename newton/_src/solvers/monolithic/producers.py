@@ -658,6 +658,7 @@ class CableProducer(_MaterialProducer):
                 self.gravity(solver),
                 dt,
                 residual,
+                build_tangent=build_tangent,
             )
         except ValueError as error:
             raise _StepFailure(solver.Status.NONFINITE, str(error)) from error

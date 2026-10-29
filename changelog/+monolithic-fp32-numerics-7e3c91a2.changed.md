@@ -1,1 +1,1 @@
-Judge monolithic relative tolerances against the residual at the inertial prediction, which also removes one residual evaluation per step.
+Judge monolithic relative tolerances against the residual at the inertial prediction instead of the step start, which also saves one residual evaluation per step; moving bodies no longer loosen their block's tolerance, so their steps may take more Newton iterations, and scenes tuned close to ``newton_max_iterations`` should recheck that budget.

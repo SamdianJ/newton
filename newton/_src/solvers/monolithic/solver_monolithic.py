@@ -90,7 +90,8 @@ class SolverMonolithic(SolverBase):
 
     Spatial contact candidates refresh at Newton boundaries and remain frozen
     through trials, with zero additional law margin. Unbounded trials can miss
-    contacts; the complete step-start residual remains the convergence reference.
+    contacts. The convergence reference is the residual at the step's first
+    iterate, evaluated with the same spatial candidates.
     ``contact_candidate_capacity`` defaults to the model's static sample upper bound, and
     factor capacity defaults to three times that bound. Capacity is fixed for
     the solver lifetime; overflow discards complete contacts and reports taint.
@@ -101,7 +102,8 @@ class SolverMonolithic(SolverBase):
 
     A step converges when every residual row satisfies its own physical
     tolerance [N or N m]: the largest of an absolute target, a relative
-    tolerance on its block's step-start residual and a multiple of the
+    tolerance on its block's residual at the step's first iterate (the
+    inertial prediction) and a multiple of the
     precision's rounding magnitude for that row. Rows are not pooled into a
     norm, so small local loads are resolved regardless of model size.
 
