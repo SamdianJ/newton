@@ -1,0 +1,1 @@
+Fix FP32 monolithic steps that accepted the prediction without responding to small loads, or stalled just above their tolerances, by bounding the rounding of cable, shell and tet strains and of tet stresses from the terms that cancel, and by applying cable tangents element by element.

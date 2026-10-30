@@ -85,6 +85,79 @@ def test_criterion_matches_oracle(test, device):
             np.testing.assert_allclose(actual, expected, rtol=8 * np.finfo(native).eps * n)
 
 
+def test_nonfinite_tolerance_never_converges(test, device):
+    """Refuse convergence on a row whose rounding magnitude is not finite, in both precisions.
+
+    An infinite magnitude would make |r| / tau zero and a NaN one would drop out of
+    the maximum, so the row could pass whatever its residual. The oracle and the
+    kernel both give such a row an infinite tau and an infinite ratio.
+    """
+    rows = convergence.RowGroups(("x",), np.zeros(3, np.int32), np.zeros(3, np.int32))
+    policy = ConvergencePolicy()
+    for dtype, native in ((wp.float64, np.float64), (wp.float32, np.float32)):
+        for bad in (np.inf, np.nan):
+            with test.subTest(dtype=native.__name__, magnitude=bad):
+                reference = np.ones(3, dtype=native)
+                magnitude = np.array([0.0, bad, 0.0], dtype=native)
+                residual = np.array([0.0, 1.0e3, 0.0], dtype=native)
+                tau, physical = convergence.tolerances(reference, magnitude, rows, policy, native)
+                worst, _ = convergence.assess(residual, tau, physical, rows)
+                test.assertTrue(np.isposinf(tau[1]))
+                test.assertTrue(np.isinf(worst[0]))
+                criterion = Criterion(rows, policy, dtype=dtype, device=device)
+                criterion.freeze_reference(wp.array(reference, dtype=dtype, device=device))
+                criterion.update(wp.array(magnitude, dtype=dtype, device=device))
+                criterion.assess(wp.array(residual, dtype=dtype, device=device))
+                test.assertTrue(np.isposinf(criterion.tau.numpy()[1]))
+                test.assertTrue(np.isinf(criterion.worst.numpy()[0]))
+
+
+def test_nonfinite_magnitude_fails_the_step(test, device):
+    """End a step whose rounding magnitude overflows with a NONFINITE status, not an exception."""
+    from scripts.monolithic_reference.run_precision_checks import _moving_tet  # noqa: PLC0415
+
+    for precision in ("fp64", "fp32"):
+        with test.subTest(precision=precision):
+            model, solver = _moving_tet(0.0, 9.81, precision, device)
+            criterion = solver._criterion
+            original = criterion.round
+
+            def overflowing(*args, criterion=criterion, original=original, **kwargs):
+                original(*args, **kwargs)
+                magnitude = criterion.magnitude.numpy()
+                magnitude[0] = np.inf
+                criterion.magnitude.assign(magnitude)
+                criterion.update(criterion.magnitude)
+
+            criterion.round = overflowing
+            state, control = solver.create_state(dt=1e-3, source=model.state()), model.control()
+            solver.step(state, state, control, dt=1e-3)
+            test.assertEqual(solver.last_stats.status, solver.Status.NONFINITE)
+            test.assertTrue(solver.last_stats.rolled_back)
+
+
+def test_moving_body_resolves_its_load(test, device):
+    """Resolve a small load on a uniformly moving body instead of stopping at the predictor.
+
+    The step-start residual carries the inertia M v / h that the predictor
+    cancels; as a reference for the relative tolerance it would loosen the
+    whole block with the speed, so a fast body converged without moving.
+    """
+    from scripts.monolithic_reference.run_precision_checks import _moving_tet  # noqa: PLC0415
+
+    dt = 1e-3
+    for precision in ("fp64", "fp32"):
+        for g, vx in ((0.05, 1.0), (0.05, 100.0), (9.81, 100.0)):
+            with test.subTest(precision=precision, g=g, vx=vx):
+                model, solver = _moving_tet(vx, g, precision, device)
+                state = solver.create_state(dt=dt)
+                solver.step(state, state, model.control(), dt=dt)
+                test.assertTrue(solver.last_stats.converged, solver.last_stats.status)
+                test.assertGreaterEqual(solver.last_stats.nonlinear_iterations, 1)
+                vz = state.particle_qd.numpy()[:, 2].astype(float).mean()
+                test.assertLess(abs(vz / (-g * dt) - 1), 1e-2)
+
+
 class TestMonolithicConvergence(unittest.TestCase):
     def test_default_policy(self):
         """Keep the approved per-unit targets, relative tolerances and rounding multipliers."""
@@ -136,6 +209,24 @@ add_function_test(
     TestMonolithicConvergence,
     "test_criterion_matches_oracle",
     test_criterion_matches_oracle,
+    devices=get_test_devices(),
+)
+add_function_test(
+    TestMonolithicConvergence,
+    "test_nonfinite_tolerance_never_converges",
+    test_nonfinite_tolerance_never_converges,
+    devices=get_test_devices(),
+)
+add_function_test(
+    TestMonolithicConvergence,
+    "test_nonfinite_magnitude_fails_the_step",
+    test_nonfinite_magnitude_fails_the_step,
+    devices=get_test_devices(),
+)
+add_function_test(
+    TestMonolithicConvergence,
+    "test_moving_body_resolves_its_load",
+    test_moving_body_resolves_its_load,
     devices=get_test_devices(),
 )
 add_function_test(

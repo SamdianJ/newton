@@ -34,16 +34,23 @@ def main():
     identity = None
     matrix_identity = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
     axes = (1, 2) if args.kind == "cantilever" else (1,)
+    # Every orientation is a full matrix of its own; zero keeps the original names.
+    angles = r.get("angles", [0])
     experiments = [
-        (axis, n, ea)
+        (angle, axis, n, ea)
+        for angle in angles
         for axis in axes
         for n, ea in [(n, 1) for n in r["segments"]]
         + [(r["segments"][-1], ea) for ea in r["ea_multipliers"] if ea != 1]
     ]
 
+    def label(angle, axis, n=None, ea=None):
+        name = ("" if angle == 0 else f"angle-{angle:g}-") + f"axis-{axis}"
+        return name if n is None else f"{name}-n-{n}-ea-{ea}"
+
     def run_case(experiment):
-        axis, n, ea = experiment
-        name = f"axis-{axis}-n-{n}-ea-{ea}"
+        angle, axis, n, ea = experiment
+        name = label(angle, axis, n, ea)
         output = args.output / name
         command = [
             sys.executable,
@@ -57,6 +64,8 @@ def main():
             str(n),
             "--ea-multiplier",
             str(ea),
+            "--angle",
+            str(angle),
             "--device",
             args.device,
             "--pcg-mode",
@@ -96,24 +105,24 @@ def main():
             if returncode or receipt["status"] not in ("PASS", "MESH_SAMPLE", "EA_SAMPLE"):
                 failures.append(name + ": failed/incomplete experiment")
             print(name, receipt["status"], flush=True)
-    for axis in axes:
-        mesh = [cases[f"axis-{axis}-n-{n}-ea-1"]["metrics"] for n in r["segments"]]
+    for angle, axis in ((angle, axis) for angle in angles for axis in axes):
+        mesh = [cases[label(angle, axis, n, 1)]["metrics"] for n in r["segments"]]
         if all(m and m["complete"] for m in mesh):
             errors = [m["relative_centerline_error"] for m in mesh]
             ratios = [b / a for a, b in pairwise(errors)]
-            comparisons[f"axis-{axis}-mesh"] = {"errors": errors, "refinement_ratios": ratios}
+            comparisons[label(angle, axis) + "-mesh"] = {"errors": errors, "refinement_ratios": ratios}
             if max(ratios) > r["gates"]["refinement_ratio"]:
-                failures.append(f"axis-{axis}: mesh refinement")
+                failures.append(f"{label(angle, axis)}: mesh refinement")
         n = r["segments"][-1]
-        base_path = args.output / f"axis-{axis}-n-{n}-ea-1" / "final.npz"
-        if not base_path.exists() or not cases[f"axis-{axis}-n-{n}-ea-1"]["metrics"]["complete"]:
+        base_path = args.output / label(angle, axis, n, 1) / "final.npz"
+        if not base_path.exists() or not cases[label(angle, axis, n, 1)]["metrics"]["complete"]:
             continue
         base = np.load(base_path)["positions"]
         for ea in r["ea_multipliers"]:
             if ea == 1:
                 continue
-            other_path = args.output / f"axis-{axis}-n-{n}-ea-{ea}" / "final.npz"
-            sample = cases[f"axis-{axis}-n-{n}-ea-{ea}"]["metrics"]
+            other_path = args.output / label(angle, axis, n, ea) / "final.npz"
+            sample = cases[label(angle, axis, n, ea)]["metrics"]
             if not other_path.exists() or not sample or not sample["complete"]:
                 continue
             other = np.load(other_path)["positions"]
@@ -128,17 +137,17 @@ def main():
                 rotated = a * np.exp(-1j * np.angle(np.vdot(b, a)))
                 other[:, 1], other[:, 2] = rotated.real, rotated.imag
             change = float(np.max(np.linalg.norm(base - other, axis=1)) / normalization)
-            comparisons[f"axis-{axis}-ea-{ea}"] = change
+            comparisons[f"{label(angle, axis)}-ea-{ea}"] = change
             if ea > 1 and change > r["gates"]["finite_EA_response_change"]:
-                failures.append(f"axis-{axis}: finite EA {ea}")
+                failures.append(f"{label(angle, axis)}: finite EA {ea}")
         if args.kind == "localized_helix":
-            low = comparisons.get(f"axis-{axis}-ea-0.1")
-            high = comparisons.get(f"axis-{axis}-ea-10")
+            low = comparisons.get(f"{label(angle, axis)}-ea-0.1")
+            high = comparisons.get(f"{label(angle, axis)}-ea-10")
             if low is not None and high is not None:
                 ratio = high / max(low, np.finfo(float).tiny)
-                comparisons[f"axis-{axis}-ea-refinement"] = ratio
+                comparisons[f"{label(angle, axis)}-ea-refinement"] = ratio
                 if ratio > r["gates"]["finite_EA_refinement_ratio"]:
-                    failures.append(f"axis-{axis}: finite EA error did not decay")
+                    failures.append(f"{label(angle, axis)}: finite EA error did not decay")
     summary = {
         "status": "FAIL" if failures else "PASS",
         "kind": args.kind,

@@ -26,6 +26,7 @@ def main():
     parser.add_argument("--segments", type=int)
     parser.add_argument("--axis", type=int, choices=(1, 2), default=1)
     parser.add_argument("--ea-multiplier", type=float, default=1)
+    parser.add_argument("--angle", type=float, default=0.0, help="Rotate the cantilever about z [deg]")
     parser.add_argument("--device", default="cpu")
     parser.add_argument("--pcg-mode", choices=("diagnostic", "production"), default="diagnostic")
     parser.add_argument("--use-cuda-graph", action="store_true")
@@ -79,6 +80,7 @@ def main():
             segments=args.segments,
             axis=args.axis,
             ea_multiplier=args.ea_multiplier,
+            angle=args.angle,
             device=args.device,
             pcg_mode=args.pcg_mode,
             use_cuda_graph=args.use_cuda_graph,

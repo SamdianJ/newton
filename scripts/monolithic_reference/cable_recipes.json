@@ -1,8 +1,12 @@
 {
-  "version": 11,
+  "version": 12,
   "status": "FROZEN_BEFORE_FINAL_MATRIX",
-  "change": "v11 (P8b): the solver judges every residual row against its own physical tolerance; the per-recipe solve_position_tolerance and solve_theta_tolerance options are removed. Physical parameters, loads and gates are unchanged.",
+  "change": "v12 (P8b2): the cantilever matrix also runs rotated 45 degrees about z (geometry, director and load); the axis-aligned cases, physical parameters, loads and gates are unchanged. v11 (P8b): the solver judges every residual row against its own physical tolerance; the per-recipe solve_position_tolerance and solve_theta_tolerance options are removed.",
   "cantilever": {
+    "angles": [
+      0,
+      45
+    ],
     "length": 1.0,
     "bending": [
       0.001,

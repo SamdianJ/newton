@@ -85,9 +85,10 @@ def _block_of(group):
 def measure(solver, residual, reference, scale):
     """Recompute row tolerances at the accepted iterate and assess its residual.
 
-    ``residual`` and ``reference`` are the accepted and step-start residuals;
-    the device copy of the accepted residual is read from the solver. The device
-    iteration reads back only per-group and per-block results.
+    ``residual`` and ``reference`` are the accepted residual and the residual
+    at the step's first iterate; the device copy of the accepted residual is
+    read from the solver. The device iteration reads back only per-group and
+    per-block results. A rounding magnitude that is not finite fails the step.
     """
     self = solver
     device = isinstance(residual, wp.array)
@@ -100,10 +101,15 @@ def measure(solver, residual, reference, scale):
     criterion = self._criterion
     for producer in self._producers:
         producer.coordinates(self, self._accepted, self._coordinates)
-    criterion.round(self._linear.k_global_scalar_bsr, self._coordinates, self._complete_a)
+    criterion.round(
+        self._linear.k_global_scalar_bsr, self._coordinates, self._complete_a, self._linear._material_operator
+    )
     criterion.assess(self._complete_r)
     rows = criterion.rows
     worst, limited = criterion.worst.numpy(), criterion.limited.numpy()
+    if not np.all(np.isfinite(worst)):
+        # Only a rounding magnitude that is not finite gives an infinite ratio here.
+        raise _StepFailure(self.Status.NONFINITE, "Nonfinite rounding magnitude")
     native = self._numpy_dtype
     ratios = {"global": native(worst.max(initial=0))}
     for group, value in zip(rows.names, worst, strict=True):
@@ -271,7 +277,7 @@ def iterate(solver, dt):
     tiny = native(1e-30)
     config = self._config
     device = self._device_iteration
-    reference = self._initial_reference(dt, device_result=True) if device else self._initial_reference(dt)
+    reference = None
     small = False
     for iteration in range(self.newton_max_iterations + 1):
         if getattr(self, "_contact_spatial", False):
@@ -282,6 +288,17 @@ def iterate(solver, dt):
         if device:
             wp.copy(self._accepted_r, evaluated)
         residual = self._accepted_r if device else evaluated
+        if iteration == 0:
+            # Relative tolerances follow the predictor's residual. The step-start
+            # residual r(x_n) carries the inertia M v / h that the predictor
+            # cancels, so a fast body would loosen its whole block's tolerance
+            # and stop at the predictor with its load unresolved.
+            self._criterion.freeze_reference(self._complete_r)
+            if device:
+                wp.copy(self._reference_device, residual)
+                reference = self._reference_device
+            else:
+                reference = np.array(residual, copy=True)
         _, scale = self._assemble(iteration, device_result=True) if device else self._assemble(iteration)
         self._reference_residual = reference
         assessment = measure(self, residual, reference, scale)

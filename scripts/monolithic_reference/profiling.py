@@ -144,7 +144,6 @@ class SolverProfiler:
             "_prepare_step",
             "_evaluate",
             "_assemble",
-            "_initial_reference",
             "_take_trial",
             "_trial_evaluation",
             "_physical_linear_error",

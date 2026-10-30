@@ -8,9 +8,10 @@ Each residual row ``i`` is converged when ``|r_i| <= tau_i`` with
 ``tau_i = max(g_u, rtol_u * max_{j in (b, u)} |r0_j|, c_u * eps_T * a_i)``,
 
 where ``u`` is the row's physical unit, ``b`` its convergence block, ``r0`` the
-step-start reference residual and ``a_i`` the row's rounding magnitude (the
-absolute contributions that were summed into ``r_i`` plus the tangent-weighted
-coordinate magnitudes). Rows are never pooled into a norm, so a small local
+residual at the step's first iterate (the inertial prediction) and ``a_i`` the
+row's rounding magnitude (the absolute contributions that were summed into
+``r_i``, the tangent-weighted coordinate magnitudes and the operand sizes of
+terms that cancel). Rows are never pooled into a norm, so a small local
 load cannot be diluted by the size of the model.
 """
 
@@ -44,15 +45,15 @@ class ConvergencePolicy:
     # plateau at 4-8 eps a while closing and 21-31 eps a at the end, on tet rows
     # summing 10-30 terms ((n - 1) eps a bounds such a sum).
     # Relative tolerances: at 1e-4 a step whose load changes accepts 1e-4 of its
-    # step-start imbalance unresolved, so the stiff precreased box and the prefolded
+    # initial imbalance unresolved, so the stiff precreased box and the prefolded
     # cloth exceed their 1e-6 N force gates; FP64 therefore uses 1e-6. FP32 keeps
-    # 1e-4, the setting the rounding multiplier was calibrated with: near rest, tet
-    # elasticity rounds above 32 eps a (stresses cancel in F - I), so at 1e-6 FP32
-    # tet vibration and the Sharpa grasp plateau above tau.
+    # 1e-4, the setting the rounding multiplier was calibrated with. The tet
+    # rounding magnitude now bounds the cancellation in F - I; whether FP32 can
+    # return to 1e-6 has not been evaluated.
     absolute: tuple[float, float] = (1e-11, 1e-13)
     """Absolute targets ``g_u`` [N, N m]."""
     relative: tuple[float, float] = (1e-6, 1e-6)
-    """Tolerances ``rtol_u`` relative to the block's step-start residual."""
+    """Tolerances ``rtol_u`` relative to the block's residual at the step's first iterate."""
     noise: tuple[float, float] = (32.0, 32.0)
     """Multipliers ``c_u`` of ``eps_T * a_i``."""
     relative_fp32: tuple[float, float] = (1e-4, 1e-4)
@@ -118,7 +119,7 @@ def tolerances(reference, magnitude, rows, policy, dtype):
     """Return per-row tolerances and whether the rounding term decides each one.
 
     Args:
-        reference: Step-start residual ``r0`` in physical units.
+        reference: Residual ``r0`` at the step's first iterate, in physical units.
         magnitude: Rounding magnitudes ``a``.
         rows: Row units and groups.
         policy: Convergence policy.
@@ -131,15 +132,22 @@ def tolerances(reference, magnitude, rows, policy, dtype):
     relative = np.asarray(policy.relative_for(dtype), dtype=dtype)[rows.units] * block[rows.groups]
     noise = np.asarray(policy.noise, dtype=dtype)[rows.units] * np.finfo(dtype).eps * magnitude
     physical = np.maximum(absolute, relative)
-    return np.maximum(physical, noise), physical
+    # A row whose rounding magnitude is not finite (NaN included) can never pass.
+    with np.errstate(invalid="ignore"):
+        tau = np.where(np.isfinite(noise), np.maximum(physical, noise), dtype(np.inf))
+    return tau, physical
 
 
 def assess(residual, tau, physical, rows):
     """Return each group's largest ``|r|/tau`` and its count of rounding-limited rows.
 
-    A row is rounding limited when it passes only because of the rounding term.
+    A row is rounding limited when it passes only because of the rounding term. A
+    row whose tolerance is not finite (an overflowed rounding magnitude) cannot be
+    judged and never passes.
     """
-    ratio = np.abs(residual) / tau
+    tau = np.asarray(tau)
+    with np.errstate(invalid="ignore"):
+        ratio = np.where(np.isfinite(tau), np.abs(residual) / tau, np.inf).astype(tau.dtype)
     worst = np.zeros(len(rows.names), dtype=ratio.dtype)
     np.maximum.at(worst, rows.groups, ratio)
     limited = np.bincount(
@@ -190,7 +198,11 @@ def _row_tolerance(
     i = wp.tid()
     limit = wp.max(absolute[i], relative[i] * block[groups[i]])
     physical[i] = limit
-    tau[i] = wp.max(limit, noise[i] * magnitude[i])
+    allowance = noise[i] * magnitude[i]
+    # A magnitude that is not finite (NaN included, which wp.max would drop) can never pass.
+    tau[i] = type(limit)(wp.inf)
+    if wp.isfinite(allowance):
+        tau[i] = wp.max(limit, allowance)
 
 
 @wp.kernel
@@ -222,6 +234,9 @@ def _assess_rows(
     i = wp.tid()
     value = wp.abs(residual[i])
     ratio = value / tau[i]
+    # An overflowed rounding magnitude makes tau infinite; such a row cannot pass.
+    if not wp.isfinite(tau[i]):
+        ratio = type(ratio)(wp.inf)
     wp.atomic_max(worst, groups[i], ratio)
     if ratio <= type(ratio)(1.0) and value > physical[i]:
         wp.atomic_add(limited, groups[i], 1)
@@ -271,17 +286,18 @@ class Criterion:
         )
 
     def freeze_reference(self, reference):
-        """Record each group's largest step-start residual."""
+        """Record each group's largest residual at the step's first iterate."""
         self.block.zero_()
         wp.launch(_group_reference, reference.size, [reference, self.groups, self.block], device=self.groups.device)
 
-    def round(self, matrix, coordinates, contributions):
+    def round(self, matrix, coordinates, contributions, operator=None):
         """Set rounding magnitudes to the summed absolute contributions plus ``|B| |u|``.
 
         Args:
             matrix: Assembled physical tangent ``B`` (scalar BSR, unscaled).
             coordinates: Magnitude ``|u|`` of each row's coordinate as represented.
             contributions: Absolute contributions summed into each residual row.
+            operator: Element tangents applied outside ``matrix``, whose ``|B| |u|`` is added.
         """
         wp.launch(
             _rounding,
@@ -289,6 +305,8 @@ class Criterion:
             [matrix.offsets, matrix.columns, matrix.values, coordinates, contributions, self.magnitude],
             device=self.groups.device,
         )
+        if operator is not None:
+            operator.add_abs_coordinates(coordinates, self.magnitude)
         self.update(self.magnitude)
 
     def update(self, magnitude):

@@ -28,6 +28,7 @@ def _residual(
     mass: wp.array[Any],
     fixed: wp.array[int],
     stretch: wp.array2d[Any],
+    stretch_rounding: wp.array2d[Any],
     bend: wp.array2d[Any],
     bend_rounding: wp.array2d[Any],
     rows: wp.array[int],
@@ -46,7 +47,7 @@ def _residual(
         vertex, axis = row // 3, row % 3
         for edge in range(wp.max(0, vertex - 1), wp.min(nv - 1, vertex + 1)):
             value += stretch[edge, 3 * (vertex - edge) + axis]
-            magnitude += wp.abs(stretch[edge, 3 * (vertex - edge) + axis])
+            magnitude += stretch_rounding[edge, 3 * (vertex - edge) + axis]
         for stencil in range(wp.max(0, vertex - 2), wp.min(nv - 2, vertex + 1)):
             value += bend[stencil, 3 * (vertex - stencil) + axis]
             magnitude += bend_rounding[stencil, 3 * (vertex - stencil) + axis]
@@ -76,27 +77,9 @@ def _residual(
 
 
 @wp.kernel
-def _scatter_tangent(
-    kind: wp.array[int],
-    element: wp.array[int],
-    a: wp.array[int],
-    b: wp.array[int],
-    mass: wp.array[Any],
-    dt: Any,
-    stretch: wp.array3d[Any],
-    bend: wp.array3d[Any],
-    offset: int,
-    output: wp.array[Any],
-):
+def _scatter_mass(vertex: wp.array[int], mass: wp.array[Any], dt: Any, offset: int, output: wp.array[Any]):
     i = wp.tid()
-    value = output.dtype(0.0)
-    if kind[i] == 0:
-        value = mass[element[i]] / (dt * dt)
-    elif kind[i] == 1:
-        value = stretch[element[i], a[i], b[i]]
-    else:
-        value = bend[element[i], a[i], b[i]]
-    output[offset + i] = value
+    output[offset + i] = mass[vertex[i]] / (dt * dt)
 
 
 @wp.kernel
@@ -240,38 +223,20 @@ class CableBlock:
         self.raw = wp.zeros(len(rows), dtype=dtype, device=device)
         self.absolute = wp.zeros(len(rows), dtype=dtype, device=device)
         self.external_energy = wp.zeros_like(self.raw)
-        global_rows, global_columns, kinds, elements, aa, bb = [], [], [], [], [], []
-
-        def entry(kind, element, a, b, row, column):
-            if row >= 0 and column >= 0:
-                global_rows.append(row)
-                global_columns.append(column)
-                kinds.append(kind)
-                elements.append(element)
-                aa.append(a)
-                bb.append(b)
-
+        # Only the lumped mass enters the global triplets; the stretch and
+        # bend-twist tangents are applied element by element (cable_operator).
+        global_rows, vertices = [], []
         for i in range(nv):
             for axis in range(3):
-                row = rows[3 * i + axis]
-                entry(0, i, axis, axis, row, row)
-        for kind, count, width in ((1, nv - 1, 6), (2, nv - 2, 11)):
-            for i in range(count):
-                local_rows = (
-                    rows[3 * i : 3 * i + 6]
-                    if kind == 1
-                    else np.r_[rows[3 * i : 3 * i + 9], rows[3 * nv + i : 3 * nv + i + 2]]
-                )
-                for a in range(width):
-                    for b in range(width):
-                        entry(kind, i, a, b, local_rows[a], local_rows[b])
+                if rows[3 * i + axis] >= 0:
+                    global_rows.append(rows[3 * i + axis])
+                    vertices.append(i)
+        global_columns = global_rows
         self.triplet_rows, self.triplet_columns = (
             np.asarray(global_rows, dtype=np.int32),
             np.asarray(global_columns, dtype=np.int32),
         )
-        self.kinds, self.elements, self.aa, self.bb = [
-            wp.array(v, dtype=int, device=device) for v in (kinds, elements, aa, bb)
-        ]
+        self.mass_vertices = wp.array(np.asarray(vertices, dtype=np.int32), dtype=int, device=device)
         self.triplet_offset = 0
         self.path_status = wp.zeros(1, dtype=int, device=device)
 
@@ -284,11 +249,12 @@ class CableBlock:
         ):
             wp.launch(_gather, self.ids.size, [source, self.ids, output], device=self.device)
 
-    def evaluate(self, state, step, theta_step, original, torque, gravity, dt, complete):
+    def evaluate(self, state, step, theta_step, original, torque, gravity, dt, complete, *, build_tangent=True):
         """Evaluate the same frozen frame chart for every current and trial state.
 
         ``step`` and ``theta_step`` are the state's exact particle and angle
-        increments from the step start ``original``.
+        increments from the step start ``original``. Only an evaluation with
+        ``build_tangent`` replaces the element tangents the linear operator reads.
         """
         objective = self.objective
         ne, ni = objective.lengths.size, objective.phi.size
@@ -303,6 +269,7 @@ class CableBlock:
             self.original_x,
             anchor.cable_ref_director[angles],
             anchor.cable_ref_twist[self.phi_offset : self.phi_offset + ni] if ni else objective.phi,
+            tangent=build_tangent,
         )
         if objective.flags.numpy()[0]:
             raise ValueError("Cable candidate left the committed geometry/frame chart")
@@ -319,6 +286,7 @@ class CableBlock:
                 self.mass,
                 self.fixed,
                 objective.stretch_r,
+                objective.stretch_rounding,
                 objective.bend_twist_r,
                 objective.bend_twist_rounding,
                 self.rows,
@@ -353,19 +321,14 @@ class CableBlock:
         return parts.sum(), abs(parts).sum()
 
     def assemble(self, assembly, dt):
-        """Write every free-coordinate mass/DER entry into reserved global triplets."""
+        """Write every free vertex's lumped mass into reserved global triplets."""
         wp.launch(
-            _scatter_tangent,
-            self.kinds.size,
+            _scatter_mass,
+            self.mass_vertices.size,
             [
-                self.kinds,
-                self.elements,
-                self.aa,
-                self.bb,
+                self.mass_vertices,
                 self.mass,
                 self.dtype(dt),
-                self.objective.stretch_b,
-                self.objective.bend_twist_b,
                 self.triplet_offset,
                 assembly.global_scalar_triplets.values,
             ],

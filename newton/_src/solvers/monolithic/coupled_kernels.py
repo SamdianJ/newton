@@ -167,12 +167,15 @@ def sparse_posterior(
     regularization_term: wp.array[Any],
     error: wp.array[Any],
     magnitude: wp.array[Any],
+    material: wp.array[Any],
+    material_magnitude: wp.array[Any],
 ):
     row = wp.tid()
-    value = residual[row]
+    # ``material`` carries the element tangents applied outside the assembly.
+    value = residual[row] + material[row]
     for j in range(offsets[row], offsets[row + 1]):
         value += values[j] * direction[columns[j]]
-    absolute = residual.dtype(0.0)
+    absolute = material_magnitude[row]
     for j in range(offsets[row], offsets[row + 1]):
         absolute += wp.abs(values[j] * direction[columns[j]])
     original[row] = scale[row] * value

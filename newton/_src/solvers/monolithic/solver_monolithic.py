@@ -19,6 +19,7 @@ from . import convergence, iteration_device, state_checks
 from . import coupled_kernels as kernels
 from .actors import Actor, ActorTable
 from .articulation import ArticulationObjective, _TreeKinematics
+from .cable_operator import CableOperator
 from .cable_system import CableBlock
 from .cloth_system import ClothBlock
 from .config import GLOBALIZATION, MonolithicConfig
@@ -89,7 +90,8 @@ class SolverMonolithic(SolverBase):
 
     Spatial contact candidates refresh at Newton boundaries and remain frozen
     through trials, with zero additional law margin. Unbounded trials can miss
-    contacts; the complete step-start residual remains the convergence reference.
+    contacts. The convergence reference is the residual at the step's first
+    iterate, evaluated with the same spatial candidates.
     ``contact_candidate_capacity`` defaults to the model's static sample upper bound, and
     factor capacity defaults to three times that bound. Capacity is fixed for
     the solver lifetime; overflow discards complete contacts and reports taint.
@@ -100,7 +102,8 @@ class SolverMonolithic(SolverBase):
 
     A step converges when every residual row satisfies its own physical
     tolerance [N or N m]: the largest of an absolute target, a relative
-    tolerance on its block's step-start residual and a multiple of the
+    tolerance on its block's residual at the step's first iterate (the
+    inertial prediction) and a multiple of the
     precision's rounding magnitude for that row. Rows are not pooled into a
     norm, so small local loads are resolved regardless of model size.
 
@@ -392,6 +395,9 @@ class SolverMonolithic(SolverBase):
             cable_row_order=np.concatenate([c.order for c in self._cables])
             if self._cables
             else np.empty(0, dtype=np.int32),
+            material_operator=CableOperator(self._cables, layout.scalar_dof_count, dtype=self._dtype, device=device)
+            if self._cables
+            else None,
             dtype=self._dtype,
         )
         self._linear._set_fixed_triplet_pattern(
@@ -415,6 +421,8 @@ class SolverMonolithic(SolverBase):
             "_post_magnitude",
             "_post_original",
             "_post_regularization",
+            "_post_material",
+            "_post_material_magnitude",
         )
         for name in native:
             setattr(self, name, wp.zeros(n, dtype=self._dtype, device=device))
@@ -1301,15 +1309,29 @@ class SolverMonolithic(SolverBase):
             self._post_regularization,
             self._post_error,
             self._post_magnitude,
+            self._post_material,
+            self._post_material_magnitude,
         ]
+        operator = self._linear._material_operator
+
+        def posterior():
+            # Cable element tangents act on the physical direction outside the assembly.
+            self._post_material.zero_()
+            self._post_material_magnitude.zero_()
+            if operator is not None:
+                operator.add_product(
+                    self._delta, operator.ones, self._post_material, magnitude=self._post_material_magnitude
+                )
+            wp.launch(kernels.sparse_posterior, self._post_error.size, buffers, device=self.model.device)
+
         self._graphs.run(
             "coupled_posterior",
             (
                 self._layout.identity,
                 self.precision.value,
             ),
-            buffers,
-            lambda: wp.launch(kernels.sparse_posterior, self._post_error.size, buffers, device=self.model.device),
+            buffers + ([] if operator is None else list(operator.buffers())),
+            posterior,
         )
         return self._post_error if device_result else self._post_error.numpy().copy()
 

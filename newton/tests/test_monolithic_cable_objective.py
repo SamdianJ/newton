@@ -3,6 +3,7 @@
 
 """Check production rod derivatives against the independent complex-step oracle."""
 
+import typing
 import unittest
 
 import numpy as np
@@ -10,6 +11,13 @@ import warp as wp
 
 from newton._src.solvers.monolithic.cable import CableObjective
 from scripts.monolithic_reference.cable_oracle import CableFrame, CableReference, cable_derivatives, cable_energy
+
+
+def _rotation(axis, angle):
+    """Rodrigues rotation by ``angle`` about ``axis``."""
+    k = np.asarray(axis, dtype=float) / np.linalg.norm(axis)
+    cross = np.array([[0, -k[2], k[1]], [k[2], 0, -k[0]], [-k[1], k[0], 0]])
+    return np.eye(3) + np.sin(angle) * cross + (1 - np.cos(angle)) * cross @ cross
 
 
 class TestMonolithicCableObjective(unittest.TestCase):
@@ -180,7 +188,7 @@ class TestMonolithicCableObjective(unittest.TestCase):
                 turn = (scale * rng.standard_normal(8)).astype(np.float32).astype(float)
                 residual = objective.evaluate_host(start, theta, frame, step=step, theta_step=turn)[1]
                 rounding = np.zeros_like(residual)
-                for i, value in enumerate(np.abs(objective.stretch_r.numpy())):
+                for i, value in enumerate(objective.stretch_rounding.numpy()):
                     rounding[3 * i : 3 * i + 6] += value
                 for i, value in enumerate(objective.bend_twist_rounding.numpy()):
                     rows = np.r_[np.arange(3 * i, 3 * i + 9), 3 * len(x0) + np.arange(i, i + 2)]
@@ -189,6 +197,92 @@ class TestMonolithicCableObjective(unittest.TestCase):
                 error = np.abs((residual - base) - (exact - exact_base))
                 bound = multiplier * eps * (np.abs(residual) + rounding)
                 self.assertTrue(np.all(error <= bound), error / bound)
+
+    def _rotated_rod(self, rotation, segments=32):
+        """Return a straight unit rod and its director, rotated and stored in FP32."""
+        s = np.linspace(-0.5, 0.5, segments + 1)
+        x0 = (np.c_[s, np.zeros_like(s), np.zeros_like(s)] @ rotation.T).astype(np.float32).astype(float)
+        tangent = np.diff(x0, axis=0)
+        tangent /= np.linalg.norm(tangent, axis=1)[:, None]
+        d0 = np.tile(rotation[:, 1], (segments, 1))
+        d0 -= np.sum(d0 * tangent, axis=1)[:, None] * tangent
+        d0 /= np.linalg.norm(d0, axis=1)[:, None]
+        return x0, d0
+
+    ROTATIONS: typing.ClassVar[dict[str, np.ndarray]] = {
+        "z0": np.eye(3),
+        "z30": _rotation((0.0, 0.0, 1.0), np.radians(30.0)),
+        "z45": _rotation((0.0, 0.0, 1.0), np.radians(45.0)),
+        "generic": _rotation((1.0, 2.0, 3.0), 0.7),
+    }
+
+    def test_float32_bend_two_sided_in_any_orientation(self):
+        """Resolve a small FP32 tip load in any orientation: accurate force, covered noise, visible load.
+
+        A rotated straight cantilever must respond to its tip load as accurately as
+        an axis-aligned one. At the predictor the rounding allowance on the loaded
+        rows must stay below the load, or the step converges without moving; at the
+        deflected state the FP32 error must stay within the allowance, or it stalls.
+        """
+        from newton._src.solvers.monolithic.convergence import ConvergencePolicy  # noqa: PLC0415
+
+        policy = ConvergencePolicy()
+        # Position rows are forces: unit 0 of the policy.
+        multiplier, eps, floor = policy.noise[0], np.finfo(np.float32).eps, policy.absolute[0]
+        stiffness, load = (1000.0, np.diag([0.001, 0.002]), 0.0007), 1.5e-8
+        for name, rotation in self.ROTATIONS.items():
+            with self.subTest(orientation=name):
+                x0, d0 = self._rotated_rod(rotation)
+                n = len(d0)
+                theta, none = np.zeros(n), np.zeros(n)
+                rest = CableReference(x0, theta, d0, stiffness)
+                frame = CableFrame(x0, d0)
+                objective = CableObjective(x0, theta, d0, stiffness, dtype=wp.float32, device=self.device)
+
+                def evaluate(step, objective=objective, x0=x0, theta=theta, frame=frame, none=none):
+                    residual = objective.evaluate_host(x0, theta, frame, step=step, theta_step=none)[1]
+                    rounding = np.zeros_like(residual)
+                    for i, value in enumerate(objective.stretch_rounding.numpy()):
+                        rounding[3 * i : 3 * i + 6] += value
+                    for i, value in enumerate(objective.bend_twist_rounding.numpy()):
+                        rows = np.r_[np.arange(3 * i, 3 * i + 9), 3 * len(x0) + np.arange(i, i + 2)]
+                        rounding[rows] += value
+                    return residual, multiplier * eps * (np.abs(residual) + rounding)
+
+                tip = slice(3 * n, 3 * n + 3)
+                zero = np.zeros_like(x0)
+                base, allowance = evaluate(zero)
+                self.assertLess(allowance[tip].max(), load, "allowance below the load at the predictor")
+                # The Euler-Bernoulli deflection of the clamped rod under the tip load.
+                s = np.linspace(0.0, 1.0, n + 1)
+                deflection = load * s * s * (3 - s) / (6 * stiffness[1][0, 0])
+                step = (deflection[:, None] * rotation[:, 1]).astype(np.float32).astype(float)
+                residual, allowance = evaluate(step)
+                response = (
+                    cable_derivatives(rest, x0 + step, theta, frame)[0] - cable_derivatives(rest, x0, theta, frame)[0]
+                )
+                error = ((residual - base) - response)[: 3 * len(x0)]
+                # The bend acts transversely; FP32 axial rounding there is covered, not resolved.
+                transverse = (error.reshape(-1, 3) @ rotation[:, 1])[2:]
+                self.assertLess(np.abs(transverse).max(), 1e-3 * load, "FP32 transverse force")
+                positions = slice(6, 3 * len(x0))  # the clamped vertices carry no residual rows
+                self.assertTrue(np.all(np.abs(error[positions]) <= allowance[positions] + floor), "noise covered")
+
+    def test_straight_rod_rounding_bound_vanishes(self):
+        """Bound no curvature rounding on a straight rod at rest, whatever its orientation."""
+        stiffness = (1000.0, np.diag([0.001, 0.002]), 0.0007)
+        for name, rotation in self.ROTATIONS.items():
+            with self.subTest(orientation=name):
+                x0, d0 = self._rotated_rod(rotation)
+                n = len(d0)
+                theta = np.zeros(n)
+                objective = CableObjective(x0, theta, d0, stiffness, dtype=wp.float32, device=self.device)
+                objective.evaluate_host(x0, theta, CableFrame(x0, d0), step=np.zeros_like(x0), theta_step=np.zeros(n))
+                # FP32 storage leaves the rotated rod bent by about one coordinate spacing per edge.
+                spacing = float(np.spacing(np.float32(np.abs(x0).max())))
+                curvature = 4 * spacing / (1.0 / n) ** 2
+                bound = 10 * stiffness[1].max() * curvature * n * n
+                self.assertLess(np.abs(objective.bend_twist_rounding.numpy()[:, :9]).max(), bound)
 
 
 @unittest.skipUnless(wp.is_cuda_available(), "CUDA unavailable")

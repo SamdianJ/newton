@@ -37,6 +37,7 @@ from .linear_types import (
 )
 from .pcg_common import group_data, group_policy, linear_rounding
 from .pcg_production_kernels import (
+    _NONFINITE,
     REDUCTION_CHUNK,
     _active_mask,
     _alpha_guard,
@@ -64,6 +65,7 @@ from .pcg_production_kernels import (
     _masked_update,
     _masked_x_solve,
     _Parameters,
+    _phase_mask,
     _publish_delta,
     _recover_candidate,
     _replace_recursive,
@@ -204,6 +206,7 @@ class MaskedPcgPlan:
         rigid_rows=None,
         cable_preconditioner=None,
         cloth_preconditioner=None,
+        material_operator=None,
     ):
         self.config = MaskedPcgConfig() if config is None else config
         if not isinstance(self.config, MaskedPcgConfig):
@@ -217,6 +220,9 @@ class MaskedPcgPlan:
         self._cable_preconditioner = cable_preconditioner
         self._cable_signature = None if cable_preconditioner is None else cable_preconditioner.signature()
         self._cable_active = None if cable_preconditioner is None else wp.zeros(1, dtype=int, device=self.device)
+        self._material_operator = material_operator
+        self._material_signature = None if material_operator is None else material_operator.signature()
+        self._material_active = None if material_operator is None else wp.zeros(1, dtype=int, device=self.device)
         self.n = y.size
         # Owned vectors use the solution's precision; stopping thresholds are FP32 and compared in FP64.
         self.dtype = y.dtype
@@ -388,6 +394,7 @@ class MaskedPcgPlan:
             rigid_rows=workspace.rigid_rows,
             cable_preconditioner=workspace._cable_preconditioner,
             cloth_preconditioner=workspace._cloth_preconditioner,
+            material_operator=workspace._material_operator,
         )
         plan._workspace = workspace
         plan._generation = workspace._generation
@@ -411,6 +418,8 @@ class MaskedPcgPlan:
             raise ValueError("Cloth preconditioner storage changed")
         if self._cable_preconditioner is not None and self._cable_signature != self._cable_preconditioner.signature():
             raise ValueError("Cable factor storage changed; construct a new PCG plan")
+        if self._material_operator is not None and self._material_signature != self._material_operator.signature():
+            raise ValueError("Material operator storage changed; construct a new PCG plan")
         arrays = tuple(value for value in vars(self).values() if isinstance(value, wp.array))
         if (
             self._stream_id() != self._stream
@@ -454,6 +463,8 @@ class MaskedPcgPlan:
             and (self._cloth_preconditioner is None or self._cloth_signature == self._cloth_preconditioner.signature())
             and self._cable_preconditioner is workspace._cable_preconditioner
             and (self._cable_preconditioner is None or self._cable_signature == self._cable_preconditioner.signature())
+            and self._material_operator is workspace._material_operator
+            and (self._material_operator is None or self._material_signature == self._material_operator.signature())
             and self._stream == self._stream_id()
             and self.layout == workspace.layout
             and _plan_identity(config) == _plan_identity(self.config)
@@ -520,6 +531,19 @@ class MaskedPcgPlan:
                     self.magnitude,
                     self.state,
                 ],
+            )
+        if self._material_operator is not None:
+            # Element tangents applied to element-relative displacements, in the
+            # same scaled units, after the assembled rows have been written.
+            self._launch(_phase_mask, 1, [self.state, checkpoint, self._material_active])
+            self._material_operator.add_product(
+                x,
+                self.scale,
+                self.ap,
+                magnitude=self.magnitude if checkpoint else None,
+                active=self._material_active,
+                error=self.error,
+                code=_NONFINITE,
             )
 
     def _emit_products(self, a, b):
