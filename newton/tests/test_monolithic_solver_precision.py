@@ -51,47 +51,55 @@ def far_slide_model(offset):
     return builder.finalize(device="cpu")
 
 
+def skip_unavailable(test, device):
+    """Skip the current subtest when ``device`` is not present on this machine."""
+    if device != "cpu" and not wp.is_cuda_available():
+        test.skipTest(f"{device} is not available")
+
+
 class TestSolverPrecision(unittest.TestCase):
     def test_native_step_and_graph(self):
         for device in ("cpu", "cuda:0"):
-            model = scene(device)
-            for graph in (False, True) if device != "cpu" else (False,):
-                runs = [
-                    solver(model, precision=p, graph=graph, mode="production", publish_policy="current_iterate")
-                    for p in ("fp64", "fp32")
-                ]
-                states = [run.create_state(dt=0.001) for run in runs]
-                for _ in range(2):
-                    for run, state in zip(runs, states, strict=True):
-                        with self.subTest(device=device, graph=graph, precision=run.precision):
-                            output = run._states.copy(state)
-                            run.step(state, output, model.control(), dt=0.001)
-                            self.assertFalse(run.last_stats.rolled_back, run.last_stats)
-                            state.assign(output)
-                            native = np.float64 if run.precision == run.Precision.FP64 else np.float32
-                            for field in (
-                                state.joint_q,
-                                state.particle_q,
-                                run._complete_r,
-                                run._objective.residual,
-                                run._tet.residual,
-                                run._contact.residual,
-                                state._monolithic_coupled.link_vsym,
-                            ):
-                                self.assertEqual(field.numpy().dtype, native)
-                            forces = run.get_contact_forces(state)
-                            self.assertEqual(forces.particle_force.dtype, native)
-                            with self.assertRaises(ValueError):
-                                forces.particle_force.flat[0] = 0
-                            saved = forces.particle_force.copy()
-                            run.reset_state(output, dt=0.001)
-                            np.testing.assert_array_equal(saved, forces.particle_force)
-                            self.assertEqual(run._linear.scale.numpy().dtype, native)
-                if graph:
-                    for run in runs:
-                        segment = run._graphs.summary()["segments"]["coupled_objective_owners"]
-                        self.assertGreater(segment["captures"], 0)
-                        self.assertGreater(segment["replays"], segment["captures"])
+            with self.subTest(device=device):
+                skip_unavailable(self, device)
+                model = scene(device)
+                for graph in (False, True) if device != "cpu" else (False,):
+                    runs = [
+                        solver(model, precision=p, graph=graph, mode="production", publish_policy="current_iterate")
+                        for p in ("fp64", "fp32")
+                    ]
+                    states = [run.create_state(dt=0.001) for run in runs]
+                    for _ in range(2):
+                        for run, state in zip(runs, states, strict=True):
+                            with self.subTest(device=device, graph=graph, precision=run.precision):
+                                output = run._states.copy(state)
+                                run.step(state, output, model.control(), dt=0.001)
+                                self.assertFalse(run.last_stats.rolled_back, run.last_stats)
+                                state.assign(output)
+                                native = np.float64 if run.precision == run.Precision.FP64 else np.float32
+                                for field in (
+                                    state.joint_q,
+                                    state.particle_q,
+                                    run._complete_r,
+                                    run._objective.residual,
+                                    run._tet.residual,
+                                    run._contact.residual,
+                                    state._monolithic_coupled.link_vsym,
+                                ):
+                                    self.assertEqual(field.numpy().dtype, native)
+                                forces = run.get_contact_forces(state)
+                                self.assertEqual(forces.particle_force.dtype, native)
+                                with self.assertRaises(ValueError):
+                                    forces.particle_force.flat[0] = 0
+                                saved = forces.particle_force.copy()
+                                run.reset_state(output, dt=0.001)
+                                np.testing.assert_array_equal(saved, forces.particle_force)
+                                self.assertEqual(run._linear.scale.numpy().dtype, native)
+                    if graph:
+                        for run in runs:
+                            segment = run._graphs.summary()["segments"]["coupled_objective_owners"]
+                            self.assertGreater(segment["captures"], 0)
+                            self.assertGreater(segment["replays"], segment["captures"])
 
     def test_checkpoint_and_cross_precision(self):
         model = scene("cpu")
@@ -164,29 +172,31 @@ class TestSolverPrecision(unittest.TestCase):
     def test_sdf_native_reference_and_source_binding(self):
         lo, hi, values = grid()
         for device in ("cpu", "cuda:0"):
-            for kind in ("c1-hermite", "c2-bspline"):
-                coefficients = build_coefficients(values, (hi - lo) / (np.array(values.shape[::-1]) - 1), kind)
-                field = SmoothSDF(coefficients, lo, hi, values.shape[::-1], kind, device=device)
-                reference = SmoothSDFSet([field], source_identity={"fixture": "native-test"})
-                native = reference.for_precision(wp.float32)
-                np.testing.assert_array_equal(
-                    native.fields[0].data.coefficients.numpy(), coefficients.ravel().astype(np.float32)
-                )
-                points = np.random.default_rng(31).uniform(lo * 0.8, hi * 0.8, (17, 3)).astype(np.float32)
-                expected = evaluate(values, lo, hi, points.astype(np.float64), kind)
-                output = wp.empty((len(points), 13), dtype=wp.float32, device=device)
-                wp.launch(
-                    sample_smooth,
-                    len(points),
-                    [native.fields[0].data, wp.array(points, dtype=wp.vec3, device=device), output],
-                    device=device,
-                )
-                actual = output.numpy()
-                np.testing.assert_allclose(actual[:, :4], expected[:, :4], atol=5e-6, rtol=5e-5)
-                np.testing.assert_allclose(actual[:, 4:], expected[:, 4:], atol=3e-3, rtol=3e-3)
-                field.data.coefficients.zero_()
-                with self.assertRaisesRegex(ValueError, "coefficients changed"):
-                    native.validate_identity()
+            with self.subTest(device=device):
+                skip_unavailable(self, device)
+                for kind in ("c1-hermite", "c2-bspline"):
+                    coefficients = build_coefficients(values, (hi - lo) / (np.array(values.shape[::-1]) - 1), kind)
+                    field = SmoothSDF(coefficients, lo, hi, values.shape[::-1], kind, device=device)
+                    reference = SmoothSDFSet([field], source_identity={"fixture": "native-test"})
+                    native = reference.for_precision(wp.float32)
+                    np.testing.assert_array_equal(
+                        native.fields[0].data.coefficients.numpy(), coefficients.ravel().astype(np.float32)
+                    )
+                    points = np.random.default_rng(31).uniform(lo * 0.8, hi * 0.8, (17, 3)).astype(np.float32)
+                    expected = evaluate(values, lo, hi, points.astype(np.float64), kind)
+                    output = wp.empty((len(points), 13), dtype=wp.float32, device=device)
+                    wp.launch(
+                        sample_smooth,
+                        len(points),
+                        [native.fields[0].data, wp.array(points, dtype=wp.vec3, device=device), output],
+                        device=device,
+                    )
+                    actual = output.numpy()
+                    np.testing.assert_allclose(actual[:, :4], expected[:, :4], atol=5e-6, rtol=5e-5)
+                    np.testing.assert_allclose(actual[:, 4:], expected[:, 4:], atol=3e-3, rtol=3e-3)
+                    field.data.coefficients.zero_()
+                    with self.assertRaisesRegex(ValueError, "coefficients changed"):
+                        native.validate_identity()
 
     def test_far_steps_in_float32(self):
         """Resolve rigid and joint steps that are small next to their coordinates."""
