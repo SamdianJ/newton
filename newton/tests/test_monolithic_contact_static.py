@@ -181,6 +181,22 @@ def test_static_contact_filtering(test, device):
     test.assertTrue(all(key[:2] == (source, target) for key in run._contact.actor_samples.keys))
 
 
+def test_static_contact_respects_disabled_collision(test, device):
+    """Leave out link-world pairs whose shape collisions were disabled after finalization.
+
+    Scenes such as the Franka grasp clear ``COLLIDE_SHAPES`` on every shape and keep
+    only particle contact; the Model's shape pair list is not rebuilt, so it still
+    names those pairs, which carry no contact.
+    """
+    model, _source, _target = static_scene(device)
+    flags = model.shape_flags.numpy()
+    flags &= ~int(newton.ShapeFlags.COLLIDE_SHAPES)
+    model.shape_flags.assign(flags)
+    run = static_solver(model)
+    test.assertEqual(run._contact.actor_samples.count, 0)
+    test.assertEqual(run._contact.actor_samples.pair_kinds, {})
+
+
 def test_static_contact_step(test, device):
     """Produce a real reaction and common-origin equal/opposite pair wrenches."""
     for kind, first in itertools.product(("plane", "box"), (False, True)):
@@ -251,6 +267,7 @@ for _test in (
     test_static_contact_terms,
     test_static_contact_derivatives,
     test_static_contact_filtering,
+    test_static_contact_respects_disabled_collision,
     test_static_contact_step,
     test_sphere_plane_step,
 ):

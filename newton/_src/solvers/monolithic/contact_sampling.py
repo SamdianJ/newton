@@ -216,6 +216,11 @@ class ContactSamples:
             mechanical_pair = bodies[a] in tree_support and bodies[b] in tree_support
             if owner[a] == owner[b]:
                 continue
+            collide = flags[a] & int(ShapeFlags.COLLIDE_SHAPES) and flags[b] & int(ShapeFlags.COLLIDE_SHAPES)
+            if not collide and not (mechanical_pair or a in self.rigid_shapes or b in self.rigid_shapes):
+                # Link-world pairs follow the shape flags, which scenes may clear after
+                # finalization without rebuilding the Model's pair list.
+                continue
             pair = tuple(sorted((a, b)))
             if pair in seen:
                 raise ValueError("Duplicate effective Model shape pair")
