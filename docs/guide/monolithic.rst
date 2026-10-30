@@ -61,6 +61,19 @@ CUDA graph. PCG has no stagnation exit: it iterates until its tolerance or
 inspected. Regularized direction retries use the same schedule for every scene,
 starting without regularization.
 
+FREE rigid actors predict translation and rotation from their current velocities;
+this changes the Newton starting point, not the discrete inertial equation.
+ArmijoOrResNorm permits either energy or residual progress. Within a physical
+step, each accepting branch must also preserve its best value reached so far,
+up to the existing rounding allowance, to prevent alternating regressions.
+The other measure may still increase; C-IE energy acceptance remains heuristic.
+
+``alignment_policy="guard"`` rejects penetrating samples whose surface normals
+point in the same direction. Robot surface contact can instead explicitly use
+``"mask"`` to exclude each such complete contact term, including both endpoint
+forces. This existing one-sided sampling model retains invalid-geometry checks
+and does not provide continuous collision or continuous normals at sharp edges.
+
 A step converges when every residual row lies within its own tolerance: the
 largest of an absolute target (1e-11 N for force rows, 1e-13 N m for torque
 rows), a relative tolerance times the largest residual of the same block and
@@ -68,9 +81,8 @@ unit at the step's first iterate, the inertial prediction (1e-6 in FP64, 1e-4
 in FP32), and 32 times the precision's machine epsilon times the row's rounding
 magnitude. Taking the reference at the prediction keeps the tolerance
 independent of uniform velocity: the step-start residual would contain each
-body's momentum over the time step, which the prediction cancels. A free rigid
-body's rotation is the exception: the prediction keeps its step-start
-orientation, so its angular momentum still enters the reference. The rounding
+body's momentum over the time step, which the prediction cancels; free rigid
+actors are predicted from both their linear and angular velocities. The rounding
 magnitude sums the row's absolute contributions, the tangent-weighted
 magnitudes of the step increments, and, for strains that are small differences
 of larger terms, the operands of their step-dependent parts: cable curvature

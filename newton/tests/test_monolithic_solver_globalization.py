@@ -45,6 +45,14 @@ class TestGlobalization(unittest.TestCase):
             self.assertEqual((tau.dtype, physical.dtype), (np.dtype(dtype), np.dtype(dtype)))
             self.assertEqual(type(convergence.merit(residual, tau)), dtype)
 
+    def test_reject_alternating_regressions(self):
+        """Reject a cycle between metrics while permitting residual progress with rising energy."""
+        kw = {"energy_noise": 0, "residual_noise": 0, "slope_noise": 0}
+        self.assertTrue(acceptance(1, 0.9, -1, 0.1, 1, 1.1, **kw)[0])
+        bounds = {"best_energy": 0.9, "best_merit": 1.0}
+        self.assertFalse(acceptance(0.9, 1.05, -1, 0.1, 1.1, 1.02, **bounds, **kw)[0])
+        self.assertTrue(acceptance(0.9, 1.05, -1, 0.1, 1.1, 0.8, **bounds, **kw)[0])
+
     def test_merit_resolves_each_unit(self):
         """Accept a torque improvement that outweighs sub-tolerance position noise, and not the reverse."""
         tau = np.array([1e-10, 1e-12])
