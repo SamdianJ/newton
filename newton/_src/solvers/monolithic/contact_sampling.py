@@ -109,7 +109,8 @@ class ContactSamples:
         rigids = [a for a in actors.actors if a.kind == "rigid"]
         arms = tuple(a for a in actors.actors if a.kind == "articulation")
         if not rigids and _materials is None and not arms:
-            self.rigid_shapes = ()
+            # A contact-free scene still reports its (empty) target set.
+            self.rigid_shapes, self.targets_used = (), ()
             return
         tree_support = articulation_support(model, arms)
         for body, (local, _) in tree_support.items():
