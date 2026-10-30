@@ -120,7 +120,7 @@ class ContactSystemAudit:
                     run._objective.residual,
                     run._tet.residual,
                     contact,
-                    run._layout.q_scalar_offset,
+                    run._linear.q_local,
                     run._layout.x_scalar_offset,
                     self.residual,
                 ],

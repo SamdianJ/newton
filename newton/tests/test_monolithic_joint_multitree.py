@@ -13,7 +13,7 @@ import warp as wp
 import newton
 from newton._src.solvers.monolithic import coupled_kernels
 from newton._src.solvers.monolithic.actors import ActorTable
-from newton._src.solvers.monolithic.articulation import ArticulationObjective, _TreeKinematics
+from newton._src.solvers.monolithic.articulation import ArticulationObjective, _configuration_digest, _TreeKinematics
 from newton._src.solvers.monolithic.linear_types import MonolithicLinearLayout
 from newton.solvers.experimental.monolithic import SolverMonolithic
 from newton.tests.monolithic_test_utils import add_contact_free_tet
@@ -151,7 +151,36 @@ def test_reordered_tree_view(test, device):
     test.assertNotEqual(k.digest, _TreeKinematics(model, actors=tuple(reversed(arms))).digest)
 
 
+def test_single_tree_digest_is_unchanged(test, device):
+    """Keep a single tree's configuration digest to its source values, as before multiple trees.
+
+    Frozen robot references and checkpoints bind that digest; only a layout of
+    several trees adds the tree structure to it.
+    """
+    model = trees_model(device, sizes=(3,))
+    extra = {"marker": np.array([7], dtype=np.int32)}
+    for dtype in (wp.float64, wp.float32):
+        with test.subTest(dtype=dtype):
+            k = _TreeKinematics(model, extra_config=extra, dtype=dtype)
+            fields = {**k._source_values, **extra}
+            if dtype == wp.float32:
+                fields["native_precision"] = np.array([32], dtype=np.int32)
+            test.assertEqual(k.digest, _configuration_digest(fields))
+    several = trees_model(device)
+    arms = ActorTable.from_model(several).actors
+    test.assertNotEqual(
+        _TreeKinematics(several, actors=arms).digest,
+        _configuration_digest(_TreeKinematics(several, actors=arms)._source_values),
+    )
+
+
 add_function_test(TestMultiTree, "test_multitree_kinematics", test_multitree_kinematics, devices=get_test_devices())
+add_function_test(
+    TestMultiTree,
+    "test_single_tree_digest_is_unchanged",
+    test_single_tree_digest_is_unchanged,
+    devices=get_test_devices(),
+)
 add_function_test(TestMultiTree, "test_multitree_objective", test_multitree_objective, devices=get_test_devices())
 add_function_test(TestMultiTree, "test_reordered_tree_view", test_reordered_tree_view, devices=get_test_devices())
 

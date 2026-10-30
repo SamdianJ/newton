@@ -400,13 +400,16 @@ class _TreeKinematics:
                 raise ValueError(f"Negative {name}")
         fields = dict(self._source_values)
         coord_ids = list(range(model.joint_coord_count)) if actor is None else list(actor.coord_indices)
-        fields.update(
-            mechanical_bodies=np.asarray(body_ids, dtype=np.int32),
-            mechanical_joints=np.asarray(joint_ids, dtype=np.int32),
-            mechanical_coordinates=np.asarray(coord_ids, dtype=np.int32),
-            mechanical_dofs=np.asarray(dof_ids, dtype=np.int32),
-            mechanical_trees=np.asarray(sizes, dtype=np.int32).reshape(-1, 3),
-        )
+        if self.tree_count > 1:
+            # A single tree keeps its earlier identity, which frozen robot references
+            # and checkpoints bind; several trees also identify their layout and order.
+            fields.update(
+                mechanical_bodies=np.asarray(body_ids, dtype=np.int32),
+                mechanical_joints=np.asarray(joint_ids, dtype=np.int32),
+                mechanical_coordinates=np.asarray(coord_ids, dtype=np.int32),
+                mechanical_dofs=np.asarray(dof_ids, dtype=np.int32),
+                mechanical_trees=np.asarray(sizes, dtype=np.int32).reshape(-1, 3),
+            )
         fields.update({} if extra_config is None else extra_config)
         if dtype == wp.float32:
             fields["native_precision"] = np.array([32], dtype=np.int32)
