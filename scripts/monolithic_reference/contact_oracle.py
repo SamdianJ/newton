@@ -20,7 +20,7 @@ def rotation(angle):
     return np.array([[c, 0, s], [0, 1, 0], [-s, 0, c]])
 
 
-def geometry(y, kind, scale):
+def geometry(y, kind, scale, *, box_smoothing=0.0):
     if isinstance(kind, dict):
         if "smooth_grid" in kind:
             if "natural_spline" in kind:
@@ -44,6 +44,14 @@ def geometry(y, kind, scale):
         length = np.linalg.norm(y)
         g = y / length
         return length - scale[0], g, (np.eye(3) - np.outer(g, g)) / length
+    if box_smoothing > 0:
+        normals = np.vstack((np.eye(3), -np.eye(3)))
+        planes = normals @ y - np.tile(scale, 2)
+        exponentials = np.exp((planes - planes.max()) / box_smoothing)
+        probabilities = exponentials / exponentials.sum()
+        g = probabilities @ normals
+        h = (normals.T @ (probabilities[:, None] * normals) - np.outer(g, g)) / box_smoothing
+        return planes.max() + box_smoothing * np.log(exponentials.sum()), g, h
     d = np.abs(y) - scale
     v = np.maximum(d, 0)
     length = np.linalg.norm(v)
@@ -70,9 +78,9 @@ def penalty(gap, stiffness, width):
     return stiffness * p**2 / 2, stiffness * p * dp, stiffness * (dp**2 + p * ddp)
 
 
-def local(y, yn, kind, scale, *, offset, stiffness, width=1e-4, mu=0.5, a=1e-5):
+def local(y, yn, kind, scale, *, offset, stiffness, width=1e-4, mu=0.5, a=1e-5, box_smoothing=0.0):
     """Evaluate one C-IE sample: friction load from the gap linearized at the start point."""
-    phi, g, h = geometry(y, kind, scale)
+    phi, g, h = geometry(y, kind, scale, box_smoothing=box_smoothing)
     d = phi - offset
     en, force, curvature = penalty(d, stiffness, width)
     u = y - yn
@@ -95,6 +103,69 @@ def local(y, yn, kind, scale, *, offset, stiffness, width=1e-4, mu=0.5, a=1e-5):
     dr = curvature * np.outer(g, g) - force * h + mu * (np.outer(factor * v, dload) + load * radial @ dv)
     b = curvature * np.outer(g, g) + mu * load * radial @ p
     return np.array([en, mu * load * psi]), -force * g + friction, dr, b
+
+
+def orientation(alignment, width):
+    """Return the independently defined C2 angular selection and its first derivative."""
+    if not 0 < width < 1:
+        raise ValueError("Orientation width must be between zero and one")
+    t = np.clip(alignment / width, 0, 1)
+    return (1 - t) ** 3 * (1 + 3 * t + 6 * t**2), -30 * t**2 * (1 - t) ** 2 / width
+
+
+def frozen_orientation(source_normal, gradient, width):
+    """Compute physical-step-start selection from normalized source/target normals."""
+    ns, ng = np.linalg.norm(source_normal), np.linalg.norm(gradient)
+    if ns == 0 or ng == 0:
+        raise ValueError("Frozen orientation requires nonzero step-start normals")
+    alignment = (source_normal @ gradient) / (ns * ng)
+    if width == 0:
+        return float(alignment <= 0)
+    return float(orientation(alignment, width)[0])
+
+
+def frozen_local(
+    y,
+    yn,
+    start_source_normal,
+    kind,
+    scale,
+    *,
+    offset,
+    stiffness,
+    width=1e-4,
+    mu=0.5,
+    a=1e-5,
+    box_smoothing=0.0,
+    alignment_smoothing=0.1,
+):
+    """Return E, residual, PSD approximation and physical-step-start weight.
+
+    Only the start normal and start field define c_n. The normal potential is
+    c_n*P(gap) within this step; cross-step conservation is not asserted.
+    C-IE friction uses c_n*|grad(phi_current)| times its original load.
+    """
+    start_gradient = geometry(yn, kind, scale, box_smoothing=box_smoothing)[1]
+    weight = frozen_orientation(start_source_normal, start_gradient, alignment_smoothing)
+    phi, g, _ = geometry(y, kind, scale, box_smoothing=box_smoothing)
+    energy, residual, _, fitted = local(
+        y,
+        yn,
+        kind,
+        scale,
+        offset=offset,
+        stiffness=stiffness,
+        width=width,
+        mu=mu,
+        a=a,
+        box_smoothing=box_smoothing,
+    )
+    _, load, curvature = penalty(phi - offset, stiffness, width)
+    normal_r, normal_b = -load * g, curvature * np.outer(g, g)
+    length = np.linalg.norm(g)
+    residual = weight * (normal_r + length * (residual - normal_r))
+    fitted = weight * (normal_b + length * (fitted - normal_b))
+    return np.array([weight * energy[0], weight * length * energy[1]]), residual, fitted, weight
 
 
 def evaluate(model, q, x, qn, xn, *, kinds, mapping=None, mu=0.5, radius=0.001):

@@ -306,6 +306,12 @@ class _ContactRows:
             end_bit = max(1, (self.row_count * self.identity_count * self.local_count).bit_length())
             radix_sort_pairs(keys, indices, span, end_bit=end_bit)
         wp.launch(_contact_offsets, self.row_count + 1, [keys, span, self.stride, self.offsets], device=self.device)
+        self._reduce_values(values, span, self.result)
+        return keys, indices
+
+    def _reduce_values(self, values, span, result):
+        """Reuse an already validated ordering for another contribution on the same rows."""
+        keys, indices = self.keys, self.indices
         if span:
             wp.launch(_contact_work, span, [keys, indices, values, self.work, self.flags], device=self.device)
             # First reduce fixed 256-entry blocks relative to each row start,
@@ -328,9 +334,8 @@ class _ContactRows:
                 )
                 distance *= 2
         if self.row_count:
-            wp.launch(_contact_result, self.row_count, [self.offsets, self.work, self.result], device=self.device)
-        wp.launch(_clear_failed_rows, self.row_count + 1, [self.offsets, self.result, self.flags], device=self.device)
-        return keys, indices
+            wp.launch(_contact_result, self.row_count, [self.offsets, self.work, result], device=self.device)
+        wp.launch(_clear_failed_rows, self.row_count + 1, [self.offsets, result, self.flags], device=self.device)
 
 
 @cache
@@ -343,9 +348,11 @@ def _pool_types(dtype):
         support_counts: wp.array[int]
         columns: wp.array2d[int]
         residual: wp.array2d[dtype]
+        magnitude: wp.array2d[dtype]
         weights: wp.array2d[dtype]
         factors: wp.array3d[dtype]
         energy: wp.array2d[dtype]
+        energy_magnitude: wp.array2d[dtype]
         rounding: wp.array[dtype]
         force_counts: wp.array[int]
         force_rows: wp.array2d[int]
@@ -368,6 +375,7 @@ def _pool_types(dtype):
         r_ids: wp.array[wp.uint64]
         r_local: wp.array[int]
         r_values: wp.array[dtype]
+        a_values: wp.array[dtype]
         energy_count: wp.array[int]
         e_rows: wp.array[int]
         e_ids: wp.array[wp.uint64]
@@ -419,7 +427,10 @@ def _validate_contacts(candidates: Any, records: Any, row_count: int, force_row_
         energy_value = candidates.energy[i, j] + candidates.energy.dtype(0)
         if not wp.isfinite(energy_value):
             wp.atomic_or(records.flags, 0, 4)
-        nonzero = nonzero or energy_value != type(energy_value)(0)
+        magnitude = candidates.energy_magnitude[i, j]
+        if not wp.isfinite(magnitude) or magnitude < type(magnitude)(0):
+            wp.atomic_or(records.flags, 0, 4)
+        nonzero = nonzero or energy_value != type(energy_value)(0) or magnitude > type(magnitude)(0)
         for axis in range(6):
             force = candidates.pairs[i, j, axis]
             if not wp.isfinite(force):
@@ -432,7 +443,10 @@ def _validate_contacts(candidates: Any, records: Any, row_count: int, force_row_
             wp.atomic_or(records.flags, 0, 2)
         if not wp.isfinite(residual_value):
             wp.atomic_or(records.flags, 0, 4)
-        nonzero = nonzero or residual_value != type(residual_value)(0)
+        magnitude = candidates.magnitude[i, j]
+        if not wp.isfinite(magnitude) or magnitude < type(magnitude)(0):
+            wp.atomic_or(records.flags, 0, 4)
+        nonzero = nonzero or residual_value != type(residual_value)(0) or magnitude > type(magnitude)(0)
     zero = candidates.weights.dtype(0)
     for component in range(3):
         weight = candidates.weights[i, component]
@@ -571,12 +585,13 @@ def _write_contacts(
         records.r_ids[slot] = identity
         records.r_local[slot] = j
         records.r_values[slot] = candidates.residual[i, j]
+        records.a_values[slot] = wp.max(wp.abs(candidates.residual[i, j]), candidates.magnitude[i, j])
     for j in range(4):
         slot = 4 * contact + j
         if j < 2:
             records.e_values[slot] = candidates.energy[i, j]
         else:
-            records.e_values[slot] = wp.abs(candidates.energy[i, j % 2])
+            records.e_values[slot] = wp.max(wp.abs(candidates.energy[i, j % 2]), candidates.energy_magnitude[i, j % 2])
         records.e_rows[slot] = j
         records.e_ids[slot] = identity
         records.e_local[slot] = 0
@@ -808,9 +823,11 @@ class _ContactPool:
             "support_counts": ((b,), wp.int32),
             "columns": ((b, k), wp.int32),
             "residual": ((b, k), dtype),
+            "magnitude": ((b, k), dtype),
             "weights": ((b, 3), dtype),
             "factors": ((b, 3, k), dtype),
             "energy": ((b, 2), dtype),
+            "energy_magnitude": ((b, 2), dtype),
             "rounding": ((b,), dtype),
             "force_counts": ((b,), wp.int32),
             "force_rows": ((b, f), wp.int32),
@@ -846,6 +863,7 @@ class _ContactPool:
                 "factor_kind": ((3 * n,), wp.int32),
                 "factor_contact": ((3 * n,), wp.int32),
                 "rounding": ((n,), dtype),
+                "a_values": ((r,), dtype),
                 "triplet_offsets": ((n + 1,), wp.int32),
                 "triplet_rows": ((t,), wp.int32),
                 "triplet_columns": ((t,), wp.int32),
@@ -866,6 +884,7 @@ class _ContactPool:
             for size, (_, scalar) in zip(sizes, (*candidate_spec.values(), *record_spec.values()), strict=True)
         )
         byte_count += 24 * b + 16 * p + (4 + native_bytes) * m
+        byte_count += row_count * native_bytes
         if batch_capacity is not None:
             byte_count += 8 * m + 4 * b + 32
         for rows, size in ((1, m), (4, 4 * n), (row_count, r), (force_row_count, f * n)):
@@ -891,6 +910,7 @@ class _ContactPool:
         self._identity = _ContactRows(1, m, identity_count, 1, dtype, self.device)
         self.energy = _ContactRows(4, 4 * n, identity_count, 1, dtype, self.device)
         self.residual = _ContactRows(row_count, r, identity_count, k, dtype, self.device)
+        self.magnitude = wp.zeros(row_count, dtype=dtype, device=self.device)
         self.force = _ContactRows(force_row_count, f * n, identity_count, f, dtype, self.device)
         self.graphs = _SegmentGraphCache(self.device, enabled=use_cuda_graph and self.device.is_cuda)
         self.payload_bytes = byte_count
@@ -913,6 +933,7 @@ class _ContactPool:
             for name in spec
         ]
         buffers.extend((self._active, self._selected, self._demands, self._prefix, self._zero_rows, self._zero_values))
+        buffers.append(self.magnitude)
         for owner in (self._identity, self.energy, self.residual, self.force):
             buffers.extend(owner.buffers())
         if self._stream is not None:
@@ -920,6 +941,13 @@ class _ContactPool:
         return tuple(buffers)
 
     def _validate_storage(self):
+        if (
+            self.magnitude.shape != (self.row_count,)
+            or self.magnitude.dtype != self.dtype
+            or self.magnitude.device != self.device
+            or not self.magnitude.is_contiguous
+        ):
+            raise ValueError("Invalid contact magnitude storage")
         for struct, spec in zip((self.candidates, self.records), self._specs, strict=True):
             for name, (shape, dtype) in spec.items():
                 array = getattr(struct, name)
@@ -1025,6 +1053,9 @@ class _ContactPool:
                 count,
                 span=None if spans is None else spans[index + 1],
             )
+        self.residual._reduce_values(
+            out.a_values, self.residual.capacity if spans is None else spans[2], self.magnitude
+        )
         wp.launch(
             _pool_row_flags, 1, [out, self.energy.flags, self.residual.flags, self.force.flags], device=self.device
         )
@@ -1043,6 +1074,7 @@ class _ContactPool:
         outputs = [getattr(out, name) for name in self._specs[1] if name not in ("flags", "requested")]
         for owner in (self.energy, self.residual, self.force):
             outputs.extend((owner.result, owner.offsets))
+        outputs.append(self.magnitude)
         for values in outputs:
             if values.size:
                 workers = min(values.size, self.energy.BLOCK_SIZE)

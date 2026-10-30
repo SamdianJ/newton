@@ -39,6 +39,8 @@ class MonolithicConfig:
     contact_stiffness: float = 1e7
     friction_coefficient: float = 0.5
     normal_smoothing: float = 1e-4
+    box_smoothing: float = 0.0
+    alignment_smoothing: float = 0.0
     material_model: MaterialModel = MaterialModel.SMITH_LOG_STABILIZED
     mass_mode: MassMode = MassMode.CONSISTENT
     min_det_f_guard: float = 0.2
@@ -67,12 +69,16 @@ class MonolithicConfig:
             ("contact_stiffness", True),
             ("friction_coefficient", False),
             ("normal_smoothing", False),
+            ("box_smoothing", False),
+            ("alignment_smoothing", False),
         ):
             value = getattr(self, name)
             if not _number(value) or not math.isfinite(value) or value < 0 or (positive and value == 0):
                 raise ValueError(f"Invalid {name}")
         if self.friction_coefficient > 0 and self.friction_velocity_scale == 0:
             raise ValueError("Friction requires a positive friction_velocity_scale")
+        if self.alignment_smoothing >= 1:
+            raise ValueError("Alignment smoothing must be below one")
         if not _number(self.min_det_f_guard) or not math.isfinite(self.min_det_f_guard) or self.min_det_f_guard <= 0:
             raise ValueError("Invalid detF guard")
         if self.contact_factor_capacity is not None and (
@@ -85,8 +91,10 @@ class MonolithicConfig:
             raise ValueError("Invalid spatial candidate capacity")
         if self.publish_policy not in ("strict", "last_accepted", "current_iterate"):
             raise ValueError("Unknown coupled publication policy")
-        if self.alignment_policy not in ("guard", "mask"):
+        if self.alignment_policy not in ("guard", "mask", "frozen"):
             raise ValueError("Unknown contact alignment policy")
+        if (self.box_smoothing > 0 or self.alignment_smoothing > 0) and self.alignment_policy != "frozen":
+            raise ValueError("Contact smoothing requires frozen orientation")
         for value in (self.newton_max_iterations, self.line_search_max_iterations, self.linear_max_iterations):
             if type(value) is not int or value <= 0:
                 raise ValueError("Iteration budgets must be positive integers")
@@ -103,7 +111,7 @@ class MonolithicConfig:
         the device-independent contact batch size, belong to the contact
         resource identity.
         """
-        return {
+        fields = {
             "config_version": np.array([CONFIG_VERSION], dtype=np.int32),
             "contact_model": _text(CONTACT_MODEL),
             "globalization": _text(GLOBALIZATION),
@@ -132,3 +140,8 @@ class MonolithicConfig:
             ),
             "precision": _text(self.precision.value),
         }
+        if self.box_smoothing or self.alignment_smoothing:
+            fields["contact_smoothing"] = np.array([self.box_smoothing, self.alignment_smoothing], dtype=np.float64)
+        if self.alignment_policy == "frozen":
+            fields["contact_orientation"] = _text("frozen-orientation/c-ie/v1")
+        return fields

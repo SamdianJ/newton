@@ -18,7 +18,9 @@ import warp as wp
 
 from ...geometry import GeoType, ShapeFlags
 from ...geometry.sdf_texture import TextureSDFData
+from .contact_roundoff import friction_magnitude, frozen_weight_magnitude, normal_magnitude
 from .contact_sampling import ContactSamples, _canonical_shapes, _checked_contact_capacity
+from .contact_smoothing import orientation_weight
 from .linear_types import MonolithicLinearLayout
 from .smooth_sdf import _sdf_type
 
@@ -45,6 +47,13 @@ def _geometry_type(dtype):
         # Length by which rounding the local point y can move the gap.
         rounding: wp.array[dtype]
         gradient: wp.array[vector]
+        orientation: wp.array[dtype]
+        orientation_magnitude: wp.array[dtype]
+        orientation_condition: wp.array[dtype]
+        field_magnitude: wp.array[dtype]
+        gradient_magnitude: wp.array[vector]
+        normal_magnitude: wp.array[vector]
+        slip_magnitude: wp.array[vector]
         distance: wp.array[dtype]
         rotation: wp.array[matrix]
         jacobian_q: wp.array2d[vector]
@@ -55,6 +64,27 @@ def _geometry_type(dtype):
 
 
 _Geometry = _geometry_type(wp.float64)
+
+
+@cache
+def _response_type(dtype):
+    vector = wp.vec3d if dtype == wp.float64 else wp.vec3
+
+    @wp.struct
+    class Response:
+        orientation: wp.array[dtype]
+        residual_magnitude: wp.array[vector]
+        max_condition: wp.array[dtype]
+
+    return Response
+
+
+def _response(dtype, count, device):
+    result = _response_type(dtype)()
+    result.orientation = wp.zeros(count, dtype=dtype, device=device)
+    result.residual_magnitude = wp.zeros(count, dtype=wp.vec3d if dtype == wp.float64 else wp.vec3, device=device)
+    result.max_condition = wp.zeros(1, dtype=dtype, device=device)
+    return result
 
 
 @wp.func
@@ -83,6 +113,33 @@ def _penalty64(gap: Any, stiffness: Any, smoothing: Any):
 def _reset_flags(flags: wp.array[int]):
     flags[0] = 0
     flags[1] = 2147483647
+
+
+@wp.kernel
+def _freeze_orientation(geometry: Any, width: Any, eps: Any, count: wp.array[int]):
+    i = wp.tid()
+    if i >= count[0]:
+        return
+    gradient = geometry.gradient[i]
+    length = wp.length(gradient)
+    # Undefined remote normals may become relevant later in the step. Keep a
+    # sentinel, so a loaded sample then fails instead of silently disappearing.
+    coefficient = type(width)(-1.0)
+    if length > type(width)(0.0) and wp.isfinite(length):
+        a = wp.dot(geometry.soft_normal[i], gradient / length)
+        coefficient = wp.where(a <= type(width)(0.0), type(width)(1.0), type(width)(0.0))
+        if width > type(width)(0.0):
+            coefficient, _derivative = orientation_weight(a, width)
+    geometry.orientation[i] = coefficient
+    if coefficient >= type(width)(0.0):
+        magnitude, condition = frozen_weight_magnitude(
+            gradient, geometry.soft_normal[i], width, geometry.gradient_magnitude[i], geometry.normal_magnitude[i], eps
+        )
+        geometry.orientation_magnitude[i] = magnitude
+        geometry.orientation_condition[i] = condition
+    else:
+        geometry.orientation_magnitude[i] = type(width)(0.0)
+        geometry.orientation_condition[i] = type(width)(wp.inf)
 
 
 @wp.kernel
@@ -140,6 +197,9 @@ def _law(
     support_local: wp.array[int],
     jacobians: wp.array[Any],
     batch_count: wp.array[int],
+    response: Any,
+    energy_magnitude: wp.array2d[Any],
+    eps: Any,
 ):
     key = wp.tid()
     if direct >= 2 and key >= batch_count[0]:
@@ -161,6 +221,8 @@ def _law(
             gap = current.distance[key] - radius - margins[shape]
     output_key = key + key_offset
     g = current.gradient[key]
+    response.orientation[output_key] = type(radius)(1.0)
+    response.residual_magnitude[output_key] = type(g)(0.0)
     u = current.slip[key]
     en, load_normal, curvature = _penalty64(gap, k, smoothing)
     direction = g
@@ -169,7 +231,9 @@ def _law(
     if mu == type(radius)(0.0):
         load = type(radius)(0.0)
     if load_normal > type(radius)(0.0) or load > type(radius)(0.0):
-        if current.uncertified[key] != 0 or (load > type(radius)(0.0) and start.uncertified[key] != 0):
+        if current.uncertified[key] != 0 or (
+            start.uncertified[key] != 0 and (load > type(radius)(0.0) or alignment_mask == 2)
+        ):
             _failure(flags, output_key, 5)
             return
         if wp.length(g) == type(radius)(0.0) or (
@@ -208,7 +272,74 @@ def _law(
     ):
         _failure(flags, output_key, 1)
         return
-    if alignment_mask != 0:
+    if alignment_mask == 2:
+        weight = start.orientation[key]
+        if weight < type(radius)(0.0):
+            if load_normal > type(radius)(0.0) or load > type(radius)(0.0):
+                _failure(flags, output_key, 2)
+                return
+            weight = type(radius)(0.0)
+        response.orientation[output_key] = weight
+        # The orientation coefficient belongs to the physical step start.
+        # Its derivative with respect to every Newton/trial coordinate is zero.
+        friction_weight = weight * wp.length(g)
+        r = -weight * load_normal * g + friction_weight * beta * v
+        omitted[output_key, 0] = (type(radius)(1.0) - weight) * en
+        omitted[output_key, 1] = (type(radius)(1.0) - weight) * dissipative
+        omitted[output_key, 2] = (type(radius)(1.0) - weight) * load_normal
+        omitted[output_key, 3] = (type(radius)(1.0) - weight) * load
+        en *= weight
+        curvature *= weight
+        dissipative *= friction_weight
+        beta *= friction_weight
+        radial *= friction_weight
+        if load_normal > type(radius)(0.0) or load > type(radius)(0.0):
+            wp.atomic_or(mask_seen, output_key, wp.where(weight > type(radius)(0.0), 1, 2))
+        gap_magnitude = current.field_magnitude[key] + wp.abs(current.distance[key]) + wp.abs(gap)
+        has_load = load_normal > type(radius)(0.0) or load > type(radius)(0.0)
+        resolved_geometry = wp.isfinite(gap_magnitude) and wp.length(g) > type(radius)(0.0)
+        if weight > type(radius)(0.0) and (has_load or resolved_geometry):
+            # The stored step-start coefficient defines this Newton equation.
+            # Its generation error and temporal lag are separate diagnostics.
+            # Evaluate the finite support-neighborhood error even when the
+            # native load rounded to zero. Remote uncertified fields stay out
+            # until the existing loaded-domain checks make them relevant.
+            ae, ar = normal_magnitude(
+                gap, g, k, smoothing, weight, gap_magnitude, current.gradient_magnitude[key], type(radius)(0.0), eps
+            )
+            ad, arf = friction_magnitude(
+                gap,
+                g,
+                u,
+                k,
+                smoothing,
+                mu,
+                falloff,
+                weight,
+                gap_magnitude,
+                current.gradient_magnitude[key],
+                current.slip_magnitude[key],
+                type(radius)(0.0),
+                eps,
+            )
+            response.residual_magnitude[output_key] = ar + arf
+            energy_magnitude[output_key, 0] = ae
+            energy_magnitude[output_key, 1] = ad
+            if has_load or ae > type(radius)(0.0) or ad > type(radius)(0.0) or wp.length(ar + arf) > type(radius)(0.0):
+                condition = eps * wp.length(current.gradient_magnitude[key]) / wp.length(g)
+                if smoothing > type(radius)(0.0):
+                    condition = wp.max(condition, eps * gap_magnitude / smoothing)
+                wp.atomic_max(response.max_condition, 0, condition)
+        if (
+            not wp.isfinite(en)
+            or not wp.isfinite(dissipative)
+            or not wp.isfinite(wp.length(r))
+            or not wp.isfinite(beta)
+            or not wp.isfinite(radial)
+        ):
+            _failure(flags, output_key, 1)
+            return
+    elif alignment_mask != 0:
         # Select the entire contact term with the law's explicit/implicit collider normal.
         masked = wp.dot(current.soft_normal[key], direction) > type(radius)(0.0)
         if load_normal > type(radius)(0.0) or load > type(radius)(0.0):
@@ -217,6 +348,7 @@ def _law(
                 bit = 2
             wp.atomic_or(mask_seen, output_key, bit)
         if masked:
+            response.orientation[output_key] = type(radius)(0.0)
             omitted[output_key, 0] = en
             omitted[output_key, 1] = dissipative
             omitted[output_key, 2] = load_normal
@@ -280,6 +412,8 @@ class ContactObjective:
         particle_radius,
         smooth_sdf=None,
         alignment_policy="guard",
+        box_smoothing=0.0,
+        alignment_smoothing=0.0,
         dtype=wp.float64,
         layout=None,
         articulation_actor=None,
@@ -295,10 +429,26 @@ class ContactObjective:
         self.vector = wp.vec3d if dtype == wp.float64 else wp.vec3
         self.matrix = wp.mat33d if dtype == wp.float64 else wp.mat33
         self.transform = wp.transformd if dtype == wp.float64 else wp.transform
-        if alignment_policy not in ("guard", "mask"):
+        if alignment_policy not in ("guard", "mask", "frozen"):
             raise ValueError("Unknown contact alignment policy")
         self.alignment_policy = alignment_policy
         self._alignment_policy = alignment_policy
+        self.box_smoothing = box_smoothing
+        self.alignment_smoothing = alignment_smoothing
+        for value in (box_smoothing, alignment_smoothing):
+            if (
+                isinstance(value, (bool, np.bool_))
+                or not isinstance(value, (int, float, np.integer, np.floating))
+                or not math.isfinite(value)
+                or value < 0
+                or value > np.finfo(self.numpy_dtype).max
+                or (value > 0 and self.numpy_dtype(value) == 0)
+            ):
+                raise ValueError("Invalid contact smoothing parameter")
+        if alignment_smoothing >= 1:
+            raise ValueError("Alignment smoothing must be below one")
+        if (box_smoothing > 0 or alignment_smoothing > 0) and alignment_policy != "frozen":
+            raise ValueError("Contact smoothing requires frozen orientation")
         parameters = (normal_stiffness, friction_coefficient, friction_velocity_scale, smoothing_width, particle_radius)
         native_parameters = np.asarray(parameters, dtype=self.numpy_dtype)
         if not np.isfinite(native_parameters).all() or any(
@@ -488,8 +638,8 @@ class ContactObjective:
         # selection, the remaining normal penalty is a true potential.
         self.conservative_energy = count == 0 or (
             parameters[1] == 0
-            and alignment_policy == "guard"
-            and (_materials is None or samples.material_start == samples.count)
+            and alignment_policy in ("guard", "frozen")
+            and (_materials is None or samples.material_start == samples.count or alignment_policy == "frozen")
         )
         self.table = table if table is not None else wp.empty(0, dtype=TextureSDFData, device=model.device)
         self.smooth_sdf = smooth_sdf
@@ -531,6 +681,15 @@ class ContactObjective:
             from .contact_actor import _validate_actor_targets  # noqa: PLC0415
 
             _validate_actor_targets(self, samples)
+        targets = shapes if samples is None else np.union1d(shapes, np.asarray(samples.targets_used, dtype=np.int32))
+        if alignment_policy == "frozen":
+            for target in targets[v["shape_type"][targets] == GeoType.MESH]:
+                index = int(v["_shape_sdf_index"][target])
+                if smooth_sdf is None or smooth_sdf.fields[index].representation != "c2-bspline":
+                    raise ValueError("Frozen mesh orientation requires bound C2 SDF")
+        box_targets = targets[v["shape_type"][targets] == GeoType.BOX]
+        if box_smoothing and len(box_targets) and box_smoothing * math.log(6) >= np.min(v["shape_scale"][box_targets]):
+            raise ValueError("BOX smoothing must retain an interior")
 
     @property
     def quaternion_norm_tolerance(self):

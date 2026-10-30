@@ -762,7 +762,11 @@ class ContactProducer(_Producer):
         return contact.energy.numpy().sum(), contact.absolute_energy.numpy().sum()
 
     def magnitude(self, solver, out):
-        residual = solver._contact.residual
+        residual = (
+            solver._contact.pool.magnitude
+            if solver._contact._alignment_policy == "frozen"
+            else solver._contact.residual
+        )
         wp.launch(_add_absolute, residual.size, [residual, out], device=solver.model.device)
 
     def coordinates(self, solver, state, out):

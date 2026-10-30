@@ -11,9 +11,10 @@ import numpy as np
 import warp as wp
 
 from .actors import articulation_support
-from .contact import _geometry_type, _law, _reset_flags, _validate_start
-from .contact_actor import _actor_geometry, _center, _point_column
+from .contact import _freeze_orientation, _geometry_type, _law, _reset_flags, _response, _validate_start
+from .contact_actor import _absolute_matrix, _actor_geometry, _center, _point_column, _point_column_magnitude
 from .contact_pool import _ContactPool, _ContactRows
+from .contact_roundoff import _abs_vector
 from .segment_graph import _SegmentGraphCache
 
 
@@ -115,6 +116,7 @@ def _load_contact_chunk(
         candidates.force_counts[i] = 0
         for axis in range(2):
             candidates.energy[i, axis] = candidates.energy.dtype(0)
+            candidates.energy_magnitude[i, axis] = candidates.energy.dtype(0)
             for j in range(6):
                 candidates.pairs[i, axis, j] = candidates.pairs.dtype(0)
         for axis in range(3):
@@ -176,6 +178,9 @@ def _copy_contact_geometry(source: Any, target: Any, ids: wp.array[wp.uint64], c
         target.soft_normal[b] = source.soft_normal[a]
         target.distance[b] = source.distance[a]
         target.uncertified[b] = source.uncertified[a]
+        target.orientation[b] = source.orientation[a]
+        target.orientation_magnitude[b] = source.orientation_magnitude[a]
+        target.orientation_condition[b] = source.orientation_condition[a]
 
 
 @wp.kernel
@@ -258,12 +263,19 @@ def _project_contact_column(
     bary: Any,
     axis: int,
     rotation: Any,
+    magnitude: Any,
+    jacobian_magnitude: Any,
 ):
     candidates.columns[contact, local] = row
     candidates.residual[contact, local] = wp.dot(jacobian, residual)
     candidates.factors[contact, 0, local] = wp.dot(jacobian, gradient)
     candidates.factors[contact, 1, local] = wp.dot(jacobian, radial)
     candidates.factors[contact, 2, local] = wp.dot(jacobian, transverse)
+    candidates.magnitude[contact, local] = (
+        wp.dot(_abs_vector(jacobian), magnitude)
+        + type(bary)(8.0) * wp.dot(_abs_vector(jacobian), _abs_vector(residual))
+        + wp.dot(jacobian_magnitude, _abs_vector(residual))
+    )
     if legacy_tet:
         # Preserve legacy bary * world-coordinate arithmetic rather than using
         # an equivalent dot.
@@ -293,6 +305,7 @@ def _project_contact_chunk(
     flags: wp.array[int],
     legacy: bool,
     particle_count: int,
+    response: Any,
 ):
     i = wp.tid()
     if i >= candidates.count[0] or flags[0] != 0:
@@ -346,6 +359,8 @@ def _project_contact_chunk(
                             bary,
                             coordinate,
                             rotation,
+                            response.residual_magnitude[i],
+                            type(bary)(8.0) * _abs_vector(jacobian),
                         )
                         k += 1
         else:
@@ -360,6 +375,12 @@ def _project_contact_chunk(
                         body, support.local[index], point, support.kinds, support.indices, com, jt, jw, rigid_com
                     )
                     jacobian = wp.transpose(rotation) * (sign * column)
+                    column_magnitude = _point_column_magnitude(
+                        body, support.local[index], point, support.kinds, support.indices, com, jt, jw, rigid_com
+                    )
+                    jacobian_magnitude = wp.transpose(_absolute_matrix(rotation)) * (
+                        column_magnitude + type(point[0])(8.0) * _abs_vector(column)
+                    )
                     _project_contact_column(
                         candidates,
                         i,
@@ -374,6 +395,8 @@ def _project_contact_chunk(
                         type(point[0])(0.0),
                         0,
                         rotation,
+                        response.residual_magnitude[i],
+                        jacobian_magnitude,
                     )
                     k += 1
     candidates.support_counts[i] = k
@@ -582,6 +605,7 @@ class _ContactBatch:
         self.weights = wp.zeros((batch_capacity, 3), dtype=self.dtype, device=self.device)
         self.omitted = wp.zeros((batch_capacity, 4), dtype=self.dtype, device=self.device)
         self.mask = wp.zeros(batch_capacity, dtype=int, device=self.device)
+        self.response = _response(self.dtype, batch_capacity, self.device)
         self.flags, self.start_flags, self._flags = (wp.zeros(2, dtype=int, device=self.device) for _ in range(3))
         self._empty_scalar = wp.empty(0, dtype=self.dtype, device=self.device)
         self._empty_int = wp.empty(0, dtype=int, device=self.device)
@@ -619,6 +643,12 @@ class _ContactBatch:
         for name in ("y", "slip", "gradient", "soft_normal"):
             setattr(geometry, name, wp.zeros(count, dtype=self.vector, device=self.device))
         geometry.distance = wp.zeros(count, dtype=self.dtype, device=self.device)
+        geometry.orientation = wp.ones(count, dtype=self.dtype, device=self.device)
+        geometry.orientation_magnitude = wp.zeros(count, dtype=self.dtype, device=self.device)
+        geometry.orientation_condition = wp.zeros(count, dtype=self.dtype, device=self.device)
+        geometry.field_magnitude = wp.zeros(count if rotation else 0, dtype=self.dtype, device=self.device)
+        for name in ("gradient_magnitude", "normal_magnitude", "slip_magnitude"):
+            setattr(geometry, name, wp.zeros(count if rotation else 0, dtype=self.vector, device=self.device))
         geometry.rounding = wp.zeros(count, dtype=self.dtype, device=self.device)
         geometry.uncertified = wp.zeros(count, dtype=int, device=self.device)
         geometry.rotation = wp.zeros(count if rotation else 0, dtype=self.matrix, device=self.device)
@@ -627,7 +657,15 @@ class _ContactBatch:
 
     def buffers(self):
         arrays = [a for a in vars(self).values() if isinstance(a, wp.array)]
-        for owner in (self.all_samples, self.samples, self.support, self.current, self.start, self._start_chunk):
+        for owner in (
+            self.all_samples,
+            self.samples,
+            self.support,
+            self.current,
+            self.start,
+            self._start_chunk,
+            self.response,
+        ):
             arrays.extend(a for a in vars(owner).values() if isinstance(a, wp.array))
         # Shared metadata is a graph binding too: rebinding a shape/SDF array
         # must not replay a graph containing its retired pointer.
@@ -911,12 +949,15 @@ class _ContactBatch:
                 self._flags,
                 False,
                 self.pool.candidates.count,
+                self.dtype(c.box_smoothing),
+                c._alignment_policy == "frozen",
             ],
             device=self.device,
         )
 
     def _stage(self, state, mode, dt, *, begin, selection=None):
         c, out = self.contact, self.pool.candidates
+        alignment = 2 if c._alignment_policy == "frozen" else int(mode == 4 or c._alignment_policy == "mask")
         wp.launch(_reset_flags, 1, [self._flags], device=self.device)
         wp.launch(
             _load_contact_chunk,
@@ -950,13 +991,25 @@ class _ContactBatch:
                     c.margins if mode == 2 else self.samples.gaps,
                     self.dtype(c.parameters[4] if mode == 2 else 0),
                     self.dtype(c.parameters[3]),
-                    int(mode == 4 or c._alignment_policy == "mask"),
+                    alignment,
                     self._flags,
                     True,
                     out.count,
                 ],
                 device=self.device,
             )
+            if alignment == 2:
+                wp.launch(
+                    _freeze_orientation,
+                    self.batch_capacity,
+                    [
+                        self.current,
+                        self.dtype(c.alignment_smoothing),
+                        self.dtype(np.finfo(c.numpy_dtype).eps),
+                        out.count,
+                    ],
+                    device=self.device,
+                )
             wp.launch(
                 _copy_contact_geometry,
                 self.batch_capacity,
@@ -982,7 +1035,7 @@ class _ContactBatch:
                 self.dtype(c.parameters[3]),
                 self.dtype(c.parameters[1]),
                 self.dtype(c.numpy_dtype(c.parameters[2]) * c.numpy_dtype(dt)),
-                int(mode == 4 or c._alignment_policy == "mask"),
+                alignment,
                 self._flags,
                 out.energy,
                 self._empty_scalar,
@@ -999,6 +1052,9 @@ class _ContactBatch:
                 self._empty_int,
                 self._empty_vector,
                 out.count,
+                self.response,
+                out.energy_magnitude,
+                self.dtype(np.finfo(c.numpy_dtype).eps),
             ],
             device=self.device,
         )
@@ -1024,6 +1080,7 @@ class _ContactBatch:
                 self._flags,
                 mode == 2,
                 c.model.particle_count,
+                self.response,
             ],
             device=self.device,
         )
@@ -1085,6 +1142,7 @@ class _ContactBatch:
         wp.launch(_contact_pool_failure, 1, [self.flags, self.pool.records], device=self.device)
 
     def _evaluate_batches(self, state, dt, selection):
+        self.response.max_condition.zero_()
         # Reset the entire stream inside the graph before any additive append.
         self.pool._begin_stream()
         wp.copy(self.flags, self.start_flags)

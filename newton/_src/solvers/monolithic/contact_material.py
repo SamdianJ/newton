@@ -10,8 +10,9 @@ import warp as wp
 
 from .cable import _transport, _transport_differential
 from .contact import _failure, _reset_flags
-from .contact_actor import _center, _point_column
+from .contact_actor import _absolute_matrix, _center, _point_column, _point_column_magnitude
 from .contact_batch import _project_contact_column
+from .contact_roundoff import _abs_vector
 
 
 @wp.kernel
@@ -114,6 +115,7 @@ def _project_surface(
     flags: wp.array[int],
     particle_count: int,
     body_count: int,
+    response: Any,
 ):
     i = wp.tid()
     if i >= candidates.count[0] or samples.sources[i] != -3 or flags[0] != 0:
@@ -160,6 +162,8 @@ def _project_surface(
                 type(point[0])(0.0),
                 0,
                 rotation,
+                response.residual_magnitude[i],
+                type(point[0])(8.0) * (wp.transpose(_absolute_matrix(rotation)) * _abs_vector(jacobian[face, j])),
             )
             k += 1
         candidates.force_rows[i, j] = force_row
@@ -167,8 +171,15 @@ def _project_surface(
     body = bodies[target]
     if body >= 0:
         for index in range(support.offsets[body], support.offsets[body + 1]):
-            column = -wp.transpose(rotation) * _point_column(
+            world_column = _point_column(
                 body, support.local[index], point, support.kinds, support.indices, com, jt, jw, rigid_com
+            )
+            column = -wp.transpose(rotation) * world_column
+            column_magnitude = _point_column_magnitude(
+                body, support.local[index], point, support.kinds, support.indices, com, jt, jw, rigid_com
+            )
+            local_magnitude = wp.transpose(_absolute_matrix(rotation)) * (
+                column_magnitude + type(point[0])(8.0) * _abs_vector(world_column)
             )
             _project_contact_column(
                 candidates,
@@ -184,6 +195,8 @@ def _project_surface(
                 type(point[0])(0.0),
                 0,
                 rotation,
+                response.residual_magnitude[i],
+                local_magnitude,
             )
             k += 1
     candidates.support_counts[i] = k
@@ -299,6 +312,7 @@ class _MaterialSurface:
                 b._flags,
                 c.model.particle_count,
                 c.model.body_count,
+                b.response,
             ],
             device=b.device,
         )

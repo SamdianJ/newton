@@ -100,6 +100,15 @@ class SolverMonolithic(SolverBase):
     energy is not a potential, so Armijo acceptance is heuristic, not a
     variational guarantee.
 
+    Experimental ``alignment_policy="frozen"`` retains each sample's physical
+    step-start orientation weight through Newton and candidate refreshes.
+    ``alignment_smoothing`` is its dimensionless C2 transition width (zero is
+    binary); ``box_smoothing`` is the six-plane LogSumExp length in meters.
+    Positive smoothing widths require this policy. These constructor options
+    are runtime solver settings, not USD attributes. They change model and
+    checkpoint identity; geometry bias and step-lag error need separate task
+    qualification and are not solver convergence allowances.
+
     A step converges when every residual row satisfies its own physical
     tolerance [N or N m]: the largest of an absolute target, a relative
     tolerance on its block's residual at the step's first iterate (the
@@ -141,6 +150,8 @@ class SolverMonolithic(SolverBase):
         publish_policy="strict",
         smooth_sdf=None,
         alignment_policy="guard",
+        box_smoothing=0.0,
+        alignment_smoothing=0.0,
         joint_terms=None,
         newton_max_iterations=10,
         line_search_max_iterations=8,
@@ -165,6 +176,8 @@ class SolverMonolithic(SolverBase):
             contact_candidate_capacity=contact_candidate_capacity,
             publish_policy=publish_policy,
             alignment_policy=alignment_policy,
+            box_smoothing=box_smoothing,
+            alignment_smoothing=alignment_smoothing,
             newton_max_iterations=newton_max_iterations,
             line_search_max_iterations=line_search_max_iterations,
             linear_max_iterations=linear_max_iterations,
@@ -300,6 +313,8 @@ class SolverMonolithic(SolverBase):
             particle_radius=tet_radius,
             smooth_sdf=smooth_sdf,
             alignment_policy=alignment_policy,
+            box_smoothing=box_smoothing,
+            alignment_smoothing=alignment_smoothing,
             dtype=self._dtype,
             _materials=self._materials,
             **({} if contact_candidate_capacity is None else {"candidate_capacity": contact_candidate_capacity}),
