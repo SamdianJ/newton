@@ -9,6 +9,11 @@ from ...geometry import GeoType, Mesh, ShapeFlags
 from .actors import articulation_support
 
 
+def _sampled_source(geo, mesh):
+    """Return whether a shape type can be a contact source surface."""
+    return geo in (GeoType.SPHERE, GeoType.BOX) or (geo == GeoType.MESH and isinstance(mesh, Mesh))
+
+
 def _surface_samples(geo, scale, mesh=None, *, _return_triangles=False):
     """Return local P1Q3 points, outward normals and scaled surface weights."""
     bary = np.eye(3) * 0.5 + np.full((3, 3), 1 / 6)
@@ -219,7 +224,7 @@ class ContactSamples:
             dynamic = [bool(support.get(int(bodies[s]), ())) for s in (a, b)]
             if not any(dynamic):
                 continue
-            self.pair_kinds[pair] = (
+            kind = (
                 "A-A"
                 if mechanical_pair
                 else "A-static"
@@ -230,6 +235,12 @@ class ContactSamples:
                 if all(s in self.rigid_shapes for s in (a, b))
                 else "A-R"
             )
+            arm = a if dynamic[0] else b
+            if kind == "A-static" and not _sampled_source(types[arm], model.shape_source[arm]):
+                # Only supported link surfaces meet the world; other link shapes,
+                # such as planes, were never contact sources and stay outside.
+                continue
+            self.pair_kinds[pair] = kind
             for source, target, enabled in ((a, b, dynamic[0]), (b, a, dynamic[1])):
                 if not enabled:
                     continue

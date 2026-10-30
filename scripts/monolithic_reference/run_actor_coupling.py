@@ -599,6 +599,9 @@ def record_run(
                 previous = state_arrays(state)
                 q, v, phase, cq, cv = assign_control(step)
                 run.step(state, state, control, dt=case["dt"])
+                if run.last_stats.status == run.Status.CONTACT_OVERFLOW:
+                    # An overflowed step rolls back before assembly; report it as such.
+                    raise ValueError("Contact capacity truncation cannot qualify an actor recording")
                 publications.append(
                     "CONVERGED"
                     if run.last_stats.converged
