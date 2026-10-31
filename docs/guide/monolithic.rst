@@ -88,6 +88,21 @@ point in the same direction. Robot surface contact can instead explicitly use
 forces. This existing one-sided sampling model retains invalid-geometry checks
 and does not provide continuous collision or continuous normals at sharp edges.
 
+Experimental ``alignment_policy="frozen"`` evaluates each sample's orientation
+weight once, at the physical step start, and keeps it through every Newton
+iterate, trial and candidate refresh of the step; the weight has no derivative
+with respect to the step's coordinates. ``alignment_smoothing`` (dimensionless,
+below one) replaces the binary weight by a C2 transition of that width.
+``box_smoothing`` [m] replaces BOX targets by a six-plane LogSumExp field, which
+must leave the box an interior (``box_smoothing * ln 6`` below its smallest half
+extent). Positive widths require the frozen policy, and frozen mesh targets
+require a bound C2 smooth SDF. A loaded sample whose step-start normal was
+undefined fails the step. These options belong to the configuration and
+checkpoint identity. The weight lags the geometry by up to one step and the
+smoothing biases the field; these model errors are not convergence allowances
+and need separate task qualification. The production robot recipes use
+``"mask"``.
+
 A step converges when every residual row lies within its own tolerance: the
 largest of an absolute target (1e-11 N for force rows, 1e-13 N m for torque
 rows), a relative tolerance times the largest residual of the same block and
@@ -106,7 +121,13 @@ plus the step's exact increment, so these rows are judged at the rounding of
 the step rather than of the strain. The tet stress is formed from ``F - I``;
 in an element that is turned or strongly deformed its terms are of the size of
 ``F - I`` and cancel to a small stress, so the magnitude also counts the size
-of each term. A row whose rounding magnitude is not finite never passes. Rows
+of each term. Contact rows use the absolute value of their summed contact
+residual under ``"guard"`` and ``"mask"``; under ``"frozen"`` they use
+first-order operation magnitudes of the contact evaluation (geometry, weight,
+normal penalty and friction) with the stored step-start weight, which exclude
+the error of generating that weight, smoothing bias and lag. Every producer
+supplies these magnitudes in physical units without machine epsilon; the
+criterion alone applies the factor. A row whose rounding magnitude is not finite never passes. Rows
 are never pooled into a norm, so a small local load is resolved regardless of
 model size. ``Stats.convergence_ratio*`` report each block's largest
 residual-to-tolerance ratio, and ``Stats.variational["convergence_groups"]``
