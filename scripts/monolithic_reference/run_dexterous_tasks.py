@@ -1,0 +1,686 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 The Newton Developers
+# SPDX-License-Identifier: Apache-2.0
+
+"""Run contact-driven task reconstructions with two dynamic fingertip proxies.
+
+These scripted controls are task-level reconstructions, not video estimates or
+full-hand retargeting. Objects receive no pose targets or grasp attachments.
+"""
+
+import argparse
+import hashlib
+import json
+import subprocess
+import time
+import traceback
+from pathlib import Path
+
+import numpy as np
+import warp as wp
+from newton.solvers.experimental.monolithic import SolverMonolithic
+
+import newton
+from scripts.monolithic_reference.articulation_oracle import transform
+
+TASKS = ("pinch-transfer", "turn-knob", "cable-pull")
+DT = 0.002
+DURATION = 4.0
+RADIUS = 0.012
+REPO = Path(__file__).resolve().parents[2]
+
+
+def contact_law_version(alignment_policy):
+    """Name the orientation-time contract independently of its physical widths."""
+    return "frozen-orientation/c-ie/v1" if alignment_policy == "frozen" else "current-orientation/c-ie/v1"
+
+
+def frozen_weight_summary(solver, previous=None, *, step=None, previous_step=None):
+    """Summarize physical-step-start selection, never interpreting updates as trial changes."""
+    if solver._contact.alignment_policy != "frozen":
+        return None, None
+    weights = solver._contact._batch.start.orientation.numpy().copy()
+    if not np.isfinite(weights).all():
+        raise ValueError("Nonfinite frozen orientation weights")
+    defined = weights >= 0
+    conditions = solver._contact._batch.start.orientation_condition.numpy()
+    magnitudes = solver._contact._batch.start.orientation_magnitude.numpy()
+    finite_condition, finite_magnitude = np.isfinite(conditions), np.isfinite(magnitudes)
+    result = {
+        "role": "most_recent_physical_step_start_selection",
+        "sample_count": len(weights),
+        "nonzero_orientation_support": int(np.count_nonzero(weights > 0)),
+        "minimum_weight": float(weights[defined].min(initial=1)),
+        "maximum_weight": float(weights.max(initial=0)),
+        "weight_sha256": hashlib.sha256(weights.tobytes()).hexdigest(),
+        "comparison": "not_available" if previous is None else "previous_physical_step_start",
+        "undefined_orientation_samples": int(np.count_nonzero(~defined)),
+        "start_condition_scope": "all stable samples, including distant unloaded samples; not a task verdict",
+        "maximum_finite_start_condition": float(conditions[finite_condition].max())
+        if np.any(finite_condition)
+        else None,
+        "uncertified_start_coefficients": int(np.count_nonzero(~finite_condition)),
+        "maximum_finite_orientation_magnitude_before_eps": float(magnitudes[finite_magnitude].max())
+        if np.any(finite_magnitude)
+        else None,
+    }
+    if step is not None:
+        result["attempted_physical_step"] = step
+    if previous is not None and step is not None and previous_step is not None:
+        result["physical_step_interval"] = step - previous_step
+        if step - previous_step != 1:
+            result["comparison"] = "previous_observed_physical_step_start"
+    if previous is not None:
+        if previous.shape != weights.shape:
+            raise ValueError("Stable orientation sample identities changed")
+        shared = defined & (previous >= 0)
+        delta = weights[shared] - previous[shared]
+        result.update(
+            changed_weights=int(np.count_nonzero(delta)),
+            maximum_absolute_update=float(np.max(np.abs(delta), initial=0)),
+            support_entered=int(np.count_nonzero((previous == 0) & (weights > 0))),
+            support_exited=int(np.count_nonzero((previous > 0) & (weights == 0))),
+            became_defined=int(np.count_nonzero((previous < 0) & defined)),
+            became_undefined=int(np.count_nonzero((previous >= 0) & ~defined)),
+        )
+    return weights, result
+
+
+def ramp(t, start, end):
+    """Return a quintic position blend and its analytic time derivative."""
+    u = np.clip((t - start) / (end - start), 0.0, 1.0)
+    return u**3 * (10 - 15 * u + 6 * u**2), 30 * u**2 * (1 - u) ** 2 / (end - start)
+
+
+def targets(task, t, *, turn_angle=np.pi / 2, initial_yaw=0.0):
+    """Return finger center positions [m], velocities [m/s], and phase."""
+    close, close_v = ramp(t, 0.2, 0.8)
+    release, release_v = ramp(t, 3.1, 3.5)
+    grip, grip_v = close * (1 - release), close_v * (1 - release) - close * release_v
+    move, move_v = ramp(t, 1.2, 2.3)
+    center, velocity = np.zeros(3), np.zeros(3)
+    angle = angle_v = 0.0
+    if task in ("pinch-transfer", "pinch-place"):
+        lift, lift_v = ramp(t, 0.9, 1.2)
+        lower, lower_v = ramp(t, 2.5, 3.0)
+        center[:] = (0.07 * move, 0, 0.016 + 0.045 * (lift - lower))
+        velocity[:] = (0.07 * move_v, 0, 0.045 * (lift_v - lower_v))
+        if task == "pinch-transfer":
+            angle, angle_v = initial_yaw + turn_angle * move, turn_angle * move_v
+        open_gap, closed_gap = 0.04, 0.025
+    elif task == "turn-knob":
+        center[2] = 0.04
+        angle, angle_v = initial_yaw + turn_angle * move, turn_angle * move_v
+        open_gap, closed_gap = 0.04, 0.0233
+    elif task == "cable-pull":
+        center[:] = (0.045 * move, 0, 0.07 + 0.025 * move)
+        velocity[:] = (0.045 * move_v, 0, 0.025 * move_v)
+        open_gap, closed_gap = 0.027, 0.014
+    else:
+        raise ValueError(f"Unknown task: {task}")
+    gap = open_gap + (closed_gap - open_gap) * grip
+    gap_v = (closed_gap - open_gap) * grip_v
+    direction = np.array((-np.sin(angle), np.cos(angle), 0))
+    direction_v = angle_v * np.array((-np.cos(angle), -np.sin(angle), 0))
+    positions = np.stack([center + sign * gap * direction for sign in (-1, 1)])
+    velocities = np.stack([velocity + sign * (gap_v * direction + gap * direction_v) for sign in (-1, 1)])
+    phase = (
+        "settle" if t < 0.2 else "pinch" if t < 0.9 else "move" if t < 2.5 else "hold/lower" if t < 3.1 else "release"
+    )
+    return positions, velocities, phase
+
+
+class TaskScene:
+    """Build a small coupled scene without modifying the solver or frozen assets."""
+
+    def __init__(
+        self,
+        task,
+        *,
+        device="cuda:0",
+        precision="fp64",
+        friction=0.6,
+        newton_iterations=80,
+        wrist=True,
+        turn_angle=np.pi / 2,
+        initial_yaw=0.0,
+        alignment_policy="mask",
+        remote_tree=False,
+        box_smoothing=0.0,
+        alignment_smoothing=0.0,
+    ):
+        if remote_tree and task != "turn-knob":
+            raise ValueError("A remote tree requires the knob task")
+        self.task = task
+        self.wrist = wrist and task in ("pinch-transfer", "turn-knob")
+        self.turn_angle, self.initial_yaw = turn_angle, initial_yaw
+        self.remote_tree = remote_tree
+        builder = newton.ModelBuilder(gravity=(0, 0, -9.81))
+        cfg = builder.ShapeConfig(density=0, margin=0.0)
+        self.initial, _, _ = targets(task, 0, turn_angle=turn_angle, initial_yaw=initial_yaw)
+        self.finger_origins = targets(task, 0)[0] if self.wrist else self.initial
+        self.finger_dofs = slice(int(self.wrist), int(self.wrist) + 6)
+        self.fingers = []
+        root = builder.add_link(mass=1.0, inertia=wp.diag(wp.vec3(0.01)), label="fixed_support")
+        joints = [builder.add_joint_fixed(-1, root)]
+        if self.wrist:
+            wrist_body = builder.add_link(mass=0.001, inertia=wp.diag(wp.vec3(5e-5)), label="wrist_yaw")
+            joints.append(
+                builder.add_joint_revolute(
+                    root,
+                    wrist_body,
+                    axis=wp.vec3(0, 0, 1),
+                    target_ke=4.0,
+                    target_kd=0.05,
+                    actuator_mode=newton.JointTargetMode.POSITION_VELOCITY,
+                    limit_ke=0,
+                    limit_kd=0,
+                    damping=0,
+                    friction=0,
+                )
+            )
+            builder.joint_q[builder.joint_q_start[joints[-1]]] = initial_yaw
+            root = wrist_body
+        for finger, origin in enumerate(self.finger_origins):
+            parent = root
+            for axis in range(3):
+                body = builder.add_link(
+                    mass=0.015 if axis == 2 else 0.001,
+                    inertia=wp.diag(wp.vec3(1e-6)),
+                    label=f"finger_{finger}_{axis}",
+                )
+                joints.append(
+                    builder.add_joint_prismatic(
+                        parent,
+                        body,
+                        axis=wp.vec3(np.eye(3)[axis]),
+                        parent_xform=wp.transform(origin if axis == 0 else (0, 0, 0), wp.quat_identity()),
+                        target_ke=8000.0,
+                        target_kd=20.0,
+                        actuator_mode=newton.JointTargetMode.POSITION_VELOCITY,
+                        limit_ke=0,
+                        limit_kd=0,
+                        damping=0,
+                        friction=0,
+                    )
+                )
+                parent = body
+            builder.add_shape_sphere(body, radius=RADIUS, cfg=cfg)
+            self.fingers.append(body)
+        builder.add_shape_plane(width=0, length=0, cfg=cfg)
+        self.object_body = None
+        cables = []
+        if task in ("pinch-transfer", "pinch-place"):
+            builder.add_articulation(joints)
+            self.object_body = builder.add_body(
+                xform=wp.transform((0, 0, 0.016), wp.quat_from_axis_angle(wp.vec3(0, 0, 1), float(initial_yaw))),
+                mass=0.012,
+                inertia=wp.diag(wp.vec3(0.012 * 0.03**2 / 6)),
+                label="free_block",
+            )
+            builder.add_shape_box(self.object_body, hx=0.015, hy=0.015, hz=0.015, cfg=cfg)
+        elif task == "turn-knob":
+            builder.add_articulation(joints)
+            pose = wp.transform((0, 0, 0.04), wp.quat_identity())
+            support = builder.add_link(mass=1.0, inertia=wp.diag(wp.vec3(0.01)), label="knob_support")
+            fixed = builder.add_joint_fixed(-1, support, parent_xform=pose)
+            self.object_body = builder.add_link(mass=0.03, inertia=wp.diag(wp.vec3(8e-6)), label="knob")
+            self.knob_joint = builder.add_joint_revolute(
+                support,
+                self.object_body,
+                axis=wp.vec3(0, 0, 1),
+                target_ke=0,
+                target_kd=0,
+                limit_ke=0,
+                limit_kd=0,
+                friction=0.001,
+                damping=0,
+            )
+            builder.add_articulation([fixed, self.knob_joint])
+            self.knob_coord = builder.joint_q_start[self.knob_joint]
+            self.knob_dof = builder.joint_qd_start[self.knob_joint]
+            builder.joint_q[self.knob_coord] = initial_yaw
+            builder.add_shape_box(self.object_body, hx=0.025, hy=0.012, hz=0.012, cfg=cfg)
+        else:
+            builder.add_articulation(joints)
+            self.rest = np.column_stack((np.zeros(17), np.zeros(17), np.linspace(0.22, 0.06, 17)))
+            masses = np.full(17, 0.02 * 0.01)
+            masses[[0, -1]] /= 2
+            for i, (point, mass) in enumerate(zip(self.rest, masses, strict=True)):
+                builder.add_particle(wp.vec3(point), wp.vec3(0), 0 if i < 2 else mass, radius=0.003)
+            cables.append(
+                SolverMonolithic.CableInput(
+                    particle_ids=tuple(range(17)),
+                    EA=50.0,
+                    bending=((2e-5, 0), (0, 2e-5)),
+                    GJ=1e-5,
+                    radius=0.003,
+                    linear_density=0.02,
+                    rest_theta=np.zeros(16),
+                    rest_director=np.tile((1.0, 0.0, 0.0), (16, 1)),
+                    fixed_theta=np.arange(16) == 0,
+                )
+            )
+        if remote_tree:
+            self.remote_body, self.remote_coord, self.remote_dof = add_remote_tree(builder)
+        scalar_count = sum(
+            kind in (newton.JointType.REVOLUTE, newton.JointType.PRISMATIC) for kind in builder.joint_type
+        )
+        self.model = builder.finalize(device=device)
+        self.solver = SolverMonolithic(
+            self.model,
+            cable_inputs=cables,
+            mass_mode="lumped",
+            precision=precision,
+            joint_terms=SolverMonolithic.JointTerms(
+                implicit_pd=True,
+                friction=True,
+                friction_velocity_scale=tuple([0.001] * scalar_count),
+            ),
+            contact_stiffness=1e7,
+            friction_coefficient=friction,
+            friction_velocity_scale=0.001,
+            normal_smoothing=1e-4,
+            newton_max_iterations=newton_iterations,
+            linear_max_iterations=300,
+            line_search_max_iterations=24,
+            pcg_mode="production",
+            use_cuda_graph=wp.get_device(device).is_cuda,
+            publish_policy="strict",
+            # Robot surface contact uses the existing one-sided sample selection.
+            alignment_policy=alignment_policy,
+            box_smoothing=box_smoothing,
+            alignment_smoothing=alignment_smoothing,
+        )
+        self.state = self.solver.create_state(dt=DT)
+        self.control = self.solver.create_control()
+        if remote_tree:
+            reference = newton.ModelBuilder(gravity=(0, 0, -9.81))
+            add_remote_tree(reference)
+            self.remote_reference = SolverMonolithic(
+                reference.finalize(device=device),
+                friction_velocity_scale=0.001,
+                precision=precision,
+                pcg_mode="production",
+                use_cuda_graph=wp.get_device(device).is_cuda,
+            )
+            self.remote_state = self.remote_reference.create_state(dt=DT)
+            self.remote_control = self.remote_reference.create_control()
+
+    def step(self, t):
+        """Only update fingertip actuator targets; leave the object unactuated."""
+        position, velocity, phase = targets(self.task, t, turn_angle=self.turn_angle, initial_yaw=self.initial_yaw)
+        q = np.zeros(self.control.joint_target_q.shape[0])
+        v = np.zeros(self.control.joint_target_qd.shape[0])
+        local_position, local_velocity = position, velocity
+        if self.wrist:
+            move, move_v = ramp(t, 1.2, 2.3)
+            angle, rate = self.initial_yaw + self.turn_angle * move, self.turn_angle * move_v
+            c, s = np.cos(angle), np.sin(angle)
+            rotation = np.array([[c, -s, 0], [s, c, 0], [0, 0, 1]])
+            local_position = position @ rotation
+            local_velocity = (velocity - np.cross([0, 0, rate], position)) @ rotation
+            q[0], v[0] = angle, rate
+        q[self.finger_dofs] = (local_position - self.finger_origins).ravel()
+        v[self.finger_dofs] = local_velocity.ravel()
+        self.control.joint_target_q.assign(q)
+        self.control.joint_target_qd.assign(v)
+        self.solver.step(self.state, self.state, self.control, dt=DT)
+        if self.remote_tree:
+            self.remote_reference.step(self.remote_state, self.remote_state, self.remote_control, dt=DT)
+            if not self.remote_reference.last_stats.converged:
+                raise RuntimeError("Independent remote tree did not converge")
+        return position, phase
+
+
+def add_remote_tree(builder):
+    """Add an isolated unactuated rotor with nonzero initial velocity for the independence control."""
+    root = builder.add_link(mass=1, inertia=wp.diag(wp.vec3(0.01)), label="remote_support")
+    fixed = builder.add_joint_fixed(-1, root, parent_xform=wp.transform((1, 0, 0.1), wp.quat_identity()))
+    rotor = builder.add_link(mass=0.03, inertia=wp.diag(wp.vec3(8e-6)), label="remote_rotor")
+    joint = builder.add_joint_revolute(
+        root, rotor, axis=newton.Axis.Z, target_ke=0, target_kd=0, limit_ke=0, limit_kd=0, damping=0, friction=0
+    )
+    builder.add_articulation([fixed, joint])
+    coord, dof = builder.joint_q_start[joint], builder.joint_qd_start[joint]
+    builder.joint_q[coord], builder.joint_qd[dof] = 0.17, 0.2
+    builder.add_shape_box(rotor, hx=0.02, hy=0.01, hz=0.01, cfg=builder.ShapeConfig(density=0))
+    return rotor, coord, dof
+
+
+def knob_diagnostics(scene, forces):
+    """Audit sampled penetration and pair balance independently of the nonlinear residual."""
+    run, model = scene.solver, scene.model
+    sample = run._contact.actor_samples
+    if not run.last_stats.converged:
+        run._kinematics.evaluate(run._kinematics.gather_q(scene.state))
+    native = run._kinematics.poses.numpy()
+    frames = {b: transform(p) for b, p in zip(run._articulation_actor.body_indices, native, strict=True)}
+    shape_frames = [
+        frames[int(b)] @ transform(p) if b >= 0 else transform(p)
+        for b, p in zip(model.shape_body.numpy(), model.shape_transform.numpy(), strict=True)
+    ]
+    types, scales = model.shape_type.numpy(), model.shape_scale.numpy().astype(float)
+    penetration = 0.0
+    for source, target in run._contact.actor_samples.pair_kinds:
+        for s, t in ((source, target), (target, source)):
+            ids = (sample.source_shapes == s) & (sample.targets == t)
+            if not ids.any():
+                continue
+            left, right = shape_frames[s], shape_frames[t]
+            world = sample.points[ids] @ left[:3, :3].T + left[:3, 3]
+            y = (world - right[:3, 3]) @ right[:3, :3]
+            if types[t] == int(newton.GeoType.SPHERE):
+                phi = np.linalg.norm(y, axis=1) - scales[t, 0]
+            else:
+                d = np.abs(y) - scales[t]
+                phi = np.linalg.norm(np.maximum(d, 0), axis=1) + np.minimum(d.max(axis=1), 0)
+            penetration = max(penetration, float(np.max(sample.offsets[ids] - phi)))
+    pair_force = pair_moment = 0.0
+    for pair in run.last_stats.variational.get("actor_contact_pairs", []):
+        wrench = np.asarray(pair["world_wrench"])
+        pair_force = max(pair_force, float(np.linalg.norm(wrench[:, :3].sum(axis=0))))
+        pair_moment = max(pair_moment, float(np.linalg.norm(wrench[:, 3:].sum(axis=0))))
+    row = {
+        "knob_angle_rad": float(scene.state.joint_q.numpy()[scene.knob_coord]),
+        "knob_contact_torque_Nm": float(forces.joint_force[scene.knob_dof]),
+        "sample_penetration_m": penetration,
+        "pair_force_imbalance_N": pair_force,
+        "pair_moment_imbalance_Nm": pair_moment,
+        "knob_active_force_Nm": float(
+            abs(scene.control.joint_f.numpy()[scene.knob_dof])
+            + (abs(run.last_stats.joint_pd_force[scene.knob_dof]) if run.last_stats.joint_pd_force is not None else 0)
+        ),
+    }
+    if scene.remote_tree:
+        row.update(
+            remote_angle_error_rad=float(
+                abs(scene.state.joint_q.numpy()[scene.remote_coord] - scene.remote_state.joint_q.numpy()[0])
+            ),
+            remote_velocity_error_rad_s=float(
+                abs(scene.state.joint_qd.numpy()[scene.remote_dof] - scene.remote_state.joint_qd.numpy()[0])
+            ),
+            remote_contact_force_N=float(np.linalg.norm(forces.body_wrench[scene.remote_body])),
+        )
+    return row
+
+
+def task_metrics(scene, rows):
+    """Judge object behavior independently of the nonlinear stopping criterion."""
+    contact = max((r["finger_contact_force_N"] for r in rows), default=0.0)
+    metrics = {"peak_finger_contact_force_N": contact}
+    gates = {"contact_present": contact > 0.01}
+    if scene.task in ("pinch-transfer", "pinch-place"):
+        poses = np.array([r["object_pose"] for r in rows])
+        quat = poses[-1, 3:]
+        yaw = np.arctan2(2 * (quat[3] * quat[2] + quat[0] * quat[1]), 1 - 2 * (quat[1] ** 2 + quat[2] ** 2))
+        target_yaw = (
+            getattr(scene, "initial_yaw", 0.0) + getattr(scene, "turn_angle", np.pi / 2)
+            if scene.task == "pinch-transfer"
+            else 0.0
+        )
+        yaw_error = abs(np.arctan2(np.sin(yaw - target_yaw), np.cos(yaw - target_yaw)))
+        metrics.update(
+            lift_m=float(poses[:, 2].max() - 0.016),
+            placement_error_m=float(np.linalg.norm(poses[-1, :3] - (0.07, 0, 0.015))),
+            yaw_error_deg=float(np.degrees(yaw_error)),
+            final_drift_m=float(np.linalg.norm(poses[-1, :3] - poses[max(0, len(poses) - 100), :3])),
+        )
+        gates.update(
+            lift=metrics["lift_m"] >= 0.03,
+            placement=metrics["placement_error_m"] <= 0.01,
+            rotation=metrics["yaw_error_deg"] <= 15,
+            release_stable=metrics["final_drift_m"] <= 0.002,
+        )
+    elif scene.task == "turn-knob":
+        target = getattr(scene, "initial_yaw", 0.0) + getattr(scene, "turn_angle", np.pi / 2)
+        metrics.update(
+            angle_error_deg=float(abs(np.degrees(rows[-1]["knob_angle_rad"] - target))),
+            peak_knob_contact_torque_Nm=max(abs(r["knob_contact_torque_Nm"]) for r in rows if r["phase"] == "move")
+            if any(r["phase"] == "move" for r in rows)
+            else 0.0,
+            max_sample_penetration_m=max(r["sample_penetration_m"] for r in rows),
+            max_pair_force_imbalance_N=max(r["pair_force_imbalance_N"] for r in rows),
+            max_pair_moment_imbalance_Nm=max(r["pair_moment_imbalance_Nm"] for r in rows),
+            max_knob_active_force_Nm=max(abs(r["knob_active_force_Nm"]) for r in rows),
+        )
+        gates.update(
+            contact_present=contact >= 1e-3,
+            rotation=metrics["angle_error_deg"] <= 10,
+            contact_torque=metrics["peak_knob_contact_torque_Nm"] >= 1e-5,
+            penetration=metrics["max_sample_penetration_m"] <= 0.001,
+            pair_force_balance=metrics["max_pair_force_imbalance_N"] <= 1e-8,
+            pair_moment_balance=metrics["max_pair_moment_imbalance_Nm"] <= 1e-8,
+            passive_knob=metrics["max_knob_active_force_Nm"] == 0,
+        )
+        if getattr(scene, "remote_tree", False):
+            for name, limit in (
+                ("remote_angle_error_rad", 1e-6),
+                ("remote_velocity_error_rad_s", 1e-6),
+                ("remote_contact_force_N", 0),
+            ):
+                metrics["max_" + name] = max(r[name] for r in rows)
+                gates[name] = metrics["max_" + name] <= limit
+    else:
+        metrics.update(
+            peak_grab_displacement_m=max(r["grab_displacement_m"] for r in rows),
+            peak_edge_stretch=max(r["edge_stretch_max"] for r in rows),
+        )
+        gates.update(pull=metrics["peak_grab_displacement_m"] >= 0.02, stretch=metrics["peak_edge_stretch"] <= 1.1)
+    return metrics, gates
+
+
+def save_json(path, payload):
+    """Write a human-readable run receipt."""
+    path.write_text(json.dumps(payload, indent=2, allow_nan=False) + "\n")
+
+
+def run_case(task, args):
+    """Preserve complete states, first failure, and independent task verdicts."""
+    output = args.output / task
+    output.mkdir(parents=True, exist_ok=False)
+    started = time.perf_counter()
+    scene = TaskScene(
+        task,
+        device=args.device,
+        precision=args.precision,
+        friction=args.friction,
+        newton_iterations=args.newton_iterations,
+        wrist=not args.translation_only_fingers,
+        turn_angle=np.radians(args.turn_angle_deg),
+        initial_yaw=np.radians(args.initial_yaw_deg),
+        remote_tree=args.remote_tree,
+        alignment_policy=args.alignment_policy,
+        box_smoothing=args.box_smoothing,
+        alignment_smoothing=args.alignment_smoothing,
+    )
+    frames = {key: [] for key in ("time", "body_q", "particle_q", "joint_q", "target", "phase")}
+    rows, error = [], None
+    previous_weights = None
+    previous_weight_step = None
+
+    def record(t, target, phase):
+        values = (
+            t,
+            scene.state.body_q.numpy(),
+            scene.state.particle_q.numpy(),
+            scene.state.joint_q.numpy(),
+            target,
+            phase,
+        )
+        for key, value in zip(frames, values, strict=True):
+            frames[key].append(value)
+
+    record(0, scene.initial, "initial")
+    limit = min(args.max_steps or round(DURATION / DT), round(DURATION / DT))
+    try:
+        with (output / "trace.jsonl").open("w") as stream:
+            for step in range(1, limit + 1):
+                target, phase = scene.step(step * DT)
+                stats = scene.solver.last_stats
+                weight_summary = None
+                if step == 1 or step % 16 == 0 or step == limit or not stats.converged:
+                    previous_weights, weight_summary = frozen_weight_summary(
+                        scene.solver, previous_weights, step=step, previous_step=previous_weight_step
+                    )
+                    previous_weight_step = step
+                row = {
+                    "step": step,
+                    "time": step * DT,
+                    "phase": phase,
+                    "status": str(stats.status),
+                    "converged": bool(stats.converged),
+                    "rolled_back": bool(stats.rolled_back),
+                    "newton": stats.nonlinear_iterations,
+                    "pcg": stats.linear_iterations,
+                    "failure_reason": stats.failure_reason,
+                    "orientation_step_start": weight_summary,
+                }
+                for name in ("convergence_ratio", "accepted_alpha", "raw_residual_q_norm"):
+                    value = getattr(stats, name)
+                    row[name] = float(value) if np.isfinite(value) else None
+                body = scene.state.body_q.numpy()
+                row["tracking_error_m"] = float(np.max(np.linalg.norm(body[scene.fingers, :3] - target, axis=1)))
+                force = scene.solver.get_contact_forces(scene.state)
+                row["finger_contact_force_N"] = float(
+                    np.max(np.linalg.norm(force.body_wrench[scene.fingers, :3], axis=1))
+                )
+                if scene.object_body is not None:
+                    row["object_pose"] = body[scene.object_body].tolist()
+                if task == "turn-knob":
+                    row.update(knob_diagnostics(scene, force))
+                if task == "cable-pull":
+                    x = scene.state.particle_q.numpy()
+                    row["grab_displacement_m"] = float(np.mean(x[-3:, 0]))
+                    row["edge_stretch_max"] = float(np.max(np.linalg.norm(np.diff(x, axis=0), axis=1) / 0.01))
+                rows.append(row)
+                stream.write(json.dumps(row, allow_nan=False) + "\n")
+                if step % 16 == 0 or step == limit or not stats.converged:
+                    record(step * DT, target, phase)
+                if not stats.converged or stats.rolled_back:
+                    error = f"Step {step}: {stats.status}: {stats.failure_reason}"
+                    scene.solver.save_checkpoint(scene.state, output / "last-published-state.npz")
+                    break
+                if step % 200 == 0:
+                    print(
+                        f"{task}: {step}/{limit}, Newton {stats.nonlinear_iterations}, contact {row['finger_contact_force_N']:.4g} N",
+                        flush=True,
+                    )
+    except Exception:
+        error = traceback.format_exc()
+    np.savez_compressed(output / "trajectory.npz", **{key: np.array(value) for key, value in frames.items()})
+    metrics, gates = task_metrics(scene, rows) if rows else ({}, {})
+    complete = len(rows) == round(DURATION / DT) and error is None
+    numerical_pass = complete and all(r["converged"] and not r["rolled_back"] for r in rows)
+    result = {
+        "task": task,
+        "status": "PASS" if numerical_pass and all(gates.values()) else "FAIL" if error or complete else "PARTIAL",
+        "complete": complete,
+        "numerical_pass": numerical_pass,
+        "task_gates": gates,
+        "metrics": metrics,
+        "steps": len(rows),
+        "expected_steps": round(DURATION / DT),
+        "dt": DT,
+        "error": error,
+        "elapsed_seconds": time.perf_counter() - started,
+        "max_tracking_error_m": max((r["tracking_error_m"] for r in rows), default=None),
+        "max_newton_iterations": max((r["newton"] for r in rows), default=None),
+    }
+    save_json(output / "summary.json", result)
+    print(json.dumps(result), flush=True)
+    return result
+
+
+def main():
+    """Run every selected task, retaining failures without suppressing later cases."""
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--task", choices=(*TASKS, "pinch-place", "all"), default="all")
+    parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--device", default="cuda:0")
+    parser.add_argument("--precision", choices=("fp64", "fp32"), default="fp64")
+    parser.add_argument("--friction", type=float, default=0.6)
+    parser.add_argument("--max-steps", type=int)
+    parser.add_argument("--newton-iterations", type=int, default=80)
+    parser.add_argument(
+        "--translation-only-fingers", action="store_true", help="Retain the original rolling-contact ablation"
+    )
+    parser.add_argument("--turn-angle-deg", type=float, default=90.0)
+    parser.add_argument("--initial-yaw-deg", type=float, default=0.0)
+    parser.add_argument("--remote-tree", action="store_true", help="Add an independent passive rotor to the knob task")
+    parser.add_argument("--alignment-policy", choices=("guard", "mask", "frozen"), default="mask")
+    parser.add_argument(
+        "--box-smoothing", type=float, default=0, help="Six-plane LSE width [m]; zero keeps the exact box"
+    )
+    parser.add_argument(
+        "--alignment-smoothing",
+        type=float,
+        default=0,
+        help="Frozen-policy C2 normal-dot width; zero freezes binary selection",
+    )
+    args = parser.parse_args()
+    if (args.box_smoothing > 0 or args.alignment_smoothing > 0) and args.alignment_policy != "frozen":
+        parser.error("Positive --box-smoothing or --alignment-smoothing requires --alignment-policy frozen")
+    if args.max_steps is not None and args.max_steps <= 0:
+        parser.error("--max-steps must be positive")
+    if args.newton_iterations <= 0:
+        parser.error("--newton-iterations must be positive")
+    if not np.isfinite(args.friction) or args.friction < 0:
+        parser.error("--friction must be finite and nonnegative")
+    if (
+        not np.isfinite([args.box_smoothing, args.alignment_smoothing]).all()
+        or args.box_smoothing < 0
+        or not 0 <= args.alignment_smoothing < 1
+    ):
+        parser.error("Require finite box-smoothing >= 0 and 0 <= alignment-smoothing < 1")
+    if not np.isfinite([args.turn_angle_deg, args.initial_yaw_deg]).all():
+        parser.error("turn angles must be finite")
+    if args.task not in ("pinch-transfer", "turn-knob") and (
+        args.translation_only_fingers or args.turn_angle_deg != 90 or args.initial_yaw_deg != 0
+    ):
+        parser.error("turning variations require --task pinch-transfer or turn-knob")
+    if args.remote_tree and args.task != "turn-knob":
+        parser.error("--remote-tree requires --task turn-knob")
+    args.output.mkdir(parents=True, exist_ok=False)
+    sources = [
+        Path(__file__),
+        REPO / "scripts/monolithic_reference/articulation_oracle.py",
+        *sorted((REPO / "newton/_src/solvers/monolithic").glob("*.py")),
+    ]
+    save_json(
+        args.output / "manifest.json",
+        {
+            "git_head": subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=REPO, text=True).strip(),
+            "newton_import": newton.__file__,
+            "device": args.device,
+            "precision": args.precision,
+            "friction": args.friction,
+            "max_steps": args.max_steps,
+            "newton_iterations": args.newton_iterations,
+            "task": args.task,
+            "translation_only_fingers": args.translation_only_fingers,
+            "turn_angle_deg": args.turn_angle_deg,
+            "initial_yaw_deg": args.initial_yaw_deg,
+            "remote_tree": args.remote_tree,
+            "alignment_policy": args.alignment_policy,
+            "contact_law_version": contact_law_version(args.alignment_policy),
+            "box_smoothing": args.box_smoothing,
+            "alignment_smoothing": args.alignment_smoothing,
+            "input_kind": "scripted dynamic fingertip proxies; no video or object pose replay",
+            "source_sha256": {str(p.relative_to(REPO)): hashlib.sha256(p.read_bytes()).hexdigest() for p in sources},
+        },
+    )
+    results = []
+    for task in TASKS if args.task == "all" else (args.task,):
+        try:
+            results.append(run_case(task, args))
+        except Exception:
+            result = {"task": task, "status": "ERROR", "error": traceback.format_exc()}
+            results.append(result)
+            save_json(args.output / task / "summary.json", result)
+            print(result["error"], flush=True)
+    save_json(args.output / "summary.json", results)
+    raise SystemExit(0 if all(r["status"] == "PASS" for r in results) else 1)
+
+
+if __name__ == "__main__":
+    main()

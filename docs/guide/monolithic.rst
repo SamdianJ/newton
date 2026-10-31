@@ -8,14 +8,28 @@ Monolithic Coupled Solver
 
 .. experimental::
 
-   :mod:`newton.solvers.experimental.monolithic` supports one world with at
-   most one articulation, at most one connected tetrahedral body, single-body
+   :mod:`newton.solvers.experimental.monolithic` supports one world with
+   independent fixed-base articulations, at most one connected tetrahedral body, single-body
    world-root FREE rigid actors and independent cloth/open cables. Any of these
    may be absent, but the scene needs at least one dynamic degree of freedom.
    Every scene uses the same step pipeline and contact path; see
    :doc:`monolithic_cloth` and :doc:`monolithic_cable` for material inputs. Its
    interfaces may change without the normal deprecation period. The old BE, q-only and tet-only solver entry points and
    their examples have been retired.
+
+Each articulation retains its own joint block and force/torque convergence groups
+inside a shared Newton solve. Trees may differ in topology and DoF count.
+FREE roots with descendant links and same-tree self-contact are unsupported.
+Shape contact between distinct articulations projects onto both trees and
+retains their cross blocks in the shared sparse operator. Fixed links can be
+zero-Jacobian endpoints. Articulation contacts with FREE actors and materials
+retain their existing paths.
+
+Model-selected articulation contacts with static world shapes also participate
+in the shared solve, including scenes with only one articulation. The dynamic
+surface is sampled at full area and its force is projected through its joint
+support; the static endpoint has no solver degrees of freedom. Model collision
+filters and the same-tree exclusion still apply.
 
 Every scene, including cloth/cable scenes, uses spatial contact. Candidates
 refresh at each Newton boundary and remain frozen during its trials. This
@@ -61,6 +75,34 @@ CUDA graph. PCG has no stagnation exit: it iterates until its tolerance or
 inspected. Regularized direction retries use the same schedule for every scene,
 starting without regularization.
 
+FREE rigid actors predict translation and rotation from their current velocities;
+this changes the Newton starting point, not the discrete inertial equation.
+ArmijoOrResNorm permits either energy or residual progress. Within a physical
+step, each accepting branch must also preserve its best value reached so far,
+up to the existing rounding allowance, to prevent alternating regressions.
+The other measure may still increase; C-IE energy acceptance remains heuristic.
+
+``alignment_policy="guard"`` rejects penetrating samples whose surface normals
+point in the same direction. Robot surface contact can instead explicitly use
+``"mask"`` to exclude each such complete contact term, including both endpoint
+forces. This existing one-sided sampling model retains invalid-geometry checks
+and does not provide continuous collision or continuous normals at sharp edges.
+
+Experimental ``alignment_policy="frozen"`` evaluates each sample's orientation
+weight once, at the physical step start, and keeps it through every Newton
+iterate, trial and candidate refresh of the step; the weight has no derivative
+with respect to the step's coordinates. ``alignment_smoothing`` (dimensionless,
+below one) replaces the binary weight by a C2 transition of that width.
+``box_smoothing`` [m] replaces BOX targets by a six-plane LogSumExp field, which
+must leave the box an interior (``box_smoothing * ln 6`` below its smallest half
+extent). Positive widths require the frozen policy, and frozen mesh targets
+require a bound C2 smooth SDF. A loaded sample whose step-start normal was
+undefined fails the step. These options belong to the configuration and
+checkpoint identity. The weight lags the geometry by up to one step and the
+smoothing biases the field; these model errors are not convergence allowances
+and need separate task qualification. The production robot recipes use
+``"mask"``.
+
 A step converges when every residual row lies within its own tolerance: the
 largest of an absolute target (1e-11 N for force rows, 1e-13 N m for torque
 rows), a relative tolerance times the largest residual of the same block and
@@ -68,9 +110,8 @@ unit at the step's first iterate, the inertial prediction (1e-6 in FP64, 1e-4
 in FP32), and 32 times the precision's machine epsilon times the row's rounding
 magnitude. Taking the reference at the prediction keeps the tolerance
 independent of uniform velocity: the step-start residual would contain each
-body's momentum over the time step, which the prediction cancels. A free rigid
-body's rotation is the exception: the prediction keeps its step-start
-orientation, so its angular momentum still enters the reference. The rounding
+body's momentum over the time step, which the prediction cancels; free rigid
+actors are predicted from both their linear and angular velocities. The rounding
 magnitude sums the row's absolute contributions, the tangent-weighted
 magnitudes of the step increments, and, for strains that are small differences
 of larger terms, the operands of their step-dependent parts: cable curvature
@@ -80,7 +121,13 @@ plus the step's exact increment, so these rows are judged at the rounding of
 the step rather than of the strain. The tet stress is formed from ``F - I``;
 in an element that is turned or strongly deformed its terms are of the size of
 ``F - I`` and cancel to a small stress, so the magnitude also counts the size
-of each term. A row whose rounding magnitude is not finite never passes. Rows
+of each term. Contact rows use the absolute value of their summed contact
+residual under ``"guard"`` and ``"mask"``; under ``"frozen"`` they use
+first-order operation magnitudes of the contact evaluation (geometry, weight,
+normal penalty and friction) with the stored step-start weight, which exclude
+the error of generating that weight, smoothing bias and lag. Every producer
+supplies these magnitudes in physical units without machine epsilon; the
+criterion alone applies the factor. A row whose rounding magnitude is not finite never passes. Rows
 are never pooled into a norm, so a small local load is resolved regardless of
 model size. ``Stats.convergence_ratio*`` report each block's largest
 residual-to-tolerance ratio, and ``Stats.variational["convergence_groups"]``
@@ -154,8 +201,10 @@ vibration benchmarks. FP32 cable cantilevers and the finest tet cantilever are
 not yet qualified, and the localized helix is outside the acceptance set in
 both precisions (see :doc:`monolithic_cable`).
 
-The precision-tagged state uses schema 4, including actor ownership, layout
-identity and native rigid continuation fields. Cross-layout and cross-precision
+The precision-tagged state uses schema 4, or schema 6 with materials, including
+actor ownership, layout identity and native rigid continuation fields. Multiple
+articulations use schema 7, including their topology and source mappings in the
+configuration identity. Cross-layout and cross-precision
 checkpoint loads are rejected. The configuration identity covers every option
 that changes the solution, the resolved contact resources and the physical,
 material and SDF digests; PCG mode and CUDA graph use are excluded. CPU and

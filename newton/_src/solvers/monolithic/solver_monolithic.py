@@ -17,7 +17,7 @@ from ...sim import JointType, Model
 from ..solver import SolverBase
 from . import convergence, iteration_device, state_checks
 from . import coupled_kernels as kernels
-from .actors import Actor, ActorTable
+from .actors import ActorTable, articulation_view
 from .articulation import ArticulationObjective, _TreeKinematics
 from .cable_operator import CableOperator
 from .cable_system import CableBlock
@@ -94,11 +94,20 @@ class SolverMonolithic(SolverBase):
     iterate, evaluated with the same spatial candidates.
     ``contact_candidate_capacity`` defaults to the model's static sample upper bound, and
     factor capacity defaults to three times that bound. Capacity is fixed for
-    the solver lifetime; overflow discards complete contacts and reports taint.
+    the solver lifetime; overflow reports dropped contacts and rolls back the step.
 
     Contact uses the C-IE law and trials use ArmijoOrResNorm acceptance. C-IE
     energy is not a potential, so Armijo acceptance is heuristic, not a
     variational guarantee.
+
+    Experimental ``alignment_policy="frozen"`` retains each sample's physical
+    step-start orientation weight through Newton and candidate refreshes.
+    ``alignment_smoothing`` is its dimensionless C2 transition width (zero is
+    binary); ``box_smoothing`` is the six-plane LogSumExp length in meters.
+    Positive smoothing widths require this policy. These constructor options
+    are runtime solver settings, not USD attributes. They change model and
+    checkpoint identity; geometry bias and step-lag error need separate task
+    qualification and are not solver convergence allowances.
 
     A step converges when every residual row satisfies its own physical
     tolerance [N or N m]: the largest of an absolute target, a relative
@@ -141,6 +150,8 @@ class SolverMonolithic(SolverBase):
         publish_policy="strict",
         smooth_sdf=None,
         alignment_policy="guard",
+        box_smoothing=0.0,
+        alignment_smoothing=0.0,
         joint_terms=None,
         newton_max_iterations=10,
         line_search_max_iterations=8,
@@ -165,6 +176,8 @@ class SolverMonolithic(SolverBase):
             contact_candidate_capacity=contact_candidate_capacity,
             publish_policy=publish_policy,
             alignment_policy=alignment_policy,
+            box_smoothing=box_smoothing,
+            alignment_smoothing=alignment_smoothing,
             newton_max_iterations=newton_max_iterations,
             line_search_max_iterations=line_search_max_iterations,
             linear_max_iterations=linear_max_iterations,
@@ -181,7 +194,8 @@ class SolverMonolithic(SolverBase):
         self._actors = ActorTable.from_model(model, materials=self._materials)
         layout = MonolithicLinearLayout.from_actors(self._actors)
         self._layout = layout
-        self._articulation_actor = next((actor for actor in self._actors.actors if actor.kind == "articulation"), None)
+        self._articulation_actors = tuple(actor for actor in self._actors.actors if actor.kind == "articulation")
+        self._articulation_actor = articulation_view(self._articulation_actors)
         tet_actor = next((actor for actor in self._actors.actors if actor.kind == "tet"), None)
         self._precision = options.precision
         self._dtype = wp.float64 if self._precision == self.Precision.FP64 else wp.float32
@@ -206,7 +220,7 @@ class SolverMonolithic(SolverBase):
         if not isinstance(joint_terms, self.JointTerms):
             raise ValueError("joint_terms must be SolverMonolithic.JointTerms")
         # An empty kinematics view owns no Model bodies/joints and adds no actor.
-        view = self._articulation_actor or Actor("articulation", 0)
+        view = self._articulation_actor
         options = {name: getattr(joint_terms, name) for name in joint_terms.__dataclass_fields__}
         self._joint_terms = JointParameters(model, actor=view, **options)
         for name in ("joint_target_ke", "joint_target_kd", "joint_limit_ke", "joint_limit_kd", "joint_friction"):
@@ -245,9 +259,18 @@ class SolverMonolithic(SolverBase):
                 self._cables.append(CableBlock(obj, actor, dtype=self._dtype, device=device, phi_offset=phi_offset))
 
         # Fixed triplet pattern: articulation, tet, rigid, cloth and cable owners.
-        nq = layout.q_dof_count
-        articulation = layout.indices("articulation")
-        global_rows, global_columns = [np.repeat(articulation, nq)], [np.tile(articulation, nq)]
+        global_rows = [
+            np.array(
+                [i for _, start, n in layout.articulation_ranges for i in range(start, start + n) for _ in range(n)],
+                dtype=np.int32,
+            )
+        ]
+        global_columns = [
+            np.array(
+                [j for _, start, n in layout.articulation_ranges for _ in range(n) for j in range(start, start + n)],
+                dtype=np.int32,
+            )
+        ]
         internal_rows = internal_columns = np.empty(0, dtype=np.int32)
         if self._has_tet:
             pattern = build_tet_triplet_pattern(
@@ -290,6 +313,8 @@ class SolverMonolithic(SolverBase):
             particle_radius=tet_radius,
             smooth_sdf=smooth_sdf,
             alignment_policy=alignment_policy,
+            box_smoothing=box_smoothing,
+            alignment_smoothing=alignment_smoothing,
             dtype=self._dtype,
             _materials=self._materials,
             **({} if contact_candidate_capacity is None else {"candidate_capacity": contact_candidate_capacity}),
@@ -466,11 +491,11 @@ class SolverMonolithic(SolverBase):
         self._criterion = convergence.Criterion(
             convergence.row_groups(layout, units), self._config.convergence, dtype=self._dtype, device=device
         )
-        # P6a reductions assume contiguous A -> T with no rigid blocks.
+        # The specialized q+x reductions require one articulation and no rigid blocks.
         self._device_iteration = (
             self._capturable
             and self._has_tet
-            and self._kinematics.count > 0
+            and len(self._articulation_actors) == 1
             and not self._rigid.count
             and self._layout.q_scalar_offset == 0
             and self._layout.x_scalar_offset == self._kinematics.count
@@ -568,8 +593,7 @@ class SolverMonolithic(SolverBase):
             fields.update(self._contact.actor_samples.fields)
         fields.update(self._coupled_config)
         fields.update(self._sdf_fields)
-        view = self._articulation_actor or Actor("articulation", 0)
-        return _TreeKinematics(model, actor=view, extra_config=fields, dtype=self._dtype)
+        return _TreeKinematics(model, actors=self._articulation_actors, extra_config=fields, dtype=self._dtype)
 
     def _make_states(self):
         return CoupledState(self._kinematics, self._actors, self._rigid, self._materials)
@@ -807,7 +831,7 @@ class SolverMonolithic(SolverBase):
                 rolled_back=not published,
                 step_generation=self._step_generation,
                 preconditioner_kind="actor_block",
-                q_block_count=int(k.count > 0),
+                q_block_count=k.tree_count,
                 variational=MappingProxyType(self._variational.copy()),
                 **self._metrics,
             )
@@ -836,7 +860,8 @@ class SolverMonolithic(SolverBase):
             detail["stopped_candidate"]["final_ratios"].update(
                 {
                     name: values["convergence_ratio_" + name]
-                    for name, values in detail.get("material_blocks", {}).items()
+                    for category in ("material_blocks", "articulation_blocks")
+                    for name, values in detail.get(category, {}).items()
                 }
             )
         self._last_stats = replace(
@@ -949,7 +974,7 @@ class SolverMonolithic(SolverBase):
                     self._objective.residual,
                     tet.residual,
                     contact.residual,
-                    self._layout.q_scalar_offset,
+                    self._linear.q_local,
                     self._layout.x_scalar_offset,
                     self._complete_r,
                 ],
@@ -993,6 +1018,8 @@ class SolverMonolithic(SolverBase):
         # inside the owner's warmup/capture/replay overwrite chain.
         evaluate_contact()
         result_buffers = (
+            self._linear.q_rows,
+            self._linear.q_local,
             self._objective.residual,
             tet.residual,
             contact.residual,
@@ -1021,6 +1048,8 @@ class SolverMonolithic(SolverBase):
         self._graphs.run("coupled_objective_result", key, result_buffers, evaluate_result)
         if not reference_mode:
             self._variational["contact_pool"] = contact.evaluation_diagnostics()
+            if self._variational["contact_pool"]["tainted"]:
+                raise _StepFailure(self.Status.CONTACT_OVERFLOW, "Incomplete contact evaluation")
         self._current_state = state
         if device_result:
             packet = self._evaluation_packet.numpy()
@@ -1134,6 +1163,8 @@ class SolverMonolithic(SolverBase):
         try:
             return self._evaluate(self._trial, dt, build_tangent=False, device_result=device_result)
         except _StepFailure as error:
+            if error.status == self.Status.CONTACT_OVERFLOW:
+                raise
             self._variational["trials"].append({"accepted": False, "domain_failure": str(error)})
             return None
 
@@ -1261,7 +1292,11 @@ class SolverMonolithic(SolverBase):
                 self._tet.ids,
                 self._tet.physics.dynamic_mass_diagonal,
                 self._dtype(self._dt),
-                self._layout.q_scalar_offset,
+                linear.q_local,
+                k.jac_offsets,
+                k.body_dof_starts,
+                k.dof_body_starts,
+                k.dof_body_ends,
                 self._layout.x_scalar_offset,
                 self._diagonal,
             ],

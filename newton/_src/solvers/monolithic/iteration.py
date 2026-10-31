@@ -26,6 +26,8 @@ def acceptance(
     energy_noise,
     residual_noise,
     slope_noise,
+    best_energy=None,
+    best_merit=None,
     dtype=np.float64,
 ):
     """Accept a trial when either the Armijo or the residual-norm predicate holds.
@@ -38,6 +40,9 @@ def acceptance(
         raise ValueError("Invalid variational acceptance parameters")
     a = slope < -slope_noise and trial <= current + dtype(1.0e-4) * alpha * slope + energy_noise
     r = trial_merit <= merit + residual_noise
+    # Either metric may rise, but alternating rises must not undo both records.
+    a = a and trial <= (current if best_energy is None else best_energy) + energy_noise
+    r = r and trial_merit <= (merit if best_merit is None else best_merit) + residual_noise
     accepted = a or r
     improved = accepted and ((a and trial < current - energy_noise) or (r and trial_merit < merit - residual_noise))
     return bool(accepted), bool(a), bool(r), bool(improved)
@@ -54,14 +59,20 @@ def _residual_floor(config, name):
         return 1e-12
     if name.startswith(("cloth_", "rigid_")) and not name.endswith("_r"):
         return config.residual_floor_x
-    if name.startswith("rigid_"):
+    if name.startswith(("rigid_", "articulation_")):
         return config.residual_floor_q
     return getattr(config, "residual_floor_" + name)
 
 
 def _record_block(solver, name, key, value):
-    if name.startswith(("rigid_", "cable_", "cloth_")):
-        category = "rigid_blocks" if name.startswith("rigid_") else "material_blocks"
+    if name.startswith(("rigid_", "cable_", "cloth_", "articulation_")):
+        category = (
+            "articulation_blocks"
+            if name.startswith("articulation_")
+            else "rigid_blocks"
+            if name.startswith("rigid_")
+            else "material_blocks"
+        )
         solver._variational.setdefault(category, {}).setdefault(name, {})[key] = value
     else:
         solver._metrics[key] = value
@@ -79,7 +90,11 @@ class Assessment:
 
 
 def _block_of(group):
-    return "q" if group.startswith("q_") else group
+    if group in ("q_force", "q_torque"):
+        return "q"
+    if group.startswith("q_"):
+        return "articulation_" + group.split("_")[1]
+    return group
 
 
 def measure(solver, residual, reference, scale):
@@ -279,6 +294,7 @@ def iterate(solver, dt):
     device = self._device_iteration
     reference = None
     small = False
+    best_energy = best_merit = math.inf
     for iteration in range(self.newton_max_iterations + 1):
         if getattr(self, "_contact_spatial", False):
             self._refresh_candidates()
@@ -303,6 +319,7 @@ def iterate(solver, dt):
         self._reference_residual = reference
         assessment = measure(self, residual, reference, scale)
         merit = assessment.merit
+        best_energy, best_merit = min(best_energy, e), min(best_merit, merit)
         self._metrics["nonlinear_iterations"] = iteration
         if iteration == 0:
             for name, _ in blocks(self):
@@ -344,7 +361,9 @@ def iterate(solver, dt):
             linear_absolute_tolerance=float(max(limits.values())),
             residual_norm_limits=tuple(limits.get(name, 1.0) for name in ("global", "q", "x")),
             group_norm_limits=tuple(limits[name] for name, _ in blocks(self))
-            if self._linear.layout.rigid_ranges or self._linear.layout.material_ranges
+            if self._linear.layout.rigid_ranges
+            or self._linear.layout.material_ranges
+            or len(self._linear.layout.articulation_ranges) > 1
             else None,
             group_residual_floors=tuple(_residual_floor(config, name) for name, _ in blocks(self))
             if self._linear.layout.material_ranges
@@ -404,6 +423,8 @@ def iterate(solver, dt):
                     energy_noise=en,
                     residual_noise=rn,
                     slope_noise=sn,
+                    best_energy=best_energy,
+                    best_merit=best_merit,
                     dtype=native,
                 )
                 conservative = self._conservative_energy()
@@ -425,6 +446,8 @@ def iterate(solver, dt):
                         "ResNorm": r,
                         "accepted": passes,
                         "improved": improved,
+                        "best_energy": best_energy,
+                        "best_merit": best_merit,
                     }
                 )
                 if passes:
@@ -458,7 +481,13 @@ def iterate(solver, dt):
 
 
 def _read_block(solver, name, key):
-    if name.startswith(("rigid_", "cable_", "cloth_")):
-        category = "rigid_blocks" if name.startswith("rigid_") else "material_blocks"
+    if name.startswith(("rigid_", "cable_", "cloth_", "articulation_")):
+        category = (
+            "articulation_blocks"
+            if name.startswith("articulation_")
+            else "rigid_blocks"
+            if name.startswith("rigid_")
+            else "material_blocks"
+        )
         return solver._variational[category][name][key]
     return solver._metrics[key]

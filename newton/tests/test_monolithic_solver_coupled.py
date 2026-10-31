@@ -324,10 +324,7 @@ def test_failure_gates(test, device):
             test.assertTrue(pool["tainted"])
             test.assertGreater(pool["dropped"], 0)
             test.assertEqual(pool["admitted"], 0)
-            test.assertFalse(run.last_stats.rolled_back)
-            run._states.validate(out)
-            assert_snapshot(test, state, expected)
-            continue
+            test.assertEqual(run.last_stats.status, run.Status.CONTACT_OVERFLOW)
         test.assertFalse(run.last_stats.converged, (failure, run.last_stats))
         test.assertTrue(run.last_stats.rolled_back)
         assert_snapshot(test, state, expected)

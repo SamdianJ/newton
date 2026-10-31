@@ -227,12 +227,16 @@ def test_pooled_assembly_generation(test, device):
 
 
 def test_pooled_capacity_and_failure(test, device):
-    """Continue after complete capacity drops, while hard matrix errors roll back all published state."""
+    """Roll back all published state on capacity drops and hard matrix errors."""
     run = contact_solver(contact_scene(device, "A-R"), contact_factor_capacity=0)
     s = contact_state(run, "A-R")
+    before = snapshot(s)
     with test.assertWarnsRegex(RuntimeWarning, "discarded.*complete contacts"):
         run.step(s, s, run.model.control(), dt=0.001)
-    test.assertTrue(run.last_stats.converged, run.last_stats)
+    test.assertFalse(run.last_stats.converged, run.last_stats)
+    test.assertEqual(run.last_stats.status, run.Status.CONTACT_OVERFLOW)
+    test.assertTrue(run.last_stats.rolled_back)
+    assert_snapshot(test, s, before)
     detail = run.last_stats.variational["contact_pool"]
     test.assertTrue(detail["tainted"])
     test.assertGreater(detail["dropped"], 0)

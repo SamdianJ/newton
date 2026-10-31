@@ -163,8 +163,8 @@ def _masked_scaled_csr_mv(
 
 @wp.kernel
 def _masked_q_solve(
-    lower: wp.array2d[Any],
-    q_start: int,
+    lower: wp.array[Any],
+    blocks: wp.array[wp.vec3i],
     r: wp.array[Any],
     temporary: wp.array[Any],
     z: wp.array[Any],
@@ -173,18 +173,19 @@ def _masked_q_solve(
 ):
     if state[0].enabled == 0:
         return
-    n = lower.shape[0]
+    block = blocks[wp.tid()]
+    q_start, n, offset = block[0], block[1], block[2]
     for i in range(n):
         value = r[q_start + i]
         for j in range(i):
-            value -= lower[i, j] * temporary[q_start + j]
-        temporary[q_start + i] = value / lower[i, i]
+            value -= lower[offset + i * n + j] * temporary[q_start + j]
+        temporary[q_start + i] = value / lower[offset + i * n + i]
     for k in range(n):
         i = n - 1 - k
         value = temporary[q_start + i]
         for j in range(i + 1, n):
-            value -= lower[j, i] * z[q_start + j]
-        value = value / lower[i, i]
+            value -= lower[offset + j * n + i] * z[q_start + j]
+        value = value / lower[offset + i * n + i]
         z[q_start + i] = value
         if not wp.isfinite(value):
             wp.atomic_max(error, 0, _NONFINITE)

@@ -179,6 +179,56 @@ def test_curved_target(test, device):
     compare(test, run, native_terms(batch), state, start)
 
 
+def test_frozen_complete_pairs(test, device):
+    """Match frozen normal selection, in-step work and PSD factors under endpoint motion."""
+    for kind, mu in itertools.product(("A-R", "R-R", "R-T", "R-static"), (0.0, 0.5)):
+        with test.subTest(kind=kind, mu=mu):
+            run = contact_solver(
+                contact_scene(device, kind),
+                friction_coefficient=mu,
+                alignment_policy="frozen",
+                box_smoothing=25e-6,
+                alignment_smoothing=0.1,
+            )
+            state, batch = contact_state(run, kind), native_batch(run)
+            values = physical(state)
+            turn = np.zeros(run._layout.scalar_dof_count)
+            turn[run._rigid.actors[0].dof_start + 5] = 1
+            perturb(run, state, values, turn, 0.05)
+            start = physical(state)
+            query(batch, run, state, start=True)
+            direction = np.linspace(-0.2, 0.3, run._layout.scalar_dof_count)
+            perturb(run, state, start, direction, 1e-7)
+            query(batch, run, state)
+            test.assertEqual(batch.flags.numpy()[0], 0)
+            stiffness, _, velocity, width, radius = run._contact.parameters
+            full = evaluate_full(
+                run.model,
+                run._actors,
+                physical(state),
+                start,
+                radius=radius,
+                stiffness=stiffness,
+                width=width,
+                mu=mu,
+                falloff=velocity * 0.001,
+                alignment_policy="frozen",
+                box_smoothing=25e-6,
+                alignment_smoothing=0.1,
+            )
+            energy, residual, matrix = native_terms(batch)
+            np.testing.assert_allclose(energy, full["energy"], rtol=2e-8, atol=1e-11)
+            np.testing.assert_allclose(residual, full["residual"], rtol=2e-7, atol=1e-9)
+            test.assertLess(np.linalg.norm(matrix - full["tangent"]) / max(1.0, np.linalg.norm(full["tangent"])), 1e-6)
+            force = batch.pool.force.result.numpy()
+            np.testing.assert_allclose(
+                force[: 3 * run.model.particle_count].reshape(-1, 3), full["particle_force"], rtol=2e-7, atol=1e-9
+            )
+            np.testing.assert_allclose(
+                force[3 * run.model.particle_count :].reshape(-1, 6), full["body_wrench"], rtol=2e-7, atol=1e-9
+            )
+
+
 add_function_test(TestContactFullOracle, "test_complete_pairs", test_complete_pairs, devices=get_test_devices())
 add_function_test(
     TestContactFullOracle,
@@ -188,6 +238,9 @@ add_function_test(
 )
 add_function_test(TestContactFullOracle, "test_mesh_input", test_mesh_input, devices=get_test_devices())
 add_function_test(TestContactFullOracle, "test_curved_target", test_curved_target, devices=get_test_devices())
+add_function_test(
+    TestContactFullOracle, "test_frozen_complete_pairs", test_frozen_complete_pairs, devices=get_test_devices()
+)
 
 
 if __name__ == "__main__":

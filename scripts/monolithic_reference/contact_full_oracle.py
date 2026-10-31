@@ -15,7 +15,7 @@ import numpy as np
 from .actor_contact_oracle import box_face_samples
 from .actor_contract_oracle import rotation, sphere_samples
 from .articulation_oracle import skew, transform
-from .contact_oracle import geometry, local
+from .contact_oracle import frozen_local, geometry, local
 from .smooth_sdf_oracle import NaturalSpline
 
 
@@ -161,6 +161,8 @@ def iter_full(
     falloff=1e-5,
     mesh_fields=None,
     alignment_policy=None,
+    box_smoothing=0.0,
+    alignment_smoothing=0.0,
 ):
     """Yield every supported Model sample, with only its local DoF and endpoint contributions.
 
@@ -171,8 +173,10 @@ def iter_full(
     pass their guard/mask physical policy. Masking retains all enumerated keys.
     """
     _check_native(state, start)
-    if alignment_policy not in (None, "guard", "mask"):
+    if alignment_policy not in (None, "guard", "mask", "frozen"):
         raise ValueError("Unsupported full-oracle alignment policy")
+    if alignment_smoothing > 0 and alignment_policy != "frozen":
+        raise ValueError("Alignment smoothing requires the frozen policy")
     poses, centers, jacobian, ancestors = _frames(model, actors, state)
     old_poses, _, _, _ = _frames(model, actors, start)
     bodies, kinds, scales, margins, flags = (
@@ -202,17 +206,42 @@ def iter_full(
             if kinds[target] != 8 or mesh_fields is None or target not in mesh_fields:
                 raise ValueError("Full oracle mesh target requires independently exported SDF input")
             kind = mesh_fields[target]
-        gap = float(geometry(y, kind, scales[target])[0] - offset)
+        gap = float(geometry(y, kind, scales[target], box_smoothing=box_smoothing)[0] - offset)
         e, r, _, b = local(
-            y, yn, kind, scales[target], offset=offset, stiffness=stiffness * weight, width=width, mu=mu, a=falloff
+            y,
+            yn,
+            kind,
+            scales[target],
+            offset=offset,
+            stiffness=stiffness * weight,
+            width=width,
+            mu=mu,
+            a=falloff,
+            box_smoothing=box_smoothing,
         )
         if any(not np.isfinite(value).all() for value in (e, r, b)):
             raise ValueError("Nonfinite full-oracle local contribution")
-        masked = False
-        if alignment_policy is not None:
+        masked, orientation_weight = False, 1.0
+        if alignment_policy == "frozen":
+            e, r, b, orientation_weight = frozen_local(
+                y,
+                yn,
+                initial[target][:3, :3].T @ old_normal,
+                kind,
+                scales[target],
+                offset=offset,
+                stiffness=stiffness * weight,
+                width=width,
+                mu=mu,
+                a=falloff,
+                box_smoothing=box_smoothing,
+                alignment_smoothing=alignment_smoothing,
+            )
+            masked = orientation_weight == 0
+        elif alignment_policy is not None:
             old_rt = initial[target][:3, :3]
-            old_geometry = geometry(yn, kind, scales[target])
-            gradient = geometry(y, kind, scales[target])[1]
+            old_geometry = geometry(yn, kind, scales[target], box_smoothing=box_smoothing)
+            gradient = geometry(y, kind, scales[target], box_smoothing=box_smoothing)[1]
             masked = np.dot(rt.T @ normal, gradient) > 0
             if alignment_policy == "guard":
                 if (old_geometry[0] - offset < 0 and np.dot(old_rt.T @ old_normal, old_geometry[1]) > 0) or (
@@ -222,6 +251,7 @@ def iter_full(
                 masked = False
             if masked:
                 e, r, b = np.zeros(2), np.zeros(3), np.zeros((3, 3))
+                orientation_weight = 0.0
         combined = dict(source_j)
         for column, value in jacobian(int(bodies[target]), point).items():
             combined[column] = combined.get(column, np.zeros(3)) - value
@@ -247,6 +277,7 @@ def iter_full(
         record = {
             "key": key,
             "alignment_masked": bool(masked),
+            "orientation_weight": float(orientation_weight),
             "energy": e,
             "columns": columns,
             "residual": rr,
@@ -375,6 +406,8 @@ def evaluate_full(
     falloff=1e-5,
     mesh_fields=None,
     alignment_policy=None,
+    box_smoothing=0.0,
+    alignment_smoothing=0.0,
 ):
     """Return the existing dense small-scene E/r/B, forces and complete per-key records."""
     _check_native(state, start)
@@ -393,6 +426,8 @@ def evaluate_full(
         falloff=falloff,
         mesh_fields=mesh_fields,
         alignment_policy=alignment_policy,
+        box_smoothing=box_smoothing,
+        alignment_smoothing=alignment_smoothing,
     ):
         key = record["key"]
         if key in records:

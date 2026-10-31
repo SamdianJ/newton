@@ -55,13 +55,17 @@ def test_spatial_default(test, device):
 
 
 def test_spatial_capacity_option(test, device):
-    """Select the spatial candidate capacity through the public constructor."""
+    """Select the public candidate capacity and roll back when it cannot hold the contacts."""
     model = contact_scene(device, "chain")
     run = contact_solver(model, contact_candidate_capacity=7)
     test.assertEqual(run._contact.candidate_capacity, 7)
     state = contact_state(run, "chain")
-    run.step(state, state, model.control(), dt=0.001)
-    test.assertFalse(run.last_stats.rolled_back, run.last_stats)
+    before = snapshot(state)
+    with test.assertWarnsRegex(RuntimeWarning, "capacity exceeded"):
+        run.step(state, state, model.control(), dt=0.001)
+    test.assertTrue(run.last_stats.rolled_back, run.last_stats)
+    test.assertEqual(run.last_stats.status, run.Status.CONTACT_OVERFLOW)
+    assert_snapshot(test, state, before)
     with test.assertRaisesRegex(ValueError, "candidate capacity"):
         contact_solver(model, contact_candidate_capacity=-1)
 
@@ -333,6 +337,9 @@ def test_spatial_capacity_reference(test, device):
         test.assertEqual(spatial["tainted"], candidate_capacity == 0)
         test.assertEqual(pool["dropped"] > 0, factor_capacity == 0)
         test.assertEqual(pool["tainted"], candidate_capacity == 0 or factor_capacity == 0)
+        if candidate_capacity == 0 or factor_capacity == 0:
+            test.assertEqual(run.last_stats.status, run.Status.CONTACT_OVERFLOW)
+            test.assertTrue(run.last_stats.rolled_back)
     for r in references[1:]:
         np.testing.assert_array_equal(r, references[0])
 
