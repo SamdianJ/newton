@@ -6,14 +6,14 @@
 import json
 from pathlib import Path
 
-GATES_PATH = Path(__file__).with_name("fixtures") / "physical_gates_v2.json"
+GATES_PATH = Path(__file__).with_name("fixtures") / "physical_gates_v3.json"
 _COUNT_KEYS = ("CONVERGED", "STOPPED_ACCEPTED", "HARD_FAILURE")
 
 
 def load_gates(path=GATES_PATH, *, allow_proposed=False):
-    """Load a version-2 gate recipe; proposed recipes are accepted only for diagnostics."""
+    """Load current or historical gates; proposed recipes are accepted only for diagnostics."""
     gates = json.loads(Path(path).read_text())
-    if gates.get("version") != 2:
+    if gates.get("version") not in (2, 3):
         raise ValueError("Unsupported physical gate version")
     if gates.get("status") != "FROZEN" and not (allow_proposed and gates.get("status") == "PROPOSED"):
         raise ValueError("Physical gates must be a frozen recipe")
@@ -49,10 +49,11 @@ def evaluate_robot(summary, gates):
     checks = {
         "complete": bool(summary["complete"]) and steps > 0,
         "hard_failures": counts["HARD_FAILURE"] <= gates["hard_failures_max"],
-        "stopped_fraction": steps > 0 and counts["STOPPED_ACCEPTED"] / steps <= gates["stopped_fraction_max"],
         "penetration": summary["maximum_penetration_m"] <= gates["penetration_max_m"],
         "det_f": summary["minimum_det_f"] > gates["det_f_min"],
     }
+    if gates["stopped_fraction_max"] is not None:
+        checks["stopped_fraction"] = steps > 0 and counts["STOPPED_ACCEPTED"] / steps <= gates["stopped_fraction_max"]
     held = grasp_held(summary, gates["grasp"])
     if gates["grasp"]["required"]:
         checks["grasp"] = held
@@ -61,6 +62,8 @@ def evaluate_robot(summary, gates):
         "status": "FAIL" if failures else "PASS",
         "failures": failures,
         "steps": steps,
+        "counts": dict(counts),
+        "stopped_fraction": counts["STOPPED_ACCEPTED"] / steps if steps else None,
         "grasp": "PASS" if held else "FAIL",
         "grasp_required": gates["grasp"]["required"],
     }

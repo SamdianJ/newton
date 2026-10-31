@@ -33,23 +33,19 @@ class FrankaAdmittance(FrankaGrasp):
     def __init__(self, cache, *, device="cuda:0", precision="fp64"):
         self.factory = FrozenRobotFactory("franka-cube", dataflow="default", precision=precision)
 
-        def strict_solver(model, **options):
-            options["publish_policy"] = "strict"
-            return self.factory(model, **options)
-
-        super().__init__(cache, device, precision=precision, solver_factory=strict_solver)
+        super().__init__(cache, device, precision=precision, solver_factory=self.factory)
         self.control = self.solver.create_control()
         self.admittance = FrankaFingerAdmittance(
             self.model.joint_limit_lower.numpy()[7:], self.model.joint_limit_upper.numpy()[7:]
         )
-        self.metadata.update(publish_policy="strict", controller="per-finger SI admittance, 1 N, M=0.2 kg, B=20 N*s/m")
+        self.metadata.update(controller="per-finger SI admittance, 1 N, M=0.2 kg, B=20 N*s/m")
         self.fingers = self.model.joint_child.numpy()[7:]
         self.parents = self.model.joint_parent.numpy()[7:]
         self.joint_frames = self.model.joint_X_p.numpy()[7:]
         self.joint_axes = self.model.joint_axis.numpy()[7:]
 
     def step(self):
-        """Publish a converged step or restore the virtual command and stop on failure."""
+        """Accept converged or STOPPED publications; restore the command on hard failure."""
         if self.failed or self.steps >= STEPS:
             return None
         q, v, self.phase = targets(self.high, self.low, (self.steps + 1) * DT)
@@ -62,7 +58,10 @@ class FrankaAdmittance(FrankaGrasp):
             self.control.joint_target_qd.assign(v)
             self.solver.step(self.state, self.state, self.control, dt=DT)
             stats = self.solver.last_stats
-            if not stats.converged or stats.rolled_back:
+            if stats.rolled_back or stats.variational.get("publication_status") not in (
+                "CONVERGED",
+                "STOPPED_ACCEPTED",
+            ):
                 raise RuntimeError(f"Step {self.steps + 1}: {stats.status}; reason={stats.failure_reason}")
         except Exception:
             self.admittance.restore(before)
@@ -97,6 +96,10 @@ def evaluate(rows, *, initial_com_z, weight, edge):
         edge=edge,
     )
     metrics = {
+        "counts": {
+            label: sum(r["publication"] == label for r in rows)
+            for label in ("CONVERGED", "STOPPED_ACCEPTED", "HARD_FAILURE")
+        },
         "grasp": grasp,
         "maximum_penetration_m": max((r["penetration_m"] for r in rows), default=None),
         "minimum_det_f": min((r["min_det_f"] for r in rows), default=None),
@@ -109,8 +112,12 @@ def evaluate(rows, *, initial_com_z, weight, edge):
         "maximum_force_projection_error_N": max((r["force_projection_error_N"] for r in rows), default=None),
     }
     gates = {
-        "complete_converged": [r["step"] for r in rows] == list(range(1, STEPS + 1))
-        and all(r["converged"] for r in rows),
+        "complete_published": [r["step"] for r in rows] == list(range(1, STEPS + 1))
+        and all(
+            r["publication"] in ("CONVERGED", "STOPPED_ACCEPTED")
+            and r["converged"] == (r["publication"] == "CONVERGED")
+            for r in rows
+        ),
         "grasp": grasp["held"],
         "penetration": bool(rows) and metrics["maximum_penetration_m"] <= 0.002,
         "deformation": bool(rows) and metrics["minimum_det_f"] >= 0.2,
@@ -151,6 +158,7 @@ def main():
         {key: str(value) if isinstance(value, Path) else value for key, value in vars(args).items()},
     )
     rows, frames, scene, error = [], [], None, None
+    hard_failure_steps = []
     initial_com_z, weight, edge = 0.0, 1.0, 0.04
     begin = time.perf_counter()
     try:
@@ -166,6 +174,8 @@ def main():
                 try:
                     stats = scene.step()
                 except Exception:
+                    if scene.solver.last_stats.rolled_back:
+                        hard_failure_steps.append(scene.steps + 1)
                     np.savez_compressed(args.output / "failure-input.npz", **before)
                     np.savez_compressed(args.output / "failure-iterate.npz", **state_arrays(scene.solver._accepted))
                     save(args.output / "failure.json", scene.solver.last_stats)
@@ -191,6 +201,10 @@ def main():
                     "penetration_m": measured["penetration"],
                     "min_det_f": stats.min_det_f,
                     "converged": stats.converged,
+                    "publication": stats.variational["publication_status"],
+                    "solver_status": stats.status.value,
+                    "stop_reason": stats.failure_reason,
+                    "convergence_ratio": stats.convergence_ratio,
                     "newton_iterations": stats.nonlinear_iterations,
                 }
                 rows.append(row)
@@ -212,11 +226,15 @@ def main():
             particle_q=np.stack([f[2] for f in frames]),
         )
     metrics, gates = evaluate(rows, initial_com_z=initial_com_z, weight=weight, edge=edge)
+    metrics["counts"]["HARD_FAILURE"] += len(hard_failure_steps)
     unchanged = all(sha(REPO / path) == value for path, value in hashes.items())
     summary = {
         "passed": all(gates.values()) and error is None and unchanged,
         "error": error,
         "steps": len(rows),
+        "counts": metrics["counts"],
+        "stopped_steps": [r["step"] for r in rows if r["publication"] == "STOPPED_ACCEPTED"],
+        "hard_failure_steps": hard_failure_steps,
         "precision": args.precision,
         "device": args.device,
         "metrics": metrics,

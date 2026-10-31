@@ -46,10 +46,31 @@ def summary(**overrides):
 
 
 class TestPhysicalGates(unittest.TestCase):
+    def test_worktree_default_counts_stopped_without_a_limit(self):
+        """Accept all published STOPPED steps while retaining hard-failure and physical gates."""
+        gates = load_gates()["robot"]["franka-cube"]
+        counts = {"CONVERGED": 0, "STOPPED_ACCEPTED": 1000, "HARD_FAILURE": 0}
+        result = evaluate_robot(summary(counts=counts), gates)
+        self.assertEqual(result["status"], "PASS")
+        self.assertEqual(result["counts"], counts)
+        self.assertEqual(result["stopped_fraction"], 1.0)
+        self.assertIn("hard_failures", evaluate_robot(summary(counts=counts | {"HARD_FAILURE": 1}), gates)["failures"])
+        self.assertIn(
+            "penetration", evaluate_robot(summary(counts=counts, maximum_penetration_m=0.003), gates)["failures"]
+        )
+
     def test_complete_physical_run_passes(self):
         self.assertEqual(
             evaluate_robot(summary(), GATES),
-            {"status": "PASS", "failures": [], "steps": 1000, "grasp": "PASS", "grasp_required": True},
+            {
+                "status": "PASS",
+                "failures": [],
+                "steps": 1000,
+                "grasp": "PASS",
+                "grasp_required": True,
+                "counts": summary()["counts"],
+                "stopped_fraction": 0.01,
+            },
         )
 
     def test_each_violation_is_reported(self):

@@ -168,9 +168,18 @@ class TestAdmittanceFeedback(unittest.TestCase):
                     "joint_velocity_m_s": [0, 0],
                     "gap_m": [0.001, 0.001],
                     "converged": True,
+                    "publication": "CONVERGED",
                 }
             )
         self.assertTrue(all(evaluate(rows)[1].values()))
+        for row in rows:
+            row.update(converged=False, publication="STOPPED_ACCEPTED")
+        metrics, gates = evaluate(rows)
+        self.assertTrue(all(gates.values()))
+        self.assertEqual(metrics["counts"], {"CONVERGED": 0, "STOPPED_ACCEPTED": 1000, "HARD_FAILURE": 0})
+        rows[0]["publication"] = "HARD_FAILURE"
+        self.assertFalse(evaluate(rows)[1]["complete"])
+        rows[0]["publication"] = "STOPPED_ACCEPTED"
         json.dumps(evaluate(rows))
         self.assertFalse(evaluate(rows[:-1])[1]["complete"])
         self.assertFalse(evaluate(rows[:100])[1]["low-force"])
@@ -188,6 +197,19 @@ class TestAdmittanceFeedback(unittest.TestCase):
             row = scene.step()
             self.assertTrue(row["converged"])
             self.assertEqual(json.loads(json.dumps(row)), row)
+
+    def test_stopped_step_publishes_feedback_and_continues(self):
+        """Consume fresh forces after a real budget-limited publication without claiming convergence."""
+        scene = AdmittanceGripper(device="cpu")
+        scene.step()
+        scene.solver.newton_max_iterations = 0
+        for expected in (2, 3):
+            row = scene.step()
+            self.assertFalse(row["converged"])
+            self.assertEqual(row["publication"], "STOPPED_ACCEPTED")
+            self.assertEqual(row["force_generation"], expected)
+            self.assertEqual(scene.steps, expected)
+            self.assertTrue(scene.feedback["valid"])
 
 
 if __name__ == "__main__":

@@ -127,11 +127,20 @@ class TestFrankaAdmittance(unittest.TestCase):
                     "min_det_f": 0.9,
                     "force_projection_error_N": 0.0,
                     "converged": True,
+                    "publication": "CONVERGED",
                 }
             )
         kwargs = {"initial_com_z": 0.02, "weight": 0.63, "edge": 0.04}
         self.assertTrue(all(evaluate(rows, **kwargs)[1].values()))
-        self.assertFalse(evaluate(rows[:-1], **kwargs)[1]["complete_converged"])
+        for row in rows:
+            row.update(converged=False, publication="STOPPED_ACCEPTED")
+        metrics, gates = evaluate(rows, **kwargs)
+        self.assertTrue(all(gates.values()))
+        self.assertEqual(metrics["counts"], {"CONVERGED": 0, "STOPPED_ACCEPTED": 5250, "HARD_FAILURE": 0})
+        rows[0]["publication"] = "HARD_FAILURE"
+        self.assertFalse(evaluate(rows, **kwargs)[1]["complete_published"])
+        rows[0]["publication"] = "STOPPED_ACCEPTED"
+        self.assertFalse(evaluate(rows[:-1], **kwargs)[1]["complete_published"])
         self.assertFalse(evaluate(rows[:3200], **kwargs)[1]["force_tracking"])
         rows[3300]["force_N"] = [1.3, 1.0]
         self.assertFalse(evaluate(rows, **kwargs)[1]["force_tracking"])
@@ -141,6 +150,38 @@ class TestFrankaAdmittance(unittest.TestCase):
         self.assertFalse(evaluate(rows, **kwargs)[1]["penetration"])
         rows[-1]["force_N"] = [0.1, 0.0]
         self.assertFalse(evaluate(rows, **kwargs)[1]["release"])
+
+    def test_stopped_publication_keeps_controller_progress(self):
+        """Advance the reference and consume a fresh generation after an accepted STOPPED step."""
+        scene = FrankaAdmittance.__new__(FrankaAdmittance)
+        scene.failed, scene.steps = False, 1500
+        scene.high = scene.low = np.r_[np.zeros(7), [0.04, 0.04]]
+        scene.admittance = FrankaFingerAdmittance([0.0, 0.0], [0.04, 0.04])
+        scene.control = SimpleNamespace(joint_target_q=Mock(), joint_target_qd=Mock())
+        scene.control.joint_target_q.numpy.return_value = scene.high.copy()
+        scene.control.joint_target_qd.numpy.return_value = np.zeros(9)
+        scene.state, scene.solver = object(), Mock()
+        scene.solver.last_stats = SimpleNamespace(
+            converged=False,
+            rolled_back=False,
+            status="nonlinear_max_iterations",
+            failure_reason="budget",
+            variational={"publication_status": "STOPPED_ACCEPTED"},
+        )
+        for generation in (1, 2):
+            scene.solver.get_contact_forces.return_value = self.forces(generation=generation)
+            self.assertFalse(scene.step().converged)
+            self.assertEqual(scene.admittance.last_generation, generation)
+            self.assertEqual(scene.steps, 1500 + generation)
+            self.assertFalse(scene.failed)
+        before = scene.admittance.snapshot()
+        scene.solver.get_contact_forces.return_value = self.forces(generation=3)
+        scene.solver.last_stats.rolled_back = True
+        scene.solver.last_stats.variational["publication_status"] = "HARD_FAILURE"
+        with self.assertRaises(RuntimeError):
+            scene.step()
+        self.assertEqual(scene.admittance.snapshot(), before)
+        self.assertEqual(scene.steps, 1502)
 
 
 if __name__ == "__main__":

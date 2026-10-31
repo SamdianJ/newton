@@ -1,0 +1,31 @@
+{
+  "version": 3,
+  "status": "FROZEN",
+  "approval": "User approved accepting and counting STOPPED publications without a count or fraction limit for subsequent tests in Monolithic-admittance on 2026-11-01. All physical thresholds are unchanged from v2. This worktree policy does not relabel historical results or change the solver convergence criterion.",
+  "robot": {
+    "franka-cube": {
+      "hard_failures_max": 0,
+      "stopped_fraction_max": null,
+      "penetration_max_m": 0.002,
+      "det_f_min": 0.2,
+      "grasp": {
+        "window_steps": 500,
+        "ground_weight_fraction_max": 0.05,
+        "com_rise_min_edge_fraction": 0.25,
+        "required": true
+      }
+    },
+    "sharpa-recorded-10mm": {
+      "hard_failures_max": 0,
+      "stopped_fraction_max": null,
+      "penetration_max_m": 0.002,
+      "det_f_min": 0.2,
+      "grasp": {
+        "window_steps": 500,
+        "ground_weight_fraction_max": 0.05,
+        "com_rise_min_edge_fraction": 0.25,
+        "required": false
+      }
+    }
+  }
+}

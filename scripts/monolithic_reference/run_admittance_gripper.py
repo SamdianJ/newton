@@ -71,7 +71,7 @@ class AdmittanceGripper:
             alignment_policy="frozen",
             alignment_smoothing=0.1,
             box_smoothing=25e-6,
-            publish_policy="strict",
+            publish_policy="current_iterate",
             pcg_mode="production",
             use_cuda_graph=wp.get_device(device).is_cuda,
             newton_max_iterations=80,
@@ -102,7 +102,10 @@ class AdmittanceGripper:
         try:
             self.solver.step(self.state, self.state, self.control, dt=DT)
             stats = self.solver.last_stats
-            if not stats.converged or stats.rolled_back:
+            if stats.rolled_back or stats.variational.get("publication_status") not in (
+                "CONVERGED",
+                "STOPPED_ACCEPTED",
+            ):
                 raise RuntimeError(f"Step {self.steps + 1}: {stats.failure_reason}")
         except Exception:
             for controller, command in zip(self.controllers, before, strict=True):
@@ -136,13 +139,22 @@ class AdmittanceGripper:
             "guard_active": guarded,
             "force_generation": forces.force_generation,
             "converged": stats.converged,
+            "publication": stats.variational["publication_status"],
+            "solver_status": stats.status.value,
+            "stop_reason": stats.failure_reason,
+            "convergence_ratio": stats.convergence_ratio,
             "newton_iterations": stats.nonlinear_iterations,
         }
 
 
 def evaluate(rows):
     """Apply predeclared force, geometry, release and completion gates."""
-    metrics = {}
+    metrics = {
+        "counts": {
+            label: sum(r["publication"] == label for r in rows)
+            for label in ("CONVERGED", "STOPPED_ACCEPTED", "HARD_FAILURE")
+        }
+    }
     for phase, start, end in (("low-force", 0.55, 0.7), ("high-force", 1.25, 1.4)):
         window = [row for row in rows if round(start / DT) < row["step"] <= round(end / DT)]
         metrics[phase] = {
@@ -156,7 +168,14 @@ def evaluate(rows):
     release = [r for r in rows if r["step"] > 925]
     metrics["release_force_N"] = max((max(abs(f) for f in r["force_N"]) for r in release), default=None)
     metrics["release_minimum_gap_m"] = min((min(r["gap_m"]) for r in release), default=None)
-    gates = {"complete": len(rows) == STEPS and all(r["converged"] for r in rows)}
+    gates = {
+        "complete": [r["step"] for r in rows] == list(range(1, STEPS + 1))
+        and all(
+            r["publication"] in ("CONVERGED", "STOPPED_ACCEPTED")
+            and r["converged"] == (r["publication"] == "CONVERGED")
+            for r in rows
+        )
+    }
     for phase in ("low-force", "high-force"):
         values = metrics[phase]
         gates[phase] = (
@@ -181,7 +200,8 @@ def main():
     paths = [Path(__file__), Path(__file__).with_name("admittance_control.py")]
     paths += sorted((REPO / "newton/_src/solvers/monolithic").glob("*.py"))
     hashes = {str(p.relative_to(REPO)): hashlib.sha256(p.read_bytes()).hexdigest() for p in paths}
-    rows, error = [], None
+    rows, error, scene = [], None, None
+    hard_failure_steps = []
     try:
         scene = AdmittanceGripper(device=args.device, precision=args.precision)
         with (args.output / "trace.jsonl").open("w") as stream:
@@ -191,7 +211,10 @@ def main():
                 stream.write(json.dumps(row) + "\n")
     except Exception as exception:
         error = f"{type(exception).__name__}: {exception}"
+        if scene is not None and scene.solver.last_stats.rolled_back:
+            hard_failure_steps.append(scene.steps + 1)
     metrics, gates = evaluate(rows)
+    metrics["counts"]["HARD_FAILURE"] += len(hard_failure_steps)
     unchanged = all(hashlib.sha256((REPO / p).read_bytes()).hexdigest() == h for p, h in hashes.items())
     summary = {
         "passed": all(gates.values()) and error is None and unchanged,
@@ -200,6 +223,10 @@ def main():
         "precision": args.precision,
         "dt_s": DT,
         "steps": len(rows),
+        "counts": metrics["counts"],
+        "stopped_steps": [r["step"] for r in rows if r["publication"] == "STOPPED_ACCEPTED"],
+        "hard_failure_steps": hard_failure_steps,
+        "publish_policy": "current_iterate",
         "metrics": metrics,
         "gates": gates,
         "commit": subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=REPO, text=True).strip(),

@@ -19,6 +19,26 @@ uv run -m newton.examples basic_pendulum
 
 ### Monolithic test policy
 
+#### Admittance worktree decision (2026-11-01)
+
+The user approved accepting STOPPED publications in subsequent tests on
+`SamiulJ/monolithic-admittance`. Use `current_iterate` for task rollouts;
+`STOPPED_ACCEPTED` may continue with valid published feedback. Count and
+report CONVERGED, STOPPED_ACCEPTED and HARD_FAILURE separately, including
+stopped step indices/reasons. Do not fail a task solely on the STOPPED count
+or fraction, and never label STOPPED as converged. Rollbacks, invalid
+publications and violated physical/task gates remain failures. Evaluate
+physical gates on every published frame, including STOPPED frames.
+
+This user decision supersedes older strict-publication or stopped-fraction
+task gates in this worktree. The default robot recipe is
+`physical_gates_v3.json`; v2 and old results remain historical evidence.
+Numerical tests must still verify the mathematical properties they claim;
+do not rewrite solver convergence or hard-failure semantics. Apply the same
+publication/counting policy when bringing another task runner into this
+worktree's subsequent validation. Other worktrees and cloud policy are
+unchanged; validation remains local-only unless the user requests upload.
+
 For Monolithic work, apply the following scope rules to the general testing instructions above. The authoritative stage workflow, directory layout, component map and commands are in [project.md](../../dev/monolithic/project.md).
 
 - Give each development stage (including a substage such as P4j) its own worktree and branch from `SamiulJ/monolithic-refactor`. Define the goal and a stage PRD with at least one E2E test, then split it into PRs. Update stage documents and commit each completed PR. After stage-goal review, pass the PRD E2E and full-scene gates before merging into the integration branch.
@@ -27,7 +47,7 @@ For Monolithic work, apply the following scope rules to the general testing inst
 - Maintain development documents under workspace `dev/monolithic/<stage>/` and current script usage under `dev/scripts/`. Keep test source in each stage worktree’s `newton/tests/` and existing scene runners in `scripts/monolithic_reference/`; do not migrate or duplicate test implementations into the workspace. Preserve Newton discovery and CI. Store results under workspace `dev/monolithic/test/results/<stage>/<PR-or-stage>/<run-id>/` and verify imports come from the tested worktree. External workspace documents and results are not included by a worktree commit; record their identity in the PR.
 - Retire tests whose only purpose is guarding historical reports, obsolete diagnostic accounting, frozen source snapshots or retired implementations. Check imports, test registration and callers first. Move any still-valid mathematical, input-validation or safety assertions to the appropriate functional test before removing the historical file. Keep independent oracles, failure rollback and explicitly supported state/checkpoint compatibility coverage.
 - The solver supports only C-IE contact, ArmijoOrResNorm acceptance and the spatial contact dataflow. Do not parameterize tests, oracles or runners over the retired C-EE/C-II laws, Armijo/ResNorm-only acceptance or the legacy dataflow. The complete-candidate pooled objective is an offline audit oracle only, constructed through `scripts.monolithic_reference.contact_routes.pooled_audit_route()`.
-- The production Franka and recorded Sharpa FP64 trajectories (C-IE, ArmijoOrResNorm, CUDA production graphs) and the 64-box collision scene are a **manually triggered overnight regression**, entered with `scripts.monolithic_reference.run_regression --profile nightly`. The `dev` and `full` profiles run the two robot trajectories; `nightly` adds the collision scene. The default is FP64; `--precision fp32` runs the same cases on the same physical gates for per-scene FP32 qualification. Robot runs qualify on the frozen physical plausibility gates (`scripts/monolithic_reference/fixtures/physical_gates_v2.json`); comparison with the retained reference trajectories is diagnostic only, and new results need not match them. These profiles are explicit long runs, not a default local, commit or ordinary CI gate, and `dev` is not the small integration tier. Do not automatically launch any profile after a refactor, documentation change or component test failure. Do not add a schedule or provision runners as part of routine development.
+- The production Franka and recorded Sharpa FP64 trajectories (C-IE, ArmijoOrResNorm, CUDA production graphs) and the 64-box collision scene are a **manually triggered overnight regression**, entered with `scripts.monolithic_reference.run_regression --profile nightly`. The `dev` and `full` profiles run the two robot trajectories; `nightly` adds the collision scene. The default is FP64; `--precision fp32` runs the same cases on the same physical gates for per-scene FP32 qualification. Robot runs qualify on the frozen physical plausibility gates (`scripts/monolithic_reference/fixtures/physical_gates_v3.json` in this worktree); comparison with the retained reference trajectories is diagnostic only, and new results need not match them. These profiles are explicit long runs, not a default local, commit or ordinary CI gate, and `dev` is not the small integration tier. Do not automatically launch any profile after a refactor, documentation change or component test failure. Do not add a schedule or provision runners as part of routine development.
 - Run the overnight matrix serially on one GPU and inspect `summary.json`, `RESULTS.md` and case receipts after it finishes. A failed case must not prevent collection of the other cases. Preserve source/input/reference identities and the frozen physical gates; never weaken them to obtain PASS. Filtered runs remain PARTIAL; mixed source/input identities must not produce an aggregate PASS.
 - Keep the retained reference trajectories immutable. The retained index still holds the ten historical FP64 recordings; only the C-IE/ArmijoOrResNorm Franka and Sharpa recordings are bound to current runs. By default, successful new recordings are deleted after their summaries and comparison results are saved; failed recordings remain for diagnosis. Use `--retain-recordings all` only when full new recordings are needed, and clean diagnostic output after review. Do not accumulate duplicate successful trajectories or commit large assets/logs.
 - Report component checks and overnight results separately. Mark unexecuted checks NOT_RUN and bind results to the actual tested version; do not reuse another commit's PASS. Stopped is not convergence. FP32 runs (`--precision fp32`) and FP32 performance experiments are reported separately from the default FP64 regression, while current precision-safety component checks remain in the component suite.
