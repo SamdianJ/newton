@@ -3,17 +3,49 @@
 
 """Check Franka opening coordinates, published feedback and controller transactions."""
 
+import tempfile
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 import numpy as np
 
+import newton
+from newton.examples.softbody.monolithic_franka import REPO, build_model
 from scripts.monolithic_reference.franka_admittance import FrankaFingerAdmittance
 from scripts.monolithic_reference.run_franka_admittance import FrankaAdmittance, evaluate
 
 
 class TestFrankaAdmittance(unittest.TestCase):
+    @unittest.skipUnless(
+        (REPO / "asset/monolithic/data/inputs/franka/franka_emika_panda/urdf/fr3_franka_hand.urdf").is_file(),
+        "Franka asset unavailable",
+    )
+    def test_material_changes_stiffness_and_mass_together(self):
+        """Build both materials with equal geometry and physically consistent nodal mass."""
+        models = []
+        with tempfile.TemporaryDirectory() as cache, patch.object(newton.Mesh, "build_sdf"):
+            for name, mass, mu, lam in (
+                ("reference", 0.064, 3846.153846, 5769.230769),
+                ("sponge-proxy", 0.0064, 1250.0, 833.333333),
+            ):
+                model, metadata = build_model(Path(cache), device="cpu", material=name)
+                models.append(model)
+                self.assertAlmostEqual(float(model.particle_mass.numpy().sum()), mass, places=7)
+                np.testing.assert_allclose(model.tet_materials.numpy()[:, 0], mu, rtol=1e-6)
+                np.testing.assert_allclose(model.tet_materials.numpy()[:, 1], lam, rtol=1e-6)
+                self.assertEqual(metadata["material"]["name"], name)
+                self.assertAlmostEqual(metadata["material"]["density_kg_m3"] * 0.04**3, mass)
+        np.testing.assert_array_equal(models[0].particle_q.numpy(), models[1].particle_q.numpy())
+        np.testing.assert_array_equal(models[0].tet_indices.numpy(), models[1].tet_indices.numpy())
+        np.testing.assert_array_equal(models[0].joint_target_ke.numpy(), models[1].joint_target_ke.numpy())
+
+    def test_unknown_material_is_rejected(self):
+        """Reject an unknown material before accessing assets or constructing a scene."""
+        with self.assertRaisesRegex(ValueError, "material"):
+            build_model(Path("unused"), device="cpu", material="unknown")
+
     @staticmethod
     def forces(loads=(0.0, 0.0), *, generation=1, valid=True):
         """Create published generalized forces in opening coordinates [N]."""

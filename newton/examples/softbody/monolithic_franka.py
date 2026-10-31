@@ -20,6 +20,11 @@ TIMES = np.array([0, 0.25, 1.0, 2.0, 3.0, 3.5, 4.25, 4.75, 5.25])
 PHASES = ("settle", "approach", "close", "lift", "hold", "lower", "release", "retract")
 CUBE_POSITION = (0.45, 0.0, 0.02)
 TCP_OFFSET = (0.0, 0.0, 0.2104)
+CUBE_MATERIALS = {
+    "reference": {"young_modulus_pa": 10000.0, "poisson_ratio": 0.3, "density_kg_m3": 1000.0},
+    # Representative compressible elastic proxy, not a calibrated foam constitutive law.
+    "sponge-proxy": {"young_modulus_pa": 3000.0, "poisson_ratio": 0.2, "density_kg_m3": 100.0},
+}
 
 
 def sha(path):
@@ -42,8 +47,13 @@ def targets(high, low, time_s):
     return poses[i] + blend * delta, rate * delta, PHASES[i]
 
 
-def build_model(cache, device="cuda:0"):
-    """Keep URDF masses/colliders and add the unchanged 40 mm all-dynamic P3 cube."""
+def build_model(cache, device="cuda:0", *, material="reference"):
+    """Keep URDF masses/colliders and the 40 mm cube geometry; select its elastic material."""
+    if material not in CUBE_MATERIALS:
+        raise ValueError(f"Unknown cube material: {material}")
+    properties = CUBE_MATERIALS[material]
+    young, nu = properties["young_modulus_pa"], properties["poisson_ratio"]
+    mu, lam = young / (2 * (1 + nu)), young * nu / ((1 + nu) * (1 - 2 * nu))
     asset = REPO / "asset/monolithic/data/inputs/franka/franka_emika_panda"
     urdf = asset / "urdf/fr3_franka_hand.urdf"
     builder = newton.ModelBuilder(gravity=(0, 0, -9.81))
@@ -86,6 +96,9 @@ def build_model(cache, device="cuda:0"):
         scale=1.0,
         vel=(0, 0, 0),
         mesh=load_cube(cube),
+        density=properties["density_kg_m3"],
+        k_mu=mu,
+        k_lambda=lam,
         particle_radius=0.0002,
         add_surface_mesh_edges=False,
     )
@@ -98,6 +111,7 @@ def build_model(cache, device="cuda:0"):
         "urdf": str(urdf),
         "urdf_sha256": sha(urdf),
         "cube_sha256": sha(cube),
+        "material": {"name": material, **properties, "mu_pa": mu, "lambda_pa": lam},
         "asset_hashes": {str(p.relative_to(asset)): sha(p) for p in asset.rglob("*") if p.is_file()},
         "cube_position_m": CUBE_POSITION,
         "finger_coupling": "independent dynamic PD with symmetric targets",
@@ -192,10 +206,11 @@ class FrankaGrasp:
         *,
         precision="fp64",
         solver_factory=SolverMonolithic,
+        material="reference",
     ):
         cache = Path(cache)
         cache.mkdir(parents=True, exist_ok=True)
-        self.model, self.metadata = build_model(cache, device=device)
+        self.model, self.metadata = build_model(cache, device=device, material=material)
         self.high, self.low, plan = plan_poses(self.model)
         smooth, checks = smooth_fields(self.model)
         self.metadata.update(
@@ -218,7 +233,12 @@ class FrankaGrasp:
             normal_smoothing=1e-4,
             material_model="smith_log_stabilized",
             mass_mode="consistent",
-            tet_rest_density=wp.full(self.model.tet_count, 1000.0, dtype=float, device=self.model.device),
+            tet_rest_density=wp.full(
+                self.model.tet_count,
+                self.metadata["material"]["density_kg_m3"],
+                dtype=float,
+                device=self.model.device,
+            ),
             joint_terms=SolverMonolithic.JointTerms(
                 implicit_pd=True, limits=True, friction=True, limit_width=widths, friction_velocity_scale=widths
             ),

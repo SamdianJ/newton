@@ -13,7 +13,7 @@ import numpy as np
 import warp as wp
 
 import newton
-from newton.examples.softbody.monolithic_franka import DT, REPO, TIMES, FrankaGrasp, sha, targets
+from newton.examples.softbody.monolithic_franka import CUBE_MATERIALS, DT, REPO, TIMES, FrankaGrasp, sha, targets
 from newton.examples.softbody.monolithic_recording import (
     grasp_metrics,
     object_weight_and_edge,
@@ -30,10 +30,10 @@ STEPS = round(TIMES[-1] / DT)
 class FrankaAdmittance(FrankaGrasp):
     """Keep the original scene and arm trajectory while closing fingers from contact feedback."""
 
-    def __init__(self, cache, *, device="cuda:0", precision="fp64"):
+    def __init__(self, cache, *, device="cuda:0", precision="fp64", material="reference"):
         self.factory = FrozenRobotFactory("franka-cube", dataflow="default", precision=precision)
 
-        super().__init__(cache, device, precision=precision, solver_factory=self.factory)
+        super().__init__(cache, device, precision=precision, solver_factory=self.factory, material=material)
         self.control = self.solver.create_control()
         self.admittance = FrankaFingerAdmittance(
             self.model.joint_limit_lower.numpy()[7:], self.model.joint_limit_upper.numpy()[7:]
@@ -138,6 +138,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--precision", choices=("fp32", "fp64"), default="fp64")
+    parser.add_argument("--material", choices=tuple(CUBE_MATERIALS), default="reference")
     parser.add_argument("--asset-cache", type=Path, default=REPO / "asset/monolithic/data/inputs/franka/sdf-cache")
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument(
@@ -162,7 +163,7 @@ def main():
     initial_com_z, weight, edge = 0.0, 1.0, 0.04
     begin = time.perf_counter()
     try:
-        scene = FrankaAdmittance(args.asset_cache, device=args.device, precision=args.precision)
+        scene = FrankaAdmittance(args.asset_cache, device=args.device, precision=args.precision, material=args.material)
         save(args.output / "configuration.json", scene.metadata)
         weights = scene.model.particle_mass.numpy().astype(float)
         initial_com_z = float(np.average(scene.state.particle_q.numpy(), axis=0, weights=weights)[2])
@@ -236,6 +237,7 @@ def main():
         "stopped_steps": [r["step"] for r in rows if r["publication"] == "STOPPED_ACCEPTED"],
         "hard_failure_steps": hard_failure_steps,
         "precision": args.precision,
+        "material": args.material,
         "device": args.device,
         "metrics": metrics,
         "gates": gates,
