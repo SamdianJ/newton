@@ -302,7 +302,14 @@ class TestSceneRunner(unittest.TestCase):
         """Reject an imported solver from a different checkout."""
         module = types.ModuleType("newton")
         module.__file__ = "/unexpected-checkout/newton/__init__.py"
-        with patch.dict(baseline.sys.modules, {"newton": module}, clear=True):
+        # Hide only the checked packages: emptying sys.modules breaks lazy standard
+        # library imports (pathlib imports ntpath on first use in Python 3.12.3).
+        others = {
+            name: loaded
+            for name, loaded in baseline.sys.modules.items()
+            if name != "newton" and not name.startswith(("newton.", "scripts.monolithic_reference."))
+        }
+        with patch.dict(baseline.sys.modules, {**others, "newton": module}, clear=True):
             with self.assertRaisesRegex(ValueError, "Unexpected module origin"):
                 baseline.module_origins(ROOT, {})
 
