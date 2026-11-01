@@ -1,0 +1,134 @@
+{
+  "version": 1,
+  "note": "Frozen quick regression cases (QT-01). Stopped limits = trunk 9aca3a08 measurement + max(ceil(50%), 3); other gates are the generic robot limits. Changes need user approval and a new manifest version.",
+  "cases": [
+    {
+      "id": "sharpa-close",
+      "scene": "sharpa",
+      "snapshot": {
+        "path": "snapshots/sharpa-fp64-3240.npz",
+        "sha256": "6c39347752adef645e369afe4580c5646ca0457f51020b6b3089ab3e11735478",
+        "step": 3240
+      },
+      "steps": 270,
+      "gates": {
+        "fp64": {
+          "hard_failures_max": 0,
+          "stopped_max": 51,
+          "penetration_max_m": 0.002,
+          "det_f_min": 0.2
+        }
+      }
+    },
+    {
+      "id": "sharpa-close-fp32",
+      "scene": "sharpa",
+      "snapshot": {
+        "path": "snapshots/sharpa-fp32-3240.npz",
+        "sha256": "392c2059305ea85a86eab904e7c5092cce584b95f526e7285c9b3ea5e4eeab5f",
+        "step": 3240
+      },
+      "steps": 270,
+      "gates": {
+        "fp32": {
+          "hard_failures_max": 0,
+          "stopped_max": 29,
+          "penetration_max_m": 0.002,
+          "det_f_min": 0.2
+        }
+      }
+    },
+    {
+      "id": "sharpa-lift",
+      "scene": "sharpa",
+      "snapshot": {
+        "path": "snapshots/sharpa-fp64-7000.npz",
+        "sha256": "f03f2cf5e48a388aeb3c74d809db945b8013a15a69c35277f881fdad3b9d3270",
+        "step": 7000
+      },
+      "steps": 200,
+      "gates": {
+        "fp64": {
+          "hard_failures_max": 0,
+          "stopped_max": 53,
+          "penetration_max_m": 0.002,
+          "det_f_min": 0.2
+        }
+      }
+    },
+    {
+      "id": "sharpa-lift-fp32",
+      "scene": "sharpa",
+      "snapshot": {
+        "path": "snapshots/sharpa-fp32-7000.npz",
+        "sha256": "ee2664b9ee44edd1845b0b08b3841368319c2d9b959ad91317a8448b4c711556",
+        "step": 7000
+      },
+      "steps": 200,
+      "gates": {
+        "fp32": {
+          "hard_failures_max": 0,
+          "stopped_max": 6,
+          "penetration_max_m": 0.002,
+          "det_f_min": 0.2
+        }
+      }
+    },
+    {
+      "id": "franka-grasp",
+      "scene": "franka",
+      "snapshot": {
+        "path": "snapshots/franka-fp64-1900.npz",
+        "sha256": "2b9f945a9f27b03eec0cba992defef38c2f05202dcbd63f3cb93877defbe4afa",
+        "step": 1900
+      },
+      "steps": 500,
+      "gates": {
+        "fp64": {
+          "hard_failures_max": 0,
+          "stopped_max": 3,
+          "penetration_max_m": 0.002,
+          "det_f_min": 0.2,
+          "grasp": {
+            "last_steps": 100,
+            "ground_weight_fraction_max": 0.05
+          }
+        },
+        "fp32": {
+          "hard_failures_max": 0,
+          "stopped_max": 3,
+          "penetration_max_m": 0.002,
+          "det_f_min": 0.2,
+          "grasp": {
+            "last_steps": 100,
+            "ground_weight_fraction_max": 0.05
+          }
+        }
+      }
+    },
+    {
+      "id": "franka-release",
+      "scene": "franka",
+      "snapshot": {
+        "path": "snapshots/franka-fp64-4150.npz",
+        "sha256": "587473f31e3b610a240de6c4b01f761499ff6e70742812847ea95dfd16f0f6f8",
+        "step": 4150
+      },
+      "steps": 300,
+      "gates": {
+        "fp64": {
+          "hard_failures_max": 0,
+          "stopped_max": 6,
+          "penetration_max_m": 0.002,
+          "det_f_min": 0.2
+        },
+        "fp32": {
+          "hard_failures_max": 0,
+          "stopped_max": 3,
+          "penetration_max_m": 0.002,
+          "det_f_min": 0.2
+        }
+      }
+    }
+  ]
+}
