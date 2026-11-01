@@ -9,8 +9,11 @@ import tempfile
 import unittest
 from pathlib import Path
 
+import warp as wp
+
 from scripts.monolithic_reference.quick_gates import evaluate
 from scripts.monolithic_reference.quick_manifest import load_manifest
+from scripts.monolithic_reference.retained_assets import INPUTS
 
 GATES = {"hard_failures_max": 0, "stopped_max": 5, "penetration_max_m": 0.002, "det_f_min": 0.2}
 CASE = {
@@ -97,6 +100,25 @@ class TestQuickGates(unittest.TestCase):
                 self.assertFalse(result[gate]["passed"], result)
                 others = [name for name, value in result.items() if name != gate and not value["passed"]]
                 self.assertEqual(others, [], result)
+
+
+@unittest.skipUnless(
+    wp.is_cuda_available() and (INPUTS / "sharpa/recorded-control.json").is_file(), "requires CUDA and Sharpa inputs"
+)
+class TestQuickScenesCUDA(unittest.TestCase):
+    def test_sharpa_window_two_steps(self):
+        """Import the initial Sharpa state into its own window and publish two observed steps."""
+        from newton.examples.softbody.monolithic_recording import state_arrays  # noqa: PLC0415
+        from scripts.monolithic_reference.quick_scenes import SharpaWindow  # noqa: PLC0415
+
+        window = SharpaWindow("fp32", "cuda:0")
+        model = {"particle_mass": window.solver.model.particle_mass.numpy()}
+        window.start(state_arrays(window.state), model, 0)
+        rows = [window.advance() for _ in range(2)]
+        self.assertEqual([row["step"] for row in rows], [1, 2])
+        self.assertIn(rows[-1]["publication"], ("CONVERGED", "STOPPED_ACCEPTED"))
+        self.assertGreaterEqual(rows[-1]["penetration"], 0.0)
+        self.assertGreater(window.weight, 0.0)
 
 
 if __name__ == "__main__":
