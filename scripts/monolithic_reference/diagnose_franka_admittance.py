@@ -306,6 +306,8 @@ def main():
         linear_max_iterations=command.get("linear_max_iterations", 200),
         newton_max_iterations=command.get("newton_max_iterations", 10),
         box_smoothing=command.get("box_smoothing", 0.0),
+        alignment_policy=command.get("alignment_policy"),
+        alignment_smoothing=command.get("alignment_smoothing"),
     )
     save(args.output / "configuration.json", scene.metadata)
     expected_config = json.loads((args.reference / "configuration.json").read_text())

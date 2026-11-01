@@ -13,7 +13,16 @@ import numpy as np
 import warp as wp
 
 import newton
-from newton.examples.softbody.monolithic_franka import CUBE_MATERIALS, DT, REPO, TIMES, FrankaGrasp, sha, targets
+from newton.examples.softbody.monolithic_franka import (
+    CUBE_MATERIALS,
+    DT,
+    REPO,
+    TIMES,
+    FrankaGrasp,
+    _alignment_options,
+    sha,
+    targets,
+)
 from newton.examples.softbody.monolithic_paper_box import PaperBoxMetrics
 from newton.examples.softbody.monolithic_recording import (
     grasp_metrics,
@@ -42,6 +51,8 @@ class FrankaAdmittance(FrankaGrasp):
         linear_max_iterations=200,
         newton_max_iterations=10,
         box_smoothing=0.0,
+        alignment_policy=None,
+        alignment_smoothing=None,
     ):
         self.factory = FrozenRobotFactory("franka-cube", dataflow="default", precision=precision)
 
@@ -55,6 +66,8 @@ class FrankaAdmittance(FrankaGrasp):
             linear_max_iterations=linear_max_iterations,
             newton_max_iterations=newton_max_iterations,
             box_smoothing=box_smoothing,
+            alignment_policy=alignment_policy,
+            alignment_smoothing=alignment_smoothing,
         )
         self.control = self.solver.create_control()
         self.admittance = FrankaFingerAdmittance(
@@ -189,7 +202,14 @@ def main():
         "--box-smoothing",
         type=float,
         default=0.0,
-        help="BOX LogSumExp length [m]; positive selects frozen alignment width 0.1 (contact model change)",
+        help="BOX LogSumExp length [m]; positive defaults to frozen alignment width 0.1",
+    )
+    parser.add_argument("--alignment-policy", choices=("mask", "frozen"), default=None)
+    parser.add_argument(
+        "--alignment-smoothing",
+        type=float,
+        default=None,
+        help="Frozen orientation transition width in [0, 1); zero uses frozen hard weights",
     )
     parser.add_argument("--asset-cache", type=Path, default=REPO / "asset/monolithic/data/inputs/franka/sdf-cache")
     parser.add_argument("--output", type=Path, required=True)
@@ -203,8 +223,10 @@ def main():
         parser.error("Paper stiffness scale requires --material paper-box")
     if args.linear_max_iterations <= 0 or args.newton_max_iterations <= 0:
         parser.error("Iteration budgets must be positive integers")
-    if not np.isfinite(args.box_smoothing) or args.box_smoothing < 0:
-        parser.error("BOX smoothing must be finite and nonnegative")
+    try:
+        _alignment_options(args.box_smoothing, args.alignment_policy, args.alignment_smoothing)
+    except ValueError as error:
+        parser.error(str(error))
     if not 1 <= args.max_steps <= STEPS or not wp.get_device(args.device).is_cuda:
         parser.error("Require CUDA mesh SDFs and max-steps in [1, 5250]")
     args.output.mkdir(parents=True, exist_ok=False)
@@ -232,6 +254,8 @@ def main():
             linear_max_iterations=args.linear_max_iterations,
             newton_max_iterations=args.newton_max_iterations,
             box_smoothing=args.box_smoothing,
+            alignment_policy=args.alignment_policy,
+            alignment_smoothing=args.alignment_smoothing,
         )
         save(args.output / "configuration.json", scene.metadata)
         shell_metrics = PaperBoxMetrics(scene.model) if args.material == "paper-box" else None

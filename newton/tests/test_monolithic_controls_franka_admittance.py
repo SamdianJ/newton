@@ -13,7 +13,7 @@ from unittest.mock import Mock, patch
 import numpy as np
 
 import newton
-from newton.examples.softbody.monolithic_franka import REPO, build_model
+from newton.examples.softbody.monolithic_franka import REPO, FrankaGrasp, build_model
 from scripts.monolithic_reference.franka_admittance import FrankaFingerAdmittance
 from scripts.monolithic_reference.run_franka_admittance import FrankaAdmittance, evaluate, main
 
@@ -64,6 +64,11 @@ class TestFrankaAdmittance(unittest.TestCase):
             (["--newton-max-iterations", "-1"], "budgets"),
             (["--box-smoothing", "-0.0001"], "smoothing"),
             (["--box-smoothing", "nan"], "smoothing"),
+            (["--alignment-smoothing", "nan"], "smoothing"),
+            (["--alignment-smoothing", "-0.1"], "smoothing"),
+            (["--alignment-smoothing", "1"], "smoothing"),
+            (["--alignment-policy", "mask", "--box-smoothing", "0.0001"], "frozen"),
+            (["--alignment-smoothing", "0.1"], "frozen"),
         ):
             argv = ["run", "--output", "unused", *options]
             with (
@@ -77,6 +82,51 @@ class TestFrankaAdmittance(unittest.TestCase):
             self.assertEqual(raised.exception.code, 2)
             self.assertIn(message, stderr.getvalue())
             get_device.assert_not_called()
+
+    def test_contact_options_preserve_defaults_and_reach_solver(self):
+        """Keep historical recipes while independently forwarding frozen hard and smooth weights."""
+        module = "newton.examples.softbody.monolithic_franka"
+        model = SimpleNamespace(tet_count=0, device="cpu")
+        for box, policy, width, expected in (
+            (0.0, None, None, ("mask", 0.0)),
+            (1e-4, None, None, ("frozen", 0.1)),
+            (0.0, "frozen", None, ("frozen", 0.0)),
+            (1e-4, "frozen", 0.0, ("frozen", 0.0)),
+            (0.0, "frozen", 0.1, ("frozen", 0.1)),
+        ):
+            factory = Mock(side_effect=RuntimeError("captured constructor"))
+            with (
+                self.subTest(box=box, policy=policy, width=width),
+                tempfile.TemporaryDirectory() as cache,
+                patch(module + ".build_model", return_value=(model, {"material": {"density_kg_m3": 1000}})),
+                patch(module + ".plan_poses", return_value=(None, None, {})),
+                patch(module + ".smooth_fields", return_value=(SimpleNamespace(identity="fixture"), [])),
+                patch(module + ".wp.full"),
+                self.assertRaisesRegex(RuntimeError, "captured constructor"),
+            ):
+                FrankaGrasp(
+                    cache,
+                    solver_factory=factory,
+                    box_smoothing=box,
+                    alignment_policy=policy,
+                    alignment_smoothing=width,
+                )
+            options = factory.call_args.kwargs
+            self.assertEqual(options["box_smoothing"], box)
+            self.assertEqual((options["alignment_policy"], options["alignment_smoothing"]), expected)
+
+    def test_invalid_contact_options_are_rejected_before_assets(self):
+        """Reject unsupported contact combinations before creating the asset cache."""
+        for options in (
+            {"alignment_policy": "unknown"},
+            {"alignment_smoothing": np.nan},
+            {"alignment_smoothing": 1.0},
+            {"alignment_policy": "mask", "box_smoothing": 1e-4},
+            {"alignment_policy": "mask", "alignment_smoothing": 0.1},
+        ):
+            with self.subTest(options=options), patch.object(Path, "mkdir") as mkdir, self.assertRaises(ValueError):
+                FrankaGrasp("unused", **options)
+            mkdir.assert_not_called()
 
     @staticmethod
     def forces(loads=(0.0, 0.0), *, generation=1, valid=True):

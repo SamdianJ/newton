@@ -209,12 +209,28 @@ def plan_poses(model):
     }
 
 
+def _alignment_options(box_smoothing, alignment_policy=None, alignment_smoothing=None):
+    """Resolve the example's historical defaults and validate supported contact choices."""
+    if not np.isfinite(box_smoothing) or box_smoothing < 0:
+        raise ValueError("BOX smoothing must be finite and nonnegative")
+    policy = ("frozen" if box_smoothing > 0 else "mask") if alignment_policy is None else alignment_policy
+    width = (0.1 if box_smoothing > 0 else 0.0) if alignment_smoothing is None else alignment_smoothing
+    if policy not in ("mask", "frozen"):
+        raise ValueError("Alignment policy must be mask or frozen")
+    if not np.isfinite(width) or not 0 <= width < 1:
+        raise ValueError("Alignment smoothing must be finite and in [0, 1)")
+    if (box_smoothing > 0 or width > 0) and policy != "frozen":
+        raise ValueError("Contact smoothing requires frozen alignment")
+    return policy, width
+
+
 class FrankaGrasp:
     """One experimental scene with an endpoint controller.
 
     Positive ``box_smoothing`` [m] selects the existing LogSumExp BOX field and
-    frozen alignment with transition width 0.1. This changes the contact model,
-    not the convergence tolerance; zero preserves the original mask policy.
+    frozen alignment with transition width 0.1 unless alignment options are
+    explicit. Zero preserves the original mask policy by default. Smoothing
+    requires frozen alignment and changes the contact model, not the tolerance.
     """
 
     def __init__(
@@ -229,7 +245,10 @@ class FrankaGrasp:
         linear_max_iterations=200,
         newton_max_iterations=10,
         box_smoothing=0.0,
+        alignment_policy=None,
+        alignment_smoothing=None,
     ):
+        alignment_policy, alignment_smoothing = _alignment_options(box_smoothing, alignment_policy, alignment_smoothing)
         cache = Path(cache)
         cache.mkdir(parents=True, exist_ok=True)
         self.model, self.metadata = build_model(
@@ -263,9 +282,9 @@ class FrankaGrasp:
         )
         self.solver = solver_factory(
             self.model,
-            alignment_policy="frozen" if box_smoothing > 0 else "mask",
+            alignment_policy=alignment_policy,
             box_smoothing=box_smoothing,
-            alignment_smoothing=0.1 if box_smoothing > 0 else 0.0,
+            alignment_smoothing=alignment_smoothing,
             linear_max_iterations=linear_max_iterations,
             newton_max_iterations=newton_max_iterations,
             publish_policy="current_iterate",
