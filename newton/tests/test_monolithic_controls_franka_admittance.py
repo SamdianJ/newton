@@ -3,6 +3,7 @@
 
 """Check Franka opening coordinates, published feedback and controller transactions."""
 
+import io
 import tempfile
 import unittest
 from pathlib import Path
@@ -14,7 +15,7 @@ import numpy as np
 import newton
 from newton.examples.softbody.monolithic_franka import REPO, build_model
 from scripts.monolithic_reference.franka_admittance import FrankaFingerAdmittance
-from scripts.monolithic_reference.run_franka_admittance import FrankaAdmittance, evaluate
+from scripts.monolithic_reference.run_franka_admittance import FrankaAdmittance, evaluate, main
 
 
 class TestFrankaAdmittance(unittest.TestCase):
@@ -45,6 +46,37 @@ class TestFrankaAdmittance(unittest.TestCase):
         """Reject an unknown material before accessing assets or constructing a scene."""
         with self.assertRaisesRegex(ValueError, "material"):
             build_model(Path("unused"), device="cpu", material="unknown")
+
+    def test_invalid_paper_stiffness_is_rejected_before_assets(self):
+        """Reject invalid scales and paper-only options on volumetric materials before scene creation."""
+        for material, scale in (("reference", 10), ("sponge-proxy", 10), ("paper-box", 0), ("paper-box", np.nan)):
+            with self.subTest(material=material, scale=scale), self.assertRaisesRegex(ValueError, "stiffness"):
+                build_model(Path("unused"), device="cpu", material=material, paper_stiffness_scale=scale)
+
+    def test_invalid_cli_is_rejected_before_device_setup(self):
+        """Reject invalid material and solver options before accessing a device or output directory."""
+        for options, message in (
+            (["--material", "reference", "--paper-stiffness-scale", "10"], "stiffness"),
+            (["--material", "paper-box", "--paper-stiffness-scale", "0"], "stiffness"),
+            (["--material", "paper-box", "--paper-stiffness-scale", "nan"], "stiffness"),
+            (["--linear-max-iterations", "0"], "budgets"),
+            (["--newton-max-iterations", "0"], "budgets"),
+            (["--newton-max-iterations", "-1"], "budgets"),
+            (["--box-smoothing", "-0.0001"], "smoothing"),
+            (["--box-smoothing", "nan"], "smoothing"),
+        ):
+            argv = ["run", "--output", "unused", *options]
+            with (
+                self.subTest(options=options),
+                patch("sys.argv", argv),
+                patch("sys.stderr", new_callable=io.StringIO) as stderr,
+                patch("warp.get_device") as get_device,
+                self.assertRaises(SystemExit) as raised,
+            ):
+                main()
+            self.assertEqual(raised.exception.code, 2)
+            self.assertIn(message, stderr.getvalue())
+            get_device.assert_not_called()
 
     @staticmethod
     def forces(loads=(0.0, 0.0), *, generation=1, valid=True):

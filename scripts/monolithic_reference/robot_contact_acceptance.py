@@ -193,6 +193,12 @@ class FrozenRobotFactory:
         }
 
 
+def _box_geometric_gap(points, half_extents, gaps):
+    """Return the original Euclidean BOX signed distance minus sample gaps [m]."""
+    q = np.abs(points) - half_extents
+    return np.linalg.norm(np.maximum(q, 0), axis=1) + np.minimum(q.max(axis=1), 0) - gaps
+
+
 class RobotContactRecorder:
     """Read committed forces and stream full diagnostics on independent offline scratch."""
 
@@ -215,6 +221,8 @@ class RobotContactRecorder:
             run._contact_steps(run._accepted),
         )
         penetration, masked_penetration, slip_max, work, load = 0.0, 0.0, 0.0, 0.0, 0.0
+        field_penetration = 0.0
+        types, scales = run.model.shape_type.numpy(), run.model.shape_scale.numpy()
         keys, omitted_sum = [], np.zeros(4)
         for mode in b._chunks():
             b._stage(args, mode, run._dt, begin=False)
@@ -222,7 +230,14 @@ class RobotContactRecorder:
                 raise ValueError("Invalid full robot diagnostic geometry")
             n = int(b.pool.candidates.count.numpy()[0])
             ids = b.pool.candidates.identities.numpy()[:n]
-            gap = b.current.distance.numpy()[:n] - b.samples.gaps.numpy()[:n]
+            gaps = b.samples.gaps.numpy()[:n]
+            gap = b.current.distance.numpy()[:n] - gaps
+            field_penetration = max(field_penetration, float(np.maximum(-gap, 0).max(initial=0)))
+            if complete._contact.box_smoothing > 0:
+                # This is the final eager scan after audit.evaluate(), outside CUDA capture.
+                targets = b.samples.targets.numpy()[:n]
+                box = types[targets] == int(newton.GeoType.BOX)
+                gap[box] = _box_geometric_gap(b.current.y.numpy()[:n][box], scales[targets[box]], gaps[box])
             penetration = max(penetration, float(np.maximum(-gap, 0).max(initial=0)))
             normal = b.normal.numpy()[:n]
             slide = b.current.slip.numpy()[:n]
@@ -248,7 +263,6 @@ class RobotContactRecorder:
         ids, pairs = records.identities.numpy()[:n], records.pairs.numpy()[:n]
         sources, targets = c._batch.all_samples.sources.numpy(), c._batch.all_samples.targets.numpy()
         forces = np.zeros((2, 3))
-        types = run.model.shape_type.numpy()
         for slot in np.argsort(ids, kind="stable"):
             key = int(ids[slot])
             if sources[key] not in (-1, -2):
@@ -257,6 +271,7 @@ class RobotContactRecorder:
         pforce, bforce = physical.contact_particle_force.numpy(), physical.contact_body_force.numpy()
         return {
             "penetration": penetration,
+            "field_penetration": field_penetration,
             "contact_load": load,
             "friction_work": work,
             "slip": slip_max,

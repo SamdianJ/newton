@@ -31,10 +31,31 @@ STEPS = round(TIMES[-1] / DT)
 class FrankaAdmittance(FrankaGrasp):
     """Keep the original scene and arm trajectory while closing fingers from contact feedback."""
 
-    def __init__(self, cache, *, device="cuda:0", precision="fp64", material="reference"):
+    def __init__(
+        self,
+        cache,
+        *,
+        device="cuda:0",
+        precision="fp64",
+        material="reference",
+        paper_stiffness_scale=1.0,
+        linear_max_iterations=200,
+        newton_max_iterations=10,
+        box_smoothing=0.0,
+    ):
         self.factory = FrozenRobotFactory("franka-cube", dataflow="default", precision=precision)
 
-        super().__init__(cache, device, precision=precision, solver_factory=self.factory, material=material)
+        super().__init__(
+            cache,
+            device,
+            precision=precision,
+            solver_factory=self.factory,
+            material=material,
+            paper_stiffness_scale=paper_stiffness_scale,
+            linear_max_iterations=linear_max_iterations,
+            newton_max_iterations=newton_max_iterations,
+            box_smoothing=box_smoothing,
+        )
         self.control = self.solver.create_control()
         self.admittance = FrankaFingerAdmittance(
             self.model.joint_limit_lower.numpy()[7:], self.model.joint_limit_upper.numpy()[7:]
@@ -103,6 +124,9 @@ def evaluate(rows, *, initial_com_z, weight, edge, material="reference"):
         },
         "grasp": grasp,
         "maximum_penetration_m": max((r["penetration_m"] for r in rows), default=None),
+        "maximum_field_penetration_m": max(
+            (r.get("field_penetration_m", r["penetration_m"]) for r in rows), default=None
+        ),
         "minimum_det_f": min((r["min_det_f"] for r in rows), default=None) if material != "paper-box" else None,
         "hold_force_error_N": max((max(abs(f - 1.0) for f in r["force_N"]) for r in steady), default=None),
         "hold_speed_m_s": max((max(abs(v) for v in r["finger_velocity_m_s"]) for r in steady), default=None),
@@ -153,12 +177,34 @@ def main():
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--precision", choices=("fp32", "fp64"), default="fp64")
     parser.add_argument("--material", choices=(*CUBE_MATERIALS, "paper-box"), default="reference")
+    parser.add_argument(
+        "--paper-stiffness-scale",
+        type=float,
+        default=1.0,
+        help="Multiply paper Young's modulus; keep mass and thickness",
+    )
+    parser.add_argument("--linear-max-iterations", type=int, default=200)
+    parser.add_argument("--newton-max-iterations", type=int, default=10)
+    parser.add_argument(
+        "--box-smoothing",
+        type=float,
+        default=0.0,
+        help="BOX LogSumExp length [m]; positive selects frozen alignment width 0.1 (contact model change)",
+    )
     parser.add_argument("--asset-cache", type=Path, default=REPO / "asset/monolithic/data/inputs/franka/sdf-cache")
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument(
         "--max-steps", type=int, default=STEPS, help="Short diagnostic window; cannot qualify as complete"
     )
     args = parser.parse_args()
+    if not np.isfinite(args.paper_stiffness_scale) or args.paper_stiffness_scale <= 0:
+        parser.error("Paper stiffness scale must be finite and positive")
+    if args.material != "paper-box" and args.paper_stiffness_scale != 1.0:
+        parser.error("Paper stiffness scale requires --material paper-box")
+    if args.linear_max_iterations <= 0 or args.newton_max_iterations <= 0:
+        parser.error("Iteration budgets must be positive integers")
+    if not np.isfinite(args.box_smoothing) or args.box_smoothing < 0:
+        parser.error("BOX smoothing must be finite and nonnegative")
     if not 1 <= args.max_steps <= STEPS or not wp.get_device(args.device).is_cuda:
         parser.error("Require CUDA mesh SDFs and max-steps in [1, 5250]")
     args.output.mkdir(parents=True, exist_ok=False)
@@ -177,7 +223,16 @@ def main():
     initial_com_z, weight, edge = 0.0, 1.0, 0.04
     begin = time.perf_counter()
     try:
-        scene = FrankaAdmittance(args.asset_cache, device=args.device, precision=args.precision, material=args.material)
+        scene = FrankaAdmittance(
+            args.asset_cache,
+            device=args.device,
+            precision=args.precision,
+            material=args.material,
+            paper_stiffness_scale=args.paper_stiffness_scale,
+            linear_max_iterations=args.linear_max_iterations,
+            newton_max_iterations=args.newton_max_iterations,
+            box_smoothing=args.box_smoothing,
+        )
         save(args.output / "configuration.json", scene.metadata)
         shell_metrics = PaperBoxMetrics(scene.model) if args.material == "paper-box" else None
         if shell_metrics is not None:
@@ -221,6 +276,7 @@ def main():
                     "cube_com_m": np.average(scene.state.particle_q.numpy(), axis=0, weights=weights).tolist(),
                     "ground_force_N": measured["ground_force"].tolist(),
                     "penetration_m": measured["penetration"],
+                    "field_penetration_m": measured["field_penetration"],
                     "min_det_f": stats.min_det_f if shell_metrics is None else None,
                     "converged": stats.converged,
                     "publication": stats.variational["publication_status"],
@@ -261,6 +317,7 @@ def main():
         "hard_failure_steps": hard_failure_steps,
         "precision": args.precision,
         "material": args.material,
+        "paper_stiffness_scale": args.paper_stiffness_scale,
         "device": args.device,
         "metrics": metrics,
         "gates": gates,

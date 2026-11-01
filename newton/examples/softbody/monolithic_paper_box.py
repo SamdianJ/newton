@@ -16,8 +16,10 @@ YOUNG_MODULUS = 1e8
 POISSON_RATIO = 0.3
 
 
-def add_paper_box(builder, position):
-    """Add five welded outward-facing panels, with all particles dynamic; return SI material data."""
+def add_paper_box(builder, position, *, stiffness_scale=1.0):
+    """Add five dynamic welded panels; scale Young's modulus [Pa] without changing mass or thickness."""
+    if not np.isfinite(stiffness_scale) or stiffness_scale <= 0:
+        raise ValueError("Paper stiffness scale must be finite and positive")
     n = CELLS
     corners = np.array(
         [
@@ -50,13 +52,15 @@ def add_paper_box(builder, position):
     first = builder.particle_count
     for p, m in zip(x, mass, strict=True):
         builder.add_particle(wp.vec3(p), wp.vec3(0), m, radius=THICKNESS / 2)
-    mu = YOUNG_MODULUS * THICKNESS / (2 * (1 + POISSON_RATIO))
-    lam = YOUNG_MODULUS * THICKNESS * POISSON_RATIO / (1 - POISSON_RATIO**2)
+    young = YOUNG_MODULUS * stiffness_scale
+    mu = young * THICKNESS / (2 * (1 + POISSON_RATIO))
+    lam = young * THICKNESS * POISSON_RATIO / (1 - POISSON_RATIO**2)
     for face in triangles:
         builder.add_triangle(*(first + i for i in face), tri_ke=mu, tri_ka=lam, tri_kd=0, tri_drag=0, tri_lift=0)
     return {
         "name": "paper-box",
-        "young_modulus_pa": YOUNG_MODULUS,
+        "stiffness_scale": stiffness_scale,
+        "young_modulus_pa": young,
         "poisson_ratio": POISSON_RATIO,
         "thickness_m": THICKNESS,
         "surface_density_kg_m2": SURFACE_DENSITY,

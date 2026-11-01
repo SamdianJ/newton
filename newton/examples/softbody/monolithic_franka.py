@@ -48,10 +48,14 @@ def targets(high, low, time_s):
     return poses[i] + blend * delta, rate * delta, PHASES[i]
 
 
-def build_model(cache, device="cuda:0", *, material="reference"):
+def build_model(cache, device="cuda:0", *, material="reference", paper_stiffness_scale=1.0):
     """Keep URDF masses/colliders; build a 40 mm elastic cube or free open paper shell."""
     if material not in (*CUBE_MATERIALS, "paper-box"):
         raise ValueError(f"Unknown cube material: {material}")
+    if not np.isfinite(paper_stiffness_scale) or paper_stiffness_scale <= 0:
+        raise ValueError("Paper stiffness scale must be finite and positive")
+    if material != "paper-box" and paper_stiffness_scale != 1.0:
+        raise ValueError("Paper stiffness scale requires the paper-box material")
     asset = REPO / "asset/monolithic/data/inputs/franka/franka_emika_panda"
     urdf = asset / "urdf/fr3_franka_hand.urdf"
     builder = newton.ModelBuilder(gravity=(0, 0, -9.81))
@@ -91,7 +95,7 @@ def build_model(cache, device="cuda:0", *, material="reference"):
     object_position = CUBE_POSITION
     if material == "paper-box":
         object_position = (CUBE_POSITION[0], CUBE_POSITION[1], CUBE_POSITION[2] + THICKNESS / 2)
-        properties = add_paper_box(builder, object_position)
+        properties = add_paper_box(builder, object_position, stiffness_scale=paper_stiffness_scale)
     else:
         properties = CUBE_MATERIALS[material]
         young, nu = properties["young_modulus_pa"], properties["poisson_ratio"]
@@ -206,7 +210,12 @@ def plan_poses(model):
 
 
 class FrankaGrasp:
-    """One fixed experimental scene with an explicit P3 solver and endpoint controller."""
+    """One experimental scene with an endpoint controller.
+
+    Positive ``box_smoothing`` [m] selects the existing LogSumExp BOX field and
+    frozen alignment with transition width 0.1. This changes the contact model,
+    not the convergence tolerance; zero preserves the original mask policy.
+    """
 
     def __init__(
         self,
@@ -216,10 +225,16 @@ class FrankaGrasp:
         precision="fp64",
         solver_factory=SolverMonolithic,
         material="reference",
+        paper_stiffness_scale=1.0,
+        linear_max_iterations=200,
+        newton_max_iterations=10,
+        box_smoothing=0.0,
     ):
         cache = Path(cache)
         cache.mkdir(parents=True, exist_ok=True)
-        self.model, self.metadata = build_model(cache, device=device, material=material)
+        self.model, self.metadata = build_model(
+            cache, device=device, material=material, paper_stiffness_scale=paper_stiffness_scale
+        )
         self.high, self.low, plan = plan_poses(self.model)
         smooth, checks = smooth_fields(self.model)
         self.metadata.update(
@@ -248,7 +263,11 @@ class FrankaGrasp:
         )
         self.solver = solver_factory(
             self.model,
-            alignment_policy="mask",
+            alignment_policy="frozen" if box_smoothing > 0 else "mask",
+            box_smoothing=box_smoothing,
+            alignment_smoothing=0.1 if box_smoothing > 0 else 0.0,
+            linear_max_iterations=linear_max_iterations,
+            newton_max_iterations=newton_max_iterations,
             publish_policy="current_iterate",
             friction_velocity_scale=0.01,
             contact_stiffness=1e7,
@@ -282,6 +301,13 @@ class FrankaGrasp:
         self.steps = 0
         self.failed = False
         self.phase = "settle"
+        self.metadata["solver_recipe"] = {
+            "linear_max_iterations": self.solver.linear_max_iterations,
+            "newton_max_iterations": self.solver.newton_max_iterations,
+            "box_smoothing_m": self.solver._contact.box_smoothing,
+            "alignment_policy": self.solver._contact.alignment_policy,
+            "alignment_smoothing": self.solver._contact.alignment_smoothing,
+        }
         self.metadata["actual_config"] = self.solver._config
         self.metadata["config_digest"] = self.solver._kinematics.digest.hex()
 

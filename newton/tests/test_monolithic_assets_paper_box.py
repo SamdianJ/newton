@@ -16,6 +16,31 @@ from scripts.monolithic_reference.material_recipes import shell_stencils
 
 
 class TestPaperBox(unittest.TestCase):
+    def test_stiffness_scale_preserves_geometry_and_mass(self):
+        """Scale membrane and bending coefficients together without changing geometry or mass."""
+        models, materials = [], []
+        for scale in (1.0, 10.0):
+            builder = newton.ModelBuilder()
+            materials.append(add_paper_box(builder, (0.0, 0.0, 0.02), stiffness_scale=scale))
+            models.append(builder.finalize(device="cpu"))
+        for name in ("particle_q", "particle_mass", "particle_radius", "tri_indices"):
+            np.testing.assert_array_equal(getattr(models[0], name).numpy(), getattr(models[1], name).numpy())
+        np.testing.assert_allclose(models[1].tri_materials.numpy(), 10 * models[0].tri_materials.numpy())
+        for name in ("young_modulus_pa", "mu_2d_N_m", "lambda_2d_N_m", "bending_Nm"):
+            np.testing.assert_allclose(materials[1][name], 10 * np.asarray(materials[0][name]))
+        for name in ("thickness_m", "surface_density_kg_m2", "poisson_ratio"):
+            self.assertEqual(materials[0][name], materials[1][name])
+        self.assertEqual(materials[0]["stiffness_scale"], 1.0)
+        self.assertEqual(materials[1]["stiffness_scale"], 10.0)
+
+    def test_invalid_stiffness_scale_does_not_modify_builder(self):
+        """Reject nonpositive and nonfinite stiffness scales before adding particles."""
+        builder = newton.ModelBuilder()
+        for scale in (0, -1, np.nan, np.inf, -np.inf):
+            with self.subTest(scale=scale), self.assertRaisesRegex(ValueError, "stiffness scale"):
+                add_paper_box(builder, (0.0, 0.0, 0.02), stiffness_scale=scale)
+            self.assertEqual(builder.particle_count, 0)
+
     def test_open_connected_free_shell_at_rest(self):
         """Construct five welded faces with outward normals, physical mass and stress-free folds."""
         builder = newton.ModelBuilder(gravity=(0, 0, 0))

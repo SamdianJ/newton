@@ -233,6 +233,7 @@ def observation(scene, stats, shell):
         "finger_velocity_m_s": scene.state.joint_qd.numpy()[7:].tolist(),
         "target_position_m": scene.control.joint_target_q.numpy()[7:].tolist(),
         "penetration_m": measured["penetration"],
+        "field_penetration_m": measured["field_penetration"],
     }
     if shell is not None:
         row.update(shell.measure(scene.state.particle_q))
@@ -297,7 +298,14 @@ def main():
         },
     )
     scene = FrankaAdmittance(
-        command["asset_cache"], device=command["device"], precision=command["precision"], material=command["material"]
+        command["asset_cache"],
+        device=command["device"],
+        precision=command["precision"],
+        material=command["material"],
+        paper_stiffness_scale=command.get("paper_stiffness_scale", 1.0),
+        linear_max_iterations=command.get("linear_max_iterations", 200),
+        newton_max_iterations=command.get("newton_max_iterations", 10),
+        box_smoothing=command.get("box_smoothing", 0.0),
     )
     save(args.output / "configuration.json", scene.metadata)
     expected_config = json.loads((args.reference / "configuration.json").read_text())
@@ -305,7 +313,9 @@ def main():
     shell = PaperBoxMetrics(scene.model) if command["material"] == "paper-box" else None
     if args.checkpoint:
         saved = json.loads((args.checkpoint / "controller.json").read_text())
-        if saved.get("linear_max_iterations", 200) != 200 and args.linear_iterations != saved["linear_max_iterations"]:
+        if saved.get(
+            "linear_max_iterations", 200
+        ) != scene.solver.linear_max_iterations and args.linear_iterations != saved.get("linear_max_iterations", 200):
             raise ValueError("A budget-control checkpoint requires its recorded explicit budget override")
         restore_start(scene, args.checkpoint)
         assert scene.steps == args.step - 1
