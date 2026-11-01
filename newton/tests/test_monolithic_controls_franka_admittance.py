@@ -164,6 +164,15 @@ class TestFrankaAdmittance(unittest.TestCase):
             )
         kwargs = {"initial_com_z": 0.02, "weight": 0.63, "edge": 0.04}
         self.assertTrue(all(evaluate(rows, **kwargs)[1].values()))
+        shell = [
+            r | {"min_det_f": None, "area_ratio_min": 0.99, "area_ratio_max": 1.01, "self_intersections": 0}
+            for r in rows
+        ]
+        self.assertTrue(all(evaluate(shell, material="paper-box", **kwargs)[1].values()))
+        shell[0]["area_ratio_min"] = 0.1
+        self.assertFalse(evaluate(shell, material="paper-box", **kwargs)[1]["deformation"])
+        shell[0]["self_intersections"] = 1
+        self.assertFalse(evaluate(shell, material="paper-box", **kwargs)[1]["no_self_intersections"])
         for row in rows:
             row.update(converged=False, publication="STOPPED_ACCEPTED")
         metrics, gates = evaluate(rows, **kwargs)

@@ -14,6 +14,7 @@ import warp as wp
 
 import newton
 from newton.examples.softbody.monolithic_franka import CUBE_MATERIALS, DT, REPO, TIMES, FrankaGrasp, sha, targets
+from newton.examples.softbody.monolithic_paper_box import PaperBoxMetrics
 from newton.examples.softbody.monolithic_recording import (
     grasp_metrics,
     object_weight_and_edge,
@@ -84,7 +85,7 @@ class FrankaAdmittance(FrankaGrasp):
         return np.array(projected)
 
 
-def evaluate(rows, *, initial_com_z, weight, edge):
+def evaluate(rows, *, initial_com_z, weight, edge, material="reference"):
     """Keep grasp, force tracking, numerical convergence and release gates distinct."""
     hold = [r for r in rows if r["phase"] == "hold"]
     steady = [r for r in hold if r["step"] >= 3300]
@@ -102,7 +103,7 @@ def evaluate(rows, *, initial_com_z, weight, edge):
         },
         "grasp": grasp,
         "maximum_penetration_m": max((r["penetration_m"] for r in rows), default=None),
-        "minimum_det_f": min((r["min_det_f"] for r in rows), default=None),
+        "minimum_det_f": min((r["min_det_f"] for r in rows), default=None) if material != "paper-box" else None,
         "hold_force_error_N": max((max(abs(f - 1.0) for f in r["force_N"]) for r in steady), default=None),
         "hold_speed_m_s": max((max(abs(v) for v in r["finger_velocity_m_s"]) for r in steady), default=None),
         "release_force_N": max((max(abs(f) for f in r["force_N"]) for r in release), default=None),
@@ -111,6 +112,12 @@ def evaluate(rows, *, initial_com_z, weight, edge):
         "release_ground_force_N": min((r["ground_force_N"][2] for r in release), default=None),
         "maximum_force_projection_error_N": max((r["force_projection_error_N"] for r in rows), default=None),
     }
+    if material == "paper-box":
+        metrics.update(
+            minimum_area_ratio=min((r["area_ratio_min"] for r in rows), default=None),
+            maximum_area_ratio=max((r["area_ratio_max"] for r in rows), default=None),
+            maximum_self_intersections=max((r["self_intersections"] for r in rows), default=None),
+        )
     gates = {
         "complete_published": [r["step"] for r in rows] == list(range(1, STEPS + 1))
         and all(
@@ -120,7 +127,12 @@ def evaluate(rows, *, initial_com_z, weight, edge):
         ),
         "grasp": grasp["held"],
         "penetration": bool(rows) and metrics["maximum_penetration_m"] <= 0.002,
-        "deformation": bool(rows) and metrics["minimum_det_f"] >= 0.2,
+        "deformation": bool(rows)
+        and (
+            metrics["minimum_area_ratio"] >= 0.2 and metrics["maximum_area_ratio"] <= 2.0
+            if material == "paper-box"
+            else metrics["minimum_det_f"] >= 0.2
+        ),
         "force_projection": bool(rows) and metrics["maximum_force_projection_error_N"] <= 1e-4,
         "force_tracking": len(steady) == 200
         and metrics["hold_force_error_N"] <= 0.1
@@ -131,6 +143,8 @@ def evaluate(rows, *, initial_com_z, weight, edge):
         and metrics["release_height_error_m"] <= 0.005
         and metrics["release_ground_force_N"] >= 0.9 * weight,
     }
+    if material == "paper-box":
+        gates["no_self_intersections"] = bool(rows) and metrics["maximum_self_intersections"] == 0
     return metrics, gates
 
 
@@ -138,7 +152,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--precision", choices=("fp32", "fp64"), default="fp64")
-    parser.add_argument("--material", choices=tuple(CUBE_MATERIALS), default="reference")
+    parser.add_argument("--material", choices=(*CUBE_MATERIALS, "paper-box"), default="reference")
     parser.add_argument("--asset-cache", type=Path, default=REPO / "asset/monolithic/data/inputs/franka/sdf-cache")
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument(
@@ -165,6 +179,13 @@ def main():
     try:
         scene = FrankaAdmittance(args.asset_cache, device=args.device, precision=args.precision, material=args.material)
         save(args.output / "configuration.json", scene.metadata)
+        shell_metrics = PaperBoxMetrics(scene.model) if args.material == "paper-box" else None
+        if shell_metrics is not None:
+            np.savez_compressed(
+                args.output / "paper-box-mesh.npz",
+                positions=scene.model.particle_q.numpy(),
+                triangles=scene.model.tri_indices.numpy(),
+            )
         weights = scene.model.particle_mass.numpy().astype(float)
         initial_com_z = float(np.average(scene.state.particle_q.numpy(), axis=0, weights=weights)[2])
         weight, edge = object_weight_and_edge(scene.model, scene.state.particle_q.numpy())
@@ -200,7 +221,7 @@ def main():
                     "cube_com_m": np.average(scene.state.particle_q.numpy(), axis=0, weights=weights).tolist(),
                     "ground_force_N": measured["ground_force"].tolist(),
                     "penetration_m": measured["penetration"],
-                    "min_det_f": stats.min_det_f,
+                    "min_det_f": stats.min_det_f if shell_metrics is None else None,
                     "converged": stats.converged,
                     "publication": stats.variational["publication_status"],
                     "solver_status": stats.status.value,
@@ -208,6 +229,8 @@ def main():
                     "convergence_ratio": stats.convergence_ratio,
                     "newton_iterations": stats.nonlinear_iterations,
                 }
+                if shell_metrics is not None:
+                    row.update(shell_metrics.measure(scene.state.particle_q))
                 rows.append(row)
                 stream.write(json.dumps(serial(row), allow_nan=False) + "\n")
                 stream.flush()
@@ -226,7 +249,7 @@ def main():
             body_q=np.stack([f[1] for f in frames]),
             particle_q=np.stack([f[2] for f in frames]),
         )
-    metrics, gates = evaluate(rows, initial_com_z=initial_com_z, weight=weight, edge=edge)
+    metrics, gates = evaluate(rows, initial_com_z=initial_com_z, weight=weight, edge=edge, material=args.material)
     metrics["counts"]["HARD_FAILURE"] += len(hard_failure_steps)
     unchanged = all(sha(REPO / path) == value for path, value in hashes.items())
     summary = {

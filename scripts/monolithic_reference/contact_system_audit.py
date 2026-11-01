@@ -4,6 +4,7 @@
 """Audit the complete native residual outside the spatial solver's step."""
 
 import json
+from typing import Any
 
 import numpy as np
 import warp as wp
@@ -12,6 +13,12 @@ from newton._src.solvers.monolithic.coupled_kernels import combine
 from newton._src.solvers.monolithic.iteration import blocks
 from newton._src.solvers.monolithic.rigid import _scatter_residual
 from scripts.monolithic_reference.contact_audit import verify_contract
+
+
+@wp.kernel
+def _add_shell_residual(shell: wp.array[Any], total: wp.array[Any]):
+    i = wp.tid()
+    total[i] += shell[i]
 
 
 def check_system_report(directory, run, summary):
@@ -68,6 +75,7 @@ class ContactSystemAudit:
         complete._contact._batch.initialize_reference()
         self.state = complete.create_state(dt=0.001)
         self.residual = wp.zeros_like(run._complete_r)
+        self.shell_residual = wp.zeros_like(run._complete_r) if run._cloths else None
 
     def _contact(self, source, *, begin):
         audit, state = self.complete, self.state
@@ -110,6 +118,20 @@ class ContactSystemAudit:
         batch = self.complete._contact._batch
         if batch.flags.numpy()[0] or batch.start_flags.numpy()[0]:
             raise ValueError("Invalid complete native contact residual")
+        if self.shell_residual is not None:
+            # Published block.raw already includes contact. Reevaluate noncontact shell
+            # terms on the auditor's own buffers, using the run's exact step increments.
+            self.shell_residual.zero_()
+            gravity = run._frozen_gravity.numpy()
+            for shell in self.complete._cloths:
+                shell.begin_step(run._original, run._frozen_force)
+                shell.evaluate(
+                    run._displacement(run._accepted),
+                    wp.vec3(gravity[int(shell.reference["world"])]),
+                    run._dt,
+                    self.shell_residual,
+                    build_tangent=False,
+                )
 
         def total(contact):
             # Preserve the production native addition order, including rigid rows.
@@ -132,6 +154,13 @@ class ContactSystemAudit:
                 [run._rigid.rows, run._rigid.residual, self.residual],
                 device=run.model.device,
             )
+            if self.shell_residual is not None:
+                wp.launch(
+                    _add_shell_residual,
+                    self.residual.size,
+                    [self.shell_residual, self.residual],
+                    device=run.model.device,
+                )
             return self.residual.numpy().copy()
 
         clipped = total(c.residual)

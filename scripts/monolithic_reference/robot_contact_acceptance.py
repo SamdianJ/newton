@@ -251,8 +251,8 @@ class RobotContactRecorder:
         types = run.model.shape_type.numpy()
         for slot in np.argsort(ids, kind="stable"):
             key = int(ids[slot])
-            if sources[key] != -1:
-                raise ValueError("Robot recorder requires canonical tet-to-shape samples")
+            if sources[key] not in (-1, -2):
+                raise ValueError("Robot recorder requires canonical tet/cloth-to-shape samples")
             forces[int(types[targets[key]] != int(newton.GeoType.PLANE))] += pairs[slot, 0, :3]
         pforce, bforce = physical.contact_particle_force.numpy(), physical.contact_body_force.numpy()
         return {

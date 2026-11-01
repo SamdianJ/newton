@@ -12,6 +12,7 @@ from newton.solvers.experimental.monolithic import SolverMonolithic, build_smoot
 
 import newton
 import newton.ik as ik
+from newton.examples.softbody.monolithic_paper_box import THICKNESS, add_paper_box
 from newton.examples.softbody.monolithic_soft_cube import load_cube
 
 REPO = Path(__file__).resolve().parents[3]
@@ -48,12 +49,9 @@ def targets(high, low, time_s):
 
 
 def build_model(cache, device="cuda:0", *, material="reference"):
-    """Keep URDF masses/colliders and the 40 mm cube geometry; select its elastic material."""
-    if material not in CUBE_MATERIALS:
+    """Keep URDF masses/colliders; build a 40 mm elastic cube or free open paper shell."""
+    if material not in (*CUBE_MATERIALS, "paper-box"):
         raise ValueError(f"Unknown cube material: {material}")
-    properties = CUBE_MATERIALS[material]
-    young, nu = properties["young_modulus_pa"], properties["poisson_ratio"]
-    mu, lam = young / (2 * (1 + nu)), young * nu / ((1 + nu) * (1 - 2 * nu))
     asset = REPO / "asset/monolithic/data/inputs/franka/franka_emika_panda"
     urdf = asset / "urdf/fr3_franka_hand.urdf"
     builder = newton.ModelBuilder(gravity=(0, 0, -9.81))
@@ -90,18 +88,27 @@ def build_model(cache, device="cuda:0", *, material="reference"):
         builder.joint_limit_ke[j] = 10000.0
         builder.joint_limit_kd[j] = 10.0
     cube = REPO / "scripts/monolithic_reference/fixtures/soft_cube_40mm/cube_r2.npz"
-    builder.add_soft_mesh(
-        pos=CUBE_POSITION,
-        rot=wp.quat_identity(),
-        scale=1.0,
-        vel=(0, 0, 0),
-        mesh=load_cube(cube),
-        density=properties["density_kg_m3"],
-        k_mu=mu,
-        k_lambda=lam,
-        particle_radius=0.0002,
-        add_surface_mesh_edges=False,
-    )
+    object_position = CUBE_POSITION
+    if material == "paper-box":
+        object_position = (CUBE_POSITION[0], CUBE_POSITION[1], CUBE_POSITION[2] + THICKNESS / 2)
+        properties = add_paper_box(builder, object_position)
+    else:
+        properties = CUBE_MATERIALS[material]
+        young, nu = properties["young_modulus_pa"], properties["poisson_ratio"]
+        mu, lam = young / (2 * (1 + nu)), young * nu / ((1 + nu) * (1 - 2 * nu))
+        builder.add_soft_mesh(
+            pos=CUBE_POSITION,
+            rot=wp.quat_identity(),
+            scale=1.0,
+            vel=(0, 0, 0),
+            mesh=load_cube(cube),
+            density=properties["density_kg_m3"],
+            k_mu=mu,
+            k_lambda=lam,
+            particle_radius=0.0002,
+            add_surface_mesh_edges=False,
+        )
+        properties = {"name": material, **properties, "mu_pa": mu, "lambda_pa": lam}
     builder.add_ground_plane()
     model = builder.finalize(device=device)
     flags = model.shape_flags.numpy()
@@ -110,10 +117,12 @@ def build_model(cache, device="cuda:0", *, material="reference"):
     metadata = {
         "urdf": str(urdf),
         "urdf_sha256": sha(urdf),
-        "cube_sha256": sha(cube),
-        "material": {"name": material, **properties, "mu_pa": mu, "lambda_pa": lam},
+        "cube_sha256": sha(cube) if material != "paper-box" else None,
+        "object_type": "paper-box" if material == "paper-box" else "tet-cube",
+        "object_position_m": object_position,
+        "material": properties,
         "asset_hashes": {str(p.relative_to(asset)): sha(p) for p in asset.rglob("*") if p.is_file()},
-        "cube_position_m": CUBE_POSITION,
+        "cube_position_m": CUBE_POSITION if material != "paper-box" else None,
         "finger_coupling": "independent dynamic PD with symmetric targets",
         "finger_open_target_m": 0.04,
         "finger_closed_target_m": 0.014,
@@ -223,6 +232,20 @@ class FrankaGrasp:
             duration=float(TIMES[-1]),
         )
         widths = (0.01,) * 7 + (0.001,) * 2
+        shell = material == "paper-box"
+        properties = self.metadata["material"]
+        cloth = (
+            (
+                SolverMonolithic.ClothInput(
+                    triangle_ids=tuple(range(self.model.tri_count)),
+                    bending=properties["bending_Nm"],
+                    thickness=properties["thickness_m"],
+                    surface_density=properties["surface_density_kg_m2"],
+                ),
+            )
+            if shell
+            else ()
+        )
         self.solver = solver_factory(
             self.model,
             alignment_policy="mask",
@@ -232,13 +255,16 @@ class FrankaGrasp:
             friction_coefficient=0.5,
             normal_smoothing=1e-4,
             material_model="smith_log_stabilized",
-            mass_mode="consistent",
+            mass_mode="lumped" if shell else "consistent",
+            cloth_inputs=cloth,
             tet_rest_density=wp.full(
                 self.model.tet_count,
-                self.metadata["material"]["density_kg_m3"],
+                properties["density_kg_m3"],
                 dtype=float,
                 device=self.model.device,
-            ),
+            )
+            if not shell
+            else None,
             joint_terms=SolverMonolithic.JointTerms(
                 implicit_pd=True, limits=True, friction=True, limit_width=widths, friction_velocity_scale=widths
             ),

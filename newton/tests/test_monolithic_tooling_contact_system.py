@@ -12,6 +12,7 @@ from unittest.mock import patch
 import numpy as np
 
 from newton.examples.softbody.monolithic_recording import serial
+from newton.tests.test_monolithic_contact_materials import scene as material_scene
 from newton.tests.test_monolithic_solver_actor_contacts import contact_scene, contact_state, frame
 from newton.tests.test_monolithic_solver_contact_pool import pooled_solver
 from newton.tests.test_monolithic_solver_contact_spatial import spatial_solver
@@ -22,6 +23,41 @@ from scripts.monolithic_reference import run_actor_coupling as coupling
 from scripts.monolithic_reference.actor_recording import check_actor, compare_actor
 from scripts.monolithic_reference.contact_audit import compare_actor_contact_recordings
 from scripts.monolithic_reference.contact_system_audit import ContactSystemAudit
+from scripts.monolithic_reference.robot_contact_acceptance import FrozenRobotFactory
+
+
+def test_cloth_robot_recording(test, device):
+    """Include shell inertia/internal forces in complete residuals and report shell-ground loads."""
+    for precision in ("fp64", "fp32"):
+        model, _, _, cloth, _ = material_scene(device=device)
+        factory = FrozenRobotFactory("franka-cube", dataflow="default", precision=precision)
+        run = factory(
+            model,
+            cloth_inputs=cloth,
+            mass_mode="lumped",
+            precision=precision,
+            contact_stiffness=1000,
+            normal_smoothing=1e-5,
+            friction_velocity_scale=0.01,
+            pcg_mode="production",
+            newton_max_iterations=2,
+            linear_max_iterations=40,
+            use_cuda_graph=device.is_cuda,
+            publish_policy="current_iterate",
+        )
+        state = run.create_state(dt=0.001)
+        run.step(state, state, run.create_control(), dt=0.001)
+        test.assertFalse(run.last_stats.rolled_back)
+        before = state.particle_q.numpy().copy()
+        raw = run._cloths[0].raw.numpy().copy()
+        measured = factory.measure(run, state)
+        test.assertGreater(measured["ground_force"][2], 0)
+        np.testing.assert_allclose(
+            measured["ground_force"], run.get_contact_forces(state).particle_force.sum(axis=0), rtol=2e-6, atol=1e-9
+        )
+        np.testing.assert_array_equal(state.particle_q.numpy(), before)
+        np.testing.assert_array_equal(run._cloths[0].raw.numpy(), raw)
+        test.assertTrue(any(name.startswith("cloth") for name in measured["full_system"]["blocks"]))
 
 
 def test_full_system_residual(test, device):
@@ -229,6 +265,7 @@ class TestContactSystemAudit(unittest.TestCase):
 
 for device in get_test_devices():
     for name in (
+        "test_cloth_robot_recording",
         "test_full_system_residual",
         "test_full_system_precision",
         "test_full_system_detects_miss",
