@@ -160,3 +160,61 @@ def import_state(solver, state, source):
     states.validate(scratch)
     state.assign(scratch)
     return report
+
+
+SNAPSHOT_FORMAT = "monolithic-snapshot/v1"
+
+
+def _frame_publication(recording, step):
+    """Return the publication label of one frame of an example-format recording."""
+    for chunk in json.loads((recording / "trajectory-index.json").read_text())["chunks"]:
+        with np.load(recording / chunk["path"], allow_pickle=False) as data:
+            hits = np.flatnonzero(data["frame_steps"] == step)
+            if len(hits):
+                return str(data["frame_publication"][hits[0]])
+    raise ValueError(f"Recording lacks step {step}")
+
+
+def write_snapshot(recording, step, destination, *, source_commit):
+    """Write one recorded frame and its scene arrays to ``destination``.npz with a .json sidecar."""
+    recording, destination = Path(recording), Path(destination)
+    values, directory = read_source(recording, step)
+    with np.load(directory / "model.npz", allow_pickle=False) as model:
+        scene = {"model." + name: model[name] for name in MODEL_ARRAYS if name in model.files}
+    if not scene:
+        raise ValueError("Recording model carries none of the scene arrays")
+    path = destination.with_suffix(".npz")
+    np.savez_compressed(path, **values, **scene)
+    meta = {
+        "format": SNAPSHOT_FORMAT,
+        "source_recording": str(recording),
+        "step": int(step),
+        "publication": "INITIAL" if step == 0 else _frame_publication(recording, step),
+        "source_commit": source_commit,
+        "sha256": _sha(path),
+        "model_arrays": sorted(name[len("model.") :] for name in scene),
+    }
+    destination.with_suffix(".json").write_text(json.dumps(meta, indent=2) + "\n")
+    return meta
+
+
+def load_snapshot(path, sha256):
+    """Return (state fields, model arrays) after verifying the snapshot file identity."""
+    path = Path(path)
+    if _sha(path) != sha256:
+        raise ValueError(f"Snapshot sha256 differs: {path}")
+    with np.load(path, allow_pickle=False) as data:
+        state = {k: data[k] for k in data.files if not k.startswith("model.")}
+        model = {k[len("model.") :]: data[k] for k in data.files if k.startswith("model.")}
+    if not model:
+        raise ValueError("Snapshot carries no model arrays to validate the scene")
+    return state, model
+
+
+def check_snapshot_scene(solver, model_values):
+    """Require every saved model array to equal the rebuilt scene; return the checked names."""
+    for name, saved in model_values.items():
+        actual = getattr(solver.model, name, None)
+        if not isinstance(actual, wp.array) or not np.array_equal(saved, actual.numpy()):
+            raise ValueError(f"Snapshot model differs from the rebuilt scene: {name}")
+    return sorted(model_values)
