@@ -9,6 +9,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from scripts.monolithic_reference.quick_gates import evaluate
 from scripts.monolithic_reference.quick_manifest import load_manifest
 
 GATES = {"hard_failures_max": 0, "stopped_max": 5, "penetration_max_m": 0.002, "det_f_min": 0.2}
@@ -54,6 +55,48 @@ class TestQuickManifest(unittest.TestCase):
                     load_manifest(_write(folder, {"version": 1, "cases": [case]}))
         with tempfile.TemporaryDirectory() as folder, self.assertRaisesRegex(ValueError, "duplicate"):
             load_manifest(_write(folder, {"version": 1, "cases": [CASE, copy.deepcopy(CASE)]}))
+
+
+def _rows(n, *, stopped=(), hard=(), penetration=0.001, ground=0.0):
+    rows = []
+    for step in range(n):
+        label = "HARD_FAILURE" if step in hard else "STOPPED_ACCEPTED" if step in stopped else "CONVERGED"
+        rows.append(
+            {
+                "step": step,
+                "publication": label,
+                "penetration": None if label == "HARD_FAILURE" else penetration,
+                "min_det_f": 0.6,
+                "ground_force_z": ground,
+            }
+        )
+    return rows
+
+
+class TestQuickGates(unittest.TestCase):
+    def test_pass_and_values(self):
+        """Report each gate's value and limit; a complete clean window passes."""
+        result = evaluate(_rows(10, stopped=(3,)), {**GATES, "stopped_max": 1}, weight=1.0, expected_steps=10)
+        self.assertTrue(all(gate["passed"] for gate in result.values()), result)
+        self.assertEqual(result["stopped_steps"]["value"], 1)
+        self.assertEqual(result["penetration"]["value"], 0.001)
+
+    def test_failures(self):
+        """Fail the stopped, hard-failure, penetration, completeness and grasp gates independently."""
+        grasp = {**GATES, "grasp": {"last_steps": 5, "ground_weight_fraction_max": 0.05}}
+        cases = {
+            "stopped_steps": (_rows(10, stopped=(1, 2)), {**GATES, "stopped_max": 1}),
+            "hard_failures": (_rows(10, hard=(4,)), GATES),
+            "penetration": (_rows(10, penetration=0.003), GATES),
+            "complete": (_rows(8), GATES),
+            "grasp": (_rows(10, ground=0.5), grasp),
+        }
+        for gate, (rows, gates) in cases.items():
+            with self.subTest(gate):
+                result = evaluate(rows, gates, weight=1.0, expected_steps=10)
+                self.assertFalse(result[gate]["passed"], result)
+                others = [name for name, value in result.items() if name != gate and not value["passed"]]
+                self.assertEqual(others, [], result)
 
 
 if __name__ == "__main__":
