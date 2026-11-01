@@ -1,0 +1,32 @@
+{
+  "date": "2026-11-02",
+  "timezone": "Asia/Tokyo",
+  "stage": "P9a",
+  "status": "PLANNED_NOT_IMPLEMENTED",
+  "branch": "SamiulJ/monolithic-p9a",
+  "worktree": "worktrees/Monolithic-p9a",
+  "base_commit": "8fa80ba7ce3fd7ce2483f2ec098e66d410bc434e",
+  "base_solver_tree": "4b3932cbb4aba7a3f05aeb88f9f18b9c554d5b87",
+  "superdex_commit": "54ae749a042709e897cad12da66822c71bcd1b97",
+  "superdex_reference_sha256": {
+    "superdex_physics/libraries/mochi/mochi_core/include/mochi_core/solvers/snle_problem.h": "ba985bc3e0a173a1eec5567e91d993cec5099b166cc9fa3e32415325c47e61d6",
+    "superdex_physics/libraries/mochi/mochi_core/src/solvers/snle_problem.cpp": "be82f258afa720461349db8d51908a2bafe5f07de0b9b500968f09a43b29c8f5",
+    "superdex_physics/libraries/mochi/mochi_core/src/solvers/newton_solver.cpp": "260c427721e311599d5e4a0abb4f415b22ca3229742865190c5dff603a6374b2",
+    "superdex_physics/libraries/mochi/mochi_physics/src/mochi_snle.h": "63178b4029847950c675362480c253448f09a95d6218d896004d942f7411f354"
+  },
+  "ci_commit": "df0927a7b1227af6ccb721154c7a455ed18bf1cb",
+  "ci_stage_sha256": "cc1808ae62d0c43a63b76fc5e5066a6da19a0d38959d7101bc154bbf761e6b05",
+  "input_sha256": {
+    "attachment-1": "626ffef68bb0ec3e45d276d5262da7de75687cf43d1170fe3d3a1869432b8bc4",
+    "attachment-2": "6622b3eb1382f99415e981d37e27b2f2683b26066f52c489e5bf3d28a754d582"
+  },
+  "workspace_index": "dev/monolithic/P9/PRD.md",
+  "workspace_index_sha256": "a61a092cc6dbc9e34ac17cd2a9c06b7e1ba354e9dd70f53f53053c97412daad9",
+  "runtime_environment": {
+    "venv": "shared symlink to ../Monolithic-refactor/.venv; use uv run --no-sync; do not uv sync this shared environment",
+    "assets": "read-only reuse of ../Monolithic-refactor/asset/monolithic/data through relative symlink",
+    "solver_runtime_tests": "NOT_RUN",
+    "performance": "NOT_RUN",
+    "superdex_runtime": "NOT_RUN"
+  }
+}
