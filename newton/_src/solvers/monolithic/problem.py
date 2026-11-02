@@ -226,9 +226,6 @@ class _MonolithicProblem:
         for index, (name, _) in enumerate(self.blocks):
             self.record(name, "scaled_step" + ("" if name == self.aggregate_name else "_" + name), float(moved[index]))
 
-    def internal_norms(self):
-        return self.solver._linear._masked_pcg_plan.norms.numpy()
-
     def pcg_config(self, limits):
         solver = self.solver
         return MonolithicPcgConfig(
@@ -280,7 +277,6 @@ class _MonolithicProblem:
     def assess(self, residual, reference):
         solver, criterion = self.solver, self.solver._criterion
         native = solver._numpy_dtype
-        norms = iteration_device.measure(solver, residual, reference)
         self.coordinates()
         criterion.round(
             solver._linear.k_global_scalar_bsr,
@@ -288,28 +284,33 @@ class _MonolithicProblem:
             solver._complete_a,
             solver._linear._material_operator,
         )
-        criterion.assess(residual)
-        worst, limited = criterion.worst.numpy(), criterion.limited.numpy()
-        if not np.all(np.isfinite(worst)):
-            raise _StepFailure(solver.Status.NONFINITE, "Nonfinite rounding magnitude")
-        sums, minimum = iteration_device.assessment(solver, residual, reference)
+        packet = iteration_device.assessment(solver, residual, reference)
+        linear = packet[: len(self.blocks)]
+        worst = packet["worst"][: len(criterion.rows.names)].astype(native, copy=False)
+        limited = packet["limited"][: len(criterion.rows.names)]
+        merit_square = native(packet["merit_square"][0])
+        if not np.all(np.isfinite(worst)) or not np.isfinite(merit_square):
+            raise _StepFailure(solver.Status.NONFINITE, "Nonfinite convergence summary")
+        solver._rhs_norms_host = np.sqrt(linear["rhs_square"].astype(native, copy=False))
+        raw_norms = np.sqrt(linear["raw_square"].astype(native, copy=False))
         caps = {}
         ratios = [native(worst[groups].max(initial=0)) for groups in self._physical_groups]
         for index, (name, _) in enumerate(self.blocks):
-            squares, reference_squares = sums[index]
+            squares = native(linear["residual_square"][index])
+            reference_squares = native(linear["reference_square"][index])
             size = max(native(1), self._group_sizes[index])
-            caps[name] = native(0.5) * native(minimum[index])
+            caps[name] = native(0.5) * native(linear["minimum"][index])
             suffix = "" if name == "global" else "_" + name
             self.record(name, "convergence_ratio" + suffix, float(ratios[index]))
             self.record(name, "merit" + suffix + "_final", float(np.sqrt(squares / size)))
             self.record(name, "merit" + suffix + "_reference", float(np.sqrt(reference_squares / size)))
             if name != "global":
-                self.record(name, "raw_residual_" + name + "_norm", float(norms[index, 2]))
+                self.record(name, "raw_residual_" + name + "_norm", float(raw_norms[index]))
         solver._variational["convergence_groups"] = {
             group: {"ratio": float(value), "rounding_limited": int(count)}
             for group, value, count in zip(criterion.rows.names, worst, limited, strict=True)
         }
-        merit = native(np.sqrt(criterion.square_sum.numpy()[0] / native(max(1, criterion.tau.size))))
+        merit = native(np.sqrt(merit_square / native(max(1, criterion.tau.size))))
         return Assessment(bool(ratios[0] <= 1), merit, caps)
 
     def merit(self):
@@ -318,8 +319,8 @@ class _MonolithicProblem:
         native = solver._numpy_dtype
         return native(np.sqrt(criterion.square_sum.numpy()[0] / native(max(1, criterion.tau.size))))
 
-    def norms(self, vector):
-        return dict(zip((name for name, _ in self.blocks), iteration_device.norms(self.solver, vector), strict=True))
+    def posterior_norms(self, error):
+        return iteration_device.posterior(self.solver, error)
 
     def trial_summary(self, residual, effective):
         values = iteration_device.trial(self.solver, residual, effective)

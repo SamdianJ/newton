@@ -53,10 +53,6 @@ def measure(solver, residual, reference, scale):
     return solver._problem.assess(residual, reference)
 
 
-def direction_norms(solver, vector):
-    return solver._problem.norms(vector)
-
-
 def solve_direction(solver, residual, scale, limits, pcg, *, iteration, retry, regularization):
     """Solve once, then qualify the direction by its true residual in the solver precision."""
     self = solver
@@ -96,39 +92,27 @@ def solve_direction(solver, residual, scale, limits, pcg, *, iteration, retry, r
         return False
     direction = self._delta
     error = self._physical_linear_error(None, direction, residual, scale, device_result=True)
-    errors = direction_norms(self, error)
+    norms = self._problem.posterior_norms(error)
     # The stored direction resolves its residual only to the rounding of
     # |A| |y|; in FP32 an ill-conditioned limit can lie below it.
-    magnitude = self._post_magnitude
-    rhs = direction_norms(self, self._rhs)
     rounding = linear_rounding(native)
-    floors = {
-        name: native(min(rounding * value, LINEAR_ROUNDING_CAP * rhs[name]))
-        for name, value in direction_norms(self, magnitude).items()
-    }
-    limits = {name: max(limits[name], floors[name]) for name in limits}
-    if native(regularization) == 0:
-        originals, terms = errors, dict.fromkeys(errors, 0.0)
-    else:
-        originals = direction_norms(self, self._post_original)
-        terms = direction_norms(self, self._post_regularization)
-    internal = self._problem.internal_norms()
-    postchecks = {
-        name: {
-            "residual": errors[name],
-            "limit": limits[name],
-            "rounding_floor": floors[name],
-            "original_residual": originals[name],
-            "regularization_term": terms[name],
-            "internal_residual": internal[index],
-            "external_minus_internal_norm": errors[name] - internal[index],
+    postchecks = {}
+    for index, (name, _) in enumerate(blocks(self)):
+        error_norm, rhs_norm, magnitude, original, term, internal = norms[index]
+        floor = native(min(rounding * magnitude, LINEAR_ROUNDING_CAP * rhs_norm))
+        postchecks[name] = {
+            "residual": error_norm,
+            "limit": max(limits[name], floor),
+            "rounding_floor": floor,
+            "original_residual": original,
+            "regularization_term": term,
+            "internal_residual": internal,
+            "external_minus_internal_norm": error_norm - internal,
         }
-        for index, (name, _) in enumerate(blocks(self))
-    }
     self._variational["linear_postchecks"].append(
         {
-            "residual": errors[self._problem.aggregate_name],
-            "limit": min(limits.values()),
+            "residual": postchecks[self._problem.aggregate_name]["residual"],
+            "limit": min(row["limit"] for row in postchecks.values()),
             "regularization": regularization,
             "actual_regularization": float(native(regularization)),
             "equation": "regularized" if native(regularization) else "original",
@@ -138,10 +122,10 @@ def solve_direction(solver, residual, scale, limits, pcg, *, iteration, retry, r
             "blocks": postchecks,
         }
     )
-    if any(not np.isfinite(value) for value in errors.values()):
+    if any(not np.isfinite(row["residual"]) for row in postchecks.values()):
         attempt["failure_reason"] = "nonfinite_posterior"
         return False
-    if all(errors[name] <= limits[name] for name in limits):
+    if all(row["residual"] <= row["limit"] for row in postchecks.values()):
         return True
     # A direction whose true residual misses a limit is a linear failure; the
     # caller retries with the next regularization rather than correcting it.
