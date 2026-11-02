@@ -1,6 +1,6 @@
 # P9a 实施计划
 
-2026-11-02。状态：IN_PROGRESS（PR-01 COMPLETE；PR-02 待实施；性能留项 OPEN）。需求与范围以 [PRD](PRD.md) 为准。实现顺序固定为 **PR-01 H1 → PR-02 H2/R1 → PR-03 M1 → PR-04 M2/M3/M4 批处理收尾 → PR-05 M5 → PR-06 L1/L2/L3 → PR-07 阶段验收**。
+2026-11-02。状态：IN_PROGRESS（PR-01/02 COMPLETE；下一步 PR-03；性能留项 OPEN）。需求与范围以 [PRD](PRD.md) 为准。实现顺序固定为 **PR-01 H1 → PR-02 H2/R1 → PR-03 M1 → PR-04 M2/M3/M4 批处理收尾 → PR-05 M5 → PR-06 L1/L2/L3 → PR-07 阶段验收**。
 
 PR-01 可以按内部里程碑分多个可审查提交，但它仍是一个完整交付 PR。中间保留旧路径仅用于迁移对照；最终必须删掉。不能以“材料后续再接”关闭 H1。
 
@@ -9,7 +9,7 @@ PR-01 可以按内部里程碑分多个可审查提交，但它仍是一个完�
 | PR | 目标 | 依赖 | 完成证据 |
 | --- | --- | --- | --- |
 | PR-01 | actor-owned 统一非线性接口、分段归约、全类型设备 phase、删除旧双路径 | 起点 | COMPLETE；[最终验收](PR-01.md#7-最终验收与剩余性能项)：E2E/quick/回读通过；性能退化另列 OPEN |
-| PR-02 | 固定绑定 PCG 复用；异常 replay 生命周期 | PR-01 的 binding/generation 合同 | H2/R1 机制回归；内容变化不重建、失效条件生效 |
+| PR-02 | 固定绑定 PCG 复用；异常 replay 生命周期 | PR-01 的 binding/generation 合同 | COMPLETE；[验收](PR-02.md)：CPU/CUDA 机制与 E2E、两精度 quick 通过，8 组稳态布局回读为 0；保留未复现观察项 |
 | PR-03 | 多向量后验与收敛结果 packet 融合 | PR-01 通用组归约，PR-02 稳定 plan | 有/无 regularization 的结果一致；回读数量下降 |
 | PR-04 | cable gauge、material reaction、control 校验的类型批处理收尾 | PR-01 已完成设备迁移 | M2/M3/M4 各自证据；同类数量增加时无逐 actor host 调度/回读 |
 | PR-05 | Stats 完整向量只作最终快照，序列化按需 | PR-01 的发布边界 | 旧 Stats 不被下步覆盖，失败诊断和 JSON 兼容，导出成本实测 |
@@ -19,6 +19,8 @@ PR-01 可以按内部里程碑分多个可审查提交，但它仍是一个完�
 M2/M3/M4、L4/L5 中阻止统一设备契约的部分已经属于 PR-01，后续不重新实现另一套逻辑。PR-04 开始前审查 PR-01 的完成记录：若已达相应结构与成本目标，直接以证据关闭该项，只处理剩余批处理缺口，禁止为凑 PR 新造抽象。
 
 ## 2. H2 与 R1：PR-02
+
+已在 `91b939e7` 完成受影响组件与两精度 quick 验收，详见 [PR-02](PR-02.md)。实际生产改动仅需 `pcg_production.py`；现有 assembly 验证和 buffer signature 满足合同，无须修改 BSR 构建或新增 epoch。以下保留原实施要求。
 
 涉及 `pcg_production.py`、`linear.py`、`bsr_reduction.py` 及受影响 linear graph/fixed-storage 测试。
 
@@ -95,3 +97,5 @@ L4/L5 已由 PR-01 的 domain/gauge 设备合同关闭，在本 PR 汇总其结�
 4. `uvx pre-commit run -a`、独立正确性/架构审查、更新本 PR 文档并本地提交。没有推送请求不推送；不为本次规划修改 CI 调度。
 
 PR-07 最终 HEAD：云端 suite、经项目流程批准启动的完整 stage；提交命令与运行身份保存在报告。性能成对测量与物理验收分别报告，已有已知失败需具体处置，不能自行登记为豁免。PR-01 最终结果见其第 7 节；阶段 E2E 为 NOT_RUN，整体性能资格与 P9a-PERF-01 保持 OPEN。
+
+PR-07 同时回看 `P9a-OBS-01`：PR-02 最初 CUDA 批次有一次 rigid FP32 graph-on checkpoint 的微小逐位差异；最小场景与后续严格复跑未复现，失败注入测试清理已补齐，但因果关系未证实。原 FAIL 和诊断证据保留在 [PR-02 第 5 节](PR-02.md#5-一次未复现的-checkpoint-观察)，不改门槛或登记为豁免。

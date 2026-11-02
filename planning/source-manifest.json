@@ -2,7 +2,7 @@
   "date": "2026-11-02",
   "timezone": "Asia/Tokyo",
   "stage": "P9a",
-  "status": "PR01_COMPLETE_STAGE_IN_PROGRESS_PERFORMANCE_OPEN",
+  "status": "PR01_PR02_COMPLETE_STAGE_IN_PROGRESS_PERFORMANCE_OPEN",
   "branch": "SamiulJ/monolithic-p9a",
   "worktree": "worktrees/Monolithic-p9a",
   "base_commit": "8fa80ba7ce3fd7ce2483f2ec098e66d410bc434e",
@@ -24,12 +24,12 @@
   "runtime_environment": {
     "venv": "shared symlink to ../Monolithic-refactor/.venv; use uv run --no-sync; do not uv sync this shared environment",
     "assets": "read-only reuse of ../Monolithic-refactor/asset/monolithic/data through relative symlink",
-    "solver_runtime_tests": "PR01 CPU/CUDA E2E, affected components and FP64/FP32 quick PASS; stage suite/stage NOT_RUN",
+    "solver_runtime_tests": "PR01 and PR02 affected CPU/CUDA components, small E2E and FP64/FP32 quick PASS; PR02 CPU 6 capability skips; stage suite/stage NOT_RUN; P9a-OBS-01 retained as an unreproduced observation",
     "performance": "Three alternating paired GPU samples recorded; structural contract PASS; P9a-PERF-01 and stage performance qualification OPEN",
     "superdex_runtime": "NOT_RUN"
   },
   "planning_snapshot_workspace_index_sha256": "a61a092cc6dbc9e34ac17cd2a9c06b7e1ba354e9dd70f53f53053c97412daad9",
-  "workspace_index_sha256": "08b665868dd14a2e78fdf43aa7c40a8304c9bc73d8e45a07bb0e3d9f29e92e15",
+  "workspace_index_sha256": "e4cf8947f28aec43b45cceaa66fa60196cbbed756f0c0e078a05f1c0f3b39f59",
   "implementation": {
     "tested_commit": "2220971595d36ea7bd5ffa52d219a340f7d83ef9",
     "solver_tree_sha256": "dda3dde1962db7ed10cdae6bbaf7a4d93af843dacb9ae6d28c08369574bf18d2",
@@ -52,5 +52,41 @@
     "performance": "OPEN / P9a-PERF-01",
     "usage_document": "dev/scripts/monolithic_performance.md",
     "usage_document_sha256": "9b6a23a89d632e6d6cc898b0fcc4fac3ec167c7e69381bba2aa156e5ff5f1445"
+  },
+  "pr02_completion": {
+    "base_commit": "e353411fed9dcfc718e6459a8546d2d3d0b8e534",
+    "implementation_commit": "0519d4fe49d428a316f09c13510df08d8ddaa7d8",
+    "tested_commit": "91b939e7914ef9dbe6a5f0045bca2277f7b00cec",
+    "tested_commit_scope": "Only failure-injection test teardown differs from implementation_commit; solver code is identical.",
+    "solver_tree_sha256": "8e88a4aae57ddbb47f0b58e0414749e519482cfc0be9bbf90d44865652f960e4",
+    "results": "dev/monolithic/test/results/P9/P9a/PR-02/20261102-01",
+    "cpu": {
+      "run": 57,
+      "pass": 51,
+      "skip": 6,
+      "fail": 0,
+      "error": 0
+    },
+    "cuda": {
+      "run": 55,
+      "pass": 55,
+      "skip": 0,
+      "fail": 0,
+      "error": 0
+    },
+    "composed_e2e": "64 steps per combination; CPU 6 and CUDA 12 combinations PASS; strict checkpoint equality and rollback assertions unchanged.",
+    "quick_results": "dev/monolithic/test/results/P9/P9a/PR-02/quick-91b939e7",
+    "quick_verdict": "CLEAN",
+    "quick_pass_items": 60,
+    "quick_result_sha256": "caeb6774bf6d0ad75ce638a19ec43f8f86259b49690da4322722f57450fa7d9f",
+    "cost_comparison_sha256": "a4da58ad8e81c9a38e4ff6046041fbb690a5d2e5e4286c0875588ebdd40515cb",
+    "cost_scope": "One before/after batch with five warm samples for each of eight tiny FP32/FP64 cases; input/config/work identical; steady H2 layout reads zero; descriptive timing only.",
+    "open_items": [
+      "P9a-PERF-01",
+      "P9a-OBS-01"
+    ],
+    "observation": "One initial CUDA FP32 graph rigid checkpoint bitwise mismatch; reconstructed baseline/current, isolated E2E and full repeats did not reproduce it. Test stream teardown fixed; causal attribution unproven. Original batch remains FAIL.",
+    "observation_sha256": "1d94b3fd3177afec92f073c46637d4694b7030127e1798e90405d49846cce5fe",
+    "completion_commit_scope": "Planning documentation only; runtime evidence binds tested_commit."
   }
 }
