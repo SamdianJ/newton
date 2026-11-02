@@ -9,53 +9,40 @@ import numpy as np
 import warp as wp
 
 from . import state_checks
+from .reductions import SegmentedReduction
 
 wp.set_module_options({"fuse_fp": False})
 
 
 @wp.kernel
-def measure_terms(
+def measure_rows(
     r: wp.array[Any],
     reference: wp.array[Any],
     scale: wp.array[Any],
-    nq: int,
     terms: wp.array2d[Any],
     rhs: wp.array[Any],
 ):
     i = wp.tid()
-    s = scale[i]
-    a, b = s * r[i], s * reference[i]
+    a, b = scale[i] * r[i], scale[i] * reference[i]
     rhs[i] = -a
-    for block in range(3):
-        active = block == 0 or (block == 1 and i < nq) or (block == 2 and i >= nq)
-        aa, bb, rr = type(r[0])(0.0), type(r[0])(0.0), type(r[0])(0.0)
-        if active:
-            aa, bb, rr = a * a, b * b, r[i] * r[i]
-        terms[3 * block, i] = aa
-        terms[3 * block + 1, i] = bb
-        terms[3 * block + 2, i] = rr
+    terms[0, i] = a * a
+    terms[1, i] = b * b
+    terms[2, i] = r[i] * r[i]
 
 
 @wp.kernel
-def assessment_terms(
-    residual: wp.array[Any],
+def assessment_rows(
+    r: wp.array[Any],
     reference: wp.array[Any],
     tau: wp.array[Any],
     scale: wp.array[Any],
-    nq: int,
     terms: wp.array2d[Any],
-    minimum: wp.array[Any],
 ):
     i = wp.tid()
-    a, b = residual[i] / tau[i], reference[i] / tau[i]
-    scaled = scale[i] * tau[i]
-    for block in range(3):
-        aa, bb = type(a)(0.0), type(a)(0.0)
-        if block == 0 or (block == 1 and i < nq) or (block == 2 and i >= nq):
-            aa, bb = a * a, b * b
-            wp.atomic_min(minimum, block, scaled)
-        terms[2 * block, i] = aa
-        terms[2 * block + 1, i] = bb
+    a, b = r[i] / tau[i], reference[i] / tau[i]
+    terms[0, i] = a * a
+    terms[1, i] = b * b
+    terms[2, i] = scale[i] * tau[i]
 
 
 @wp.kernel
@@ -66,13 +53,11 @@ def unrepresentable_rows(effective: wp.array[Any], coordinates: wp.array[Any], e
 
 
 @wp.kernel
-def norm_terms(r: wp.array[Any], nq: int, terms: wp.array2d[Any]):
+def norm_rows(r: wp.array[Any], terms: wp.array2d[Any]):
     i = wp.tid()
-    for block in range(3):
-        value = type(r[0])(0.0)
-        if block == 0 or (block == 1 and i < nq) or (block == 2 and i >= nq):
-            value = r[i] * r[i]
-        terms[block, i] = value
+    terms[0, i] = r[i] * r[i]
+    terms[1, i] = terms.dtype(0)
+    terms[2, i] = terms.dtype(0)
 
 
 @wp.kernel
@@ -95,30 +80,21 @@ def effective_displacement(
 
 
 @wp.kernel
-def trial_terms(
+def trial_rows(
     r: wp.array[Any],
-    trial: wp.array[Any],
     scale: wp.array[Any],
     direction: wp.array[Any],
     effective: wp.array[Any],
-    nq: int,
+    unscaled: wp.array[int],
     terms: wp.array2d[Any],
 ):
     i = wp.tid()
-    s, d, e = scale[i], direction[i], effective[i]
-    scaled = s * trial[i]
-    step = e / s
-    terms[0, i] = r[i] * e
-    terms[1, i] = scaled * scaled
-    terms[2, i] = s * s
-    terms[3, i] = d * d
-    terms[4, i] = wp.abs(d)
-    terms[5, i] = wp.abs(r[i] * d)
-    for block in range(3):
-        value = type(r[0])(0.0)
-        if block == 0 or (block == 1 and i < nq) or (block == 2 and i >= nq):
-            value = step * step
-        terms[6 + block, i] = value
+    step = effective[i]
+    if unscaled[i] == 0:
+        step /= scale[i]
+    terms[0, i] = r[i] * effective[i]
+    terms[1, i] = wp.abs(r[i] * direction[i])
+    terms[2, i] = step * step
 
 
 @wp.kernel
@@ -221,14 +197,19 @@ def initialize(solver):
     n, device, dtype = self._complete_r.size, self.model.device, self._dtype
     for name in ("_accepted_r", "_reference_device", "_effective_device", "_stats_residual"):
         setattr(self, name, wp.zeros(n, dtype=dtype, device=device))
-    self._nonlinear_terms = wp.zeros((9, n), dtype=dtype, device=device)
-    self._nonlinear_sums = wp.zeros((9, 1), dtype=dtype, device=device)
-    self._assessment_terms = wp.zeros((6, n), dtype=dtype, device=device)
-    self._assessment_sums = wp.zeros((6, 1), dtype=dtype, device=device)
-    self._assessment_minimum = wp.zeros(3, dtype=dtype, device=device)
+    self._row_terms = wp.zeros((3, n), dtype=dtype, device=device)
+    self._group_reduction = SegmentedReduction(
+        n,
+        [np.arange(start, start + count) for _, start, count in self._layout.groups],
+        3,
+        dtype=dtype,
+        device=device,
+    )
+    unscaled = np.zeros(n, dtype=np.int32)
+    for _, start in self._layout.rigid_ranges:
+        unscaled[start : start + 6] = 1
+    self._step_unscaled = wp.array(unscaled, dtype=int, device=device)
     self._unrepresentable = wp.zeros(1, dtype=int, device=device)
-    self._norm_terms = wp.zeros((3, n), dtype=dtype, device=device)
-    self._norm_sums = wp.zeros((3, 1), dtype=dtype, device=device)
     energy_size = sum(
         a.size
         for a in (self._objective.link_energy, self._objective.joint_energy, self._tet.parts, self._contact.energy)
@@ -282,63 +263,48 @@ def evaluate(solver):
 
 
 def measure(solver, residual, reference):
-    """Return native norms for global/q/x and build the device RHS."""
+    """Build the RHS and read norms in LinearLayout group order."""
     self = solver
-    if not isinstance(reference, wp.array):
-        reference = wp.array(reference, dtype=self._dtype, device=self.model.device)
-    buffers = [residual, reference, self._linear.scale, self._nonlinear_terms, self._nonlinear_sums, self._rhs]
+    reduction = self._group_reduction
+    buffers = [residual, reference, self._linear.scale, self._row_terms, self._rhs, *reduction.buffers()]
 
     def execute():
-        wp.launch(
-            measure_terms,
-            residual.size,
-            [residual, reference, self._linear.scale, self._kinematics.count, self._nonlinear_terms, self._rhs],
-            device=self.model.device,
-        )
-        wp.utils.array_sum(self._nonlinear_terms, out=self._nonlinear_sums, axis=1)
+        wp.launch(measure_rows, residual.size, buffers[:5], device=self.model.device)
+        reduction.reduce(self._row_terms)
 
     self._graphs.run("nonlinear_measure", (), buffers, execute)
-    norms = np.sqrt(self._nonlinear_sums.numpy().reshape(3, 3))
-    self._rhs_norms_host = norms[:, 0].copy()
-    return norms
+    values = np.sqrt(reduction.result.numpy())
+    self._rhs_norms_host = values[:, 0].copy()
+    return values
 
 
 def norms(solver, error):
-    """Read only the three physical posterior error norms."""
+    """Read posterior error norms for every active layout group."""
     self = solver
+    reduction = self._group_reduction
 
     def execute():
-        wp.launch(norm_terms, error.size, [error, self._kinematics.count, self._norm_terms], device=self.model.device)
-        wp.utils.array_sum(self._norm_terms, out=self._norm_sums, axis=1)
+        wp.launch(norm_rows, error.size, [error, self._row_terms], device=self.model.device)
+        reduction.reduce(self._row_terms)
 
-    self._graphs.run("nonlinear_posterior_norms", (), [error, self._norm_terms, self._norm_sums], execute)
-    return np.sqrt(self._norm_sums.numpy().ravel())
+    self._graphs.run("nonlinear_posterior_norms", (), [error, self._row_terms, *reduction.buffers()], execute)
+    return np.sqrt(reduction.result.numpy()[:, 0])
 
 
 def trial(solver, residual, candidate, effective):
-    """Read slope, noise scales and block displacement norms together."""
+    """Read slope, noise scale and actual per-group step norms together."""
     self = solver
-    buffers = [
-        residual,
-        candidate,
-        self._linear.scale,
-        self._delta,
-        effective,
-        self._nonlinear_terms,
-        self._nonlinear_sums,
-    ]
+    reduction = self._group_reduction
+    buffers = [residual, self._linear.scale, self._delta, effective, self._step_unscaled, self._row_terms]
 
     def execute():
-        wp.launch(
-            trial_terms,
-            residual.size,
-            [*buffers[:5], self._kinematics.count, self._nonlinear_terms],
-            device=self.model.device,
-        )
-        wp.utils.array_sum(self._nonlinear_terms, out=self._nonlinear_sums, axis=1)
+        wp.launch(trial_rows, residual.size, buffers, device=self.model.device)
+        reduction.reduce(self._row_terms)
 
-    self._graphs.run("nonlinear_trial", (), buffers, execute)
-    return self._nonlinear_sums.numpy().ravel()
+    self._graphs.run("nonlinear_trial", (), [*buffers, *reduction.buffers()], execute)
+    values = reduction.result.numpy()
+    # Preserve the strategy packet until it moves into the problem interface.
+    return np.r_[values[0, 0], np.zeros(4, dtype=self._numpy_dtype), values[0, 1], values[:, 2]]
 
 
 @wp.kernel
@@ -386,29 +352,18 @@ def domain(solver, state, revolute):
 
 
 def assessment(solver, residual, reference):
-    """Return per-block RMS of ``r/tau`` and ``r0/tau`` and the smallest scaled tolerance.
-
-    Rows are ordered global/q/x; only these three small results are read back.
-    """
+    """Read per-group r/tau squares and the smallest scaled row tolerance."""
     self = solver
-    tau = self._criterion.tau
-    self._assessment_minimum.fill_(np.inf)
+    reduction = self._group_reduction
     wp.launch(
-        assessment_terms,
+        assessment_rows,
         residual.size,
-        [
-            residual,
-            reference,
-            tau,
-            self._linear.scale,
-            self._kinematics.count,
-            self._assessment_terms,
-            self._assessment_minimum,
-        ],
+        [residual, reference, self._criterion.tau, self._linear.scale, self._row_terms],
         device=self.model.device,
     )
-    wp.utils.array_sum(self._assessment_terms, out=self._assessment_sums, axis=1)
-    return self._assessment_sums.numpy().reshape(3, 2), self._assessment_minimum.numpy()
+    reduction.reduce(self._row_terms, minimum=2)
+    values = reduction.result.numpy()
+    return values[:, :2], values[:, 2]
 
 
 def representable(solver, effective, eps):

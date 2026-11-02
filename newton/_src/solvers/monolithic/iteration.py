@@ -133,7 +133,8 @@ def measure(solver, residual, reference, scale):
     if device:
         sums, minimum = iteration_device.assessment(self, residual, reference)
         summary = {
-            name: (sums[i, 0], sums[i, 1], minimum[i], norms[i, 2]) for i, name in enumerate(("global", "q", "x"))
+            name: (sums[i, 0], sums[i, 1], minimum[i], norms[i, 2])
+            for i, name in enumerate(name for name, _ in blocks(self))
         }
     else:
         tau = criterion.tau.numpy()
@@ -184,7 +185,7 @@ def direction_norms(solver, vector):
     """Measure every active layout group in the nonlinear native precision."""
     if isinstance(vector, wp.array):
         values = iteration_device.norms(solver, vector)
-        return dict(zip(("global", "q", "x"), values, strict=True))
+        return dict(zip((name for name, _ in blocks(solver)), values, strict=True))
     return {name: np.linalg.norm(vector[part]) for name, part in blocks(solver)}
 
 
