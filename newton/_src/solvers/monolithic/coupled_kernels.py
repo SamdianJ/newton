@@ -52,20 +52,6 @@ def freeze_step_forces(
 
 
 @wp.kernel
-def combine(
-    q: wp.array[Any], x: wp.array[Any], contact: wp.array[Any], q_local: wp.array[int], x_start: int, out: wp.array[Any]
-):
-    i = wp.tid()
-    value = contact[i]
-    if q_local[i] >= 0:
-        value += q[q_local[i]]
-    elif i >= x_start and i < x_start + 3 * x.shape[0]:
-        j = i - x_start
-        value += x[j / 3][j % 3]
-    out[i] = value
-
-
-@wp.kernel
 def particle_trial(
     accepted: wp.array[Any],
     xn: wp.array[Any],

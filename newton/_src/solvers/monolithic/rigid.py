@@ -595,9 +595,3 @@ class RigidObjective:
             device=self.device,
         )
         self.publish(state)
-
-    def domain(self, state):
-        if not self.count:
-            return True
-        wp.launch(_matrices, self.count, [state._monolithic_coupled.rigid_rotation, self.rotations], device=self.device)
-        return bool(np.all(np.einsum("bij,bij->b", self.rotations.numpy(), self.rn.numpy()) > 1))

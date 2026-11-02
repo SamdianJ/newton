@@ -35,7 +35,7 @@ class TestProducerRows(unittest.TestCase):
             validate_row_partition([_Rows("a", [0, 2])], 2)
 
     def test_protocol_lists_the_step_contract(self):
-        for name in ("begin_step", "candidate", "evaluate", "assemble", "scale", "displacement", "domain", "publish"):
+        for name in ("begin_step", "candidate", "evaluate", "assemble", "scale", "difference", "domain", "publish"):
             self.assertTrue(hasattr(Producer, name), name)
 
 
@@ -57,10 +57,10 @@ class TestSolverProducers(unittest.TestCase):
         self.assertEqual(solver._contact.count, 0)
         _, solver = material_scene(mechanical=True, rigid=True, tet=True, cloth=True, cables=2, shape_radius=0.5)
         self.assert_partition(solver, names)
-        self.assertFalse(solver._capturable)
+        self.assertTrue(solver._capturable)
         policies = {p.name: (p.capturable, p.scale_policy) for p in solver._producers}
-        self.assertEqual(policies["cloth_0"], (False, "coordinate"))
-        self.assertEqual(policies["cable_1"], (False, "coordinate"))
+        self.assertEqual(policies["cloth_0"], (True, "coordinate"))
+        self.assertEqual(policies["cable_1"], (True, "coordinate"))
         self.assertEqual(policies["tet"], (True, "diagonal"))
 
 

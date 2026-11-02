@@ -17,7 +17,8 @@ def _residual(
     step: wp.array[Any],
     vn: wp.array[Any],
     forces: wp.array[wp.vec3],
-    gravity: wp.vec3,
+    gravity: wp.array[wp.vec3],
+    world: int,
     mass: wp.array[Any],
     fixed: wp.array[int],
     offsets: wp.array[int],
@@ -39,7 +40,7 @@ def _residual(
         entry = entries[i]
         value += local[entry // 18, entry % 18]
         magnitude += rounding[entry // 18, entry % 18]
-    force = type(dt)(forces[vertex][axis]) + mass[vertex] * type(dt)(gravity[axis])
+    force = type(dt)(forces[vertex][axis]) + mass[vertex] * type(dt)(gravity[world][axis])
     displacement = step[vertex][axis]
     difference = displacement - dt * vn[vertex][axis]
     value -= force
@@ -86,12 +87,16 @@ def _candidate(
     alpha: Any,
     dt: Any,
     predict: bool,
+    fallback: bool,
+    path_status: wp.array[int],
     trial: wp.array[Any],
     trial_velocity: wp.array[Any],
     trial_step: wp.array[Any],
 ):
     """Advance the exact step displacement; positions and velocity are formed once from it."""
     i = wp.tid()
+    if fallback and path_status[0] == 0:
+        return
     p = ids[i]
     step = type(original[0])()
     if rows[3 * i] >= 0:
@@ -205,8 +210,6 @@ class ClothBlock:
         """
         wp.launch(_gather, self.ids.size, [step, self.ids, self.step], device=self.device)
         self.objective.evaluate(self.original_x, build_tangent=build_tangent, step=self.step)
-        if self.objective.flags.numpy()[0]:
-            raise ValueError("Invalid cloth geometry or membrane projection")
         wp.launch(
             _residual,
             self.raw.size,
@@ -215,6 +218,7 @@ class ClothBlock:
                 self.original_v,
                 self.forces,
                 gravity,
+                int(self.reference["world"]),
                 self.mass,
                 self.fixed,
                 self.offsets,
@@ -230,10 +234,6 @@ class ClothBlock:
             ],
             device=self.device,
         )
-        parts = np.r_[self.objective.energy.numpy().ravel(), self.external_energy.numpy()]
-        if not np.isfinite(parts).all() or not np.isfinite(self.raw.numpy()).all():
-            raise ValueError("Nonfinite cloth energy or residual")
-        return parts.sum(), abs(parts).sum()
 
     def assemble(self, assembly, dt):
         """Retain every free-coordinate shell block and inertia entry."""
@@ -251,7 +251,7 @@ class ClothBlock:
             device=self.device,
         )
 
-    def candidate(self, accepted_step, original, trial, trial_step, delta, alpha, dt, *, predict=False):
+    def candidate(self, accepted_step, original, trial, trial_step, delta, alpha, dt, *, predict=False, fallback=False):
         """Update free positions in the common trial and retain prescribed vertices.
 
         The trial step displacement is advanced exactly from the accepted one,
@@ -270,6 +270,8 @@ class ClothBlock:
                 self.dtype(alpha),
                 self.dtype(dt),
                 predict,
+                fallback,
+                self.path_status,
                 trial.particle_q,
                 trial.particle_qd,
                 trial_step,
@@ -277,9 +279,8 @@ class ClothBlock:
             device=self.device,
         )
 
-    def path_valid(self, original, accepted_step, trial_step):
+    def check_path(self, original, accepted_step, trial_step, flags):
         """Reject triangle collapse along the entire actual trial segment."""
-        self.path_status.zero_()
         wp.launch(
             _path,
             self.objective.stencils.shape[0],
@@ -290,8 +291,7 @@ class ClothBlock:
                 accepted_step,
                 trial_step,
                 self.objective.areas,
-                self.path_status,
+                flags,
             ],
             device=self.device,
         )
-        return not bool(self.path_status.numpy()[0])

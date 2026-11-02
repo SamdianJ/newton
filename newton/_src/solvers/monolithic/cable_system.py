@@ -24,7 +24,8 @@ def _residual(
     theta_step: wp.array[Any],
     torque: wp.array[Any],
     forces: wp.array[wp.vec3],
-    gravity: wp.vec3,
+    gravity: wp.array[wp.vec3],
+    world: int,
     mass: wp.array[Any],
     fixed: wp.array[int],
     stretch: wp.array2d[Any],
@@ -51,7 +52,7 @@ def _residual(
         for stencil in range(wp.max(0, vertex - 2), wp.min(nv - 2, vertex + 1)):
             value += bend[stencil, 3 * (vertex - stencil) + axis]
             magnitude += bend_rounding[stencil, 3 * (vertex - stencil) + axis]
-        applied = type(dt)(forces[vertex][axis]) + mass[vertex] * type(dt)(gravity[axis])
+        applied = type(dt)(forces[vertex][axis]) + mass[vertex] * type(dt)(gravity[world][axis])
         displacement = step[vertex][axis]
         prediction_error = displacement - dt * vn[vertex][axis]
         value -= applied
@@ -271,8 +272,6 @@ class CableBlock:
             anchor.cable_ref_twist[self.phi_offset : self.phi_offset + ni] if ni else objective.phi,
             tangent=build_tangent,
         )
-        if objective.flags.numpy()[0]:
-            raise ValueError("Cable candidate left the committed geometry/frame chart")
         wp.launch(
             _residual,
             self.raw.size,
@@ -283,6 +282,7 @@ class CableBlock:
                 torque[self.theta_offset : self.theta_offset + ne],
                 self.forces,
                 gravity,
+                int(self.reference["world"]),
                 self.mass,
                 self.fixed,
                 objective.stretch_r,
@@ -298,11 +298,6 @@ class CableBlock:
             ],
             device=self.device,
         )
-        parts = np.r_[
-            objective.stretch_energy.numpy(), objective.bend_twist_energy.numpy().ravel(), self.external_energy.numpy()
-        ]
-        if not np.isfinite(parts).all() or not np.isfinite(self.raw.numpy()).all():
-            raise ValueError("Nonfinite cable energy or residual")
         if state is not original:
             wp.launch(
                 _publish_frame,
@@ -318,7 +313,6 @@ class CableBlock:
                 ],
                 device=self.device,
             )
-        return parts.sum(), abs(parts).sum()
 
     def assemble(self, assembly, dt):
         """Write every free vertex's lumped mass into reserved global triplets."""
@@ -384,13 +378,11 @@ class CableBlock:
             device=self.device,
         )
 
-    def path_valid(self, original, accepted_step, trial_step):
+    def check_path(self, original, accepted_step, trial_step, flags):
         """Reject an edge collapse anywhere along the actual line-search segment."""
-        self.path_status.zero_()
         wp.launch(
             _path_domain,
             self.ids.size - 1,
-            [self.ids, original.particle_q, accepted_step, trial_step, self.objective.lengths0, self.path_status],
+            [self.ids, original.particle_q, accepted_step, trial_step, self.objective.lengths0, flags],
             device=self.device,
         )
-        return not bool(self.path_status.numpy()[0])

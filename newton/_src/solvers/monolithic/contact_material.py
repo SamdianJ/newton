@@ -241,7 +241,7 @@ class _MaterialSurface:
         self.anchor_d = wp.zeros(c._materials.theta_count, dtype=batch.vector, device=batch.device)
         self.flags = wp.zeros(2, dtype=int, device=batch.device)
 
-    def update(self, state, x_steps=None, *, begin=False):
+    def update(self, state, x_steps=None, *, begin=False, check=True):
         """Form the cable surface points and their steps from the particle steps ``x_steps``.
 
         Without exact steps they are derived from the step-start positions.
@@ -277,7 +277,7 @@ class _MaterialSurface:
             ],
             device=self.batch.device,
         )
-        if self.flags.numpy()[0]:
+        if check and self.flags.numpy()[0]:
             raise ValueError("Invalid cable contact frame")
         wp.launch(
             _copy_surface,

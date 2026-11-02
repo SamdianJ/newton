@@ -8,7 +8,6 @@ from typing import Any
 import numpy as np
 import warp as wp
 
-from . import state_checks
 from .reductions import SegmentedReduction
 
 wp.set_module_options({"fuse_fp": False})
@@ -61,25 +60,6 @@ def norm_rows(r: wp.array[Any], terms: wp.array2d[Any]):
 
 
 @wp.kernel
-def effective_displacement(
-    q_step: wp.array[Any],
-    accepted_q_step: wp.array[Any],
-    x: wp.array[Any],
-    accepted_x: wp.array[Any],
-    ids: wp.array[int],
-    out: wp.array[Any],
-):
-    i = wp.tid()
-    nq = q_step.shape[0]
-    if i < nq:
-        out[i] = q_step[i] - accepted_q_step[i]
-    else:
-        j = (i - nq) / 3
-        axis = (i - nq) % 3
-        out[i] = x[ids[j]][axis] - accepted_x[ids[j]][axis]
-
-
-@wp.kernel
 def trial_rows(
     r: wp.array[Any],
     scale: wp.array[Any],
@@ -95,100 +75,6 @@ def trial_rows(
     terms[0, i] = r[i] * effective[i]
     terms[1, i] = wp.abs(r[i] * direction[i])
     terms[2, i] = step * step
-
-
-@wp.kernel
-def energy_terms(
-    link: wp.array[Any],
-    joint: wp.array[Any],
-    tet: wp.array[Any],
-    contact: wp.array[Any],
-    contact_absolute: wp.array[Any],
-    pooled: bool,
-    terms: wp.array2d[Any],
-):
-    i = wp.tid()
-    j = i
-    value = type(link[0])(0.0)
-    if j < link.shape[0]:
-        value = link[j]
-    else:
-        j -= link.shape[0]
-        if j < joint.shape[0]:
-            value = joint[j]
-        else:
-            j -= joint.shape[0]
-            if j < tet.shape[0]:
-                value = tet[j]
-            else:
-                value = contact[j - tet.shape[0]]
-    terms[0, i] = value
-    terms[1, i] = wp.abs(value)
-    if pooled and i >= link.shape[0] + joint.shape[0] + tet.shape[0]:
-        terms[1, i] = contact_absolute[j - tet.shape[0]]
-
-
-@wp.kernel
-def evaluation_packet(
-    tet: wp.array[int],
-    contact: wp.array[int],
-    finite: wp.array[int],
-    energy: wp.array2d[Any],
-    det: wp.array[Any],
-    packet: wp.array[Any],
-):
-    packet[0] = type(packet[0])(tet[0])
-    packet[1] = type(packet[0])(contact[0])
-    packet[2] = type(packet[0])(finite[0])
-    packet[3] = energy[0, 0]
-    packet[4] = energy[1, 0]
-    packet[5] = det[0]
-
-
-@wp.kernel
-def host_evaluation_packet(
-    rigid: wp.array[Any],
-    link: wp.array[Any],
-    joint: wp.array[Any],
-    tet: wp.array[Any],
-    contact: wp.array[Any],
-    absolute: wp.array[Any],
-    tet_flags: wp.array[int],
-    contact_flags: wp.array[int],
-    det: wp.array[Any],
-    pooled: bool,
-    packet: wp.array[Any],
-):
-    i = wp.tid()
-    value = packet.dtype(0)
-    if i == 0:
-        value = packet.dtype(tet_flags[0])
-    elif i == 1:
-        value = packet.dtype(contact_flags[0])
-    elif i == 2:
-        value = det[0]
-    elif i < 5:
-        if pooled:
-            value = absolute[i - 3]
-    else:
-        j = i - 5
-        if j < rigid.shape[0]:
-            value = rigid[j]
-        else:
-            j -= rigid.shape[0]
-            if j < link.shape[0]:
-                value = link[j]
-            else:
-                j -= link.shape[0]
-                if j < joint.shape[0]:
-                    value = joint[j]
-                else:
-                    j -= joint.shape[0]
-                    if j < tet.shape[0]:
-                        value = tet[j]
-                    else:
-                        value = contact[j - tet.shape[0]]
-    packet[i] = value
 
 
 def initialize(solver):
@@ -210,56 +96,6 @@ def initialize(solver):
         unscaled[start : start + 6] = 1
     self._step_unscaled = wp.array(unscaled, dtype=int, device=device)
     self._unrepresentable = wp.zeros(1, dtype=int, device=device)
-    energy_size = sum(
-        a.size
-        for a in (self._objective.link_energy, self._objective.joint_energy, self._tet.parts, self._contact.energy)
-    )
-    self._energy_terms = wp.zeros((2, energy_size), dtype=dtype, device=device)
-    self._energy_sums = wp.zeros((2, 1), dtype=dtype, device=device)
-    self._evaluation_status = wp.zeros(1, dtype=int, device=device)
-    self._evaluation_packet = wp.zeros(6, dtype=dtype, device=device)
-    # Copy terms without reducing them: the host path retains NumPy's sum order.
-    self._host_evaluation_packet = wp.zeros(5 + self._rigid.energy.size + energy_size, dtype=dtype, device=device)
-
-
-def evaluate(solver):
-    """Append energy reduction and numerical guards to the objective graph."""
-    self = solver
-    wp.launch(
-        energy_terms,
-        self._energy_terms.shape[1],
-        [
-            self._objective.link_energy,
-            self._objective.joint_energy,
-            self._tet.parts,
-            self._contact.energy.flatten(),
-            self._contact.absolute_energy if self._contact_pool else self._contact.energy.flatten(),
-            self._contact_pool,
-            self._energy_terms,
-        ],
-        device=self.model.device,
-    )
-    wp.utils.array_sum(self._energy_terms, out=self._energy_sums, axis=1)
-    self._evaluation_status.zero_()
-    wp.launch(
-        state_checks.finite,
-        self._complete_r.size,
-        [self._complete_r, self._evaluation_status, 0],
-        device=self.model.device,
-    )
-    wp.launch(
-        evaluation_packet,
-        1,
-        [
-            self._tet.flags,
-            self._contact.flags,
-            self._evaluation_status,
-            self._energy_sums,
-            self._tet.min_det_f,
-            self._evaluation_packet,
-        ],
-        device=self.model.device,
-    )
 
 
 def measure(solver, residual, reference):
@@ -305,50 +141,6 @@ def trial(solver, residual, candidate, effective):
     values = reduction.result.numpy()
     # Preserve the strategy packet until it moves into the problem interface.
     return np.r_[values[0, 0], np.zeros(4, dtype=self._numpy_dtype), values[0, 1], values[:, 2]]
-
-
-@wp.kernel
-def domain_check(
-    q: wp.array[Any],
-    qn: wp.array[Any],
-    dof_joint: wp.array[int],
-    types: wp.array[int],
-    rotations: wp.array[Any],
-    rn: wp.array[Any],
-    revolute: int,
-    half_pi: Any,
-    flags: wp.array[int],
-):
-    i = wp.tid()
-    if i < q.shape[0] and types[dof_joint[i]] == revolute:
-        if wp.abs(q[i] - qn[i]) >= half_pi:
-            wp.atomic_max(flags, 0, 1)
-    if i < rotations.shape[0]:
-        value = type(q[0])(0.0)
-        for a in range(3):
-            for b in range(3):
-                value += rotations[i][a, b] * rn[i][a, b]
-        if not (value > type(q[0])(1.0)):
-            wp.atomic_max(flags, 0, 1)
-
-
-def domain(solver, state, revolute):
-    """Check the local coordinate and rotation domain without host matrices."""
-    self, k, obj = solver, solver._kinematics, solver._objective
-    flags = self._evaluation_status
-    buffers = [k.gather_q(state), obj.qn, k.dof_joint, k.types, k.rotations, obj.rn, flags]
-
-    def execute():
-        flags.zero_()
-        wp.launch(
-            domain_check,
-            max(k.count, k.bodies),
-            [*buffers[:6], revolute, self._dtype(np.pi / 2), flags],
-            device=self.model.device,
-        )
-
-    self._graphs.run("nonlinear_domain", (), buffers, execute)
-    return not bool(flags.numpy()[0])
 
 
 def assessment(solver, residual, reference):

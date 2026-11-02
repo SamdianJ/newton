@@ -38,8 +38,9 @@ from .linear_types import (
     MonolithicLinearStatus,
 )
 from .material_inputs import _MaterialInputs
+from .problem import _MonolithicProblem
 from .producers import build_producers
-from .rigid import RigidObjective, _scatter_residual
+from .rigid import RigidObjective
 from .segment_graph import _SegmentGraphCache
 from .solver_types import (
     CableInput,
@@ -494,6 +495,8 @@ class SolverMonolithic(SolverBase):
         # The specialized q+x reductions require one articulation and no rigid blocks.
         self._device_iteration = (
             self._capturable
+            and not self._cloths
+            and not self._cables
             and self._has_tet
             and len(self._articulation_actors) == 1
             and not self._rigid.count
@@ -501,6 +504,7 @@ class SolverMonolithic(SolverBase):
             and self._layout.x_scalar_offset == self._kinematics.count
         )
         iteration_device.initialize(self)
+        self._problem = _MonolithicProblem(self)
 
     def create_control(self):
         """Create experimental cable position [m], angle [rad] and torque [N m] controls.
@@ -912,194 +916,8 @@ class SolverMonolithic(SolverBase):
             producer.begin_step(self, state_in)
 
     def _evaluate(self, state, dt, *, build_tangent=True, device_result=False):
-        if not self._capturable:
-            return self._evaluate_eager(state, dt, build_tangent=build_tangent)
-        k, contact, tet = self._kinematics, self._contact, self._tet
-        joint_step, rigid_steps = self._joint_step(state), self._rigid_steps(state)
-        contact_steps = self._contact_steps(state)
-        local_q = k.gather_q(state)
-        buffers = [
-            state.joint_q,
-            state.particle_q,
-            self._displacement(state),
-            joint_step,
-            *rigid_steps,
-            self._original.particle_q,
-            self._original.particle_qd,
-            self._frozen_force,
-            self._frozen_gravity,
-            self._complete_r,
-        ]
-        if device_result:
-            buffers.extend((self._energy_terms, self._energy_sums, self._evaluation_status, self._evaluation_packet))
-        else:
-            buffers.append(self._host_evaluation_packet)
-        rigid_history = state._monolithic_coupled
-        buffers.extend([rigid_history.rigid_com, rigid_history.rigid_rotation])
-        for owner in (self._objective, k, tet, self._rigid):
-            buffers.extend(value for value in vars(owner).values() if isinstance(value, wp.array))
-
-        def evaluate_owners():
-            self._objective.evaluate(local_q, dt, build_tangent=build_tangent, step=joint_step)
-            self._rigid.evaluate(state, rigid_steps, dt, build_tangent)
-            tet.evaluate(
-                state.particle_q,
-                self._original.particle_q,
-                self._original.particle_qd,
-                self._frozen_force,
-                self._frozen_gravity,
-                dt=dt,
-                min_det_f_guard=self._guard,
-                displacement=self._displacement(state),
-            )
-
-        def evaluate_contact():
-            contact.evaluate(
-                state.particle_q,
-                k.poses,
-                k.com,
-                k.jt,
-                k.jw,
-                dt=dt,
-                rigid_com=rigid_history.rigid_com,
-                rigid_rotation=rigid_history.rigid_rotation,
-                steps=contact_steps,
-            )
-
-        def evaluate_result():
-            wp.launch(
-                kernels.combine,
-                self._complete_r.size,
-                [
-                    self._objective.residual,
-                    tet.residual,
-                    contact.residual,
-                    self._linear.q_local,
-                    self._layout.x_scalar_offset,
-                    self._complete_r,
-                ],
-                device=self.model.device,
-            )
-            wp.launch(
-                _scatter_residual,
-                (self._rigid.count, 6),
-                [self._rigid.rows, self._rigid.residual, self._complete_r],
-                device=self.model.device,
-            )
-            self._complete_a.zero_()
-            for producer in self._producers:
-                producer.magnitude(self, self._complete_a)
-            if device_result:
-                iteration_device.evaluate(self)
-            else:
-                wp.launch(
-                    iteration_device.host_evaluation_packet,
-                    self._host_evaluation_packet.size,
-                    [
-                        self._rigid.energy,
-                        self._objective.link_energy,
-                        self._objective.joint_energy,
-                        tet.parts,
-                        contact.energy.flatten(),
-                        contact.absolute_energy,
-                        tet.flags,
-                        contact.flags,
-                        tet.min_det_f,
-                        self._contact_pool,
-                        self._host_evaluation_packet,
-                    ],
-                    device=self.model.device,
-                )
-
-        reference_mode = self._contact_spatial and contact._reference_mode
-        key = (self._layout.identity, self.precision.value, dt, build_tangent, device_result, reference_mode)
-        self._graphs.run("coupled_objective_owners", key, buffers, evaluate_owners)
-        # Pool begin/append have side effects; they must run once, never
-        # inside the owner's warmup/capture/replay overwrite chain.
-        evaluate_contact()
-        result_buffers = (
-            self._linear.q_rows,
-            self._linear.q_local,
-            self._objective.residual,
-            tet.residual,
-            contact.residual,
-            self._complete_r,
-            self._objective.absolute,
-            tet.absolute,
-            self._rigid.absolute,
-            self._complete_a,
-            self._rigid.rows,
-            self._rigid.residual,
-            self._rigid.energy,
-            self._objective.link_energy,
-            self._objective.joint_energy,
-            tet.parts,
-            contact.energy,
-            contact.absolute_energy,
-            tet.flags,
-            contact.flags,
-            tet.min_det_f,
-            self._energy_terms,
-            self._energy_sums,
-            self._evaluation_status,
-            self._evaluation_packet,
-            self._host_evaluation_packet,
-        )
-        self._graphs.run("coupled_objective_result", key, result_buffers, evaluate_result)
-        if not reference_mode:
-            self._variational["contact_pool"] = contact.evaluation_diagnostics()
-            if self._variational["contact_pool"]["tainted"]:
-                raise _StepFailure(self.Status.CONTACT_OVERFLOW, "Incomplete contact evaluation")
-        self._current_state = state
-        if device_result:
-            packet = self._evaluation_packet.numpy()
-            if packet[0]:
-                status = self.Status.TET_INVERSION if packet[0] == 1 else self.Status.NONFINITE
-                raise _StepFailure(status, "Invalid tet candidate")
-            if packet[1]:
-                raise _StepFailure(self.Status.NONFINITE, f"Invalid contact geometry: {[int(packet[1])]}")
-            contact._evaluated = True
-            if packet[2] or not np.isfinite(packet[3]):
-                raise _StepFailure(self.Status.NONFINITE, "Nonfinite coupled E/r")
-            self._metrics["min_det_f"] = float(packet[5])
-            return packet[3], self._complete_r, packet[4]
-        packet = self._host_evaluation_packet.numpy()
-        if packet[0]:
-            status = self.Status.TET_INVERSION if packet[0] == 1 else self.Status.NONFINITE
-            raise _StepFailure(status, "Invalid tet candidate")
-        if packet[1]:
-            # The offending contact identity is int32 and may not fit FP32 exactly.
-            raise _StepFailure(self.Status.NONFINITE, f"Invalid contact geometry: {contact.flags.numpy().tolist()}")
-        # Graph replay executes device work, not evaluate()'s host-side marker.
-        contact._evaluated = True
-        residual = self._complete_r.numpy().copy()
-        parts = packet[5:]
-        if not np.isfinite(residual).all() or not np.isfinite(parts).all() or not np.isfinite(parts.sum()):
-            raise _StepFailure(self.Status.NONFINITE, "Nonfinite coupled E/r")
-        self._metrics["min_det_f"] = float(packet[2])
-        absolute = abs(parts).sum()
-        if self._contact_pool:
-            absolute = abs(parts[: -contact.energy.size]).sum() + packet[3:5].sum()
-        return parts.sum(), residual, absolute
-
-    def _evaluate_eager(self, state, dt, *, build_tangent):
-        """Accumulate every producer's E/r in order, with host reads between producers."""
-        self._complete_r.zero_()
-        self._complete_a.zero_()
-        self._temporary_gauges = []
-        self._cable_raw_theta_norms = {}
-        total = absolute = 0.0
-        for producer in self._producers:
-            energy, magnitude = producer.evaluate(self, state, dt, self._complete_r, build_tangent=build_tangent)
-            producer.magnitude(self, self._complete_a)
-            total += energy
-            absolute += magnitude
-        self._settle_cable_gauges()
-        residual = self._complete_r.numpy().copy()
-        if not np.isfinite(residual).all() or not np.isfinite(total):
-            raise _StepFailure(self.Status.NONFINITE, "Nonfinite material-scene E/r")
-        self._current_state = state
-        return total, residual, absolute
+        energy, residual, absolute = self._problem.evaluate(state, dt, build_tangent=build_tangent)
+        return energy, residual if device_result else residual.numpy().copy(), absolute
 
     def _settle_cable_gauges(self):
         """Measure free cable angles and select temporary gauges for common-angle null modes."""
@@ -1238,25 +1056,8 @@ class SolverMonolithic(SolverBase):
             producer.candidate(self, self._accepted, self._trial, self._delta, alpha, dt)
 
     def _effective_displacement(self, *, device_result=False):
-        if device_result:
-            wp.launch(
-                iteration_device.effective_displacement,
-                self._effective_device.size,
-                [
-                    self._joint_step(self._trial),
-                    self._joint_step(self._accepted),
-                    self._displacement(self._trial),
-                    self._displacement(self._accepted),
-                    self._tet.ids,
-                    self._effective_device,
-                ],
-                device=self.model.device,
-            )
-            return self._effective_device
-        displacement = np.empty(self._layout.scalar_dof_count, dtype=self._numpy_dtype)
-        for producer in self._producers:
-            producer.displacement(self, self._accepted, self._trial, displacement)
-        return displacement
+        displacement = self._problem.difference(self._accepted, self._trial)
+        return displacement if device_result else displacement.numpy().copy()
 
     def _assemble(self, iteration, *, device_result=False):
         k, linear, obj = self._kinematics, self._linear, self._objective
@@ -1436,7 +1237,7 @@ class SolverMonolithic(SolverBase):
         state.assign(self._out_backup)
 
     def _domain(self, state):
-        return all(producer.domain(self, self._accepted, state) for producer in self._producers)
+        return self._problem.domain(self._accepted, state)
 
     def _joint_force_metrics(self, state):
         """Bind scalar force diagnostics to the successfully published state."""
