@@ -220,18 +220,23 @@ def test_graph_submission_failures(test, device):
     with test.assertRaisesRegex(RuntimeError, "Collect"):
         runner.solve()
     plan.collect_result()
-    with (
-        patch.object(wp, "capture_launch", side_effect=RuntimeError("injected replay")),
-        patch.object(wp, "synchronize_stream", side_effect=RuntimeError("injected drain")),
-        test.assertRaisesRegex(RuntimeError, "injected"),
-    ):
-        runner.solve()
-    test.assertTrue(plan._in_flight)
-    test.assertIsNotNone(plan.graph)
-    with test.assertRaises(RuntimeError):
-        plan.collect_result()
-    with test.assertRaisesRegex(RuntimeError, "Collect"):
-        runner.solve()
+    try:
+        with (
+            patch.object(wp, "capture_launch", side_effect=RuntimeError("injected replay")),
+            patch.object(wp, "synchronize_stream", side_effect=RuntimeError("injected drain")),
+            test.assertRaisesRegex(RuntimeError, "injected"),
+        ):
+            runner.solve()
+        test.assertTrue(plan._in_flight)
+        test.assertIsNotNone(plan.graph)
+        with test.assertRaises(RuntimeError):
+            plan.collect_result()
+        with test.assertRaisesRegex(RuntimeError, "Collect"):
+            runner.solve()
+    finally:
+        # The injected drain failure must not leak pending parameter writes
+        # into later tests when this workspace and its arrays are released.
+        wp.synchronize_stream(plan._bound_stream)
 
 
 class TestPcgPlanLifecycle(unittest.TestCase):
