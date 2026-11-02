@@ -3,12 +3,32 @@
 
 """Per-cable band Cholesky in vertex/edge order; the global operator stays coupled."""
 
+from functools import cache
 from typing import Any
 
 import numpy as np
 import warp as wp
 
 from .cable_operator import _band
+from .material_batch import _DeviceRecords
+
+
+@cache
+def _record_type(dtype):
+    @wp.struct
+    class Band:
+        targets: wp.array[int]
+        offsets: wp.array[int]
+        kinds: wp.array[int]
+        elements: wp.array[int]
+        first: wp.array[int]
+        second: wp.array[int]
+        row_a: wp.array[int]
+        row_b: wp.array[int]
+        stretch: wp.array3d[dtype]
+        bend: wp.array3d[dtype]
+
+    return Band
 
 
 @wp.kernel
@@ -140,6 +160,19 @@ class CablePreconditioner:
         self.band = wp.zeros(11 * count, dtype=dtype, device=device)
         self._operator = operator
         self._band_table = None if operator is None else self._build_band_table(operator, inverse, count, device)
+        self._records = (
+            None
+            if operator is None
+            else _DeviceRecords(
+                _record_type(dtype), self._views(), [table[0].size for table in self._band_table], device=self.device
+            )
+        )
+
+    def _views(self):
+        return [
+            (*table, cable.stretch_matrix, cable.bend_matrix)
+            for cable, table in zip(self._operator.cables, self._band_table, strict=True)
+        ]
 
     @staticmethod
     def _build_band_table(operator, inverse, count, device):
@@ -178,8 +211,9 @@ class CablePreconditioner:
             self.used_shift,
             self.band,
         )
-        if self._band_table is not None:
-            arrays += tuple(a for table in self._band_table for a in table)
+        if self._records is not None:
+            self._records.bind(self._views())
+            arrays += self._records.buffers()
         return arrays
 
     def signature(self):
@@ -190,15 +224,14 @@ class CablePreconditioner:
         """Factor each cable principal block without dropping its xyz/theta entries."""
         matrix = workspace.k_global_scalar_bsr
         self.band.zero_()
-        if self._band_table is not None:
-            for cable, table in zip(self._operator.cables, self._band_table, strict=True):
-                if table[0].size:
-                    wp.launch(
-                        _band,
-                        table[0].size,
-                        [*table, cable.stretch_matrix, cable.bend_matrix, workspace.scale, self.band],
-                        device=self.device,
-                    )
+        if self._records is not None:
+            records = self._records.bind(self._views())
+            wp.launch(
+                _band,
+                self._records.jobs.size,
+                [records, self._records.jobs, workspace.scale, self.band],
+                device=self.device,
+            )
         wp.launch(
             _factor,
             self.spans.shape[0],

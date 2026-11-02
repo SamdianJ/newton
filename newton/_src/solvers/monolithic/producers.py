@@ -3,6 +3,7 @@
 
 """Step contract shared by every monolithic physical producer."""
 
+from functools import cache
 from typing import Any, Protocol
 
 import numpy as np
@@ -12,6 +13,7 @@ from ...sim import JointType
 from . import coupled_kernels as kernels
 from .articulation_state import _predict, _recover_step
 from .contact import ContactStatus
+from .material_batch import _DeviceRecords
 from .rigid import _matrices, _scatter_residual, _scatter_tangent
 from .solver_types import _StepFailure
 from .state_checks import scalar_view
@@ -205,24 +207,35 @@ def _rotation_domain(rotations: wp.array[Any], original: wp.array[Any], flags: w
         wp.atomic_max(flags, 0, 1)
 
 
+@cache
+def _reaction_type(dtype):
+    @wp.struct
+    class Material:
+        ids: wp.array[int]
+        rows: wp.array[int]
+        raw: wp.array[dtype]
+        theta_offset: int
+
+    return Material
+
+
 @wp.kernel
 def _contact_reaction(
-    ids: wp.array[int],
-    rows: wp.array[int],
+    materials: wp.array[Any],
+    jobs: wp.array[wp.vec2i],
     residual: wp.array[Any],
     forces: wp.array[Any],
-    theta_offset: int,
     reference: bool,
-    raw: wp.array[Any],
 ):
-    i = wp.tid()
+    job = jobs[wp.tid()]
+    material, i = materials[job[0]], job[1]
     if reference:
-        if rows[i] >= 0:
-            raw[i] += residual[rows[i]]
-    elif i < 3 * ids.shape[0]:
-        raw[i] -= forces[3 * ids[i // 3] + i % 3]
+        if material.rows[i] >= 0:
+            material.raw[i] += residual[material.rows[i]]
+    elif i < 3 * material.ids.shape[0]:
+        material.raw[i] -= forces[3 * material.ids[i // 3] + i % 3]
     else:
-        raw[i] -= forces[theta_offset + i - 3 * ids.shape[0]]
+        material.raw[i] -= forces[material.theta_offset + i - 3 * material.ids.shape[0]]
 
 
 @wp.kernel
@@ -851,6 +864,20 @@ class ContactProducer(_Producer):
         surface = contact._batch.material_surface
         if surface is not None:
             self.checks += ((surface, "flags", {}, "Invalid cable contact frame"),)
+        self._materials = tuple(solver._cloths + solver._cables)
+        self._theta_start = 3 * solver.model.particle_count + 6 * solver.model.body_count
+        self._reactions = _DeviceRecords(
+            _reaction_type(solver._dtype),
+            self._reaction_views(),
+            [block.raw.size for block in self._materials],
+            device=solver.model.device,
+        )
+
+    def _reaction_views(self):
+        return [
+            (block.ids, block.rows, block.raw, self._theta_start + int(block.reference.get("theta_offset", 0)))
+            for block in self._materials
+        ]
 
     def begin_step(self, solver, state_in):
         contact, k = solver._contact, solver._kinematics
@@ -898,31 +925,20 @@ class ContactProducer(_Producer):
         if diagnostics.get("tainted", False):
             raise _StepFailure(solver.Status.CONTACT_OVERFLOW, "Incomplete contact evaluation")
 
+        reactions = self._reactions.bind(self._reaction_views())
+
         def accumulate():
             wp.launch(_add_values, residual.size, [contact.residual, residual], device=solver.model.device)
             # Include fixed-point reactions as well as free-row contact residuals.
-            for block in solver._cloths + solver._cables:
-                theta_offset = 3 * solver.model.particle_count + 6 * solver.model.body_count
-                theta_offset += int(block.reference.get("theta_offset", 0))
+            if self._materials:
                 wp.launch(
                     _contact_reaction,
-                    block.raw.size,
-                    [
-                        block.ids,
-                        block.rows,
-                        contact.residual,
-                        contact.pool.force.result,
-                        theta_offset,
-                        reference_mode,
-                        block.raw,
-                    ],
+                    self._reactions.jobs.size,
+                    [reactions, self._reactions.jobs, contact.residual, contact.pool.force.result, reference_mode],
                     device=solver.model.device,
                 )
 
-        buffers = [contact.residual, contact.pool.force.result, residual]
-        buffers.extend(
-            array for block in solver._cloths + solver._cables for array in (block.ids, block.rows, block.raw)
-        )
+        buffers = [contact.residual, contact.pool.force.result, residual, *self._reactions.buffers()]
         # This adds to the freshly overwritten owner residuals exactly once.
         solver._graphs.run("problem_interaction_rows", (reference_mode,), buffers, accumulate, warmup=False)
 

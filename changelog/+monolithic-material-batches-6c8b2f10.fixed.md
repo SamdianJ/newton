@@ -1,0 +1,1 @@
+Reduce per-object kernel submissions for Monolithic material contact reactions, cable gauge checks, element products and preconditioner bands while preserving their native arithmetic and storage bindings.

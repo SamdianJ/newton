@@ -3,34 +3,50 @@
 
 """Device qualification and projection of cable common-angle null modes."""
 
+from functools import cache
 from typing import Any
 
 import numpy as np
 import warp as wp
 
 from .convergence import Unit
+from .material_batch import _DeviceRecords
 from .reductions import SegmentedReduction
 from .solver_types import _StepFailure
 
 wp.set_module_options({"fuse_fp": False})
 
 
-@wp.kernel
-def _raw_terms(raw: wp.array[Any], fixed: wp.array[int], start: int, offset: int, terms: wp.array2d[Any]):
-    i = wp.tid()
-    value = raw[start + i]
-    terms[0, offset + i] = value
-    square = value * value
-    if fixed[i] != 0:
-        square = terms.dtype(0)
-    terms[1, offset + i] = square
+@cache
+def _record_type(dtype):
+    @wp.struct
+    class Cable:
+        raw: wp.array[dtype]
+        fixed: wp.array[int]
+        jacobian: wp.array3d[dtype]
+        start: int
+        offset: int
+
+    return Cable
 
 
 @wp.kernel
-def _jacobian_modes(jacobian: wp.array3d[Any], actor: int, blocked: wp.array[int]):
-    i, j = wp.tid()
-    if jacobian[i, j, 9] != -jacobian[i, j, 10]:
-        wp.atomic_max(blocked, actor, 1)
+def _gauge_terms(cables: wp.array[Any], jobs: wp.array[wp.vec2i], terms: wp.array2d[Any], blocked: wp.array[int]):
+    job = jobs[wp.tid()]
+    actor, index = job[0], job[1]
+    cable = cables[actor]
+    if index < cable.fixed.shape[0]:
+        value = cable.raw[cable.start + index]
+        terms[0, cable.offset + index] = value
+        square = value * value
+        if cable.fixed[index] != 0:
+            square = terms.dtype(0)
+        terms[1, cable.offset + index] = square
+    width = cable.jacobian.shape[1]
+    if index < cable.jacobian.shape[0] * width:
+        i, j = index // width, index % width
+        if cable.jacobian[i, j, 9] != -cable.jacobian[i, j, 10]:
+            wp.atomic_max(blocked, actor, 1)
 
 
 @wp.kernel
@@ -152,6 +168,14 @@ class CableGauges:
         # Preserve the existing float64 mean, including for an FP32 direction.
         self.direction_terms = wp.zeros((1, n), dtype=wp.float64, device=self.device)
         self.direction_reduction = SegmentedReduction(n, theta_rows, 1, dtype=wp.float64, device=self.device)
+        counts = [max(c.theta_fixed.size, np.prod(c.objective.jacobian.shape[:2])) for c in self.cables]
+        self._records = _DeviceRecords(_record_type(self.dtype), self._views(), counts, device=self.device)
+
+    def _views(self):
+        return [
+            (c.raw, c.theta_fixed, c.objective.jacobian, 3 * c.ids.size, offset)
+            for c, offset in zip(self.cables, self.offsets, strict=True)
+        ]
 
     def qualify(self, solver):
         if not self.cables:
@@ -170,23 +194,17 @@ class CableGauges:
         ]
         bound = [self.eligible, self.permanent, self.first_rows, self.blocked, self.raw_reduction.result]
         buffers = [*factors, *bound, self.terms, self.pins, self.summary, *self.raw_reduction.buffers()]
-        buffers.extend(a for c in self.cables for a in (c.raw, c.theta_fixed, c.objective.jacobian))
+        records_view = self._records.bind(self._views())
+        buffers.extend(self._records.buffers())
 
         def execute():
             self.blocked.zero_()
-            for index, cable in enumerate(self.cables):
-                wp.launch(
-                    _raw_terms,
-                    cable.theta_fixed.size,
-                    [cable.raw, cable.theta_fixed, 3 * cable.ids.size, self.offsets[index], self.terms],
-                    device=self.device,
-                )
-                wp.launch(
-                    _jacobian_modes,
-                    cable.objective.jacobian.shape[:2],
-                    [cable.objective.jacobian, index, self.blocked],
-                    device=self.device,
-                )
+            wp.launch(
+                _gauge_terms,
+                self._records.jobs.size,
+                [records_view, self._records.jobs, self.terms, self.blocked],
+                device=self.device,
+            )
             self.raw_reduction.reduce(self.terms)
             wp.launch(_factor_modes, records.factor_weights.size, factors, device=self.device)
             wp.launch(
