@@ -48,7 +48,7 @@ PR-01 后的状态：
 | M5 | PARTIAL；迭代内完整 residual 回读已移除，最终 Stats/序列化仍 OPEN |
 | H2、R1、M1、L1、L2、L3 | OPEN；保留原计划顺序 |
 | C1 | 持续约束；保留单 stream、非重入合同 |
-| P9a-PERF-01 | OPEN；成对同输入、同工作量下 q+x/rigid-only 稳定退化；PR-03/06 复测处理，整体性能尚未 PASS |
+| P9a-PERF-01 | OPEN；小型 q+x/rigid-only 及 Franka/Sharpa FP32 冻结窗口退化；新增 candidate alpha 图缓存反复淘汰证据。见 [机器人对照](PR-01-robot-performance.md)，PR-03/06 处理，整体性能尚未 PASS |
 
 审查结论的限定：原“约 20 次/轮、5 次/trial”“host 比 kernel 更贵”未经 profiling；历史 11 solves/2 graph_rebuilt 不记录重建原因且可能含首次捕获；“无 O(n²)”不适用于每树 dense block 或全量配对元数据；有界缓存不等于已证明无泄漏。`_steps` 首次分配后复用，`_variational` 每步重建。上述表述纠正不另造求解器 bug。
 

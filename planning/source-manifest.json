@@ -39,5 +39,18 @@
     "quick_pass_items": 60,
     "performance_open_item": "P9a-PERF-01",
     "completion_commit_scope": "Documentation only; runtime results bind tested_commit, not the subsequent documentation commit."
+  },
+  "robot_fp32_measurement": {
+    "baseline_commit": "8fa80ba7ce3fd7ce2483f2ec098e66d410bc434e",
+    "tested_commit": "7f20e48b6ada37c995d11b82a43bae45ce835ab8",
+    "results": "dev/monolithic/test/results/P9/P9a/PR-01/robot-fp32-20261102-01",
+    "comparison_sha256": "dc463226fde1c390f1f81967d5f0eef8113efd038d91c670d439e9c942c36726",
+    "physical_gates": "PASS / 24 measured windows and 24 warmup windows",
+    "per_step_work": "IDENTICAL",
+    "franka_selected_window_change_pct": 5.095520607269832,
+    "sharpa_selected_window_change_pct": 11.361696715175817,
+    "performance": "OPEN / P9a-PERF-01",
+    "usage_document": "dev/scripts/monolithic_performance.md",
+    "usage_document_sha256": "9b6a23a89d632e6d6cc898b0fcc4fac3ec167c7e69381bba2aa156e5ff5f1445"
   }
 }

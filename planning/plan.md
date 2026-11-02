@@ -72,6 +72,7 @@ PR-01 已经必须完成以下设备语义，此 PR 只合并剩余按 block 展
 
 - L1：复用 PR-01 显式 buffer registry，消除热路径 `vars(owner)` 扫描。绑定变更仍走生产有效性检查，不能只留下会被关闭的 assertion。
 - L2：将参与捕获的 dt 相关标量更新纳入稳定 buffers，检查各物理项与派生量实际使用新 dt；检查 A/B/A dt 下结果和 graph identity。不是只删除 key 中的 dt。
+- 机器人补充已复现：`problem_candidate` 将 alpha 放入参数键，Sharpa close/lift 每轮测量捕获 2055/233 次（baseline 0），该段驻留上限 6 且大量淘汰。L2 的数值参数处理须覆盖 alpha，L3 同时覆盖此场景；先用小 q+x 多档 alpha＋角色切换提炼机制测试，再复测现有四窗口，详见 [补充证据](PR-01-robot-performance.md)。
 - L3：先构造超过驻留集合的 span 交替模式，辨认 contact order、pool finish、BSR 等各 segment 原因。比较合并档位、固定预算 mask 与有界缓存工作集；不无限增大 LRU。报告空算/峰值 scratch/graph 驻留和整体 median/P95。局部无可复现回退时记录“未证实瓶颈”，不凭猜测改缓存。
 
 L4/L5 已由 PR-01 的 domain/gauge 设备合同关闭，在本 PR 汇总其结果。C1 单 stream 非重入合同继续保持。
