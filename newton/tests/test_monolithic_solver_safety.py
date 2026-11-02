@@ -44,7 +44,7 @@ def test_publication(test, device):
 
                 def stop(dt, run=run, accepted=accepted, expected=expected):
                     run._metrics["nonlinear_iterations"] = 0
-                    run._reference_residual = run._initial_reference(dt)
+                    run._reference_residual = run._initial_reference(dt, device_result=True)
                     run._refresh_candidates()
                     run._evaluate(run._accepted, dt)
                     if accepted:

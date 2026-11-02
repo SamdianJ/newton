@@ -1,16 +1,13 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 The Newton Developers
 # SPDX-License-Identifier: Apache-2.0
 
-"""Shared PR2/PR3 bounded iteration; component/state policy stays with each entry."""
+"""Newton, regularization and line-search policy for one bound nonlinear problem."""
 
 import math
-from dataclasses import dataclass
 
 import numpy as np
-import warp as wp
 
-from . import iteration_device
-from .linear_types import MonolithicPcgConfig, MonolithicPcgWarmStart
+from .linear_types import MonolithicPcgWarmStart
 from .pcg_common import LINEAR_ROUNDING_CAP, linear_rounding
 from .solver_types import _StepFailure
 
@@ -49,144 +46,15 @@ def acceptance(
 
 
 def blocks(solver):
-    names = {"articulation": "q", "tet": "x", "global": "global"}
-    return [(names.get(kind, kind), slice(start, start + count)) for kind, start, count in solver._linear.layout.groups]
-
-
-def _residual_floor(config, name):
-    """Return a block's linear residual denominator floor in its scaled units."""
-    if name.startswith("cable_"):
-        return 1e-12
-    if name.startswith(("cloth_", "rigid_")) and not name.endswith("_r"):
-        return config.residual_floor_x
-    if name.startswith(("rigid_", "articulation_")):
-        return config.residual_floor_q
-    return getattr(config, "residual_floor_" + name)
-
-
-def _record_block(solver, name, key, value):
-    if name.startswith(("rigid_", "cable_", "cloth_", "articulation_")):
-        category = (
-            "articulation_blocks"
-            if name.startswith("articulation_")
-            else "rigid_blocks"
-            if name.startswith("rigid_")
-            else "material_blocks"
-        )
-        solver._variational.setdefault(category, {}).setdefault(name, {})[key] = value
-    else:
-        solver._metrics[key] = value
-
-
-@dataclass(frozen=True)
-class Assessment:
-    """Row-tolerance assessment of the accepted iterate."""
-
-    converged: bool
-    merit: float
-    """Tolerance-normalized RMS residual."""
-    caps: dict
-    """Half of each block's smallest scaled row tolerance, the linear solve's sufficient accuracy."""
-
-
-def _block_of(group):
-    if group in ("q_force", "q_torque"):
-        return "q"
-    if group.startswith("q_"):
-        return "articulation_" + group.split("_")[1]
-    return group
+    return solver._problem.blocks
 
 
 def measure(solver, residual, reference, scale):
-    """Recompute row tolerances at the accepted iterate and assess its residual.
-
-    ``residual`` and ``reference`` are the accepted residual and the residual
-    at the step's first iterate; the device copy of the accepted residual is
-    read from the solver. The device iteration reads back only per-group and
-    per-block results. A rounding magnitude that is not finite fails the step.
-    """
-    self = solver
-    device = isinstance(residual, wp.array)
-    norms = None
-    if device:
-        if not isinstance(reference, wp.array):
-            reference = wp.array(reference, dtype=self._dtype, device=self.model.device)
-        # The device iteration builds its scaled RHS and block norms here.
-        norms = iteration_device.measure(self, residual, reference)
-    criterion = self._criterion
-    for producer in self._producers:
-        producer.coordinates(self, self._accepted, self._coordinates)
-    criterion.round(
-        self._linear.k_global_scalar_bsr, self._coordinates, self._complete_a, self._linear._material_operator
-    )
-    criterion.assess(self._complete_r)
-    rows = criterion.rows
-    worst, limited = criterion.worst.numpy(), criterion.limited.numpy()
-    if not np.all(np.isfinite(worst)):
-        # Only a rounding magnitude that is not finite gives an infinite ratio here.
-        raise _StepFailure(self.Status.NONFINITE, "Nonfinite rounding magnitude")
-    native = self._numpy_dtype
-    ratios = {"global": native(worst.max(initial=0))}
-    for group, value in zip(rows.names, worst, strict=True):
-        block = _block_of(group)
-        ratios[block] = max(ratios.get(block, native(0)), native(value))
-    if device:
-        sums, minimum = iteration_device.assessment(self, residual, reference)
-        summary = {
-            name: (sums[i, 0], sums[i, 1], minimum[i], norms[i, 2])
-            for i, name in enumerate(name for name, _ in blocks(self))
-        }
-    else:
-        tau = criterion.tau.numpy()
-        r, r0 = np.asarray(residual), np.asarray(reference)
-        s = np.asarray(scale).astype(native)
-        summary = {
-            name: (
-                np.dot(r[part] / tau[part], r[part] / tau[part]),
-                np.dot(r0[part] / tau[part], r0[part] / tau[part]),
-                np.min(s[part] * tau[part]),
-                np.linalg.norm(r[part]),
-            )
-            for name, part in blocks(self)
-        }
-    caps = {}
-    for name, part in blocks(self):
-        squares, reference_squares, smallest, raw = summary[name]
-        size = native(part.stop - part.start)
-        # A scaled L2 error below half the smallest scaled row tolerance bounds every row.
-        caps[name] = native(0.5) * native(smallest)
-        suffix = "" if name == "global" else "_" + name
-        _record_block(self, name, "convergence_ratio" + suffix, float(ratios.get(name, 0.0)))
-        _record_block(self, name, "merit" + suffix + "_final", float(np.sqrt(squares / size)))
-        _record_block(self, name, "merit" + suffix + "_reference", float(np.sqrt(reference_squares / size)))
-        if name != "global":
-            _record_block(self, name, "raw_residual_" + name + "_norm", float(raw))
-    self._variational["convergence_groups"] = {
-        group: {"ratio": float(value), "rounding_limited": int(count)}
-        for group, value, count in zip(rows.names, worst, limited, strict=True)
-    }
-    merit = native(np.sqrt(criterion.square_sum.numpy()[0] / native(max(1, rows.units.size))))
-    return Assessment(bool(ratios["global"] <= 1), merit, caps)
-
-
-def _rms(values):
-    return np.sqrt(np.dot(values, values) / values.size) if values.size else 0.0
-
-
-def trial_merit(solver):
-    """Assess the last evaluated trial residual against the accepted iterate's frozen tolerances."""
-    criterion = solver._criterion
-    criterion.assess(solver._complete_r)
-    native = solver._numpy_dtype
-    return native(np.sqrt(criterion.square_sum.numpy()[0] / native(max(1, criterion.tau.size))))
+    return solver._problem.assess(residual, reference)
 
 
 def direction_norms(solver, vector):
-    """Measure every active layout group in the nonlinear native precision."""
-    if isinstance(vector, wp.array):
-        values = iteration_device.norms(solver, vector)
-        return dict(zip((name for name, _ in blocks(solver)), values, strict=True))
-    return {name: np.linalg.norm(vector[part]) for name, part in blocks(solver)}
+    return solver._problem.norms(vector)
 
 
 def solve_direction(solver, residual, scale, limits, pcg, *, iteration, retry, regularization):
@@ -226,13 +94,13 @@ def solve_direction(solver, residual, scale, limits, pcg, *, iteration, retry, r
     except _StepFailure as error:
         attempt["failure_reason"] = error.status.value
         return False
-    direction = self._delta if self._device_iteration else self._delta.numpy().astype(native)
-    error = self._physical_linear_error(None, direction, residual, scale, device_result=self._device_iteration)
+    direction = self._delta
+    error = self._physical_linear_error(None, direction, residual, scale, device_result=True)
     errors = direction_norms(self, error)
     # The stored direction resolves its residual only to the rounding of
     # |A| |y|; in FP32 an ill-conditioned limit can lie below it.
-    magnitude = self._post_magnitude if self._device_iteration else self._post_magnitude.numpy()
-    rhs = direction_norms(self, self._rhs if self._device_iteration else self._rhs.numpy())
+    magnitude = self._post_magnitude
+    rhs = direction_norms(self, self._rhs)
     rounding = linear_rounding(native)
     floors = {
         name: native(min(rounding * value, LINEAR_ROUNDING_CAP * rhs[name]))
@@ -242,13 +110,9 @@ def solve_direction(solver, residual, scale, limits, pcg, *, iteration, retry, r
     if native(regularization) == 0:
         originals, terms = errors, dict.fromkeys(errors, 0.0)
     else:
-        originals = direction_norms(
-            self, self._post_original if self._device_iteration else self._post_original.numpy()
-        )
-        terms = direction_norms(
-            self, self._post_regularization if self._device_iteration else self._post_regularization.numpy()
-        )
-    internal = self._linear._masked_pcg_plan.norms.numpy()
+        originals = direction_norms(self, self._post_original)
+        terms = direction_norms(self, self._post_regularization)
+    internal = self._problem.internal_norms()
     postchecks = {
         name: {
             "residual": errors[name],
@@ -263,7 +127,7 @@ def solve_direction(solver, residual, scale, limits, pcg, *, iteration, retry, r
     }
     self._variational["linear_postchecks"].append(
         {
-            "residual": errors["global"],
+            "residual": errors[self._problem.aggregate_name],
             "limit": min(limits.values()),
             "regularization": regularization,
             "actual_regularization": float(native(regularization)),
@@ -292,43 +156,28 @@ def iterate(solver, dt):
     eps = native(np.finfo(native).eps)
     tiny = native(1e-30)
     config = self._config
-    device = self._device_iteration
+    problem = self._problem
     reference = None
     small = False
     best_energy = best_merit = math.inf
     for iteration in range(self.newton_max_iterations + 1):
-        if getattr(self, "_contact_spatial", False):
-            self._refresh_candidates()
-        e, evaluated, absolute = (
-            self._evaluate(self._accepted, dt, device_result=True) if device else self._evaluate(self._accepted, dt)
-        )
-        if device:
-            wp.copy(self._accepted_r, evaluated)
-        residual = self._accepted_r if device else evaluated
+        problem.refresh()
+        e, residual, absolute = problem.evaluate_accepted(dt)
         if iteration == 0:
             # Relative tolerances follow the predictor's residual. The step-start
             # residual r(x_n) carries the inertia M v / h that the predictor
             # cancels, so a fast body would loosen its whole block's tolerance
             # and stop at the predictor with its load unresolved.
-            self._criterion.freeze_reference(self._complete_r)
-            if device:
-                wp.copy(self._reference_device, residual)
-                reference = self._reference_device
-            else:
-                reference = np.array(residual, copy=True)
-        _, scale = self._assemble(iteration, device_result=True) if device else self._assemble(iteration)
+            reference = problem.freeze_reference(residual)
+        scale = problem.linearize(iteration)
         self._reference_residual = reference
         assessment = measure(self, residual, reference, scale)
         merit = assessment.merit
         best_energy, best_merit = min(best_energy, e), min(best_merit, merit)
         self._metrics["nonlinear_iterations"] = iteration
         if iteration == 0:
-            for name, _ in blocks(self):
-                key = "merit" + ("" if name == "global" else "_" + name)
-                _record_block(self, name, key + "_initial", _read_block(self, name, key + "_final"))
-        if device:
-            wp.copy(self._stats_residual, residual)
-        self._variational.update(objective_total=e, residual=self._stats_residual if device else residual.tolist())
+            problem.record_initial_merit()
+        problem.record_residual(e, residual)
         if assessment.converged:
             return self.Status.SUCCESS
         if small:
@@ -337,42 +186,15 @@ def iterate(solver, dt):
             )
         if iteration == self.newton_max_iterations:
             return self.Status.NONLINEAR_MAX_ITERATIONS
-        rhs = None
-        if not device:
-            rhs = -scale * residual
-            self._rhs.assign(rhs.astype(native))
         caps = assessment.caps
         # Inexact Newton with one global forcing term: each direction reduces the
         # whole scaled residual by the linear tolerance, or already lies within
         # half of every row tolerance. A per-block forcing term would ask FP32 PCG
         # for absolute accuracy that coupling to larger blocks cannot provide.
-        rhs_norm = self._rhs_norms_host[0] if device else np.linalg.norm(rhs)
+        rhs_norm = self._rhs_norms_host[0]
         forcing = native(self.linear_tolerance) * rhs_norm
         limits = {name: max(caps[name], forcing) for name, _ in blocks(self)}
-        pcg = MonolithicPcgConfig(
-            maximum_iterations=self.linear_max_iterations,
-            # Mixed actors use the same actual-operator checkpoint cadence in
-            # both backends; otherwise bounded batches can oversolve A/T and
-            # give different accepted trajectories at unchanged outer gates.
-            true_residual_interval=1 if self._linear.layout.rigid_ranges else 10,
-            linear_tolerance=self.linear_tolerance,
-            # An absolute term at the largest limit makes every group's target
-            # min(max(rtol |b_g|, atol), limit_g) its own limit: PCG stops where
-            # the posterior qualifies the direction, without oversolving.
-            linear_absolute_tolerance=float(max(limits.values())),
-            residual_norm_limits=tuple(limits.get(name, 1.0) for name in ("global", "q", "x")),
-            group_norm_limits=tuple(limits[name] for name, _ in blocks(self))
-            if self._linear.layout.rigid_ranges
-            or self._linear.layout.material_ranges
-            or len(self._linear.layout.articulation_ranges) > 1
-            else None,
-            group_residual_floors=tuple(_residual_floor(config, name) for name, _ in blocks(self))
-            if self._linear.layout.material_ranges
-            else None,
-            residual_floor_global=config.residual_floor_global,
-            residual_floor_q=config.residual_floor_q,
-            residual_floor_x=config.residual_floor_x,
-        )
+        pcg = problem.pcg_config(limits)
         accepted = False
         for retry, regularization in enumerate(config.regularization_values):
             self._metrics["regularization_retries"] += int(retry > 0)
@@ -388,27 +210,18 @@ def iterate(solver, dt):
                 self, residual, scale, limits, pcg, iteration=iteration, retry=retry, regularization=regularization
             ):
                 continue
-            direction = self._delta if device else self._delta.numpy().astype(native)
-            coordinates = None if device else self._coordinates.numpy()
             for search in range(self.line_search_max_iterations):
                 alpha = native(0.5**search)
                 self._metrics["line_search_iterations"] += 1
-                self._take_trial(alpha, dt)
-                trial = self._trial_evaluation(dt, device_result=True) if device else self._trial_evaluation(dt)
-                if trial is None or not self._domain(self._trial):
+                problem.candidate(alpha, dt)
+                trial = problem.evaluate_trial(dt)
+                if trial is None or not problem.domain(self._accepted, self._trial):
                     continue
-                te, tr, ta = trial
-                trial_value = trial_merit(self)
-                effective = (
-                    self._effective_displacement(device_result=True) if device else self._effective_displacement()
-                )
-                terms = (
-                    iteration_device.trial(self, residual, tr, effective)
-                    if device
-                    else np.array([residual @ effective, abs(residual * direction).sum()])
-                )
-                slope = terms[0] / alpha
-                weighted = terms[5] if device else terms[1]
+                te, _, ta = trial
+                trial_value = problem.merit()
+                effective = problem.difference(self._accepted, self._trial)
+                slope_dot, weighted, moved = problem.trial_summary(residual, effective)
+                slope = slope_dot / alpha
                 # Rounding allowances in the selected precision for energy, merit and slope.
                 allowance = native(128) * eps
                 en = allowance * max(tiny, absolute, ta)
@@ -428,7 +241,7 @@ def iterate(solver, dt):
                     best_merit=best_merit,
                     dtype=native,
                 )
-                conservative = self._conservative_energy()
+                conservative = problem.conservative_energy()
                 self._variational["trials"].append(
                     {
                         "iteration": iteration,
@@ -452,23 +265,10 @@ def iterate(solver, dt):
                     }
                 )
                 if passes:
-                    for index, (name, part) in enumerate(blocks(self)):
-                        if device:
-                            moved = np.sqrt(terms[6 + index] / native(part.stop - part.start))
-                        else:
-                            moved = _rms(
-                                effective[part] if name.startswith("rigid_") else effective[part] / scale[part]
-                            )
-                        _record_block(
-                            self, name, "scaled_step" + ("" if name == "global" else "_" + name), float(moved)
-                        )
+                    problem.record_step(moved)
                     # No coordinate changed by more than its rounding: further iterations cannot move.
-                    small = (
-                        iteration_device.representable(self, effective, eps)
-                        if device
-                        else bool(np.all(np.abs(effective) <= eps * coordinates))
-                    )
-                    self._accepted, self._trial = self._trial, self._accepted
+                    small = problem.unrepresentable(effective, eps)
+                    problem.accept()
                     self._metrics["accepted_alpha"] = alpha
                     accepted = True
                     break
@@ -479,16 +279,3 @@ def iterate(solver, dt):
                 self.Status.REGULARIZATION_EXHAUSTED, "No direction/trial passed unchanged physical gates"
             )
     raise AssertionError("Unreachable")
-
-
-def _read_block(solver, name, key):
-    if name.startswith(("rigid_", "cable_", "cloth_", "articulation_")):
-        category = (
-            "articulation_blocks"
-            if name.startswith("articulation_")
-            else "rigid_blocks"
-            if name.startswith("rigid_")
-            else "material_blocks"
-        )
-        return solver._variational[category][name][key]
-    return solver._metrics[key]

@@ -85,9 +85,8 @@ def qualify(run, residual, limits, *, budget=20, regularization=0.0, pcg_limit=N
         residual_norm_limits=tuple(solve[name] for name in ("global", "q", "x")),
         group_norm_limits=tuple(solve[name] for name, _ in blocks(run)),
     )
-    if run._device_iteration:
-        run._accepted_r.assign(residual)
-        residual = run._accepted_r
+    run._accepted_r.assign(residual)
+    residual = run._accepted_r
     return solve_direction(run, residual, scale, limits, config, iteration=0, retry=0, regularization=regularization)
 
 

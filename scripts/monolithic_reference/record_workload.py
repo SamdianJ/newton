@@ -130,8 +130,12 @@ class CallRecorder:
         self.patches.enter_context(patch.object(owner, method, observed))
 
     def __enter__(self):
-        for method, boundary in (("_evaluate", "objective"), ("_assemble", "assembly"), ("_take_trial", "trial")):
-            self._observe(self.run, method, boundary)
+        for owner, method, boundary in (
+            (self.run._problem, "evaluate", "objective"),
+            (self.run, "_assemble", "assembly"),
+            (self.run._problem, "candidate", "trial"),
+        ):
+            self._observe(owner, method, boundary)
         self._observe(self.run._linear, "solve_pcg", "pcg")
         return self
 

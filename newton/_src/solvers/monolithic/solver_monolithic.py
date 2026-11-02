@@ -24,7 +24,6 @@ from .cable_operator import CableOperator
 from .cable_system import CableBlock
 from .cloth_system import ClothBlock
 from .config import GLOBALIZATION, MonolithicConfig
-from .contact import ContactStatus
 from .contact_forces import MonolithicContactForces
 from .contact_pipeline import _PooledContactObjective, _SpatialContactObjective
 from .contact_pipeline import _SpatialContactObjective as ContactObjective
@@ -472,11 +471,16 @@ class SolverMonolithic(SolverBase):
             *self._rigid.external_steps,
         )
         self._cable_torque = wp.zeros_like(self._cable_target_theta)
+        fixed_theta = np.zeros(theta_count, dtype=np.int32)
+        if self._materials is not None:
+            for obj in self._materials.cable:
+                offset = int(obj["theta_offset"])
+                fixed_theta[offset : offset + len(obj["rest_theta"])] = obj["fixed_theta"]
+        self._cable_fixed_theta = wp.array(fixed_theta, dtype=int, device=device)
+        self._material_control_status = wp.zeros(4, dtype=int, device=device)
         self._out_backup = None
         self._dt = None
         self._producers = build_producers(self)
-        # Graph-captured E/r requires every producer to evaluate without host reads.
-        self._capturable = all(p.capturable for p in self._producers)
         coordinate = [p for p in self._producers if p.scale_policy == "coordinate"]
         scale, mask = np.ones(n, dtype=self._numpy_dtype), np.zeros(n, dtype=np.int32)
         for producer in coordinate:
@@ -490,17 +494,6 @@ class SolverMonolithic(SolverBase):
         units = np.where(revolute, convergence.Unit.TORQUE, convergence.Unit.FORCE)
         self._criterion = convergence.Criterion(
             convergence.row_groups(layout, units), self._config.convergence, dtype=self._dtype, device=device
-        )
-        # The specialized q+x reductions require one articulation and no rigid blocks.
-        self._device_iteration = (
-            self._capturable
-            and not self._cloths
-            and not self._cables
-            and self._has_tet
-            and len(self._articulation_actors) == 1
-            and not self._rigid.count
-            and self._layout.q_scalar_offset == 0
-            and self._layout.x_scalar_offset == self._kinematics.count
         )
         iteration_device.initialize(self)
         self._gauges = CableGauges(self)
@@ -532,37 +525,43 @@ class SolverMonolithic(SolverBase):
 
     def _snapshot_material_control(self, control):
         namespace = getattr(control, "_monolithic_cable", None)
-        values = {}
-        for name in ("target_theta", "torque"):
-            array = getattr(namespace, name, None)
-            if not isinstance(array, wp.array) or (array.shape, array.dtype, array.device) != (
-                (self._materials.theta_count,),
-                self._dtype,
-                self.model.device,
+        targets = {
+            "target_theta": self._cable_target_theta,
+            "torque": self._cable_torque,
+            "target_position": self._cable_target_x,
+        }
+        sources = {}
+        for name, target in targets.items():
+            source = getattr(namespace, name, None)
+            if not isinstance(source, wp.array) or (source.shape, source.dtype, source.device) != (
+                target.shape,
+                target.dtype,
+                target.device,
             ):
                 raise ValueError(f"Invalid cable control: {name}")
-            values[name] = array.numpy().copy()
-            if not np.isfinite(values[name]).all():
+            sources[name] = source
+        self._material_control_status.zero_()
+        wp.launch(
+            state_checks.material_control,
+            max(self._cable_torque.size, self._cable_target_x.size),
+            [
+                sources["target_theta"],
+                sources["torque"],
+                sources["target_position"],
+                self._cable_fixed_theta,
+                self._material_control_status,
+            ],
+            device=self.model.device,
+        )
+        flags = self._material_control_status.numpy()
+        for slot, name in enumerate(sources):
+            if flags[slot]:
                 raise ValueError(f"Nonfinite cable control: {name}")
-        for obj in self._materials.cable:
-            offset = int(obj["theta_offset"])
-            part = slice(offset, offset + len(obj["rest_theta"]))
-            if np.any(values["torque"][part][obj["fixed_theta"]] != 0):
-                raise ValueError("External cable torques require physically free theta")
-        array = getattr(namespace, "target_position", None)
-        if (
-            not isinstance(array, wp.array)
-            or (array.shape, array.dtype, array.device)
-            != (
-                (self.model.particle_count,),
-                self._states.vector,
-                self.model.device,
-            )
-            or not np.isfinite(array.numpy()).all()
-        ):
-            raise ValueError("Invalid cable control: target_position")
-        values["target_position"] = array.numpy().copy()
-        return values
+        if flags[3]:
+            raise ValueError("External cable torques require physically free theta")
+        for name, target in targets.items():
+            wp.copy(target, sources[name])
+        return targets
 
     def _freeze_sdf(self, model):
         """Bind actual texels and indirection, excluding process-specific GPU handles."""
@@ -694,10 +693,7 @@ class SolverMonolithic(SolverBase):
 
     def step(self, state_in, state_out, control, contacts=None, dt=0.0):
         if self._materials is not None:
-            inputs = self._snapshot_material_control(control)
-            self._cable_target_x.assign(inputs["target_position"])
-            self._cable_target_theta.assign(inputs["target_theta"])
-            self._cable_torque.assign(inputs["torque"])
+            self._snapshot_material_control(control)
         self._validate_components()
         self._stopped_failure = None
         if contacts is not None or not math.isfinite(dt) or dt <= 0:
@@ -912,8 +908,7 @@ class SolverMonolithic(SolverBase):
             self._out_backup.assign(state_out)
         wp.copy(self._frozen_force, state_in.particle_f)
         wp.copy(self._frozen_gravity, self.model.gravity)
-        for producer in sorted(self._producers, key=lambda p: p.begin_rank):
-            producer.begin_step(self, state_in)
+        self._problem.predict(state_in)
 
     def _evaluate(self, state, dt, *, build_tangent=True, device_result=False):
         energy, residual, absolute = self._problem.evaluate(state, dt, build_tangent=build_tangent)
@@ -948,13 +943,11 @@ class SolverMonolithic(SolverBase):
         return self._contact.conservative_energy and not self._rigid.has_torque
 
     def _trial_evaluation(self, dt, *, device_result=False):
-        try:
-            return self._evaluate(self._trial, dt, build_tangent=False, device_result=device_result)
-        except _StepFailure as error:
-            if error.status == self.Status.CONTACT_OVERFLOW:
-                raise
-            self._variational["trials"].append({"accepted": False, "domain_failure": str(error)})
-            return None
+        result = self._problem.evaluate_trial(dt)
+        if result is None or device_result:
+            return result
+        energy, residual, absolute = result
+        return energy, residual.numpy().copy(), absolute
 
     def _displacement(self, state):
         """Return the native step displacement ``x - x_n`` of a state's particles.
@@ -1022,8 +1015,7 @@ class SolverMonolithic(SolverBase):
         return (self._displacement(state), k.translation_steps, k.rotation_steps, *self._rigid_steps(state))
 
     def _take_trial(self, alpha, dt):
-        for producer in self._producers:
-            producer.candidate(self, self._accepted, self._trial, self._delta, alpha, dt)
+        self._problem.candidate(alpha, dt)
 
     def _effective_displacement(self, *, device_result=False):
         displacement = self._problem.difference(self._accepted, self._trial)
@@ -1040,15 +1032,7 @@ class SolverMonolithic(SolverBase):
             history_epoch=self._step_generation,
         )
         assembly = linear.begin_assembly(self._generation)
-        for producer in self._producers:
-            producer.assemble(self, assembly, self._dt)
-        if self._contact.flags.numpy()[0]:
-            status = (
-                self.Status.CONTACT_OVERFLOW
-                if self._contact.flags.numpy()[0] == ContactStatus.CAPACITY
-                else self.Status.NONFINITE
-            )
-            raise _StepFailure(status, "Invalid contact tangent or capacity")
+        self._problem.assemble(assembly, self._dt)
         self._require_linear(linear.finalize_assembly(generation=self._generation).status)
         wp.launch(
             kernels.dynamic_diagonal,
@@ -1138,16 +1122,10 @@ class SolverMonolithic(SolverBase):
         self._gauges.project(self)
 
     def _validate_final(self, dt, status):
-        device = self._device_iteration
-        energy, residual, _ = self._evaluate(self._accepted, dt, device_result=device)
-        if device:
-            wp.copy(self._accepted_r, residual)
-            residual = self._accepted_r
-        _, scale = self._assemble(self._metrics["nonlinear_iterations"], device_result=device)
+        energy, residual, _ = self._problem.evaluate_accepted(dt)
+        scale = self._problem.linearize(self._metrics["nonlinear_iterations"])
         assessment = measure(self, residual, self._reference_residual, scale)
-        if device:
-            wp.copy(self._stats_residual, residual)
-        self._variational.update(objective_total=energy, residual=self._stats_residual if device else residual.tolist())
+        self._problem.record_residual(energy, residual)
         # Objective/scaling boundaries already check every residual/scale entry on device.
         if not np.isfinite(energy):
             raise _StepFailure(self.Status.NONFINITE, "Final coupled candidate contains nonfinite E/r/scale")
@@ -1164,8 +1142,7 @@ class SolverMonolithic(SolverBase):
             arrays.append(torque)
         for array in arrays:
             array.zero_()
-        for producer in self._producers:
-            producer.publish(self, state)
+        self._problem.publish(state)
         if self._cloths or self._cables:
             self._variational["cloth_reactions"] = tuple(c.raw.numpy().tolist() for c in self._cloths)
             self._variational["cable_reactions"] = tuple(c.raw.numpy().tolist() for c in self._cables)

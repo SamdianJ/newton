@@ -156,7 +156,6 @@ def test_free_coordinate_history(test, device):
     run = rigid_solver(rigid_scene(device, before=True, contact=False), mode="production", graph=device.is_cuda)
     state = run.create_state(dt=0.001)
     test.assertGreater(state.joint_q.size, state.joint_qd.size)
-    test.assertFalse(run._device_iteration)
     history = state._monolithic_coupled
     for name in ("bound_q", "bound_qd"):
         array = getattr(history, name)

@@ -136,6 +136,23 @@ def test_objective_contact_rebinding(test, device):
         test.assertEqual(solver._graphs.captures["problem_summary"], results + 1)
 
 
+def test_assembly_result_rebinding(test, device):
+    """Write replaced tet assembly storage after warming the owner phase graph."""
+    model = coupled.scene(device)
+    solver = coupled.solver(model, mode="production", graph=True)
+    state = solver.create_state(dt=0.001)
+    solver.step(state, state, model.control(), dt=0.001)
+    test.assertTrue(solver.last_stats.converged)
+    solver._assemble(0, device_result=True)
+    expected = solver._tet_assembly_residual.numpy().copy()
+    previous = solver._tet_assembly_residual
+    solver._tet_assembly_residual = wp.empty_like(previous)
+    solver._tet_assembly_residual.fill_(np.nan)
+    solver._assemble(0, device_result=True)
+    np.testing.assert_array_equal(solver._tet_assembly_residual.numpy(), expected)
+    np.testing.assert_array_equal(previous.numpy(), expected)
+
+
 def test_binding_and_stream_changes(test, device):
     """Rebind replaced buffers and streams while bounding retained graph allocations."""
     cache = _SegmentGraphCache(device, enabled=True)
@@ -243,6 +260,7 @@ for function in (
     test_segment_warm_replay,
     test_objective_contact_rebinding,
     test_objective_candidate_reuse,
+    test_assembly_result_rebinding,
     test_binding_and_stream_changes,
     test_factor_scaling_and_failures,
     test_graph_transactions,

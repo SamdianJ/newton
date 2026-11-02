@@ -21,6 +21,24 @@ def finite(values: wp.array[Any], flags: wp.array[int], slot: int):
 
 
 @wp.kernel
+def material_control(
+    theta: wp.array[Any], torque: wp.array[Any], position: wp.array[Any], fixed: wp.array[int], flags: wp.array[int]
+):
+    i = wp.tid()
+    if i < theta.shape[0]:
+        if not wp.isfinite(theta[i]):
+            wp.atomic_max(flags, 0, 1)
+        if not wp.isfinite(torque[i]):
+            wp.atomic_max(flags, 1, 1)
+        if fixed[i] != 0 and torque[i] != type(torque[i])(0):
+            wp.atomic_max(flags, 3, 1)
+    if i < position.shape[0]:
+        for axis in range(3):
+            if not wp.isfinite(position[i][axis]):
+                wp.atomic_max(flags, 2, 1)
+
+
+@wp.kernel
 def history_check(
     version: wp.array[int],
     valid: wp.array[int],

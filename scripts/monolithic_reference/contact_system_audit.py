@@ -8,9 +8,7 @@ import json
 import numpy as np
 import warp as wp
 
-from newton._src.solvers.monolithic.coupled_kernels import combine
 from newton._src.solvers.monolithic.iteration import blocks
-from newton._src.solvers.monolithic.rigid import _scatter_residual
 from scripts.monolithic_reference.contact_audit import verify_contract
 
 
@@ -111,28 +109,16 @@ class ContactSystemAudit:
         if batch.flags.numpy()[0] or batch.start_flags.numpy()[0]:
             raise ValueError("Invalid complete native contact residual")
 
+        owned = np.zeros(self.residual.size, dtype=run._numpy_dtype)
+        owned[run._layout.articulation_indices()] = run._objective.residual.numpy()
+        owned[run._layout.indices("tet")] = run._tet.residual.numpy().ravel()
+        owned[run._rigid.rows_numpy] = run._rigid.residual.numpy()
+
         def total(contact):
-            # Preserve the production native addition order, including rigid rows.
-            wp.launch(
-                combine,
-                self.residual.size,
-                [
-                    run._objective.residual,
-                    run._tet.residual,
-                    contact,
-                    run._linear.q_local,
-                    run._layout.x_scalar_offset,
-                    self.residual,
-                ],
-                device=run.model.device,
-            )
-            wp.launch(
-                _scatter_residual,
-                (run._rigid.count, 6),
-                [run._rigid.rows, run._rigid.residual, self.residual],
-                device=run.model.device,
-            )
-            return self.residual.numpy().copy()
+            # This offline oracle adds contact once to the native owned rows.
+            result = owned + contact.numpy()
+            self.residual.assign(result)
+            return result
 
         clipped = total(c.residual)
         np.testing.assert_array_equal(clipped, run._complete_r.numpy())

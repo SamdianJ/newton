@@ -113,7 +113,7 @@ def test_spatial_retry_freeze(test, device):
     state = contact_state(run, "chain")
     before = snapshot(state)
     calls, queries = [], []
-    original_refresh, original_evaluate = run._refresh_candidates, run._evaluate
+    original_refresh, original_evaluate = run._refresh_candidates, run._problem.evaluate
     original_acceptance = solver_monolithic.iterate.__globals__["acceptance"]
 
     def refresh():
@@ -141,7 +141,7 @@ def test_spatial_retry_freeze(test, device):
 
     with (
         patch.object(run, "_refresh_candidates", refresh),
-        patch.object(run, "_evaluate", evaluate),
+        patch.object(run._problem, "evaluate", evaluate),
         patch.dict(solver_monolithic.iterate.__globals__, acceptance=reject_first_retry),
     ):
         run.step(state, state, run.model.control(), dt=0.001)
@@ -294,7 +294,6 @@ def test_spatial_device_iteration(test, device):
             contact_dataflow=algorithm,
             spatial={"candidate_capacity": 256} if algorithm == "spatial" else None,
         )
-        test.assertTrue(run._device_iteration)
         run.step(state, state, model.control(), dt=0.001)
         test.assertTrue(run.last_stats.converged, run.last_stats)
         runs.append(run)

@@ -11,6 +11,7 @@ import warp as wp
 from ...sim import JointType
 from . import coupled_kernels as kernels
 from .articulation_state import _predict, _recover_step
+from .contact import ContactStatus
 from .rigid import _matrices, _scatter_residual, _scatter_tangent
 from .solver_types import _StepFailure
 from .state_checks import scalar_view
@@ -29,7 +30,7 @@ class Producer(Protocol):
 
     name: str
     rows: np.ndarray
-    capturable: bool
+    energy_fields: tuple[str, ...]
     scale_policy: str
 
     def begin_step(self, solver: Any, state_in: Any) -> None: ...
@@ -271,9 +272,8 @@ def _raise_coordinates(
 
 
 class _Producer:
-    """Name, owned rows, declared policies and default no-op step methods."""
+    """Name, owned rows and declared policies; concrete types supply their phases."""
 
-    capturable = True
     interaction = False
     scale_policy = "diagonal"
     # Step-start predictions read state_in; articulation and rigid prediction run last.
@@ -282,53 +282,23 @@ class _Producer:
     def __init__(self, name, rows):
         self.name, self.rows = name, np.asarray(rows, dtype=np.int32)
         self.energies, self.checks, self.finite_values, self.owners = (), (), (), ()
-
-    def begin_step(self, solver, state_in):
-        """Freeze step-start inputs and write this producer's predictor into the accepted state."""
-
-    def candidate(self, solver, accepted, trial, direction, alpha, dt):
-        """Write this producer's trial coordinates from the accepted state and direction."""
-
-    def evaluate(self, solver, state, dt, residual, *, build_tangent):
-        """Submit residual and registered energy outputs into bound device buffers."""
-        raise NotImplementedError(self.name)
-
-    def magnitude(self, solver, out):
-        """Add the absolute contributions summed into this producer's last residual rows."""
-
-    def coordinates(self, solver, state, out):
-        """Write the magnitude of each owned row's coordinate as this producer's terms read it.
-
-        Terms are formed from the exact step increments, so each row's
-        coordinate is its increment.
-        """
-
-    def assemble(self, solver, assembly, dt):
-        """Write this producer's tangent into its fixed triplet slots."""
+        self.assembly_checks = ()
 
     def scale(self, solver, diagonal, coordinate):
         """Write coordinate-policy unit scales for this producer's rows."""
-
-    def difference(self, solver, accepted, trial, out):
-        """Write the effective trial displacement of this producer's rows."""
-
-    def domain(self, solver, accepted, candidate, flags):
-        """Mark invalid candidate or path geometry in the shared device flags."""
-
-    def publish(self, solver, state):
-        """Publish this producer's final history or forces into the accepted state."""
 
 
 class ArticulationProducer(_Producer):
     """Articulation coordinates with joint, PD, limit and friction terms."""
 
     begin_rank = 1
+    energy_fields = ("link_energy", "joint_energy")
 
     def __init__(self, solver):
         super().__init__("articulation", solver._layout.articulation_indices())
         obj = solver._objective
         self.energies = ((obj, "link_energy", None), (obj, "joint_energy", None))
-        self.owners = (obj, solver._kinematics)
+        self.owners = (obj, solver._kinematics, solver._joint_terms)
 
     def begin_step(self, solver, state_in):
         k, obj, device = solver._kinematics, solver._objective, solver.model.device
@@ -492,6 +462,7 @@ class RigidProducer(_Producer):
     """Every FREE rigid actor: three COM and three rotation rows each."""
 
     begin_rank = 2
+    energy_fields = ("energy",)
 
     def __init__(self, solver):
         super().__init__("rigid", solver._rigid.rows_numpy.ravel())
@@ -565,11 +536,21 @@ class RigidProducer(_Producer):
 class TetProducer(_Producer):
     """Dynamic tet particles with inertia, elasticity and frozen external forces."""
 
+    energy_fields = ("parts",)
+
     def __init__(self, solver):
         super().__init__("tet", solver._layout.indices("tet"))
         self.energies = ((solver._tet, "parts", None),)
         self.checks = ((solver._tet, "flags", {1: solver.Status.TET_INVERSION}, "Invalid tet candidate"),)
-        self.owners = (solver._tet, solver._tet.physics)
+        self.assembly_checks = (
+            (
+                solver._tet_assembly,
+                "failure_flags",
+                {None: solver.Status.TET_PROJECTION_FAILURE},
+                "Invalid tet tangent",
+            ),
+        )
+        self.owners = (solver._tet, solver._tet.physics, solver._tet_assembly)
 
     def begin_step(self, solver, state_in):
         accepted = solver._accepted
@@ -665,8 +646,12 @@ class TetProducer(_Producer):
             scatter=scatter,
             frozen_gravity=solver._frozen_gravity,
         )
-        if solver._tet_assembly.failure_flags.numpy()[0]:
-            raise _StepFailure(solver.Status.TET_PROJECTION_FAILURE, "Invalid tet tangent")
+
+    def domain(self, solver, accepted, candidate, flags):
+        """Tet evaluation already reports the candidate determinant guard."""
+
+    def publish(self, solver, state):
+        """Particle velocity is formed with its candidate displacement."""
 
     def difference(self, solver, accepted, trial, out):
         wp.launch(
@@ -686,7 +671,6 @@ class TetProducer(_Producer):
 class _MaterialProducer(_Producer):
     """One cloth or cable object expanded into a typed device execution plan."""
 
-    capturable = True
     scale_policy = "coordinate"
 
     def __init__(self, solver, kind, block):
@@ -741,9 +725,14 @@ class _MaterialProducer(_Producer):
     def domain(self, solver, accepted, candidate, flags):
         self.block.check_path(solver._original, solver._displacement(accepted), solver._displacement(candidate), flags)
 
+    def publish(self, solver, state):
+        """Candidate geometry already carries velocity and evaluated frame history."""
+
 
 class ClothProducer(_MaterialProducer):
     """One cloth object."""
+
+    energy_fields = ("energy", "external_energy")
 
     def __init__(self, solver, block):
         super().__init__(solver, "cloth", block)
@@ -772,6 +761,8 @@ class ClothProducer(_MaterialProducer):
 
 class CableProducer(_MaterialProducer):
     """One cable object; theta rows use a fixed inverse-length scale."""
+
+    energy_fields = ("stretch_energy", "bend_twist_energy", "external_energy")
 
     def __init__(self, solver, block):
         super().__init__(solver, "cable", block)
@@ -842,12 +833,21 @@ class ContactProducer(_Producer):
 
     scale_policy = "none"
     interaction = True
+    energy_fields = ("energy",)
 
     def __init__(self, solver):
         super().__init__("contact", np.empty(0, dtype=np.int32))
         contact = solver._contact
         self.energies = ((contact, "energy", "absolute_energy"),)
         self.checks = ((contact, "flags", {}, "Invalid contact geometry"),)
+        self.assembly_checks = (
+            (
+                contact,
+                "flags",
+                {ContactStatus.CAPACITY: solver.Status.CONTACT_OVERFLOW},
+                "Invalid contact tangent or capacity",
+            ),
+        )
         surface = contact._batch.material_surface
         if surface is not None:
             self.checks += ((surface, "flags", {}, "Invalid cable contact frame"),)
@@ -925,6 +925,15 @@ class ContactProducer(_Producer):
         )
         # This adds to the freshly overwritten owner residuals exactly once.
         solver._graphs.run("problem_interaction_rows", (reference_mode,), buffers, accumulate, warmup=False)
+
+    def candidate(self, solver, accepted, trial, direction, alpha, dt):
+        """Contact uses the candidate geometry supplied by its state owners."""
+
+    def difference(self, solver, accepted, trial, out):
+        """Contact owns no tangent rows."""
+
+    def domain(self, solver, accepted, candidate, flags):
+        """Contact evaluation already reports its geometry and capacity guards."""
 
     def magnitude(self, solver, out):
         residual = (

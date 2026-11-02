@@ -160,7 +160,6 @@ def test_robot_diagnostics(test, device):
         fields = factory.measure(run, states[0])
         expected = measure(complete, states[1])
         test.assertEqual(fields["full_system"]["status"], "PASS_FULL_RESIDUAL")
-        test.assertTrue(run._device_iteration)
         test.assertIsInstance(run._reference_residual, wp.array)
         test.assertGreater(fields["contact_load"], 0)
         for name in ("penetration", "contact_load", "friction_work", "slip", "force_balance"):

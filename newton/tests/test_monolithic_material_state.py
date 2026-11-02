@@ -257,7 +257,7 @@ class TestMonolithicMaterialState(unittest.TestCase):
         control._monolithic_cable.torque.assign(torque)
         frozen = solver._snapshot_material_control(control)
         control._monolithic_cable.torque.zero_()
-        self.assertEqual(frozen["torque"][0], 0.2)
+        self.assertEqual(frozen["torque"].numpy()[0], 0.2)
         np.testing.assert_array_equal(other._monolithic_cable.torque.numpy(), 0)
         torque[1] = 0.1
         control._monolithic_cable.torque.assign(torque)

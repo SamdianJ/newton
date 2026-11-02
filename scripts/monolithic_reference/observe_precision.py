@@ -74,10 +74,15 @@ class Observer:
                 else None,
             },
         )
-        for name in ("_evaluate", "_take_trial", "_assemble", "_physical_linear_error"):
-            original = getattr(run, name)
-            setattr(self, name + "_native", original)
-            setattr(run, name, getattr(self, name))
+        for owner, name, method in (
+            (run._problem, "evaluate", "_evaluate"),
+            (run._problem, "candidate", "_take_trial"),
+            (run, "_assemble", "_assemble"),
+            (run, "_physical_linear_error", "_physical_linear_error"),
+        ):
+            original = getattr(owner, name)
+            setattr(self, method + "_native", original)
+            setattr(owner, name, getattr(self, method))
 
     def snapshot(self, name, data):
         """Write an immutable numeric snapshot and return its identity."""
@@ -121,12 +126,12 @@ class Observer:
         self.base = state_arrays(self.run._accepted)
         return self._take_trial_native(alpha, dt)
 
-    def _evaluate(self, state, dt, *, build_tangent=True, device_result=False):
+    def _evaluate(self, state, dt, *, build_tangent=True):
         run = self.run
         role = "original" if state is run._original else "trial" if state is run._trial else "accepted"
         error, result = None, None
         try:
-            result = self._evaluate_native(state, dt, build_tangent=build_tangent, device_result=device_result)
+            result = self._evaluate_native(state, dt, build_tangent=build_tangent)
             return result
         except Exception as exc:
             error = str(exc)
@@ -153,8 +158,7 @@ class Observer:
             data["native.gravity"] = run._frozen_gravity.numpy()
             if result is not None:
                 data["native.energy"], data["native.residual"], data["native.absolute"] = result
-                if device_result:
-                    data["native.residual"] = result[1].numpy().copy()
+                data["native.residual"] = result[1].numpy().copy()
             if self.scale is not None:
                 data["native.scale"] = self.scale
             if self.direction is not None:

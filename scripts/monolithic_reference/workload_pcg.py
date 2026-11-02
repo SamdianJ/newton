@@ -151,7 +151,10 @@ def replay_pcg(arrays, metadata, expected, expected_result, *, device, repeat=5)
         for name, value in arrays.items()
         if name != "limits"
     }
-    plan = MaskedPcgPlan(**buffers, layout=layout, config=MaskedPcgConfig(**metadata["config"]))
+    config = dict(metadata["config"])
+    if config.get("group_residual_floors") is not None:
+        config["group_residual_floors"] = tuple(config["group_residual_floors"])
+    plan = MaskedPcgPlan(**buffers, layout=layout, config=MaskedPcgConfig(**config))
     times, restore_times = [], []
     for index in range(repeat + 1):
         start = time.perf_counter()

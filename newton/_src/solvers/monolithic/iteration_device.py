@@ -27,6 +27,7 @@ def measure_rows(
     terms[0, i] = a * a
     terms[1, i] = b * b
     terms[2, i] = r[i] * r[i]
+    terms[3, i] = terms.dtype(0)
 
 
 @wp.kernel
@@ -42,6 +43,7 @@ def assessment_rows(
     terms[0, i] = a * a
     terms[1, i] = b * b
     terms[2, i] = scale[i] * tau[i]
+    terms[3, i] = terms.dtype(0)
 
 
 @wp.kernel
@@ -57,6 +59,7 @@ def norm_rows(r: wp.array[Any], terms: wp.array2d[Any]):
     terms[0, i] = r[i] * r[i]
     terms[1, i] = terms.dtype(0)
     terms[2, i] = terms.dtype(0)
+    terms[3, i] = terms.dtype(0)
 
 
 @wp.kernel
@@ -65,16 +68,14 @@ def trial_rows(
     scale: wp.array[Any],
     direction: wp.array[Any],
     effective: wp.array[Any],
-    unscaled: wp.array[int],
     terms: wp.array2d[Any],
 ):
     i = wp.tid()
-    step = effective[i]
-    if unscaled[i] == 0:
-        step /= scale[i]
+    step = effective[i] / scale[i]
     terms[0, i] = r[i] * effective[i]
     terms[1, i] = wp.abs(r[i] * direction[i])
     terms[2, i] = step * step
+    terms[3, i] = effective[i] * effective[i]
 
 
 def initialize(solver):
@@ -83,18 +84,14 @@ def initialize(solver):
     n, device, dtype = self._complete_r.size, self.model.device, self._dtype
     for name in ("_accepted_r", "_reference_device", "_effective_device", "_stats_residual"):
         setattr(self, name, wp.zeros(n, dtype=dtype, device=device))
-    self._row_terms = wp.zeros((3, n), dtype=dtype, device=device)
+    self._row_terms = wp.zeros((4, n), dtype=dtype, device=device)
     self._group_reduction = SegmentedReduction(
         n,
         [np.arange(start, start + count) for _, start, count in self._layout.groups],
-        3,
+        4,
         dtype=dtype,
         device=device,
     )
-    unscaled = np.zeros(n, dtype=np.int32)
-    for _, start in self._layout.rigid_ranges:
-        unscaled[start : start + 6] = 1
-    self._step_unscaled = wp.array(unscaled, dtype=int, device=device)
     self._unrepresentable = wp.zeros(1, dtype=int, device=device)
 
 
@@ -127,20 +124,18 @@ def norms(solver, error):
     return np.sqrt(reduction.result.numpy()[:, 0])
 
 
-def trial(solver, residual, candidate, effective):
+def trial(solver, residual, effective):
     """Read slope, noise scale and actual per-group step norms together."""
     self = solver
     reduction = self._group_reduction
-    buffers = [residual, self._linear.scale, self._delta, effective, self._step_unscaled, self._row_terms]
+    buffers = [residual, self._linear.scale, self._delta, effective, self._row_terms]
 
     def execute():
         wp.launch(trial_rows, residual.size, buffers, device=self.model.device)
         reduction.reduce(self._row_terms)
 
     self._graphs.run("nonlinear_trial", (), [*buffers, *reduction.buffers()], execute)
-    values = reduction.result.numpy()
-    # Preserve the strategy packet until it moves into the problem interface.
-    return np.r_[values[0, 0], np.zeros(4, dtype=self._numpy_dtype), values[0, 1], values[:, 2]]
+    return reduction.result.numpy()
 
 
 def assessment(solver, residual, reference):

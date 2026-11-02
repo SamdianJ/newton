@@ -14,6 +14,32 @@ from .convergence import abs3, axial_absolute
 
 
 @wp.kernel
+def _freeze_forces(
+    body_force: wp.array[wp.spatial_vector],
+    joint_force: wp.array[float],
+    gravity: wp.array[wp.vec3],
+    worlds: wp.array[int],
+    bodies: wp.array[int],
+    dofs: wp.array[int],
+    mass: wp.array[Any],
+    force: wp.array[Any],
+    torque: wp.array[Any],
+    has_torque: wp.array[int],
+):
+    i = wp.tid()
+    body, dof = bodies[i], dofs[i]
+    f, t = type(force[0])(), type(torque[0])()
+    for axis in range(3):
+        f[axis] = type(mass[0])(body_force[body][axis]) + type(mass[0])(joint_force[dof + axis])
+        f[axis] += mass[i] * type(mass[0])(gravity[worlds[body]][axis])
+        t[axis] = type(mass[0])(body_force[body][axis + 3]) + type(mass[0])(joint_force[dof + axis + 3])
+        if t[axis] != type(mass[0])(0):
+            wp.atomic_max(has_torque, 0, 1)
+    force[i] = f
+    torque[i] = t
+
+
+@wp.kernel
 def _initialize(
     q: wp.array[Any],
     qd: wp.array[Any],
@@ -354,6 +380,7 @@ class RigidObjective:
         self._maps = {name: getattr(self, name) for name in ("rows", "qs", "vs", "bodies")}
         self._map_values = {name: value.numpy().copy() for name, value in self._maps.items()}
         self.has_torque = False
+        self._torque_flag = wp.zeros(1, dtype=int, device=self.device)
 
     def validate_identity(self):
         for name, source in self._maps.items():
@@ -473,13 +500,25 @@ class RigidObjective:
         if not self.count:
             return
         history = state._monolithic_coupled
-        force = state.body_f.numpy()[self.body_indices].astype(self.numpy_dtype) + control.joint_f.numpy()[
-            self.dof_indices
-        ].astype(self.numpy_dtype)
-        gravity = self.model.gravity.numpy()[self.model.body_world.numpy()[self.body_indices]]
-        self.force.assign(force[:, :3] + self.mass.numpy()[:, None] * gravity)
-        self.torque.assign(force[:, 3:])
-        self.has_torque = bool(np.any(force[:, 3:] != 0))
+        self._torque_flag.zero_()
+        wp.launch(
+            _freeze_forces,
+            self.count,
+            [
+                state.body_f,
+                control.joint_f,
+                self.model.gravity,
+                self.model.body_world,
+                self.bodies,
+                self.vs,
+                self.mass,
+                self.force,
+                self.torque,
+                self._torque_flag,
+            ],
+            device=self.device,
+        )
+        self.has_torque = bool(self._torque_flag.numpy()[0])
         wp.copy(self.tn, history.rigid_com)
         wp.copy(self.quat_n, history.rigid_rotation)
         wp.launch(_matrices, self.count, [history.rigid_rotation, self.rn], device=self.device)

@@ -239,7 +239,6 @@ class CableBlock:
         )
         self.mass_vertices = wp.array(np.asarray(vertices, dtype=np.int32), dtype=int, device=device)
         self.triplet_offset = 0
-        self.path_status = wp.zeros(1, dtype=int, device=device)
 
     def begin_step(self, original, forces):
         """Snapshot position/velocity and applied forces once for the step."""

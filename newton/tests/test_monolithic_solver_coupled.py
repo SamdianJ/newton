@@ -275,7 +275,9 @@ def test_failure_gates(test, device):
         out = run._states.copy(state)
         expected, expected_out = snapshot(state), snapshot(out)
         if failure == "posterior":
-            context = patch.object(run, "_physical_linear_error", return_value=np.full(14, np.nan))
+            context = patch.object(
+                run, "_physical_linear_error", return_value=wp.full(14, np.nan, dtype=run._dtype, device=device)
+            )
         elif failure == "trial":
             context = patch(
                 "newton._src.solvers.monolithic.iteration.acceptance",
@@ -283,9 +285,13 @@ def test_failure_gates(test, device):
             )
         elif failure == "small":
             context = ExitStack()
-            context.enter_context(patch.object(run, "_physical_linear_error", return_value=np.zeros(14)))
             context.enter_context(
-                patch.object(run, "_take_trial", side_effect=lambda *args, run=run: run._trial.assign(run._accepted))
+                patch.object(run, "_physical_linear_error", return_value=wp.zeros(14, dtype=run._dtype, device=device))
+            )
+            context.enter_context(
+                patch.object(
+                    run._problem, "candidate", side_effect=lambda *args, run=run: run._trial.assign(run._accepted)
+                )
             )
             context.enter_context(
                 patch(

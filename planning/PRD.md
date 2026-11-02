@@ -1,6 +1,6 @@
 # P9a PRD：统一非线性问题接口与主机开销治理
 
-2026-11-02。状态：**PLANNED / WORKTREE_CREATED**。本次建立工作区和规划，尚未实施求解器改动或取得运行验收。
+2026-11-02。状态：**IN_PROGRESS / PR-01**。统一接口已进入实现与验收；各批次证据和未完成项见 [PR-01](PR-01.md)。阶段尚未完成。
 
 ## 1. 身份与范围
 
@@ -129,7 +129,7 @@ CPU 和 CUDA、graph 开与关使用相同 problem/executor 计算流程；graph
 - 组合 A：两棵不同规模的固定基座树 + rigid + tet，采用现有受支持接触类型；组合 B：articulation + rigid + tet + cloth + 两条 cable，复用 material-state fixture 的受支持布局。另有 rigid-only 变体。测试实现时固定具体参数并纳入提交，不采集或修改 frozen quick 快照。
 - 覆盖加载/持有/卸载三个阶段（16/32/16 步），第 32 步保存状态并作后续 continuation 对照；用独立故障分支注入 rejected trial 和发布失败。
 - 必须 64/64 完成，无硬失败、非有限值或容量丢弃，逐行结果与状态标签一致，固定行和反力平衡通过已有组件物理阈值；checkpoint continuation 按现有精度合同；注入失败分支完整回滚。无法完成构造或支持组合时先报告，不能用静默 fallback 或缩小矩阵代替验收。
-- 执行入口（新增测试完成后）：`uv run --no-sync python -B -m newton.tests --pattern 'test_monolithic_solver_problem.py' -j 1`。当前文件未实现，结果 NOT_RUN；它属于小型集成，不替代下面的长 E2E。
+- 执行入口：`uv run --no-sync python -B -m newton.tests --pattern 'test_monolithic_solver_problem.py' -j 1`。测试已经实现，实际设备/精度结果见 PR-01；它属于小型集成，不替代下面的长 E2E。
 
 **阶段完整 E2E（PR-07）：**复用固定 CI stage 作业集，两精度，绑定最终 SHA；包括 Franka 5250 步、Sharpa 8667 步、64 刚体 2000 步，材料完整任务、cable cantilever 全矩阵（每例 600 步）、cloth patch/prefold（各 360 步）、tet 既有全矩阵；FP64 remote-tree 完整 2000 步。其配置及物理门槛以当前版本 recipe/fixture 和 CI stage manifest 为准，执行前冻结 hashes。完整 helix 360 保持独立 nightly 项，不用本阶段顺带启动。
 
@@ -151,4 +151,4 @@ uv run --no-sync python -B -m scripts.monolithic_reference.run_cloth_benchmark p
 
 已有 P9-P1（池容量与全配对元数据）、P9-P2（完整接触执行规模/图缓存）、浮动基座、多 world 外层设备循环、world 压缩、P5-I2/P6b-P1 性能资格继续保留。P9a 的 L3 只覆盖实际命中的局部 graph 成本，不自动关闭整个 P9-P2。它们见 workspace `dev/monolithic/P9/performance-plan.md` 与 `dev/monolithic/open_items.md`。
 
-P9a 收尾要求问题表逐项给出 FIXED/验证证据或明确未完成项；未完成 PRD 必需项不得标记阶段完成。当前所有 runtime、quick、suite、stage、性能结果均为 **NOT_RUN**。
+P9a 收尾要求问题表逐项给出 FIXED/验证证据或明确未完成项；未完成 PRD 必需项不得标记阶段完成。PR-01 的局部 runtime 结果已记录；阶段 suite/stage 和整体性能资格仍为 **NOT_RUN**。

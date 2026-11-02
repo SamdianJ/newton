@@ -356,7 +356,8 @@ def test_rigid_failures_and_reset(test, device):
     test.assertTrue(run.last_stats.rolled_back)
     assert_snapshot(test, state, original)
     assert_snapshot(test, output, previous)
-    with patch.object(run._rigid, "domain", return_value=False):
+    rigid_producer = next(p for p in run._producers if p.name == "rigid")
+    with patch.object(rigid_producer, "domain", side_effect=lambda solver, accepted, trial, flags: flags.fill_(1)):
         run.step(state, output, control, dt=0.001)
     test.assertTrue(run.last_stats.rolled_back)
     assert_snapshot(test, output, previous)
@@ -370,7 +371,7 @@ def test_rigid_failures_and_reset(test, device):
     def posterior(*args, **kwargs):
         value = np.zeros(run._layout.scalar_dof_count)
         value[run._rigid.rows_numpy[1, 3]] = 1
-        return value
+        return wp.array(value, dtype=run._dtype, device=device)
 
     with patch.object(run, "_physical_linear_error", side_effect=posterior):
         run.step(state, output, control, dt=0.001)

@@ -25,23 +25,22 @@ def test_reductions(test, device):
         direction = rng.normal(size=n).astype(native)
         arrays = [wp.array(v, dtype=dtype, device=device) for v in (r, reference, trial, effective)]
         ds, dd = [wp.array(v, dtype=dtype, device=device) for v in (scale, direction)]
-        terms = wp.empty((3, n), dtype=dtype, device=device)
+        terms = wp.empty((4, n), dtype=dtype, device=device)
         rhs = wp.empty(n, dtype=dtype, device=device)
         tau = np.geomspace(1e-4, 1e2, n).astype(native)
         dtau = wp.array(tau, dtype=dtype, device=device)
-        # Rigid tangent rows use the physical displacement without scaling.
-        unscaled = (np.arange(n) % 7 == 0).astype(np.int32)
-        mask = wp.array(unscaled, dtype=int, device=device)
         tolerance = 64 * np.finfo(native).eps
         for groups in (
             [np.arange(n), np.arange(3), np.arange(3, n)],
             [np.arange(n), np.arange(0, n, 2), np.arange(1, n, 2), np.empty(0, dtype=int)],
             [np.arange(n), np.arange(n), np.empty(0, dtype=int)],
         ):
-            plan = SegmentedReduction(n, groups, 3, dtype=dtype, device=device)
+            plan = SegmentedReduction(n, groups, 4, dtype=dtype, device=device)
             wp.launch(kernels.measure_rows, n, [arrays[0], arrays[1], ds, terms, rhs], device=device)
             plan.reduce(terms)
-            expected = [[np.sum((scale[p] * v[p]) ** 2) for v in (r, reference)] + [np.sum(r[p] ** 2)] for p in groups]
+            expected = [
+                [np.sum((scale[p] * v[p]) ** 2) for v in (r, reference)] + [np.sum(r[p] ** 2), 0] for p in groups
+            ]
             np.testing.assert_allclose(plan.result.numpy(), expected, rtol=tolerance, atol=0)
             np.testing.assert_array_equal(rhs.numpy(), -scale * r)
             wp.launch(kernels.assessment_rows, n, [arrays[0], arrays[1], dtau, ds, terms], device=device)
@@ -51,14 +50,23 @@ def test_reductions(test, device):
                     np.sum((r[p] / tau[p]) ** 2),
                     np.sum((reference[p] / tau[p]) ** 2),
                     np.min(scale[p] * tau[p], initial=np.inf),
+                    0,
                 ]
                 for p in groups
             ]
             np.testing.assert_allclose(plan.result.numpy(), expected, rtol=tolerance, atol=0)
-            wp.launch(kernels.trial_rows, n, [arrays[0], ds, dd, arrays[3], mask, terms], device=device)
+            wp.launch(kernels.trial_rows, n, [arrays[0], ds, dd, arrays[3], terms], device=device)
             plan.reduce(terms)
-            moved = np.where(unscaled, effective, effective / scale)
-            expected = [[r[p] @ effective[p], np.sum(abs(r[p] * direction[p])), np.sum(moved[p] ** 2)] for p in groups]
+            moved = effective / scale
+            expected = [
+                [
+                    r[p] @ effective[p],
+                    np.sum(abs(r[p] * direction[p])),
+                    np.sum(moved[p] ** 2),
+                    np.sum(effective[p] ** 2),
+                ]
+                for p in groups
+            ]
             actual = plan.result.numpy()
             np.testing.assert_allclose(actual, expected, rtol=tolerance, atol=tolerance)
             plan.reduce(terms)
@@ -68,7 +76,7 @@ def test_reductions(test, device):
                     plan.reduce(terms)
                 terms.fill_(native(2))
                 wp.capture_launch(capture.graph)
-                np.testing.assert_array_equal(plan.result.numpy(), [[2 * len(p)] * 3 for p in groups])
+                np.testing.assert_array_equal(plan.result.numpy(), [[2 * len(p)] * 4 for p in groups])
         arrays[0].fill_(native(float("nan")))
         wp.launch(kernels.measure_rows, n, [arrays[0], arrays[1], ds, terms, rhs], device=device)
         plan.reduce(terms)
