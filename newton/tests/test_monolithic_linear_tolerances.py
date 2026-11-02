@@ -89,7 +89,7 @@ def test_solver_targets(test, device):
     def solve(*args, original=original, configs=configs, solver=solver, **kwargs):
         config = kwargs["config"]
         configs.append(config)
-        limits = config.residual_norm_limits
+        limits = config.group_norm_limits
         # The absolute term covers every limit, so min(max(rtol |b|, atol), limit) is the limit itself.
         test.assertEqual(config.linear_absolute_tolerance, max(limits))
         # Each block's limit is the global forcing term or half its smallest scaled row tolerance.
@@ -106,7 +106,7 @@ def test_solver_targets(test, device):
     test.assertTrue(configs)
     for config, post in zip(configs, posts, strict=True):
         test.assertEqual(
-            config.residual_norm_limits, tuple(post["blocks"][name]["limit"] for name in ("global", "q", "x"))
+            config.group_norm_limits, tuple(post["blocks"][name]["limit"] for name in ("global", "q", "x"))
         )
 
 
