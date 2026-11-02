@@ -1,6 +1,6 @@
 # P9a PRD：统一非线性问题接口与主机开销治理
 
-2026-11-02。状态：**IN_PROGRESS / PR-01**。统一接口已进入实现与验收；各批次证据和未完成项见 [PR-01](PR-01.md)。阶段尚未完成。
+2026-11-02。状态：**IN_PROGRESS / PR-01 COMPLETE**。统一接口与本 PR 正确性/回读合同已通过验收；性能退化 `P9a-PERF-01` 保持 OPEN。证据见 [PR-01 第 7 节](PR-01.md#7-最终验收与剩余性能项)。阶段尚未完成。
 
 ## 1. 身份与范围
 
@@ -20,7 +20,7 @@
 
 ## 2. review 问题全集与处置
 
-以下位置均相对 `newton/_src/solvers/monolithic/`，行号绑定起点版本。所有条目初始为 OPEN；H/M 的级别来自原 review，不表示已有量化性能排名。
+以下位置均相对 `newton/_src/solvers/monolithic/`，行号绑定起点版本。以下表格保留起点盘点与计划；本轮关闭状态见表后。H/M 的级别来自原 review，不表示已有量化性能排名。
 
 | ID | 已核实问题及边界 | 主要位置 | 计划归属 / 完成证据 |
 | --- | --- | --- | --- |
@@ -38,6 +38,17 @@
 | L5 | cable gauge 投影下载/上传完整 delta | `solver_monolithic.py:1373` | PR-01；设备分段投影，保留公共角与当前 FP64 均值约定 |
 | R1 | replay launch 抛异常后 `_in_flight` 保持 true，下一次使用被阻塞 | `pcg_production.py:745` | PR-02；失败注入、重入拒绝、清理与后续合法使用测试 |
 | C1 | 多个 graph 共享 scratch，仅串行使用安全 | `iteration_device.py`；`pcg_production.py:188` | 全阶段保持单 stream、非重入合同；这是约束，不宣称当前已有并发错误 |
+
+PR-01 后的状态：
+
+| 条目 | 当前处置 |
+| --- | --- |
+| H1、L4、L5 | FIXED；全类型统一 problem/phase、旧双路径删除、设备 domain/gauge；CPU/CUDA E2E、两精度 quick 与回读审计通过 |
+| M2、M3、M4 | DEVICE_FIXED；原向量回读/host 运算已移除；按 PR-04 审查剩余批处理成本，不能为凑 PR 重做已完成逻辑 |
+| M5 | PARTIAL；迭代内完整 residual 回读已移除，最终 Stats/序列化仍 OPEN |
+| H2、R1、M1、L1、L2、L3 | OPEN；保留原计划顺序 |
+| C1 | 持续约束；保留单 stream、非重入合同 |
+| P9a-PERF-01 | OPEN；成对同输入、同工作量下 q+x/rigid-only 稳定退化；PR-03/06 复测处理，整体性能尚未 PASS |
 
 审查结论的限定：原“约 20 次/轮、5 次/trial”“host 比 kernel 更贵”未经 profiling；历史 11 solves/2 graph_rebuilt 不记录重建原因且可能含首次捕获；“无 O(n²)”不适用于每树 dense block 或全量配对元数据；有界缓存不等于已证明无泄漏。`_steps` 首次分配后复用，`_variational` 每步重建。上述表述纠正不另造求解器 bug。
 
@@ -151,4 +162,4 @@ uv run --no-sync python -B -m scripts.monolithic_reference.run_cloth_benchmark p
 
 已有 P9-P1（池容量与全配对元数据）、P9-P2（完整接触执行规模/图缓存）、浮动基座、多 world 外层设备循环、world 压缩、P5-I2/P6b-P1 性能资格继续保留。P9a 的 L3 只覆盖实际命中的局部 graph 成本，不自动关闭整个 P9-P2。它们见 workspace `dev/monolithic/P9/performance-plan.md` 与 `dev/monolithic/open_items.md`。
 
-P9a 收尾要求问题表逐项给出 FIXED/验证证据或明确未完成项；未完成 PRD 必需项不得标记阶段完成。PR-01 的局部 runtime 结果已记录；阶段 suite/stage 和整体性能资格仍为 **NOT_RUN**。
+P9a 收尾要求问题表逐项给出 FIXED/验证证据或明确未完成项；未完成 PRD 必需项不得标记阶段完成。PR-01 的最终 runtime、quick、结构审计和成对性能结果已记录；阶段 suite/stage 为 **NOT_RUN**，整体性能资格为 **OPEN**（含 `P9a-PERF-01`）。

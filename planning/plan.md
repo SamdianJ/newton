@@ -1,6 +1,6 @@
 # P9a 实施计划
 
-2026-11-02。状态：IN_PROGRESS（PR-01）。需求与范围以 [PRD](PRD.md) 为准。实现顺序固定为 **PR-01 H1 → PR-02 H2/R1 → PR-03 M1 → PR-04 M2/M3/M4 批处理收尾 → PR-05 M5 → PR-06 L1/L2/L3 → PR-07 阶段验收**。
+2026-11-02。状态：IN_PROGRESS（PR-01 COMPLETE；PR-02 待实施；性能留项 OPEN）。需求与范围以 [PRD](PRD.md) 为准。实现顺序固定为 **PR-01 H1 → PR-02 H2/R1 → PR-03 M1 → PR-04 M2/M3/M4 批处理收尾 → PR-05 M5 → PR-06 L1/L2/L3 → PR-07 阶段验收**。
 
 PR-01 可以按内部里程碑分多个可审查提交，但它仍是一个完整交付 PR。中间保留旧路径仅用于迁移对照；最终必须删掉。不能以“材料后续再接”关闭 H1。
 
@@ -8,7 +8,7 @@ PR-01 可以按内部里程碑分多个可审查提交，但它仍是一个完�
 
 | PR | 目标 | 依赖 | 完成证据 |
 | --- | --- | --- | --- |
-| PR-01 | actor-owned 统一非线性接口、分段归约、全类型设备 phase、删除旧双路径 | 起点 | [专门计划](PR-01.md) 的全部里程碑；完整贡献、混合 E2E、回读审计 |
+| PR-01 | actor-owned 统一非线性接口、分段归约、全类型设备 phase、删除旧双路径 | 起点 | COMPLETE；[最终验收](PR-01.md#7-最终验收与剩余性能项)：E2E/quick/回读通过；性能退化另列 OPEN |
 | PR-02 | 固定绑定 PCG 复用；异常 replay 生命周期 | PR-01 的 binding/generation 合同 | H2/R1 机制回归；内容变化不重建、失效条件生效 |
 | PR-03 | 多向量后验与收敛结果 packet 融合 | PR-01 通用组归约，PR-02 稳定 plan | 有/无 regularization 的结果一致；回读数量下降 |
 | PR-04 | cable gauge、material reaction、control 校验的类型批处理收尾 | PR-01 已完成设备迁移 | M2/M3/M4 各自证据；同类数量增加时无逐 actor host 调度/回读 |
@@ -31,6 +31,8 @@ M2/M3/M4、L4/L5 中阻止统一设备契约的部分已经属于 PR-01，后续
 验证：`test_monolithic_linear_graph.py`、`test_monolithic_linear_fixed_storage.py`、`test_monolithic_linear_internal_storage.py`、`test_monolithic_linear_production.py` 的受影响用例，CPU/CUDA 与精度变体；固定物理输入前后 D2H/重捕获/耗时对照，再执行本 PR 通用收尾。
 
 ## 3. M1：PR-03
+
+同时复测 `P9a-PERF-01` 的 q+x/rigid-only：使用 PR-01 的相同输入与工作量对照，检查新增摘要读取是否实际解释耗时，不能仅以读取数量下降关闭性能退化。
 
 涉及 `iteration.py`、PR-01 的分段归约/输出计划及 PCG 结果边界。不会恢复硬编码三个组，也不创建 `(5*G,N)` 中间矩阵。
 
@@ -66,6 +68,8 @@ PR-01 已经必须完成以下设备语义，此 PR 只合并剩余按 block 展
 
 ## 6. L1/L2/L3：PR-06
 
+同时处理 `P9a-PERF-01`：统一 phase 增加了 graph/binding 工作；须归因并处理稳定退化，复用 PR-01 三组成对测量合同，不把材料场景的收益抵消为其他场景已通过。
+
 - L1：复用 PR-01 显式 buffer registry，消除热路径 `vars(owner)` 扫描。绑定变更仍走生产有效性检查，不能只留下会被关闭的 assertion。
 - L2：将参与捕获的 dt 相关标量更新纳入稳定 buffers，检查各物理项与派生量实际使用新 dt；检查 A/B/A dt 下结果和 graph identity。不是只删除 key 中的 dt。
 - L3：先构造超过驻留集合的 span 交替模式，辨认 contact order、pool finish、BSR 等各 segment 原因。比较合并档位、固定预算 mask 与有界缓存工作集；不无限增大 LRU。报告空算/峰值 scratch/graph 驻留和整体 median/P95。局部无可复现回退时记录“未证实瓶颈”，不凭猜测改缓存。
@@ -89,4 +93,4 @@ L4/L5 已由 PR-01 的 domain/gauge 设备合同关闭，在本 PR 汇总其结�
    两精度 frozen quick 不改清单/阈值/快照。新失败说明能否提炼为组件机制或短窗口；增加冻结窗口另按项目流程处理。
 4. `uvx pre-commit run -a`、独立正确性/架构审查、更新本 PR 文档并本地提交。没有推送请求不推送；不为本次规划修改 CI 调度。
 
-PR-07 最终 HEAD：云端 suite、经项目流程批准启动的完整 stage；提交命令与运行身份保存在报告。性能成对测量与物理验收分别报告，已有已知失败需具体处置，不能自行登记为豁免。PR-01 局部结果见其实现记录，阶段 E2E/整体性能验证仍为 NOT_RUN。
+PR-07 最终 HEAD：云端 suite、经项目流程批准启动的完整 stage；提交命令与运行身份保存在报告。性能成对测量与物理验收分别报告，已有已知失败需具体处置，不能自行登记为豁免。PR-01 最终结果见其第 7 节；阶段 E2E 为 NOT_RUN，整体性能资格与 P9a-PERF-01 保持 OPEN。

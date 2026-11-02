@@ -2,7 +2,7 @@
   "date": "2026-11-02",
   "timezone": "Asia/Tokyo",
   "stage": "P9a",
-  "status": "PLANNED_NOT_IMPLEMENTED",
+  "status": "PR01_COMPLETE_STAGE_IN_PROGRESS_PERFORMANCE_OPEN",
   "branch": "SamiulJ/monolithic-p9a",
   "worktree": "worktrees/Monolithic-p9a",
   "base_commit": "8fa80ba7ce3fd7ce2483f2ec098e66d410bc434e",
@@ -21,12 +21,23 @@
     "attachment-2": "6622b3eb1382f99415e981d37e27b2f2683b26066f52c489e5bf3d28a754d582"
   },
   "workspace_index": "dev/monolithic/P9/PRD.md",
-  "workspace_index_sha256": "a61a092cc6dbc9e34ac17cd2a9c06b7e1ba354e9dd70f53f53053c97412daad9",
   "runtime_environment": {
     "venv": "shared symlink to ../Monolithic-refactor/.venv; use uv run --no-sync; do not uv sync this shared environment",
     "assets": "read-only reuse of ../Monolithic-refactor/asset/monolithic/data through relative symlink",
-    "solver_runtime_tests": "NOT_RUN",
-    "performance": "NOT_RUN",
+    "solver_runtime_tests": "PR01 CPU/CUDA E2E, affected components and FP64/FP32 quick PASS; stage suite/stage NOT_RUN",
+    "performance": "Three alternating paired GPU samples recorded; structural contract PASS; P9a-PERF-01 and stage performance qualification OPEN",
     "superdex_runtime": "NOT_RUN"
+  },
+  "planning_snapshot_workspace_index_sha256": "a61a092cc6dbc9e34ac17cd2a9c06b7e1ba354e9dd70f53f53053c97412daad9",
+  "workspace_index_sha256": "08b665868dd14a2e78fdf43aa7c40a8304c9bc73d8e45a07bb0e3d9f29e92e15",
+  "implementation": {
+    "tested_commit": "2220971595d36ea7bd5ffa52d219a340f7d83ef9",
+    "solver_tree_sha256": "dda3dde1962db7ed10cdae6bbaf7a4d93af843dacb9ae6d28c08369574bf18d2",
+    "results": "dev/monolithic/test/results/P9/P9a/PR-01/20261102-01A",
+    "quick_results": "dev/monolithic/test/results/P9/P9a/PR-01/quick-20261102-01",
+    "quick_verdict": "CLEAN",
+    "quick_pass_items": 60,
+    "performance_open_item": "P9a-PERF-01",
+    "completion_commit_scope": "Documentation only; runtime results bind tested_commit, not the subsequent documentation commit."
   }
 }
