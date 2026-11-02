@@ -2,7 +2,7 @@
   "date": "2026-11-02",
   "timezone": "Asia/Tokyo",
   "stage": "P9a",
-  "status": "PR01_PR02_COMPLETE_STAGE_IN_PROGRESS_PERFORMANCE_OPEN",
+  "status": "PR01_PR02_PR03_COMPLETE_STAGE_IN_PROGRESS_PERFORMANCE_OPEN",
   "branch": "SamiulJ/monolithic-p9a",
   "worktree": "worktrees/Monolithic-p9a",
   "base_commit": "8fa80ba7ce3fd7ce2483f2ec098e66d410bc434e",
@@ -24,12 +24,12 @@
   "runtime_environment": {
     "venv": "shared symlink to ../Monolithic-refactor/.venv; use uv run --no-sync; do not uv sync this shared environment",
     "assets": "read-only reuse of ../Monolithic-refactor/asset/monolithic/data through relative symlink",
-    "solver_runtime_tests": "PR01 and PR02 affected CPU/CUDA components, small E2E and FP64/FP32 quick PASS; PR02 CPU 6 capability skips; stage suite/stage NOT_RUN; P9a-OBS-01 retained as an unreproduced observation",
+    "solver_runtime_tests": "PR01/PR02/PR03 affected CPU/CUDA components, small E2E and FP64/FP32 quick PASS; capability skips documented per PR; stage suite/stage NOT_RUN; P9a-OBS-01 remains open and was not reproduced in PR03.",
     "performance": "Three alternating paired GPU samples recorded; structural contract PASS; P9a-PERF-01 and stage performance qualification OPEN",
     "superdex_runtime": "NOT_RUN"
   },
   "planning_snapshot_workspace_index_sha256": "a61a092cc6dbc9e34ac17cd2a9c06b7e1ba354e9dd70f53f53053c97412daad9",
-  "workspace_index_sha256": "e4cf8947f28aec43b45cceaa66fa60196cbbed756f0c0e078a05f1c0f3b39f59",
+  "workspace_index_sha256": "92d24a6b9ebb283b7c03b7c631919c8356aa76759ed793a5a57aabbe16233e11",
   "implementation": {
     "tested_commit": "2220971595d36ea7bd5ffa52d219a340f7d83ef9",
     "solver_tree_sha256": "dda3dde1962db7ed10cdae6bbaf7a4d93af843dacb9ae6d28c08369574bf18d2",
@@ -87,6 +87,48 @@
     ],
     "observation": "One initial CUDA FP32 graph rigid checkpoint bitwise mismatch; reconstructed baseline/current, isolated E2E and full repeats did not reproduce it. Test stream teardown fixed; causal attribution unproven. Original batch remains FAIL.",
     "observation_sha256": "1d94b3fd3177afec92f073c46637d4694b7030127e1798e90405d49846cce5fe",
+    "completion_commit_scope": "Planning documentation only; runtime evidence binds tested_commit."
+  },
+  "pr03_completion": {
+    "base_commit": "30c4964592205c90b045b5dfe0d958c6ac132132",
+    "implementation_commit": "bbfd16ca36c014be141548d7475b3add96ddec5e",
+    "tested_commit": "afe86b7e433a2b32f24b6ba8e89e13b286268164",
+    "tested_commit_scope": "Two obsolete test fields migrated to group_norm_limits and development note updated; solver identical to implementation commit.",
+    "solver_tree_sha256": "4683ea1332e58f4efb83ed7ba5bbe5961d02c4e404d567928cba5a212a86b135",
+    "results": "dev/monolithic/test/results/P9/P9a/PR-03/20261102-01",
+    "cpu": {
+      "run": 54,
+      "fail": 0,
+      "error": 0,
+      "skip_records": 3,
+      "skip_scope": "Two CUDA subtests and one CUDA-only mesh texture method; no claim of three wholly skipped methods."
+    },
+    "cuda": {
+      "run": 36,
+      "pass": 36,
+      "skip": 0,
+      "fail": 0,
+      "error": 0
+    },
+    "manual_precision": {
+      "run": 2,
+      "pass": 2,
+      "skip": 0,
+      "scope": "Methods internally run both CPU and CUDA; separate unfiltered process."
+    },
+    "composed_e2e": "CPU 6 and CUDA 12 combinations of 64 steps, strict checkpoint continuation and rollback assertions PASS.",
+    "quick_results": "dev/monolithic/test/results/P9/P9a/PR-03/quick-afe86b7e",
+    "quick_verdict": "CLEAN",
+    "quick_pass_items": 60,
+    "quick_result_sha256": "05944b455906a70ebc39b80ad15e1a081f03f5b40b82791995642f1825f4ecd9",
+    "paired_summary_sha256": "bf27ffc82f8abe72868bae0e4cd9ce92d04f8ffbc4d9c584b65440e73cec832e",
+    "cost_comparison_sha256": "3e5893b4b276b95ccb3c438dab10747c35778ada1779ca03f3a925fff831e545",
+    "cost_scope": "Three serial alternating pairs, eight tiny FP32/FP64 cases, 15 timed samples per case/revision. Input/config/step work identical. Single read per assessment and posterior. q+x/trees/rigid medians lower in each pair; materials variable, some FP32 bytes higher. Not full robot or stage qualification.",
+    "summary_storage_scope": "Actual affected buffer bytes measured; extra storage (N+C+7G)*sizeof(native)+64*max(1,G,P), excludes unaffected buffers and graph/allocator overhead.",
+    "open_items": [
+      "P9a-PERF-01",
+      "P9a-OBS-01"
+    ],
     "completion_commit_scope": "Planning documentation only; runtime evidence binds tested_commit."
   }
 }

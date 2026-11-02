@@ -1,6 +1,6 @@
 # P9a PRD：统一非线性问题接口与主机开销治理
 
-2026-11-02。状态：**IN_PROGRESS / PR-01、PR-02 COMPLETE**。统一接口及固定绑定 PCG 复用/失败生命周期合同已通过验收；性能退化 `P9a-PERF-01` 保持 OPEN，另保留未复现观察项 `P9a-OBS-01`。证据见 [PR-01 第 7 节](PR-01.md#7-最终验收与剩余性能项) 与 [PR-02](PR-02.md)。阶段尚未完成。
+2026-11-02。状态：**IN_PROGRESS / PR-01、PR-02、PR-03 COMPLETE**。统一接口、固定绑定 PCG 复用/失败生命周期与摘要融合合同已通过验收；性能退化 `P9a-PERF-01` 保持 OPEN，另保留未复现观察项 `P9a-OBS-01`。证据见 [PR-01 第 7 节](PR-01.md#7-最终验收与剩余性能项)、[PR-02](PR-02.md) 与 [PR-03](PR-03.md)。阶段尚未完成。
 
 ## 1. 身份与范围
 
@@ -39,7 +39,7 @@
 | R1 | replay launch 抛异常后 `_in_flight` 保持 true，下一次使用被阻塞 | `pcg_production.py:745` | PR-02；失败注入、重入拒绝、清理与后续合法使用测试 |
 | C1 | 多个 graph 共享 scratch，仅串行使用安全 | `iteration_device.py`；`pcg_production.py:188` | 全阶段保持单 stream、非重入合同；这是约束，不宣称当前已有并发错误 |
 
-PR-02 后的状态：
+PR-03 后的状态：
 
 | 条目 | 当前处置 |
 | --- | --- |
@@ -47,9 +47,10 @@ PR-02 后的状态：
 | M2、M3、M4 | DEVICE_FIXED；原向量回读/host 运算已移除；按 PR-04 审查剩余批处理成本，不能为凑 PR 重做已完成逻辑 |
 | M5 | PARTIAL；迭代内完整 residual 回读已移除，最终 Stats/序列化仍 OPEN |
 | H2、R1 | FIXED；固定存储内容变化复用 plan/graph，保留绑定失效与 standalone 校验；失败排空/失效/恢复机制、CPU/CUDA E2E 和两精度 quick 通过，8 组稳态布局回读为 0；见 [PR-02](PR-02.md) |
-| M1、L1、L2、L3 | OPEN；保留原计划顺序 |
+| M1 | FIXED；assessment 5→1、posterior 4/6→1 次读取，数学与依赖边界通过独立公式/CPU/CUDA/E2E/quick 验证；三组成对成本、FP32 字节与存储代价见 [PR-03](PR-03.md) |
+| L1、L2、L3 | OPEN；保留原计划顺序 |
 | C1 | 持续约束；保留单 stream、非重入合同 |
-| P9a-PERF-01 | OPEN；小型 q+x/rigid-only 及 Franka/Sharpa FP32 冻结窗口退化；新增 candidate alpha 图缓存反复淘汰证据。见 [机器人对照](PR-01-robot-performance.md)，PR-03/06 处理，整体性能尚未 PASS |
+| P9a-PERF-01 | OPEN；小型 q+x/rigid-only 及 Franka/Sharpa FP32 冻结窗口退化；新增 candidate alpha 图缓存反复淘汰证据。见 [机器人对照](PR-01-robot-performance.md)，PR-03 的增量小场景收益已记录，PR-06 继续处理，整体性能尚未 PASS |
 | P9a-OBS-01 | OPEN / 未复现观察；最初 PR-02 CUDA 批次一次 rigid FP32 checkpoint 逐位差异，随后小例与完整严格复跑通过。测试清理已修复，因果未证实，PR-07 回看；原 FAIL 不覆盖、不改门槛，见 [诊断](PR-02.md#5-一次未复现的-checkpoint-观察) |
 
 审查结论的限定：原“约 20 次/轮、5 次/trial”“host 比 kernel 更贵”未经 profiling；历史 11 solves/2 graph_rebuilt 不记录重建原因且可能含首次捕获；“无 O(n²)”不适用于每树 dense block 或全量配对元数据；有界缓存不等于已证明无泄漏。`_steps` 首次分配后复用，`_variational` 每步重建。上述表述纠正不另造求解器 bug。
@@ -164,4 +165,4 @@ uv run --no-sync python -B -m scripts.monolithic_reference.run_cloth_benchmark p
 
 已有 P9-P1（池容量与全配对元数据）、P9-P2（完整接触执行规模/图缓存）、浮动基座、多 world 外层设备循环、world 压缩、P5-I2/P6b-P1 性能资格继续保留。P9a 的 L3 只覆盖实际命中的局部 graph 成本，不自动关闭整个 P9-P2。它们见 workspace `dev/monolithic/P9/performance-plan.md` 与 `dev/monolithic/open_items.md`。
 
-P9a 收尾要求问题表逐项给出 FIXED/验证证据或明确未完成项；未完成 PRD 必需项不得标记阶段完成。PR-01 的最终 runtime、quick、结构审计和成对性能结果，以及 PR-02 的组件/E2E、quick、成本对照与观察项已记录；阶段 suite/stage 为 **NOT_RUN**，整体性能资格为 **OPEN**（含 `P9a-PERF-01`），`P9a-OBS-01` 留待阶段回看。
+P9a 收尾要求问题表逐项给出 FIXED/验证证据或明确未完成项；未完成 PRD 必需项不得标记阶段完成。PR-01 的最终 runtime、quick、结构审计和成对性能结果，PR-02 的组件/E2E、quick、成本对照与观察项，以及 PR-03 的 packet 机制、三组成对测量与两精度 quick 已记录；阶段 suite/stage 为 **NOT_RUN**，整体性能资格为 **OPEN**（含 `P9a-PERF-01`），`P9a-OBS-01` 留待阶段回看。

@@ -1,6 +1,6 @@
 # P9a 实施计划
 
-2026-11-02。状态：IN_PROGRESS（PR-01/02 COMPLETE；下一步 PR-03；性能留项 OPEN）。需求与范围以 [PRD](PRD.md) 为准。实现顺序固定为 **PR-01 H1 → PR-02 H2/R1 → PR-03 M1 → PR-04 M2/M3/M4 批处理收尾 → PR-05 M5 → PR-06 L1/L2/L3 → PR-07 阶段验收**。
+2026-11-02。状态：IN_PROGRESS（PR-01/02/03 COMPLETE；下一步 PR-04；性能留项 OPEN）。需求与范围以 [PRD](PRD.md) 为准。实现顺序固定为 **PR-01 H1 → PR-02 H2/R1 → PR-03 M1 → PR-04 M2/M3/M4 批处理收尾 → PR-05 M5 → PR-06 L1/L2/L3 → PR-07 阶段验收**。
 
 PR-01 可以按内部里程碑分多个可审查提交，但它仍是一个完整交付 PR。中间保留旧路径仅用于迁移对照；最终必须删掉。不能以“材料后续再接”关闭 H1。
 
@@ -10,7 +10,7 @@ PR-01 可以按内部里程碑分多个可审查提交，但它仍是一个完�
 | --- | --- | --- | --- |
 | PR-01 | actor-owned 统一非线性接口、分段归约、全类型设备 phase、删除旧双路径 | 起点 | COMPLETE；[最终验收](PR-01.md#7-最终验收与剩余性能项)：E2E/quick/回读通过；性能退化另列 OPEN |
 | PR-02 | 固定绑定 PCG 复用；异常 replay 生命周期 | PR-01 的 binding/generation 合同 | COMPLETE；[验收](PR-02.md)：CPU/CUDA 机制与 E2E、两精度 quick 通过，8 组稳态布局回读为 0；保留未复现观察项 |
-| PR-03 | 多向量后验与收敛结果 packet 融合 | PR-01 通用组归约，PR-02 稳定 plan | 有/无 regularization 的结果一致；回读数量下降 |
+| PR-03 | 多向量后验与收敛结果 packet 融合 | PR-01 通用组归约，PR-02 稳定 plan | COMPLETE；[验收](PR-03.md)：两类摘要各一次读取，独立公式/CPU/CUDA/E2E/quick 通过，三组成对成本与额外存储已记录 |
 | PR-04 | cable gauge、material reaction、control 校验的类型批处理收尾 | PR-01 已完成设备迁移 | M2/M3/M4 各自证据；同类数量增加时无逐 actor host 调度/回读 |
 | PR-05 | Stats 完整向量只作最终快照，序列化按需 | PR-01 的发布边界 | 旧 Stats 不被下步覆盖，失败诊断和 JSON 兼容，导出成本实测 |
 | PR-06 | binding 元数据复用、dt 数值化、有界 graph 档位策略 | PR-01/02；M 项测量 | L1/L2/L3 实际触发证据、失效验证、总耗时/内存对照 |
@@ -33,6 +33,8 @@ M2/M3/M4、L4/L5 中阻止统一设备契约的部分已经属于 PR-01，后续
 验证：`test_monolithic_linear_graph.py`、`test_monolithic_linear_fixed_storage.py`、`test_monolithic_linear_internal_storage.py`、`test_monolithic_linear_production.py` 的受影响用例，CPU/CUDA 与精度变体；固定物理输入前后 D2H/重捕获/耗时对照，再执行本 PR 通用收尾。
 
 ## 3. M1：PR-03
+
+已在 `afe86b7e433a2b32f24b6ba8e89e13b286268164` 完成验收，详见 [PR-03](PR-03.md)。assessment 回读 5→1、posterior 4/6→1；三组成对小场景中 q+x/rigid 两精度 median 均降低，材料波动、部分 FP32 字节增加照实保留。整体 `P9a-PERF-01` 仍 OPEN。以下保留实施要求。
 
 同时复测 `P9a-PERF-01` 的 q+x/rigid-only：使用 PR-01 的相同输入与工作量对照，检查新增摘要读取是否实际解释耗时，不能仅以读取数量下降关闭性能退化。
 
