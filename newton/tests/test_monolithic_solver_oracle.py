@@ -73,7 +73,7 @@ def test_graph_after_early_convergence(test, device):
         results.append(np.r_[state.joint_q.numpy(), state.particle_q.numpy().ravel()])
         if graph:
             test.assertTrue(run._contact._evaluated)
-            test.assertGreater(run._graphs.summary()["segments"]["coupled_objective_owners"]["replays"], 3)
+            test.assertGreater(run._graphs.summary()["segments"]["problem_owners"]["replays"], 3)
     np.testing.assert_allclose(results[0], results[1], atol=1e-14, rtol=0)
 
 

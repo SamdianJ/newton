@@ -125,15 +125,15 @@ def test_objective_contact_rebinding(test, device):
     for device_result in (False, True):
         energy, residual, absolute = solver._evaluate(solver._accepted, 0.001, device_result=device_result)
         expected = residual.numpy().copy() if device_result else residual.copy()
-        owners = solver._graphs.captures["coupled_objective_owners"]
-        results = solver._graphs.captures["coupled_objective_result"]
+        owners = solver._graphs.captures["problem_owners"]
+        results = solver._graphs.captures["problem_summary"]
         solver._contact.pool.residual.result = wp.clone(solver._contact.pool.residual.result)
         got, residual, total = solver._evaluate(solver._accepted, 0.001, device_result=device_result)
         np.testing.assert_array_equal(residual.numpy() if device_result else residual, expected)
         test.assertEqual(got, energy)
         test.assertEqual(total, absolute)
-        test.assertEqual(solver._graphs.captures["coupled_objective_owners"], owners)
-        test.assertEqual(solver._graphs.captures["coupled_objective_result"], results + 1)
+        test.assertEqual(solver._graphs.captures["problem_owners"], owners)
+        test.assertEqual(solver._graphs.captures["problem_summary"], results + 1)
 
 
 def test_binding_and_stream_changes(test, device):

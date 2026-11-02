@@ -154,18 +154,18 @@ def test_graph_rebinding(test, device):
     test.assertTrue(run.last_stats.converged)
     expected = run._evaluate(run._accepted, 0.001)[1]
     for name in ("_residual_terms", "_residual_offsets", "_residual_slots"):
-        count = run._graphs.captures["coupled_objective_owners"]
+        count = run._graphs.captures["problem_owners"]
         setattr(run._tet, name, wp.clone(getattr(run._tet, name)))
         np.testing.assert_array_equal(run._evaluate(run._accepted, 0.001)[1], expected)
-        test.assertEqual(run._graphs.captures["coupled_objective_owners"], count + 1)
+        test.assertEqual(run._graphs.captures["problem_owners"], count + 1)
     x = run._accepted.particle_q.numpy()
     dynamic = run.model.particle_inv_mass.numpy() > 0
     x[dynamic, 1] += 1e-6
     run._accepted.particle_q.assign(x)
-    count = run._graphs.captures["coupled_objective_owners"]
+    count = run._graphs.captures["problem_owners"]
     changed = run._evaluate(run._accepted, 0.001)[1]
     test.assertFalse(np.array_equal(changed, expected))
-    test.assertEqual(run._graphs.captures["coupled_objective_owners"], count)
+    test.assertEqual(run._graphs.captures["problem_owners"], count)
     run._graphs.enabled = False
     np.testing.assert_array_equal(run._evaluate(run._accepted, 0.001)[1], changed)
 

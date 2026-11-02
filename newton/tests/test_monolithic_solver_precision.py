@@ -97,7 +97,7 @@ class TestSolverPrecision(unittest.TestCase):
                                 self.assertEqual(run._linear.scale.numpy().dtype, native)
                     if graph:
                         for run in runs:
-                            segment = run._graphs.summary()["segments"]["coupled_objective_owners"]
+                            segment = run._graphs.summary()["segments"]["problem_owners"]
                             self.assertGreater(segment["captures"], 0)
                             self.assertGreater(segment["replays"], segment["captures"])
 

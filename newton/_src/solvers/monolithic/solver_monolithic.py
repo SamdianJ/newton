@@ -19,6 +19,7 @@ from . import convergence, iteration_device, state_checks
 from . import coupled_kernels as kernels
 from .actors import ActorTable, articulation_view
 from .articulation import ArticulationObjective, _TreeKinematics
+from .cable_gauge import CableGauges
 from .cable_operator import CableOperator
 from .cable_system import CableBlock
 from .cloth_system import ClothBlock
@@ -471,8 +472,6 @@ class SolverMonolithic(SolverBase):
             *self._rigid.external_steps,
         )
         self._cable_torque = wp.zeros_like(self._cable_target_theta)
-        self._temporary_gauges = []
-        self._assembly_gauges = ()
         self._out_backup = None
         self._dt = None
         self._producers = build_producers(self)
@@ -504,6 +503,7 @@ class SolverMonolithic(SolverBase):
             and self._layout.x_scalar_offset == self._kinematics.count
         )
         iteration_device.initialize(self)
+        self._gauges = CableGauges(self)
         self._problem = _MonolithicProblem(self)
 
     def create_control(self):
@@ -920,37 +920,7 @@ class SolverMonolithic(SolverBase):
         return energy, residual if device_result else residual.numpy().copy(), absolute
 
     def _settle_cable_gauges(self):
-        """Measure free cable angles and select temporary gauges for common-angle null modes."""
-        reference_mode = self._contact_spatial and self._contact._reference_mode
-        for cable in self._cables:
-            raw = cable.raw.numpy()[3 * cable.ids.size :]
-            self._cable_raw_theta_norms[f"cable_{cable.actor.source_index}_theta"] = float(
-                np.linalg.norm(raw[~cable.reference["fixed_theta"]])
-            )
-            if reference_mode or cable.reference["fixed_theta"].any():
-                continue
-            jacobian = cable.objective.jacobian.numpy()
-            null = np.array_equal(jacobian[:, :, 9], -jacobian[:, :, 10])
-            if null:
-                rows = cable.rows_host[3 * cable.ids.size :]
-                records = self._contact.pool.records
-                count = int(records.factor_count.numpy()[0])
-                offsets = records.factor_offsets.numpy()
-                columns = records.factor_columns.numpy()
-                values = records.factor_values.numpy()
-                weights = records.factor_weights.numpy()
-                for factor in range(count):
-                    first, end = offsets[factor : factor + 2]
-                    if weights[factor] > 0 and values[first:end][np.isin(columns[first:end], rows)].sum() != 0:
-                        null = False
-                        break
-            if bool(cable.reference["gauge"]) or null:
-                if abs(raw.sum()) > self._config.convergence.absolute[convergence.Unit.TORQUE]:
-                    raise _StepFailure(
-                        self.Status.LINEAR_NON_POSITIVE_CURVATURE, "Cable common-angle mode has incompatible net torque"
-                    )
-            if null and not bool(cable.reference["gauge"]):
-                self._temporary_gauges.append(cable)
+        self._gauges.qualify(self)
 
     def _initial_reference(self, dt, *, device_result=False):
         if self._contact_spatial:
@@ -1115,14 +1085,7 @@ class SolverMonolithic(SolverBase):
         else:
             status = linear.build_scaling(self._diagonal, epsilon_d=epsilon_d, generation=self._generation)
         self._require_linear(status)
-        # Cable common-angle null modes are pinned in the cable preconditioner.
-        self._assembly_gauges = tuple(self._temporary_gauges)
-        if linear._cable_preconditioner is not None:
-            pins = np.full(len(self._cables), -1, dtype=np.int32)
-            for i, cable in enumerate(self._cables):
-                if cable in self._temporary_gauges:
-                    pins[i] = cable.rows_host[3 * cable.ids.size]
-            linear._cable_preconditioner.gauge_rows.assign(pins)
+        self._gauges.commit(linear._cable_preconditioner)
         self._metrics["matrix_assembly_count"] += 1
         return None, linear.scale if device_result else linear.scale.numpy().astype(self._numpy_dtype)
 
@@ -1172,14 +1135,7 @@ class SolverMonolithic(SolverBase):
         return self._post_error if device_result else self._post_error.numpy().copy()
 
     def _project_gauges(self):
-        """Remove each pinned cable's common angle, a null mode of its operator, from the direction."""
-        if not self._assembly_gauges:
-            return
-        delta = self._delta.numpy()
-        for cable in self._assembly_gauges:
-            rows = cable.rows_host[3 * cable.ids.size :]
-            delta[rows] -= delta[rows].mean(dtype=np.float64)
-        self._delta.assign(delta)
+        self._gauges.project(self)
 
     def _validate_final(self, dt, status):
         device = self._device_iteration

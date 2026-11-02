@@ -247,7 +247,7 @@ def test_modes_and_sparse_posterior(test, device):
             actual, scale * (matrix @ direction.astype(float) + residual), atol=2e-12, rtol=2e-14
         )
         if graph:
-            test.assertGreater(run._graphs.summary()["segments"]["coupled_objective_owners"]["captures"], 1)
+            test.assertGreater(run._graphs.summary()["segments"]["problem_owners"]["captures"], 1)
             test.assertGreater(run._graphs.summary()["segments"]["coupled_posterior"]["replays"], 0)
         # Frictional C-IE energy is heuristic; no trial may claim an Armijo guarantee.
         test.assertTrue(all(row.get("Armijo") is None for row in run.last_stats.variational["trials"]))

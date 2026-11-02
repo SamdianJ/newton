@@ -49,7 +49,6 @@ class _MonolithicProblem:
         names = [producer.name for producer in self.producers]
         if len(set(names)) != len(names):
             raise ValueError("Duplicate nonlinear contribution")
-        self.energies, self.checks, self.finite_values = [], [], [solver._complete_r, solver._complete_a]
         for producer in self.producers:
             if not producer.energies:
                 raise ValueError(f"Missing energy contribution: {producer.name}")
@@ -65,16 +64,15 @@ class _MonolithicProblem:
             ):
                 if not callable(getattr(producer, name, None)):
                     raise ValueError(f"Missing nonlinear phase {name}: {producer.name}")
-            for energy, absolute in producer.energies:
-                if energy.ndim != 1 or energy.dtype != solver._dtype or energy.device != solver.model.device:
-                    raise ValueError(f"Invalid energy binding: {producer.name}")
-                if absolute is not None and (
-                    absolute.shape != energy.shape or absolute.dtype != energy.dtype or absolute.device != energy.device
-                ):
-                    raise ValueError(f"Invalid absolute energy binding: {producer.name}")
-                self.energies.append((energy, absolute))
-            self.checks.extend(producer.checks)
-            self.finite_values.extend(producer.finite_values)
+        self._energy_bindings = tuple(binding for producer in self.producers for binding in producer.energies)
+        self._check_bindings = tuple(binding for producer in self.producers for binding in producer.checks)
+        self._finite_bindings = (
+            (solver, "_complete_r"),
+            (solver, "_complete_a"),
+            *(binding for producer in self.producers for binding in producer.finite_values),
+        )
+        self._bind_evaluation()
+        self._energy_shapes = tuple(energy.shape for energy, _ in self.energies)
         self.owners = tuple(p for p in self.producers if not p.interaction)
         self.interactions = tuple(p for p in self.producers if p.interaction)
         count = sum(energy.size for energy, _ in self.energies)
@@ -84,6 +82,28 @@ class _MonolithicProblem:
         )
         self.flags = wp.zeros(1 + len(self.checks), dtype=int, device=solver.model.device)
         self.domain_flags = wp.zeros(1, dtype=int, device=solver.model.device)
+
+    def _bind_evaluation(self):
+        """Resolve registered storage; numerical generations may reuse or replace it."""
+        solver = self.solver
+        self.energies = []
+        for owner, name, absolute_name in self._energy_bindings:
+            energy = state_checks.scalar_view(getattr(owner, name))
+            absolute = None if absolute_name is None else state_checks.scalar_view(getattr(owner, absolute_name))
+            if energy.dtype != solver._dtype or energy.device != solver.model.device:
+                raise ValueError(f"Invalid energy binding: {name}")
+            if absolute is not None and (
+                absolute.shape != energy.shape or absolute.dtype != energy.dtype or absolute.device != energy.device
+            ):
+                raise ValueError(f"Invalid absolute energy binding: {name}")
+            self.energies.append((energy, absolute))
+        shapes = tuple(energy.shape for energy, _ in self.energies)
+        if shapes != getattr(self, "_energy_shapes", shapes):
+            raise ValueError("Energy replacement changed the contribution layout")
+        self.checks = [
+            (getattr(owner, name), statuses, message) for owner, name, statuses, message in self._check_bindings
+        ]
+        self.finite_values = [state_checks.scalar_view(getattr(owner, name)) for owner, name in self._finite_bindings]
 
     def difference(self, accepted, trial):
         """Write actual tangent displacement through each owner's state geometry."""
@@ -141,6 +161,7 @@ class _MonolithicProblem:
 
     def evaluate(self, state, dt, *, build_tangent):
         solver = self.solver
+        self._bind_evaluation()
         buffers = self._buffers(state)
 
         def owners():
@@ -189,8 +210,5 @@ class _MonolithicProblem:
             raise _StepFailure(solver.Status.NONFINITE, "Nonfinite coupled E/r")
         solver._metrics["min_det_f"] = float(solver._tet.min_det_f.numpy()[0])
         solver._current_state = state
-        # Gauge qualification moves to device with the cable operator migration.
-        solver._temporary_gauges = []
-        solver._cable_raw_theta_norms = {}
         solver._settle_cable_gauges()
         return energy, solver._complete_r, absolute

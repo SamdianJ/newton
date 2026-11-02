@@ -327,7 +327,7 @@ class ArticulationProducer(_Producer):
     def __init__(self, solver):
         super().__init__("articulation", solver._layout.articulation_indices())
         obj = solver._objective
-        self.energies = ((obj.link_energy, None), (obj.joint_energy, None))
+        self.energies = ((obj, "link_energy", None), (obj, "joint_energy", None))
         self.owners = (obj, solver._kinematics)
 
     def begin_step(self, solver, state_in):
@@ -495,7 +495,7 @@ class RigidProducer(_Producer):
 
     def __init__(self, solver):
         super().__init__("rigid", solver._rigid.rows_numpy.ravel())
-        self.energies = ((solver._rigid.energy, None),)
+        self.energies = ((solver._rigid, "energy", None),)
         self.owners = (solver._rigid,)
 
     def begin_step(self, solver, state_in):
@@ -567,8 +567,8 @@ class TetProducer(_Producer):
 
     def __init__(self, solver):
         super().__init__("tet", solver._layout.indices("tet"))
-        self.energies = ((solver._tet.parts, None),)
-        self.checks = ((solver._tet.flags, {1: solver.Status.TET_INVERSION}, "Invalid tet candidate"),)
+        self.energies = ((solver._tet, "parts", None),)
+        self.checks = ((solver._tet, "flags", {1: solver.Status.TET_INVERSION}, "Invalid tet candidate"),)
         self.owners = (solver._tet, solver._tet.physics)
 
     def begin_step(self, solver, state_in):
@@ -693,8 +693,8 @@ class _MaterialProducer(_Producer):
         source = block.actor.source_index
         super().__init__(f"{kind}_{source}", solver._layout.indices(kind, source))
         self.block = block
-        self.checks = ((block.objective.flags, {}, f"Invalid {kind} geometry or projection"),)
-        self.finite_values = (block.raw,)
+        self.checks = ((block.objective, "flags", {}, f"Invalid {kind} geometry or projection"),)
+        self.finite_values = ((block, "raw"),)
         self.owners = (block, block.objective)
 
     def assemble(self, solver, assembly, dt):
@@ -747,7 +747,7 @@ class ClothProducer(_MaterialProducer):
 
     def __init__(self, solver, block):
         super().__init__(solver, "cloth", block)
-        self.energies = ((scalar_view(block.objective.energy), None), (block.external_energy, None))
+        self.energies = ((block.objective, "energy", None), (block, "external_energy", None))
 
     def begin_step(self, solver, state_in):
         cloth, original, accepted = self.block, solver._original, solver._accepted
@@ -777,9 +777,9 @@ class CableProducer(_MaterialProducer):
         super().__init__(solver, "cable", block)
         obj = block.objective
         self.energies = (
-            (obj.stretch_energy, None),
-            (scalar_view(obj.bend_twist_energy), None),
-            (block.external_energy, None),
+            (obj, "stretch_energy", None),
+            (obj, "bend_twist_energy", None),
+            (block, "external_energy", None),
         )
 
     def begin_step(self, solver, state_in):
@@ -846,11 +846,11 @@ class ContactProducer(_Producer):
     def __init__(self, solver):
         super().__init__("contact", np.empty(0, dtype=np.int32))
         contact = solver._contact
-        self.energies = ((contact.energy.flatten(), contact.absolute_energy),)
-        self.checks = ((contact.flags, {}, "Invalid contact geometry"),)
+        self.energies = ((contact, "energy", "absolute_energy"),)
+        self.checks = ((contact, "flags", {}, "Invalid contact geometry"),)
         surface = contact._batch.material_surface
         if surface is not None:
-            self.checks += ((surface.flags, {}, "Invalid cable contact frame"),)
+            self.checks += ((surface, "flags", {}, "Invalid cable contact frame"),)
 
     def begin_step(self, solver, state_in):
         contact, k = solver._contact, solver._kinematics
