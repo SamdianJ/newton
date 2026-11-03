@@ -29,7 +29,7 @@
     "superdex_runtime": "NOT_RUN"
   },
   "planning_snapshot_workspace_index_sha256": "a61a092cc6dbc9e34ac17cd2a9c06b7e1ba354e9dd70f53f53053c97412daad9",
-  "workspace_index_sha256": "f3f22e76dcf4d04e5ab633180af331039a4e2f4c51fc7de3a0c95d90173974d9",
+  "workspace_index_sha256": "f8fd91eae2d78982725802cf796cbae9c4392dfc3507712685f38c52528fdbff",
   "implementation": {
     "tested_commit": "2220971595d36ea7bd5ffa52d219a340f7d83ef9",
     "solver_tree_sha256": "dda3dde1962db7ed10cdae6bbaf7a4d93af843dacb9ae6d28c08369574bf18d2",
@@ -305,7 +305,7 @@
     }
   },
   "pr07_acceptance": {
-    "status": "IN_PROGRESS",
+    "status": "WAITING_REMOTE",
     "results": "dev/monolithic/test/results/P9/P9a/PR-07/20261103-01",
     "initial_candidate": "8a83c3abcd2197c8aae6dc347ac44406d6816179",
     "superseded_runs": {
@@ -323,12 +323,16 @@
       "P9a-OBS-02 attribution"
     ],
     "evidence_sha256": {
-      "preflight.json": "50c7fe23e89ac22201d75aeacb3dbd6f41d27720da6b2cfd58952c73643acd34",
+      "preflight-final.json": "f70c4df3df46919c32225c1dadf45f5dd8cbe57fa9438f0b0d39070400e475a9",
       "historical-evidence-audit.json": "ffed21d54ab267b339ef1ea26c43efd38fd3dc041462ce131407e8480cd8a128",
-      "reviews.json": "0cc29e8c1fe64323e01300989fe48c08df5f677274248d4760ebcae272b4dcd2",
+      "reviews.json": "66476bf5b3395c6694fafa8f5e4d540bace1a566a60a739a5c4fa500afb05419",
       "red-regression.log": "86aae7ddb013f3abe546afa331e107127c42dbad66ec4a46038769a722a8961b",
       "red-strided-energy.log": "ab1ba33373c5c18a677d5c8e8f483b8c172521bd1a6edbc7f84b8cd5b11950a9",
-      "cancelled-status.json": "91b621550222f81bd5d473dc31971a2a5c92a23ffbc1395be9ed28a1518c27e5"
+      "cancelled-status.json": "91b621550222f81bd5d473dc31971a2a5c92a23ffbc1395be9ed28a1518c27e5",
+      "validation-summary.json": "73d7b94d91d78d0026e01ab851e61e7e4fe269d7d84bd9b0d848057a7bc5facf",
+      "submit-suite-final.log": "8d80064522bb48fce094e0754cdc8da3e9defe12caed9094eac45918d0049af7",
+      "submit-stage-final.log": "5305cd9af7da23b196d3f27a8a02b88238dd9fa09543aed629d577353b016b56",
+      "remote-assets-precheck.json": "24e21f8130f23e46e58bb2acf142221d23880e59a862ba4d7ecb8c8034e1d1fe"
     },
     "repair_component_checks": {
       "cpu_pass": 2,
@@ -337,6 +341,56 @@
       "error": 0,
       "skip": 0,
       "scope": "precommit repair content; final clean SHA validation to follow"
-    }
+    },
+    "tested_commit": "84076a4fde67119c0e5dbfa5486de1731fe4018b",
+    "repair_issue_status": "FIXED",
+    "cpu": {
+      "run": 2,
+      "pass": 2,
+      "fail": 0,
+      "error": 0,
+      "skip": 0,
+      "seconds": 1.067,
+      "log": "final-cpu.log"
+    },
+    "cuda": {
+      "run": 2,
+      "pass": 2,
+      "fail": 0,
+      "error": 0,
+      "skip": 0,
+      "seconds": 1.6,
+      "log": "final-cuda.log"
+    },
+    "quick": {
+      "state": "COMPLETE",
+      "verdict": "CLEAN",
+      "counts": {
+        "gate:PASS": 60
+      },
+      "result": "dev/monolithic/test/results/P9/P9a/PR-07/quick-84076a4f/result.json",
+      "sha256": "093386930b2a091be88e262e58d4f3e774c073f777785ef72f45f730b90b97b6"
+    },
+    "suite": {
+      "run_id": 41615619651,
+      "state": "DISPATCHED/RUNNING",
+      "verdict": null,
+      "planned_cpu": 885,
+      "planned_cuda": 512,
+      "planned_checks": 83
+    },
+    "stage": {
+      "run_id": 41615727514,
+      "state": "DISPATCHED/pending",
+      "verdict": null,
+      "jobs": 47,
+      "precisions": [
+        "fp64",
+        "fp32"
+      ],
+      "skip": [],
+      "baseline": null
+    },
+    "record_commit_scope": "Documentation only; runtime remains bound to tested_commit; full acceptance not complete"
   }
 }
