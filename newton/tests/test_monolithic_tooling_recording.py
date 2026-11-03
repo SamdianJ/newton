@@ -8,11 +8,85 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import numpy as np
 
+from newton.examples.softbody.monolithic_recording import serial
+from newton.solvers.experimental.monolithic import SolverMonolithic
 from scripts.monolithic_reference import check_recording as recording
+from scripts.monolithic_reference import run_cloth_benchmark, run_material_acceptance
+
+
+class TestFailureStats(unittest.TestCase):
+    def test_full_vector_export(self):
+        """Retain every failed candidate value when the text repr truncates a large array."""
+        values = np.linspace(-0.123456789, 0.987654321, 2048)
+        values[17] = np.nan
+        values.setflags(write=False)
+        stats = SolverMonolithic.Stats(
+            SolverMonolithic.Status.NONFINITE,
+            rolled_back=True,
+            step_generation=7,
+            variational={"residual": values, "cloth_reactions": (values,), "cable_reactions": ()},
+        )
+
+        def fail():
+            raise RuntimeError("injected failed step")
+
+        run = SimpleNamespace(
+            last_stats=stats, precision=SolverMonolithic.Precision.FP64, save_checkpoint=lambda *args: None
+        )
+        case = SimpleNamespace(
+            solver=run,
+            state=SimpleNamespace(particle_q=SimpleNamespace(numpy=lambda: np.zeros((0, 3)))),
+            step=fail,
+            steps=0,
+            total_steps=1,
+            common={"steps": 1, "checkpoint_step": 1},
+            recipe={"checkpoint_step": 1},
+            records=[],
+            rest=[],
+            peak_positions=[],
+            triangles=[],
+            positions=[],
+            angles=[],
+            coordinates=[],
+            restart=None,
+            natural_identity="fixture",
+            resume_position_error=None,
+            resume_theta_error=None,
+            metrics=lambda: {},
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            recipe = root / "recipe.json"
+            recipe.write_text("{}")
+            args = SimpleNamespace(
+                output=root,
+                recipe=recipe,
+                device="cpu",
+                pcg_mode="production",
+                use_cuda_graph=False,
+                precision="fp64",
+                max_steps=1,
+            )
+            source = {"source_hashes": {"fixture": "unit"}}
+            with (
+                patch.object(run_material_acceptance, "MaterialAcceptance", return_value=case),
+                patch.object(run_material_acceptance, "provenance", return_value=source),
+            ):
+                receipt = run_material_acceptance.run_case("material", args, source)
+            self.assertEqual(receipt["status"], "FAIL")
+            command = ["run_cloth_benchmark", "patch", "--output", str(root / "cloth")]
+            with patch("sys.argv", command), patch.object(run_cloth_benchmark, "ClothBenchmark", return_value=case):
+                with self.assertRaisesRegex(RuntimeError, "injected failed step"):
+                    run_cloth_benchmark.main()
+            for name in ("cloth", "material"):
+                with self.subTest(runner=name):
+                    self.assertTrue((root / name / "failure-stats.txt").is_file())
+                    self.assertEqual(json.loads((root / name / "failure-stats.json").read_text()), serial(stats))
 
 
 class TestContactFields(unittest.TestCase):

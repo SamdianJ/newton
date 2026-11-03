@@ -127,7 +127,7 @@ def test_device_iteration(test, device):
         with patch.object(run, "_iterate_articulation", iterate):
             run.step(state, state, run.model.control(), dt=0.001)
         test.assertTrue(run.last_stats.converged, run.last_stats)
-        test.assertIsInstance(run.last_stats.variational["residual"], list)
+        test.assertIsInstance(run.last_stats.variational["residual"], np.ndarray)
         test.assertEqual(len(run.last_stats.variational["residual"]), run._complete_r.size)
 
 

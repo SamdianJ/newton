@@ -62,6 +62,13 @@ from .tet_assembly import (
 from .tet_precision import TetObjective
 
 
+def _diagnostic_snapshot(array):
+    """Own a read-only host copy, including when CPU numpy() aliases solver storage."""
+    value = array.numpy().copy()
+    value.setflags(write=False)
+    return value
+
+
 class _AbsentTet:
     """Stand in for a scene without a tet: no rows or energy, and an undeformed det F."""
 
@@ -813,7 +820,7 @@ class SolverMonolithic(SolverBase):
                 self._restore(state_out)
                 self._variational.pop("actor_contact_pairs", None)
             if isinstance(self._variational.get("residual"), wp.array):
-                self._variational["residual"] = self._variational["residual"].numpy().tolist()
+                self._variational["residual"] = _diagnostic_snapshot(self._variational["residual"])
             self._variational["graphs"] = self._graphs.summary()
             if self._contact_pool:
                 self._variational["contact_graphs"] = {
@@ -1144,8 +1151,8 @@ class SolverMonolithic(SolverBase):
             array.zero_()
         self._problem.publish(state)
         if self._cloths or self._cables:
-            self._variational["cloth_reactions"] = tuple(c.raw.numpy().tolist() for c in self._cloths)
-            self._variational["cable_reactions"] = tuple(c.raw.numpy().tolist() for c in self._cables)
+            self._variational["cloth_reactions"] = tuple(_diagnostic_snapshot(c.raw) for c in self._cloths)
+            self._variational["cable_reactions"] = tuple(_diagnostic_snapshot(c.raw) for c in self._cables)
         for pair in self._variational.get("actor_contact_pairs", ()):
             pair["force_generation"] = self._step_generation
         self._force_status.zero_()

@@ -14,6 +14,7 @@ import numpy as np
 import warp as wp
 
 import newton
+from newton.examples.softbody.monolithic_recording import save
 
 from .cloth_benchmarks import ClothBenchmark
 from .numerical_gates import loaded_reference_modules
@@ -95,6 +96,7 @@ def main():
             if receipt["status"] == "FAIL":
                 case.solver.save_checkpoint(case.state, args.output / "failed-state.npz")
                 (args.output / "failure-stats.txt").write_text(str(case.solver.last_stats))
+                save(args.output / "failure-stats.json", case.solver.last_stats)
         path.write_text(json.dumps(receipt, indent=2) + "\n")
         print(json.dumps({k: v for k, v in receipt.items() if k != "sha256"}), flush=True)
 

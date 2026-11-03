@@ -130,6 +130,14 @@ class Stats:
 
     Linear residual ratios are measured by actual-operator post-checks;
     they remain NaN if the step does not invoke a linear solve.
+
+    Internal ``variational`` residual and material reaction vectors are independent,
+    read-only NumPy snapshots in solver precision. Exporters convert them to lists
+    on demand. Residual is the last reported iterate of ``step_generation`` (absent
+    before the first report); reactions are captured during candidate publication
+    (absent if publication was not reached). On rollback either can describe a
+    discarded candidate, not the returned state. Published and stopped steps
+    report the final candidate. Input rejection before iteration keeps prior Stats.
     """
 
     status: Status
