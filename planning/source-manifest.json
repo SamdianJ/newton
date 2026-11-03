@@ -1,8 +1,8 @@
 {
-  "date": "2026-11-02",
+  "date": "2026-11-03",
   "timezone": "Asia/Tokyo",
   "stage": "P9a",
-  "status": "PR01_PR02_PR03_COMPLETE_STAGE_IN_PROGRESS_PERFORMANCE_OPEN",
+  "status": "PR01_PR02_PR03_PR04_COMPLETE_STAGE_IN_PROGRESS_PERFORMANCE_OPEN",
   "branch": "SamiulJ/monolithic-p9a",
   "worktree": "worktrees/Monolithic-p9a",
   "base_commit": "8fa80ba7ce3fd7ce2483f2ec098e66d410bc434e",
@@ -24,12 +24,12 @@
   "runtime_environment": {
     "venv": "shared symlink to ../Monolithic-refactor/.venv; use uv run --no-sync; do not uv sync this shared environment",
     "assets": "read-only reuse of ../Monolithic-refactor/asset/monolithic/data through relative symlink",
-    "solver_runtime_tests": "PR01/PR02/PR03 affected CPU/CUDA components, small E2E and FP64/FP32 quick PASS; capability skips documented per PR; stage suite/stage NOT_RUN; P9a-OBS-01 remains open and was not reproduced in PR03.",
-    "performance": "Three alternating paired GPU samples recorded; structural contract PASS; P9a-PERF-01 and stage performance qualification OPEN",
+    "solver_runtime_tests": "PR01\u2013PR04 affected CPU/CUDA components, small E2E and FP64/FP32 quick PASS; capability skips and exact tested commits documented per PR. Stage suite/stage NOT_RUN; OBS01 remains open. OBS02 capture boundary mitigation has red/green and final regressions; dependency internal attribution remains open.",
+    "performance": "PR04: three serial alternating pairs across24 FP32/FP64 tiny cases; input/config/work identical. Material phase structural contract PASS, cable8 median -13.1%/-15.6%; FP64 trees +1.6% retained under PERF01. Overall stage/robot performance qualification remains OPEN.",
     "superdex_runtime": "NOT_RUN"
   },
   "planning_snapshot_workspace_index_sha256": "a61a092cc6dbc9e34ac17cd2a9c06b7e1ba354e9dd70f53f53053c97412daad9",
-  "workspace_index_sha256": "92d24a6b9ebb283b7c03b7c631919c8356aa76759ed793a5a57aabbe16233e11",
+  "workspace_index_sha256": "39d416426525a9da20130ec75c7b461223ce419c5f6a337c2c007b11c54d06be",
   "implementation": {
     "tested_commit": "2220971595d36ea7bd5ffa52d219a340f7d83ef9",
     "solver_tree_sha256": "dda3dde1962db7ed10cdae6bbaf7a4d93af843dacb9ae6d28c08369574bf18d2",
@@ -130,5 +130,56 @@
       "P9a-OBS-01"
     ],
     "completion_commit_scope": "Planning documentation only; runtime evidence binds tested_commit."
+  },
+  "pr04_completion": {
+    "base_commit": "7cca28113d3b3e27a07c31df7ba3ef103f6477f7",
+    "material_implementation_commit": "efab832b5d0b27c85cd7615dd542e235346d7716",
+    "tested_commit": "c3dc0714c78e4deee7dd808a78481af542983f12",
+    "solver_tree_sha256": "7d1a481f07579cc7e21592c837d59c47cfcd1fead2e6166cf0aaa399cc8bd371",
+    "results": "dev/monolithic/test/results/P9/P9a/PR-04/20261103-01",
+    "material_validation": {
+      "commit": "efab832b5d0b27c85cd7615dd542e235346d7716",
+      "cpu": {
+        "run": 140,
+        "pass": 118,
+        "skip": 22
+      },
+      "gpu_batch": {
+        "run": 56,
+        "pass": 56,
+        "cuda_named": 54,
+        "explicit_cpu": 2
+      }
+    },
+    "guarded_validation": {
+      "cpu": {
+        "run": 8,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0
+      },
+      "cuda": {
+        "run": 57,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0
+      }
+    },
+    "composed_e2e": "Final clean commit:CPU6/CUDA12 combinations\u00d764steps, checkpoint continuation and rejected-trial/publication-failure rollback PASS.",
+    "quick_results": "dev/monolithic/test/results/P9/P9a/PR-04/quick-c3dc0714",
+    "quick_verdict": "CLEAN",
+    "quick_pass_items": 60,
+    "quick_result_sha256": "ac86f70f2f1529200566d3192aeba8d066f36aa5194d07bf2611c9d487e2577a",
+    "phase_comparison_sha256": "6bc3b5c081612dca2745da26273c1991f001ea95cce3124f7379495fe2699146",
+    "paired_summary_sha256": "5add4c99f65fc1814f8260b62e04be3534f0c2721474356a8d01f5a7fb345e8e",
+    "cost_scope": "48 phase comparisons;3 alternating pairs\u00d724cases,15timed samples per case/version. Steady direct phase H2D0 and explicit stream sync0; complete-step existing transfers unchanged. Newly captured segments drain current stream; capture waits remain in timing.",
+    "observation_status": "P9a-OBS-02 MITIGATED; exact dependency layer cause unassigned",
+    "observation_sha256": "76f5a8d9888b5a437493f0bc55812db5261803a68dad1bb6e18aa6f8457b9852",
+    "open_items": [
+      "P9a-PERF-01",
+      "P9a-OBS-01",
+      "P9a-OBS-02 dependency attribution"
+    ],
+    "completion_commit_scope": "Planning documentation only; runtime evidence binds tested_commit. No push or merge."
   }
 }

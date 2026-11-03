@@ -1,6 +1,6 @@
 # P9a 实施计划
 
-2026-11-02。状态：IN_PROGRESS（PR-01/02/03 COMPLETE；下一步 PR-04；性能留项 OPEN）。需求与范围以 [PRD](PRD.md) 为准。实现顺序固定为 **PR-01 H1 → PR-02 H2/R1 → PR-03 M1 → PR-04 M2/M3/M4 批处理收尾 → PR-05 M5 → PR-06 L1/L2/L3 → PR-07 阶段验收**。
+2026-11-03。状态：IN_PROGRESS（PR-01/02/03/04 COMPLETE；下一步 PR-05；性能留项 OPEN）。需求与范围以 [PRD](PRD.md) 为准。实现顺序固定为 **PR-01 H1 → PR-02 H2/R1 → PR-03 M1 → PR-04 M2/M3/M4 批处理收尾 → PR-05 M5 → PR-06 L1/L2/L3 → PR-07 阶段验收**。
 
 PR-01 可以按内部里程碑分多个可审查提交，但它仍是一个完整交付 PR。中间保留旧路径仅用于迁移对照；最终必须删掉。不能以“材料后续再接”关闭 H1。
 
@@ -11,7 +11,7 @@ PR-01 可以按内部里程碑分多个可审查提交，但它仍是一个完�
 | PR-01 | actor-owned 统一非线性接口、分段归约、全类型设备 phase、删除旧双路径 | 起点 | COMPLETE；[最终验收](PR-01.md#7-最终验收与剩余性能项)：E2E/quick/回读通过；性能退化另列 OPEN |
 | PR-02 | 固定绑定 PCG 复用；异常 replay 生命周期 | PR-01 的 binding/generation 合同 | COMPLETE；[验收](PR-02.md)：CPU/CUDA 机制与 E2E、两精度 quick 通过，8 组稳态布局回读为 0；保留未复现观察项 |
 | PR-03 | 多向量后验与收敛结果 packet 融合 | PR-01 通用组归约，PR-02 稳定 plan | COMPLETE；[验收](PR-03.md)：两类摘要各一次读取，独立公式/CPU/CUDA/E2E/quick 通过，三组成对成本与额外存储已记录 |
-| PR-04 | cable gauge、material reaction、control 校验的类型批处理收尾 | PR-01 已完成设备迁移 | M2/M3/M4 各自证据；同类数量增加时无逐 actor host 调度/回读 |
+| PR-04 | cable gauge、material reaction、control 校验的类型批处理收尾 | PR-01 已完成设备迁移 | COMPLETE；[验收](PR-04.md)：材料设备提交固定，48 组阶段对照、三组成对测量、CPU/CUDA/E2E/quick 通过；首捕获 reset 防护及性能留项单列 |
 | PR-05 | Stats 完整向量只作最终快照，序列化按需 | PR-01 的发布边界 | 旧 Stats 不被下步覆盖，失败诊断和 JSON 兼容，导出成本实测 |
 | PR-06 | binding 元数据复用、dt 数值化、有界 graph 档位策略 | PR-01/02；M 项测量 | L1/L2/L3 实际触发证据、失效验证、总耗时/内存对照 |
 | PR-07 | 所有 requirement 关闭审查、全组件与完整 E2E、性能报告 | 前述 PR | 最终 SHA suite/stage 及问题处置；不复用旧版本 PASS |
@@ -48,6 +48,8 @@ M2/M3/M4、L4/L5 中阻止统一设备契约的部分已经属于 PR-01，后续
 
 ## 4. M2/M3/M4：PR-04
 
+已在 `c3dc0714` 完成验收，详见 [PR-04](PR-04.md)。N=8 的 gauge/reaction/product+size/absolute/band+factor 提交分别为 20→5、8→1、32→3、24→2、9→2；control 保持 1 次校验、1 次状态回读、3 次 D2D。元数据枚举仍属 L1。8 cable 整步 median 降低 13.1%/15.6%（FP32/FP64）；FP64 trees 三组小幅上升、median +1.6%，保留于 P9a-PERF-01。OBS02 已蒸馏为组件 red/green：capture miss 同步防护通过最终组件和 quick，命中重放不加同步，依赖内部根因待查。以下保留原实施要求。
+
 PR-01 已经必须完成以下设备语义，此 PR 只合并剩余按 block 展开的存储/launch，并补充分项测量。
 
 | 项目 | 实施重点 | 机制验证 |
@@ -72,7 +74,7 @@ PR-01 已经必须完成以下设备语义，此 PR 只合并剩余按 block 展
 
 ## 6. L1/L2/L3：PR-06
 
-同时处理 `P9a-PERF-01`：统一 phase 增加了 graph/binding 工作；须归因并处理稳定退化，复用 PR-01 三组成对测量合同，不把材料场景的收益抵消为其他场景已通过。
+同时处理 `P9a-PERF-01`：PR-04 新记录 FP64 trees 三组成对 median +1.6%（0.9%/0.9%/3.3%），独立插桩样本无新增显式 stream 同步，仍须归因；统一 phase 增加了 graph/binding 工作；须归因并处理稳定退化，复用 PR-01 三组成对测量合同，不把材料场景的收益抵消为其他场景已通过。
 
 - L1：复用 PR-01 显式 buffer registry，消除热路径 `vars(owner)` 扫描。绑定变更仍走生产有效性检查，不能只留下会被关闭的 assertion。
 - L2：将参与捕获的 dt 相关标量更新纳入稳定 buffers，检查各物理项与派生量实际使用新 dt；检查 A/B/A dt 下结果和 graph identity。不是只删除 key 中的 dt。
@@ -101,3 +103,5 @@ L4/L5 已由 PR-01 的 domain/gauge 设备合同关闭，在本 PR 汇总其结�
 PR-07 最终 HEAD：云端 suite、经项目流程批准启动的完整 stage；提交命令与运行身份保存在报告。性能成对测量与物理验收分别报告，已有已知失败需具体处置，不能自行登记为豁免。PR-01 最终结果见其第 7 节；阶段 E2E 为 NOT_RUN，整体性能资格与 P9a-PERF-01 保持 OPEN。
 
 PR-07 同时回看 `P9a-OBS-01`：PR-02 最初 CUDA 批次有一次 rigid FP32 graph-on checkpoint 的微小逐位差异；最小场景与后续严格复跑未复现，失败注入测试清理已补齐，但因果关系未证实。原 FAIL 和诊断证据保留在 [PR-02 第 5 节](PR-02.md#5-一次未复现的-checkpoint-观察)，不改门槛或登记为豁免。
+
+PR-07 同时回看 `P9a-OBS-02` 的依赖版本处置：首次捕获 reset 问题在 Warp-only 程序复现；Newton 的 capture-miss 同步防护和组件回归已通过。依赖内部根因未归属，升级后须重验再考虑移除防护；不自动合并 OBS01 的原因。
