@@ -11,6 +11,7 @@ import warp as wp
 from .articulation import _inner
 from .articulation_state import _initial_symmetric, _predict, _skew, _store_rates
 from .convergence import abs3, axial_absolute
+from .numeric_parameters import scalar_value
 
 
 @wp.kernel
@@ -135,12 +136,13 @@ def _predict_pose(
     predicted_step: wp.array[Any],
     quat_n: wp.array[Any],
     omega: wp.array[Any],
-    h: Any,
+    h_arg: Any,
     com: wp.array[Any],
     rotation: wp.array[Any],
     step: wp.array[Any],
     rotation_step: wp.array[Any],
 ):
+    h = scalar_value(h_arg)
     i = wp.tid()
     dr = h * omega[i]
     angle = wp.length(dr)
@@ -160,7 +162,7 @@ def _trial(
     rotation_step: wp.array[Any],
     rows: wp.array2d[int],
     direction: wp.array[Any],
-    alpha: Any,
+    alpha_arg: Any,
     tn: wp.array[Any],
     quat_n: wp.array[Any],
     out_step: wp.array[Any],
@@ -168,6 +170,7 @@ def _trial(
     out_com: wp.array[Any],
     out_rotation: wp.array[Any],
 ):
+    alpha = scalar_value(alpha_arg)
     i = wp.tid()
     dc = type(tn[0])(
         type(alpha)(direction[rows[i, 0]]), type(alpha)(direction[rows[i, 1]]), type(alpha)(direction[rows[i, 2]])
@@ -208,11 +211,12 @@ def _derive_steps(
 def _recover(
     step: wp.array[Any],
     rotation_step: wp.array[Any],
-    h: Any,
+    h_arg: Any,
     v: wp.array[Any],
     omega: wp.array[Any],
     sym: wp.array2d[Any],
 ):
+    h = scalar_value(h_arg)
     i = wp.tid()
     _store_rates(step[i], _rotation_step(rotation_step[i]), h, i, v, omega, sym)
 
@@ -231,7 +235,7 @@ def _terms(
     second: wp.array[Any],
     force: wp.array[Any],
     torque: wp.array[Any],
-    h: Any,
+    h_arg: Any,
     tangent: bool,
     energy: wp.array[Any],
     residual: wp.array2d[Any],
@@ -239,6 +243,7 @@ def _terms(
     b: wp.array3d[Any],
     diagonal: wp.array2d[Any],
 ):
+    h = scalar_value(h_arg)
     i = wp.tid()
     r = wp.quat_to_matrix(rotation[i])
     rotations[i] = r
@@ -540,7 +545,7 @@ class RigidObjective:
             device=self.device,
         )
 
-    def predict_pose(self, state_in, accepted, steps, dt):
+    def predict_pose(self, state_in, accepted, steps, dt, *, dt_buffer=None):
         """Initialize both translations and rotations without changing the inertial objective."""
         if self.count:
             history = accepted._monolithic_coupled
@@ -552,7 +557,7 @@ class RigidObjective:
                     self.step_t,
                     self.quat_n,
                     state_in._monolithic_coupled.rigid_omega,
-                    self.dtype(dt),
+                    (self.dtype(dt) if dt_buffer is None else dt_buffer),
                     history.rigid_com,
                     history.rigid_rotation,
                     *steps,
@@ -572,7 +577,7 @@ class RigidObjective:
             )
         return self.external_steps
 
-    def evaluate(self, state, steps, dt, tangent):
+    def evaluate(self, state, steps, dt, tangent, *, dt_buffer=None):
         if not self.count:
             return
         history = state._monolithic_coupled
@@ -591,7 +596,7 @@ class RigidObjective:
                 self.second,
                 self.force,
                 self.torque,
-                self.dtype(dt),
+                (self.dtype(dt) if dt_buffer is None else dt_buffer),
                 tangent,
                 self.energy,
                 self.residual,
@@ -602,7 +607,7 @@ class RigidObjective:
             device=self.device,
         )
 
-    def trial(self, source_steps, target, target_steps, direction, alpha):
+    def trial(self, source_steps, target, target_steps, direction, alpha, *, alpha_buffer=None):
         if not self.count:
             return
         b = target._monolithic_coupled
@@ -613,7 +618,7 @@ class RigidObjective:
                 *source_steps,
                 self.rows,
                 direction,
-                self.dtype(alpha),
+                (self.dtype(alpha) if alpha_buffer is None else alpha_buffer),
                 self.tn,
                 self.quat_n,
                 *target_steps,
@@ -623,14 +628,20 @@ class RigidObjective:
             device=self.device,
         )
 
-    def recover(self, state, steps, dt):
+    def recover(self, state, steps, dt, *, dt_buffer=None):
         if not self.count:
             return
         history = state._monolithic_coupled
         wp.launch(
             _recover,
             self.count,
-            [*steps, self.dtype(dt), history.rigid_v_com, history.rigid_omega, history.rigid_vsym],
+            [
+                *steps,
+                (self.dtype(dt) if dt_buffer is None else dt_buffer),
+                history.rigid_v_com,
+                history.rigid_omega,
+                history.rigid_vsym,
+            ],
             device=self.device,
         )
         self.publish(state)

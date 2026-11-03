@@ -14,7 +14,9 @@ class _Window:
     def __init__(self, *, hard=False, stopped=False):
         self.clock, self.starts, self.weight = 0, [], 1.0
         self.hard, self.stopped = hard, stopped
-        self.solver = SimpleNamespace(model=SimpleNamespace(device="cpu"), step=self.step)
+        self.solver = SimpleNamespace(
+            model=SimpleNamespace(device="cpu"), step=self.step, _contact_pool=False, _contact_spatial=False
+        )
 
     def start(self, values, model_values, step):
         self.starts.append(step)

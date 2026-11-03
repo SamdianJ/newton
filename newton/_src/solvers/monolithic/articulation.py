@@ -17,6 +17,7 @@ from ...sim import BodyFlags, JointType
 from .actors import articulation_view
 from .convergence import abs3, axial_absolute
 from .joint_parameters import _validate_joint_coordinate_layout
+from .numeric_parameters import scalar_value
 
 
 @wp.kernel
@@ -692,12 +693,13 @@ def _joint_variation(
     qt: wp.array[Any],
     vt: wp.array[Any],
     force: wp.array[Any],
-    h: Any,
+    h_arg: Any,
     energy: wp.array[Any],
     residual: wp.array[Any],
     absolute: wp.array[Any],
     tangent: wp.array[Any],
 ):
+    h = scalar_value(h_arg)
     i = wp.tid()
     # Terms read the exact step; offsets from the step start are fixed in a step.
     delta = step[i]
@@ -760,7 +762,7 @@ def _link_variation(
     mass: wp.array[Any],
     second: wp.array[Any],
     force: wp.array[Any],
-    h: Any,
+    h_arg: Any,
     energy: wp.array[Any],
     translation_gradient: wp.array[Any],
     rotation_gradient: wp.array[Any],
@@ -769,6 +771,7 @@ def _link_variation(
     rotation_tangent: wp.array[Any],
     build_tangent: bool,
 ):
+    h = scalar_value(h_arg)
     b = wp.tid()
     # Differences from the prediction are formed between increments.
     dt = com_step[b] - step_t[b]
@@ -809,11 +812,12 @@ def _reduced_variation(
     gta: wp.array[Any],
     gra: wp.array[Any],
     joint_absolute: wp.array[Any],
-    h: Any,
+    h_arg: Any,
     residual: wp.array[Any],
     absolute: wp.array[Any],
     tangent: wp.array2d[Any],
 ):
+    h = scalar_value(h_arg)
     entry = wp.tid()
     i, j = rows[entry], columns[entry]
     b = type(h)(0.0)
@@ -910,7 +914,7 @@ class ArticulationObjective:
         wp.copy(self.rn, k.rotations)
         wp.copy(self.axes_n, k.world_axes)
 
-    def evaluate(self, q, h, *, build_tangent=True, step=None):
+    def evaluate(self, q, h, *, build_tangent=True, step=None, dt_buffer=None):
         """Evaluate without reading derived FP32 body outputs or changing history.
 
         ``step`` is the exact increment ``q - qn``; without it the increment is
@@ -936,7 +940,7 @@ class ArticulationObjective:
                 self.qt,
                 self.vt,
                 self.joint_force,
-                k.dtype(h),
+                k.dtype(h) if dt_buffer is None else dt_buffer,
                 self.joint_energy,
                 self.joint_r,
                 self.joint_absolute,
@@ -958,7 +962,7 @@ class ArticulationObjective:
                 k.mass,
                 k.second,
                 self.force,
-                k.dtype(h),
+                k.dtype(h) if dt_buffer is None else dt_buffer,
                 self.link_energy,
                 self.gt,
                 self.gr,
@@ -1013,7 +1017,7 @@ class ArticulationObjective:
                 self.gta,
                 self.gra,
                 self.joint_absolute,
-                k.dtype(h),
+                k.dtype(h) if dt_buffer is None else dt_buffer,
                 self.residual,
                 self.absolute,
                 self.tangent,

@@ -73,6 +73,9 @@ def arrays_for(run):
     for prefix, owner in owners.items():
         fields = (f.name for f in dataclasses.fields(owner)) if dataclasses.is_dataclass(owner) else vars(owner)
         for name in fields:
+            # Recomputed from dt on evaluation, with a host-side value cache.
+            if prefix == "contact.batch" and name == "_falloff":
+                continue
             value = getattr(owner, name)
             if isinstance(value, wp.array) and name not in HANDLES:
                 # Struct arrays can contain process-specific device pointers.

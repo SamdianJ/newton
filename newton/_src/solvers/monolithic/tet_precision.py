@@ -10,6 +10,7 @@ import numpy as np
 import warp as wp
 
 from .convergence import abs3
+from .numeric_parameters import scalar_value
 from .residual import _accumulate_rows, _row_gather_map
 from .tet_common import TetPhysicsWorkspace, _validate_candidate_particles, validate_tet_scope
 from .tet_material import (
@@ -38,12 +39,13 @@ def _particles(
     mass: wp.array[float],
     row_mass: wp.array[float],
     consistent: bool,
-    dt: Any,
+    dt_arg: Any,
     residual: wp.array[Any],
     absolute: wp.array[Any],
     parts: wp.array2d[Any],
     flags: wp.array[int],
 ):
+    dt = scalar_value(dt_arg)
     i = wp.tid()
     p = ids[i]
     world = worlds[p]
@@ -80,7 +82,7 @@ def _elements(
     coefficients: wp.array[float],
     material: int,
     consistent: bool,
-    dt: Any,
+    dt_arg: Any,
     guard: Any,
     terms: wp.array[Any],
     absolute_terms: wp.array[Any],
@@ -88,6 +90,7 @@ def _elements(
     min_det: wp.array[Any],
     flags: wp.array[int],
 ):
+    dt = scalar_value(dt_arg)
     e = wp.tid()
     pose = wp.matrix(poses[e], shape=(3, 3), dtype=type(dt))
     # Displacement gradient h = F - I from the step-start edges plus the step
@@ -221,7 +224,7 @@ class TetObjective:
         self.flags = wp.zeros(1, dtype=int, device=model.device)
         self._difference = wp.zeros(model.particle_count, dtype=self.vector, device=model.device)
 
-    def evaluate(self, x, xn, vn, forces, gravity, *, dt, min_det_f_guard=0.2, displacement=None):
+    def evaluate(self, x, xn, vn, forces, gravity, *, dt, min_det_f_guard=0.2, displacement=None, dt_buffer=None):
         """Evaluate directly in the selected dtype, without promoting a rounded residual.
 
         Inertia and element edges use the step displacement ``x - xn``. A caller
@@ -278,7 +281,7 @@ class TetObjective:
                 physics.mass,
                 physics.row_mass,
                 physics.mass_mode == "consistent",
-                self.dtype(dt),
+                self.dtype(dt) if dt_buffer is None else dt_buffer,
                 self.residual,
                 self.absolute,
                 self._particle_parts,
@@ -300,7 +303,7 @@ class TetObjective:
                 physics.coefficients,
                 int(physics.material_model == "smith_log_stabilized"),
                 physics.mass_mode == "consistent",
-                self.dtype(dt),
+                self.dtype(dt) if dt_buffer is None else dt_buffer,
                 self.dtype(min_det_f_guard),
                 self._residual_terms,
                 self._absolute_terms,

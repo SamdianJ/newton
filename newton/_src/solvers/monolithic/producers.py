@@ -318,7 +318,7 @@ class ArticulationProducer(_Producer):
         obj.begin(k.gather_q(state_in))
         wp.copy(obj.vn, k.gather_qd(state_in))
         history = getattr(state_in, solver._states.namespace)
-        dt = solver._dtype(solver._dt)
+        dt = solver._problem.dt
         wp.launch(
             _predict,
             k.bodies,
@@ -364,9 +364,9 @@ class ArticulationProducer(_Producer):
                 solver._joint_step(accepted),
                 direction,
                 solver._linear.q_rows,
-                solver._dtype(alpha),
+                solver._problem.alpha,
                 solver._objective.qn,
-                solver._dtype(dt),
+                solver._problem.dt,
                 k.coord_map,
                 k.dof_map,
                 trial.joint_q,
@@ -379,7 +379,7 @@ class ArticulationProducer(_Producer):
     def evaluate(self, solver, state, dt, residual, *, build_tangent):
         k, obj = solver._kinematics, solver._objective
         step = solver._joint_step(state)
-        obj.evaluate(k.gather_q(state), dt, build_tangent=build_tangent, step=step)
+        obj.evaluate(k.gather_q(state), dt, build_tangent=build_tangent, step=step, dt_buffer=solver._problem.dt)
         wp.launch(
             _scatter_rows,
             k.count,
@@ -446,7 +446,7 @@ class ArticulationProducer(_Producer):
     def publish(self, solver, state):
         k, obj, device = solver._kinematics, solver._objective, solver.model.device
         final = getattr(state, solver._states.namespace)
-        dt = solver._dtype(solver._dt)
+        dt = solver._problem.dt
         q = k.gather_q(state)
         k.evaluate_step(q, solver._joint_step(state), obj.rn, obj.axes_n)
         wp.launch(
@@ -483,14 +483,23 @@ class RigidProducer(_Producer):
         self.owners = (solver._rigid,)
 
     def begin_step(self, solver, state_in):
-        solver._rigid.predict_pose(state_in, solver._accepted, solver._rigid_steps(solver._accepted), solver._dt)
+        solver._rigid.predict_pose(
+            state_in, solver._accepted, solver._rigid_steps(solver._accepted), solver._dt, dt_buffer=solver._problem.dt
+        )
 
     def candidate(self, solver, accepted, trial, direction, alpha, dt):
-        solver._rigid.trial(solver._rigid_steps(accepted), trial, solver._rigid_steps(trial), direction, alpha)
+        solver._rigid.trial(
+            solver._rigid_steps(accepted),
+            trial,
+            solver._rigid_steps(trial),
+            direction,
+            alpha,
+            alpha_buffer=solver._problem.alpha,
+        )
 
     def evaluate(self, solver, state, dt, residual, *, build_tangent):
         rigid = solver._rigid
-        rigid.evaluate(state, solver._rigid_steps(state), dt, build_tangent)
+        rigid.evaluate(state, solver._rigid_steps(state), dt, build_tangent, dt_buffer=solver._problem.dt)
         wp.launch(
             _scatter_residual, (rigid.count, 6), [rigid.rows, rigid.residual, residual], device=solver.model.device
         )
@@ -543,7 +552,7 @@ class RigidProducer(_Producer):
         wp.launch(_rotation_domain, rigid.count, [rigid.rotations, rigid.rn, flags], device=solver.model.device)
 
     def publish(self, solver, state):
-        solver._rigid.recover(state, solver._rigid_steps(state), solver._dt)
+        solver._rigid.recover(state, solver._rigid_steps(state), solver._dt, dt_buffer=solver._problem.dt)
 
 
 class TetProducer(_Producer):
@@ -574,7 +583,7 @@ class TetProducer(_Producer):
                 state_in.particle_q,
                 state_in.particle_qd,
                 solver._tet.mapping,
-                solver._dtype(solver._dt),
+                solver._problem.dt,
                 accepted.particle_q,
                 accepted.particle_qd,
                 solver._displacement(accepted),
@@ -592,8 +601,8 @@ class TetProducer(_Producer):
                 solver._tet.mapping,
                 direction,
                 solver._layout.x_scalar_offset,
-                solver._dtype(alpha),
-                solver._dtype(dt),
+                solver._problem.alpha,
+                solver._problem.dt,
                 trial.particle_q,
                 trial.particle_qd,
                 solver._displacement(trial),
@@ -612,6 +621,7 @@ class TetProducer(_Producer):
             dt=dt,
             min_det_f_guard=solver._guard,
             displacement=solver._displacement(state),
+            dt_buffer=solver._problem.dt,
         )
         wp.launch(
             _scatter_values,
@@ -654,6 +664,8 @@ class TetProducer(_Producer):
             particle_to_dynamic=solver._tet.mapping,
             residual_x=solver._tet_assembly_residual,
             dt=float(dt),
+            dt_buffer=solver._problem.dt,
+            inv_dt_sq_buffer=solver._problem.inv_dt_sq,
             min_det_f_guard=solver._guard,
             workspace=solver._tet_assembly,
             scatter=scatter,
@@ -695,7 +707,7 @@ class _MaterialProducer(_Producer):
         self.owners = (block, block.objective)
 
     def assemble(self, solver, assembly, dt):
-        self.block.assemble(assembly, dt)
+        self.block.assemble(assembly, dt, dt_buffer=solver._problem.dt)
 
     def magnitude(self, solver, out):
         block = self.block
@@ -755,20 +767,37 @@ class ClothProducer(_MaterialProducer):
         cloth, original, accepted = self.block, solver._original, solver._accepted
         start, step = solver._displacement(original), solver._displacement(accepted)
         cloth.begin_step(original, solver._frozen_force)
-        cloth.candidate(start, original, accepted, step, solver._delta, 0.0, solver._dt, predict=True)
+        cloth.candidate(
+            start, original, accepted, step, solver._delta, 0.0, solver._dt, predict=True, dt_buffer=solver._problem.dt
+        )
         cloth.path_status.zero_()
         cloth.check_path(original, start, step, cloth.path_status)
         # An inertial guess is optional; retain the valid input chart on device.
-        cloth.candidate(start, original, accepted, step, solver._delta, 0.0, solver._dt, fallback=True)
+        cloth.candidate(
+            start, original, accepted, step, solver._delta, 0.0, solver._dt, fallback=True, dt_buffer=solver._problem.dt
+        )
 
     def candidate(self, solver, accepted, trial, direction, alpha, dt):
         self.block.candidate(
-            solver._displacement(accepted), solver._original, trial, solver._displacement(trial), direction, alpha, dt
+            solver._displacement(accepted),
+            solver._original,
+            trial,
+            solver._displacement(trial),
+            direction,
+            alpha,
+            dt,
+            dt_buffer=solver._problem.dt,
+            alpha_buffer=solver._problem.alpha,
         )
 
     def evaluate(self, solver, state, dt, residual, *, build_tangent):
         self.block.evaluate(
-            solver._displacement(state), solver._frozen_gravity, dt, residual, build_tangent=build_tangent
+            solver._displacement(state),
+            solver._frozen_gravity,
+            dt,
+            residual,
+            build_tangent=build_tangent,
+            dt_buffer=solver._problem.dt,
         )
 
 
@@ -799,6 +828,7 @@ class CableProducer(_MaterialProducer):
             0.0,
             solver._dt,
             predict=True,
+            dt_buffer=solver._problem.dt,
         )
 
     def candidate(self, solver, accepted, trial, direction, alpha, dt):
@@ -812,6 +842,8 @@ class CableProducer(_MaterialProducer):
             solver._cable_target_theta,
             alpha,
             dt,
+            dt_buffer=solver._problem.dt,
+            alpha_buffer=solver._problem.alpha,
         )
 
     def evaluate(self, solver, state, dt, residual, *, build_tangent):
@@ -825,6 +857,7 @@ class CableProducer(_MaterialProducer):
             dt,
             residual,
             build_tangent=build_tangent,
+            dt_buffer=solver._problem.dt,
         )
 
     def scale(self, solver, diagonal, coordinate):

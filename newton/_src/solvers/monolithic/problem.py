@@ -104,10 +104,56 @@ class _MonolithicProblem:
         self.domain_flags = wp.zeros(1, dtype=int, device=solver.model.device)
         self.assembly_flags = wp.zeros(len(self._assembly_bindings), dtype=int, device=solver.model.device)
         self._predictors = tuple(sorted(self.producers, key=lambda producer: producer.begin_rank))
+        self.dt = wp.zeros(1, dtype=solver._dtype, device=solver.model.device)
+        self.alpha = wp.zeros_like(self.dt)
+        self.inv_dt_sq = wp.zeros_like(self.dt)
+        self._dt_value = None
+        self._dt_binding = None
+        self._owner_bindings = []
+        for producer in self.owners:
+            for owner in producer.owners:
+                names = (field.name for field in fields(owner)) if is_dataclass(owner) else vars(owner)
+                for name in names:
+                    value = getattr(owner, name)
+                    if isinstance(value, wp.array):
+                        self._owner_bindings.append((owner, name, self._storage_layout(value)))
+        self._state_fields = None
         self._bind_groups()
+
+    @staticmethod
+    def _storage_layout(array):
+        return array.shape, array.dtype, array.device
+
+    def _set_timestep(self, dt):
+        # The tet inverse uses the supplied host value before native rounding.
+        dt = float(dt)
+        binding = (self.dt, self.inv_dt_sq)
+        for array in (*binding, self.alpha):
+            if (
+                not isinstance(array, wp.array)
+                or array.shape != (1,)
+                or array.dtype != self.solver._dtype
+                or array.device != self.solver.model.device
+                or not array.is_contiguous
+            ):
+                raise ValueError("Invalid numerical parameter buffer binding")
+        if dt == self._dt_value and binding == self._dt_binding:
+            return
+        native = self.solver._numpy_dtype
+        with np.errstate(over="ignore", under="ignore", divide="ignore", invalid="ignore"):
+            value = native(dt)
+            inverse = native(1.0 / np.float64(dt) ** 2)
+            validated_inverse = native((1.0 / np.float64(dt)) ** 2)
+        if not np.isfinite(value) or value <= 0:
+            raise ValueError("dt must be finite, positive and representable in the solver precision")
+        self.dt.fill_(self.solver._dtype(value))
+        self.inv_dt_sq.fill_(self.solver._dtype(inverse))
+        self._dt_value, self._dt_binding = dt, binding
+        self._inverse_valid = bool(np.isfinite(validated_inverse) and validated_inverse > 0)
 
     def predict(self, state_in):
         solver = self.solver
+        self._set_timestep(solver._dt)
         for producer in self.interactions:
             producer.begin_step(self.solver, state_in)
 
@@ -118,24 +164,28 @@ class _MonolithicProblem:
 
         solver._graphs.run(
             "problem_predict",
-            (solver._dt,),
+            (),
             [*self._buffers(state_in), *self._buffers(solver._accepted), solver._delta],
             execute,
         )
 
     def publish(self, state):
         solver = self.solver
+        self._set_timestep(solver._dt)
 
         def execute():
             for producer in self.owners:
                 producer.publish(solver, state)
 
-        solver._graphs.run("problem_publish", (solver._dt,), self._buffers(state), execute)
+        solver._graphs.run("problem_publish", (), self._buffers(state), execute)
         for producer in self.interactions:
             producer.publish(solver, state)
 
     def assemble(self, assembly, dt):
         solver = self.solver
+        self._set_timestep(dt)
+        if solver._has_tet and not self._inverse_valid:
+            raise ValueError("dt must be finite, positive and representable in the tet precision")
 
         def execute():
             for producer in self.owners:
@@ -151,7 +201,7 @@ class _MonolithicProblem:
             assembly.global_scalar_triplets.values,
             assembly.ax_internal_triplets.values,
         ]
-        solver._graphs.run("problem_assemble", (dt,), buffers, execute)
+        solver._graphs.run("problem_assemble", (), buffers, execute)
         for producer in self.interactions:
             producer.assemble(solver, assembly, dt)
         for index, (owner, field, _, _) in enumerate(self._assembly_bindings):
@@ -335,6 +385,8 @@ class _MonolithicProblem:
 
     def candidate(self, alpha, dt):
         solver = self.solver
+        self._set_timestep(dt)
+        self.alpha.fill_(solver._dtype(alpha))
 
         def execute():
             for producer in self.producers:
@@ -347,7 +399,7 @@ class _MonolithicProblem:
             solver._cable_target_x,
             solver._cable_target_theta,
         ]
-        solver._graphs.run("problem_candidate", (float(alpha), dt), buffers, execute)
+        solver._graphs.run("problem_candidate", (), buffers, execute)
 
     def evaluate_trial(self, dt):
         solver = self.solver
@@ -428,6 +480,9 @@ class _MonolithicProblem:
     def _buffers(self, state):
         solver = self.solver
         buffers = [
+            self.dt,
+            self.alpha,
+            self.inv_dt_sq,
             solver._complete_r,
             solver._complete_a,
             solver._linear.q_rows,
@@ -441,16 +496,24 @@ class _MonolithicProblem:
             solver._joint_step(state),
             *solver._rigid_steps(state),
         ]
-        for owner in (state, state._monolithic_coupled, solver._original, solver._original._monolithic_coupled):
-            buffers.extend(value for value in vars(owner).values() if isinstance(value, wp.array))
-        for producer in self.owners:
-            for owner in producer.owners:
-                names = (field.name for field in fields(owner)) if is_dataclass(owner) else vars(owner)
-                buffers.extend(getattr(owner, name) for name in names if isinstance(getattr(owner, name), wp.array))
+        if self._state_fields is None:
+            self._state_fields = tuple(
+                name for name, value in vars(solver._accepted).items() if isinstance(value, wp.array)
+            )
+        for source in (state, solver._original):
+            buffers.extend(getattr(source, name) for name in self._state_fields)
+            history = getattr(source, solver._states.namespace)
+            buffers.extend(getattr(history, name) for name in solver._states.schema)
+        for owner, name, layout in self._owner_bindings:
+            value = getattr(owner, name)
+            if not isinstance(value, wp.array) or self._storage_layout(value) != layout:
+                raise ValueError(f"Invalid graph buffer binding: {type(owner).__name__}.{name}")
+            buffers.append(value)
         return buffers
 
     def evaluate(self, state, dt, *, build_tangent):
         solver = self.solver
+        self._set_timestep(dt)
         self._bind_evaluation()
         buffers = self._buffers(state)
 
@@ -460,7 +523,7 @@ class _MonolithicProblem:
                 producer.evaluate(solver, state, dt, solver._complete_r, build_tangent=build_tangent)
 
         reference = solver._contact_spatial and solver._contact._reference_mode
-        parameters = (self.layout.identity, solver.precision.value, dt, build_tangent, reference)
+        parameters = (self.layout.identity, solver.precision.value, build_tangent, reference)
         solver._graphs.run("problem_owners", parameters, buffers, owners)
         for producer in self.interactions:
             producer.evaluate(solver, state, dt, solver._complete_r, build_tangent=build_tangent)

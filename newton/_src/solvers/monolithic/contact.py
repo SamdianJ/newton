@@ -22,6 +22,7 @@ from .contact_roundoff import friction_magnitude, frozen_weight_magnitude, norma
 from .contact_sampling import ContactSamples, _canonical_shapes, _checked_contact_capacity
 from .contact_smoothing import orientation_weight
 from .linear_types import MonolithicLinearLayout
+from .numeric_parameters import scalar_value
 from .smooth_sdf import _sdf_type
 
 
@@ -179,7 +180,7 @@ def _law(
     stiffness: Any,
     smoothing: Any,
     mu: Any,
-    falloff: Any,
+    falloff_arg: Any,
     alignment_mask: int,
     flags: wp.array[int],
     energy: wp.array2d[Any],
@@ -201,6 +202,7 @@ def _law(
     energy_magnitude: wp.array2d[Any],
     eps: Any,
 ):
+    falloff = scalar_value(falloff_arg)
     key = wp.tid()
     if direct >= 2 and key >= batch_count[0]:
         return

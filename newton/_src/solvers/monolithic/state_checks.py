@@ -10,6 +10,9 @@ import warp as wp
 
 def scalar_view(array):
     """Retain strided input support while exposing scalar components for checks."""
+    if array.ndim == 1 and array.dtype in (wp.float32, wp.float64):
+        # Keep output bindings live until the producer has written them.
+        return array
     dtype = getattr(array.dtype, "_wp_scalar_type_", array.dtype)
     return array.contiguous().view(dtype).flatten()
 

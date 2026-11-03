@@ -240,6 +240,7 @@ class _MaterialSurface:
         self.x_steps = wp.zeros_like(self.anchor_x)
         self.anchor_d = wp.zeros(c._materials.theta_count, dtype=batch.vector, device=batch.device)
         self.flags = wp.zeros(2, dtype=int, device=batch.device)
+        self._buffer_fields = tuple(name for name, value in vars(self).items() if isinstance(value, wp.array))
 
     def update(self, state, x_steps=None, *, begin=False, check=True):
         """Form the cable surface points and their steps from the particle steps ``x_steps``.
@@ -318,4 +319,4 @@ class _MaterialSurface:
         )
 
     def buffers(self):
-        return tuple(a for a in vars(self).values() if isinstance(a, wp.array))
+        return tuple(getattr(self, name) for name in self._buffer_fields)

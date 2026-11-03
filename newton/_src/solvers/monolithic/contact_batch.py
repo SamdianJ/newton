@@ -467,6 +467,10 @@ class _ContactBatch:
     def __init__(self, contact, *, batch_capacity, capacity, contact_factor_capacity=None, use_cuda_graph=False):
         self.contact, self.device = contact, contact.model.device
         self.dtype, self.vector, self.matrix = contact.dtype, contact.vector, contact.matrix
+        self._falloff = wp.zeros(1, dtype=self.dtype, device=self.device)
+        self._falloff_value = None
+        self._falloff_binding = None
+        self._buffer_fields = None
         self.batch_capacity = batch_capacity
         model, m = contact.model, contact.count
         if (
@@ -656,17 +660,25 @@ class _ContactBatch:
         return geometry
 
     def buffers(self):
-        arrays = [a for a in vars(self).values() if isinstance(a, wp.array)]
-        for owner in (
-            self.all_samples,
-            self.samples,
-            self.support,
-            self.current,
-            self.start,
-            self._start_chunk,
-            self.response,
-        ):
-            arrays.extend(a for a in vars(owner).values() if isinstance(a, wp.array))
+        if self._buffer_fields is None:
+            self._buffer_fields = tuple(
+                (owner_name, tuple(name for name, value in vars(owner).items() if isinstance(value, wp.array)))
+                for owner_name in (
+                    "",
+                    "all_samples",
+                    "samples",
+                    "support",
+                    "current",
+                    "start",
+                    "_start_chunk",
+                    "response",
+                )
+                for owner in (getattr(self, owner_name) if owner_name else self,)
+            )
+        arrays = []
+        for owner_name, names in self._buffer_fields:
+            owner = getattr(self, owner_name) if owner_name else self
+            arrays.extend(getattr(owner, name) for name in names)
         # Shared metadata is a graph binding too: rebinding a shape/SDF array
         # must not replay a graph containing its retired pointer.
         if self.material_surface is not None:
@@ -679,6 +691,7 @@ class _ContactBatch:
 
     def initialize_reference(self):
         """Reserve batch-sized full-reference scratch, independent of contact admission budgets."""
+        self._buffer_fields = None
         k = self.pool.max_support
         capacity = self.batch_capacity * (k + 2)
         self.reference_rows = _ContactRows(
@@ -697,6 +710,20 @@ class _ContactBatch:
         self.reference_residual = wp.zeros(self.pool.row_count, dtype=self.dtype, device=self.device)
         self.reference_energy = wp.zeros(2, dtype=self.dtype, device=self.device)
 
+    def _set_falloff(self, value):
+        if (
+            not isinstance(self._falloff, wp.array)
+            or self._falloff.shape != (1,)
+            or self._falloff.dtype != self.dtype
+            or self._falloff.device != self.device
+            or not self._falloff.is_contiguous
+        ):
+            raise ValueError("Invalid contact displacement buffer binding")
+        if value != self._falloff_value or (self._falloff,) != self._falloff_binding:
+            self._falloff.fill_(self.dtype(value))
+            self._falloff_value = value
+            self._falloff_binding = (self._falloff,)
+
     def evaluate_reference(self, x, poses, com, jt, jw, *, dt, rigid_com=None, rigid_rotation=None, steps=None):
         """Stream every sample into a native residual without capacity truncation or tangent storage."""
         if not self._started or not np.isfinite(dt) or dt <= 0:
@@ -709,11 +736,12 @@ class _ContactBatch:
             or (self.contact.parameters[1] > 0 and (not np.isfinite(falloff) or falloff <= 0))
         ):
             raise ValueError("Invalid native contact displacement scale")
+        self._set_falloff(falloff)
         state = self._state(x, poses, com, jt, jw, rigid_com, rigid_rotation, steps)
         self.reference_rows._validate_inputs(*self.reference_inputs)
         self.graphs.run(
             "contact_reference",
-            (float(dt),),
+            (),
             (*self.buffers(), *state),
             partial(self._evaluate_reference, state, dt),
         )
@@ -1034,7 +1062,7 @@ class _ContactBatch:
                 self.dtype(c.parameters[0]),
                 self.dtype(c.parameters[3]),
                 self.dtype(c.parameters[1]),
-                self.dtype(c.numpy_dtype(c.parameters[2]) * c.numpy_dtype(dt)),
+                self._falloff,
                 alignment,
                 self._flags,
                 out.energy,
@@ -1115,6 +1143,7 @@ class _ContactBatch:
             or (self.contact.parameters[1] > 0 and (not np.isfinite(falloff) or falloff <= 0))
         ):
             raise ValueError("Invalid native contact displacement scale")
+        self._set_falloff(falloff)
         state = self._state(x, poses, com, jt, jw, rigid_com, rigid_rotation, steps)
         bindings = ()
         if selection is not None:
@@ -1133,7 +1162,7 @@ class _ContactBatch:
         self.pool._validate_storage()
         self.graphs.run(
             "contact_batch_eval",
-            (float(dt), chunks),
+            (chunks,),
             (*self.buffers(), *state, *bindings),
             partial(self._evaluate_batches, state, dt, selection),
         )

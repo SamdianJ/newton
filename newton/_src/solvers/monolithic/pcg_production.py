@@ -365,7 +365,8 @@ class MaskedPcgPlan:
         self._failed = False
         self._bound_stream = wp.get_stream(self.device) if self.device.is_cuda else None
         self._prepared_regularization = None
-        self._storage = tuple(value for value in vars(self).values() if isinstance(value, wp.array))
+        self._storage_names = tuple(name for name, value in vars(self).items() if isinstance(value, wp.array))
+        self._storage = tuple(getattr(self, name) for name in self._storage_names)
         self._storage_signature = tuple(map(_signature, self._storage))
         self._schedule_signature = (
             _plan_identity(self.config),
@@ -434,9 +435,10 @@ class MaskedPcgPlan:
             raise ValueError("Cable factor storage changed; construct a new PCG plan")
         if self._material_operator is not None and self._material_signature != self._material_operator.signature():
             raise ValueError("Material operator storage changed; construct a new PCG plan")
-        arrays = tuple(value for value in vars(self).values() if isinstance(value, wp.array))
+        arrays = tuple(getattr(self, name) for name in self._storage_names)
         if (
             self._stream_id() != self._stream
+            or any(not isinstance(array, wp.array) for array in arrays)
             or tuple(map(_signature, arrays)) != self._storage_signature
             or (_plan_identity(self.config), self.n, self.nq, self.nx, self.layout, self._conditional_graph_supported)
             != self._schedule_signature

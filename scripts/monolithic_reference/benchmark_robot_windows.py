@@ -27,6 +27,26 @@ from scripts.monolithic_reference.run_quick_regression import MANIFEST, SNAPSHOT
 from scripts.monolithic_reference.state_snapshots import load_snapshot
 
 
+def span_graphs(solver):
+    """Snapshot dynamic-span caches outside the timed solver calls."""
+    caches = {}
+    if solver._contact_pool:
+        caches["pool"] = solver._contact.pool.graphs
+        caches.update({f"bsr_{i}": owner.graphs for i, owner in enumerate(solver._linear._fixed_bsr)})
+    if solver._contact_spatial:
+        caches["query"] = solver._contact.query_graphs
+    result = {}
+    for owner, cache in caches.items():
+        for name, segment in cache.summary()["segments"].items():
+            index = {"contact_candidate_order": 0, "contact_stream_finish": -1, "fixed_scalar_bsr": 2}.get(name)
+            if index is not None:
+                result[f"{owner}.{name}"] = {
+                    **segment,
+                    "resident_spans": [key[1][index] for key in cache.entries[name]],
+                }
+    return result
+
+
 def measure_window(window, case, values, model_values, precision):
     """Warm a complete window, restore its snapshot, and time solver calls only."""
     solver = window.solver
@@ -37,6 +57,7 @@ def measure_window(window, case, values, model_values, precision):
         check_gpu_idle(device)
         window.start(values, model_values, case["snapshot"]["step"])
         captures = capture_count(solver)
+        spans_before = span_graphs(solver)
         rows, seconds = [], []
 
         def timed_step(*args, seconds=seconds, **kwargs):
@@ -74,6 +95,8 @@ def measure_window(window, case, values, model_values, precision):
                 "median_ms": float(np.median(seconds) * 1000),
                 "p95_ms": float(np.percentile(seconds, 95) * 1000),
                 "captures": capture_count(solver) - captures,
+                "span_graphs_before": spans_before,
+                "span_graphs_after": span_graphs(solver),
             }
         )
     return {

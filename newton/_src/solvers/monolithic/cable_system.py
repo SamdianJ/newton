@@ -9,6 +9,7 @@ import numpy as np
 import warp as wp
 
 from .cable import CableObjective
+from .numeric_parameters import scalar_value
 
 
 @wp.kernel
@@ -33,12 +34,13 @@ def _residual(
     bend: wp.array2d[Any],
     bend_rounding: wp.array2d[Any],
     rows: wp.array[int],
-    dt: Any,
+    dt_arg: Any,
     raw: wp.array[Any],
     absolute: wp.array[Any],
     complete: wp.array[Any],
     external_energy: wp.array[Any],
 ):
+    dt = scalar_value(dt_arg)
     row = wp.tid()
     nv = step.shape[0]
     value = type(dt)(0.0)
@@ -78,7 +80,8 @@ def _residual(
 
 
 @wp.kernel
-def _scatter_mass(vertex: wp.array[int], mass: wp.array[Any], dt: Any, offset: int, output: wp.array[Any]):
+def _scatter_mass(vertex: wp.array[int], mass: wp.array[Any], dt_arg: Any, offset: int, output: wp.array[Any]):
+    dt = scalar_value(dt_arg)
     i = wp.tid()
     output[offset + i] = mass[vertex[i]] / (dt * dt)
 
@@ -98,8 +101,8 @@ def _candidate(
     accepted_theta_step: wp.array[Any],
     original_theta: wp.array[Any],
     delta: wp.array[Any],
-    alpha: Any,
-    dt: Any,
+    alpha_arg: Any,
+    dt_arg: Any,
     predict: bool,
     trial_x: wp.array[Any],
     trial_v: wp.array[Any],
@@ -108,6 +111,8 @@ def _candidate(
     trial_theta_step: wp.array[Any],
 ):
     """Advance the exact position and angle increments; trial values are formed once from them."""
+    alpha = scalar_value(alpha_arg)
+    dt = scalar_value(dt_arg)
     i = wp.tid()
     nv = ids.shape[0]
     if i < nv:
@@ -249,7 +254,9 @@ class CableBlock:
         ):
             wp.launch(_gather, self.ids.size, [source, self.ids, output], device=self.device)
 
-    def evaluate(self, state, step, theta_step, original, torque, gravity, dt, complete, *, build_tangent=True):
+    def evaluate(
+        self, state, step, theta_step, original, torque, gravity, dt, complete, *, build_tangent=True, dt_buffer=None
+    ):
         """Evaluate the same frozen frame chart for every current and trial state.
 
         ``step`` and ``theta_step`` are the state's exact particle and angle
@@ -289,7 +296,7 @@ class CableBlock:
                 objective.bend_twist_r,
                 objective.bend_twist_rounding,
                 self.rows,
-                self.dtype(dt),
+                self.dtype(dt) if dt_buffer is None else dt_buffer,
                 self.raw,
                 self.absolute,
                 complete,
@@ -313,7 +320,7 @@ class CableBlock:
                 device=self.device,
             )
 
-    def assemble(self, assembly, dt):
+    def assemble(self, assembly, dt, *, dt_buffer=None):
         """Write every free vertex's lumped mass into reserved global triplets."""
         wp.launch(
             _scatter_mass,
@@ -321,7 +328,7 @@ class CableBlock:
             [
                 self.mass_vertices,
                 self.mass,
-                self.dtype(dt),
+                self.dtype(dt) if dt_buffer is None else dt_buffer,
                 self.triplet_offset,
                 assembly.global_scalar_triplets.values,
             ],
@@ -341,6 +348,8 @@ class CableBlock:
         dt,
         *,
         predict=False,
+        dt_buffer=None,
+        alpha_buffer=None,
     ):
         """Apply xyz/theta in the same trial, including prescribed boundary values.
 
@@ -365,8 +374,8 @@ class CableBlock:
                 accepted_theta_step,
                 original._monolithic_coupled.cable_theta,
                 delta,
-                self.dtype(alpha),
-                self.dtype(dt),
+                self.dtype(alpha) if alpha_buffer is None else alpha_buffer,
+                self.dtype(dt) if dt_buffer is None else dt_buffer,
                 predict,
                 trial.particle_q,
                 trial.particle_qd,
