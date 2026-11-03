@@ -11,9 +11,11 @@ import numpy as np
 import warp as wp
 
 from newton._src.solvers.monolithic import contact_batch, contact_material, problem
+from newton._src.solvers.monolithic.solver_types import _StepFailure
 from newton.tests.test_monolithic_contact_actor_pairs import native_inputs, perturb, physical
 from newton.tests.test_monolithic_contact_spatial import spatial_fixture
 from newton.tests.test_monolithic_material_state import scene, snapshot
+from newton.tests.test_monolithic_solver_problem import energy_arrays
 from newton.tests.unittest_utils import add_function_test, get_test_devices
 
 
@@ -114,6 +116,58 @@ def test_timestep_validation_scope(test, device):
     test.assertTrue(run.last_stats.rolled_back)
     for name, value in snapshot(state).items():
         np.testing.assert_array_equal(value, before[name])
+
+
+def test_strided_material_energy(test, device):
+    """Read newly produced multidimensional energy after strided storage replacement."""
+    for precision, graph in product(("fp32", "fp64"), (False, True) if device.is_cuda else (False,)):
+        _, run = scene(
+            cloth=1, cables=1, precision=precision, device=device, pcg_mode="production", use_cuda_graph=graph
+        )
+        state = run.create_state(dt=0.001)
+        run.step(state, state, run.create_control(), dt=0.001)
+        test.assertTrue(run.last_stats.converged, run.last_stats)
+        for owner, name in (
+            (run._cloths[0].objective, "energy"),
+            (run._cables[0].objective, "bend_twist_energy"),
+        ):
+            original = getattr(owner, name)
+            for _ in range(2):
+                shape = (2 * original.shape[0], *original.shape[1:])
+                backing = wp.empty(shape, dtype=original.dtype, device=device)
+                values = backing[::2] if original.ndim == 1 else backing[::2, :]
+                setattr(owner, name, values)
+                captures = run._graphs.captures["problem_summary"]
+                for sentinel in (17.0, np.nan, 29.0):
+                    backing.fill_(original.dtype(sentinel))
+                    energy, _, absolute = run._evaluate(run._accepted, 0.001, build_tangent=False, device_result=True)
+                    parts = np.concatenate([array.numpy().ravel() for array in energy_arrays(run)])
+                    expected = parts.sum() + run._contact.energy.numpy().sum()
+                    expected_absolute = abs(parts).sum() + run._contact.absolute_energy.numpy().sum()
+                    tolerance = 64 * np.finfo(run._numpy_dtype).eps
+                    np.testing.assert_allclose(energy, expected, rtol=tolerance, atol=1e-12)
+                    np.testing.assert_allclose(absolute, expected_absolute, rtol=tolerance, atol=1e-12)
+                    np.testing.assert_array_equal(backing.numpy()[1::2], sentinel)
+                if graph:
+                    test.assertEqual(run._graphs.captures["problem_summary"], captures + 1)
+            # Inject only nonfinite energy after otherwise valid owner computation.
+            # A new binding forces the owner graph to capture the injected write.
+            backing = wp.zeros_like(backing)
+            values = backing[::2] if original.ndim == 1 else backing[::2, :]
+            setattr(owner, name, values)
+            producer = next(p for p in run._problem.owners if any(o is owner for o, _, _ in p.energies))
+            evaluate = producer.evaluate
+
+            def nonfinite(*args, evaluate=evaluate, values=values, **kwargs):
+                evaluate(*args, **kwargs)
+                values.fill_(values.dtype(np.nan))
+
+            with patch.object(producer, "evaluate", side_effect=nonfinite):
+                for _ in range(2):
+                    with test.assertRaises(_StepFailure) as failure:
+                        run._evaluate(run._accepted, 0.001, build_tangent=False, device_result=True)
+                    test.assertEqual(failure.exception.status, run.Status.NONFINITE)
+            setattr(owner, name, original)
 
 
 def test_timestep_rounding(test, device):
@@ -217,6 +271,7 @@ class TestGraphParameters(unittest.TestCase):
 for name, function in (
     ("test_candidate_parameters", test_candidate_parameters),
     ("test_registered_bindings", test_registered_bindings),
+    ("test_strided_material_energy", test_strided_material_energy),
     ("test_timestep_replay", test_timestep_replay),
     ("test_timestep_validation_scope", test_timestep_validation_scope),
     ("test_timestep_rounding", test_timestep_rounding),

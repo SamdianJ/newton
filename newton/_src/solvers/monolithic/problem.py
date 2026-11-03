@@ -91,6 +91,7 @@ class _MonolithicProblem:
             (solver, "_complete_a"),
             *(binding for producer in self.producers for binding in producer.finite_values),
         )
+        self._evaluation_copies = {}
         self._bind_evaluation()
         self._energy_shapes = tuple(energy.shape for energy, _ in self.energies)
         self.owners = tuple(p for p in self.producers if not p.interaction)
@@ -425,10 +426,22 @@ class _MonolithicProblem:
     def _bind_evaluation(self):
         """Resolve registered storage; numerical generations may reuse or replace it."""
         solver = self.solver
+        copies = {}
+
+        def scalar_binding(owner, name):
+            array = getattr(owner, name)
+            if array.is_contiguous or (array.ndim == 1 and array.dtype == solver._dtype):
+                return state_checks.scalar_view(array)
+            key = (id(owner), name)
+            previous = self._evaluation_copies.get(key)
+            target = previous[1] if previous is not None and previous[0] is array else wp.empty_like(array)
+            copies[key] = (array, target)
+            return state_checks.scalar_view(target)
+
         self.energies = []
         for owner, name, absolute_name in self._energy_bindings:
-            energy = state_checks.scalar_view(getattr(owner, name))
-            absolute = None if absolute_name is None else state_checks.scalar_view(getattr(owner, absolute_name))
+            energy = scalar_binding(owner, name)
+            absolute = None if absolute_name is None else scalar_binding(owner, absolute_name)
             if energy.dtype != solver._dtype or energy.device != solver.model.device:
                 raise ValueError(f"Invalid energy binding: {name}")
             if absolute is not None and (
@@ -442,7 +455,8 @@ class _MonolithicProblem:
         self.checks = [
             (getattr(owner, name), statuses, message) for owner, name, statuses, message in self._check_bindings
         ]
-        self.finite_values = [state_checks.scalar_view(getattr(owner, name)) for owner, name in self._finite_bindings]
+        self.finite_values = [scalar_binding(owner, name) for owner, name in self._finite_bindings]
+        self._evaluation_copies = copies
 
     def difference(self, accepted, trial):
         """Write actual tangent displacement through each owner's state geometry."""
@@ -532,6 +546,9 @@ class _MonolithicProblem:
             solver._complete_a.zero_()
             for producer in self.producers:
                 producer.magnitude(solver, solver._complete_a)
+            # Refresh packed views only after producers have written this evaluation.
+            for source, target in self._evaluation_copies.values():
+                wp.copy(target, source)
             offset = 0
             for energy, absolute in self.energies:
                 wp.launch(
@@ -549,6 +566,7 @@ class _MonolithicProblem:
                 wp.launch(_copy_flag, 1, [flags, index, self.flags], device=solver.model.device)
 
         result_buffers = [self.flags, self.energy_terms, *self.energy_reduction.buffers(), *self.finite_values]
+        result_buffers.extend(array for pair in self._evaluation_copies.values() for array in pair)
         result_buffers.extend(values for pair in self.energies for values in pair if values is not None)
         result_buffers.extend(flags for flags, _, _ in self.checks)
         solver._graphs.run(
