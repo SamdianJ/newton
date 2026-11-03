@@ -29,7 +29,7 @@
     "superdex_runtime": "NOT_RUN"
   },
   "planning_snapshot_workspace_index_sha256": "a61a092cc6dbc9e34ac17cd2a9c06b7e1ba354e9dd70f53f53053c97412daad9",
-  "workspace_index_sha256": "dd820265a53f6c7f629bd3a7b3856972d6ebda317d2177898c602f05489ba43e",
+  "workspace_index_sha256": "268fb592f5aa99592ee04022d764b73d8b12a9f73515f0acd2dfe5b01b525435",
   "implementation": {
     "tested_commit": "2220971595d36ea7bd5ffa52d219a340f7d83ef9",
     "solver_tree_sha256": "dda3dde1962db7ed10cdae6bbaf7a4d93af843dacb9ae6d28c08369574bf18d2",
@@ -305,7 +305,7 @@
     }
   },
   "pr07_acceptance": {
-    "status": "WAITING_REMOTE_QUIET_WINDOW",
+    "status": "LOCAL_ACCEPTANCE_PLANNED",
     "results": "dev/monolithic/test/results/P9/P9a/PR-07/20261103-01",
     "initial_candidate": "8a83c3abcd2197c8aae6dc347ac44406d6816179",
     "superseded_runs": {
@@ -447,8 +447,8 @@
         "sha256": "373c7c5d73b1f2996f2f5d8dd82b69c6e60eb2b9926e61af6f11cba81259b518"
       },
       "remote": {
-        "state": "QUEUED",
-        "reason": "00:30\u201308:00 Asia/Tokyo reserved for nightly",
+        "state": "CANCELLED",
+        "reason": "User 2026-11-04 switched complete suite and E2E to local execution before dispatch",
         "cards": {
           "suite": "20261103T153812-8775416f-suite.json",
           "stage": "20261103T153805-8775416f-stage.json"
@@ -458,6 +458,21 @@
       "tested_commit": "8775416f5f1a8a6cf6e1dc12957b5049692721e1",
       "qt04_sha256": "96f436987d4e1c6573bfaea4a580ca29cc9bf4f137e4c683be6e1abf2212cf95"
     },
-    "tested_commit_scope": "First completed remote candidate; current repairs are described in followup_repairs."
+    "tested_commit_scope": "First completed remote candidate; current repairs are described in followup_repairs.",
+    "local_acceptance": {
+      "status": "PLANNED",
+      "results": "dev/monolithic/test/results/P9/P9a/PR-07/local-20261104-01",
+      "authorization": "User 2026-11-04: \u672c\u5730\u6d4b\u8bd5suite\u548cE2E\u5427; retain complete FP64/FP32 scope.",
+      "suite": "Complete CI discovery and check set; CPU4/CUDA1, warm caches; wall budget adapted only",
+      "stage_jobs": 47,
+      "precisions": [
+        "fp64",
+        "fp32"
+      ],
+      "skip": [],
+      "baseline": null,
+      "ci_commit": "df0927a7b1227af6ccb721154c7a455ed18bf1cb",
+      "planned_stage_sha256": "8ba3931d6051eadf58de8f4bf772c5e4ca29df44c910350d7b7c8b1e8f89bd5a"
+    }
   }
 }

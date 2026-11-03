@@ -1,6 +1,6 @@
 # P9a PRD：统一非线性问题接口与主机开销治理
 
-2026-11-04。状态：**IN_PROGRESS / PR-01、PR-02、PR-03、PR-04、PR-05、PR-06 COMPLETE**。统一接口、PCG 复用、摘要融合、材料设备批处理、最终 Stats 快照与 L1/L2 合同已通过验收（L3 仅完成测量处置，合成限制保留）；`P9a-PERF-01` 与未复现观察 `P9a-OBS-01` 仍 OPEN。OBS02 已加入捕获边界防护并通过回归，依赖内部归因待查。证据见 [PR-01](PR-01.md)、[PR-02](PR-02.md)、[PR-03](PR-03.md)、[PR-04](PR-04.md)、[PR-05](PR-05.md) 与 [PR-06](PR-06.md)。阶段尚未完成；[PR-07](PR-07.md) 已进入验收，独立审查发现的 P9a-F1（非连续多维能量提前复制）已修复，84076a4f 的 CPU/CUDA 定向与 quick 60 项通过，第一轮远程 suite 为 REGRESSION（7 个新失败 / 4 类机制），完整 stage 为 KNOWN_ONLY；suite 问题及独立发现的 cable owner 重绑 P1 已修复并通过 CPU10/CUDA9 定向验证，8775416f quick CLEAN60；远程重验因夜间保护窗口已排队。
+2026-11-04。状态：**IN_PROGRESS / PR-01、PR-02、PR-03、PR-04、PR-05、PR-06 COMPLETE**。统一接口、PCG 复用、摘要融合、材料设备批处理、最终 Stats 快照与 L1/L2 合同已通过验收（L3 仅完成测量处置，合成限制保留）；`P9a-PERF-01` 与未复现观察 `P9a-OBS-01` 仍 OPEN。OBS02 已加入捕获边界防护并通过回归，依赖内部归因待查。证据见 [PR-01](PR-01.md)、[PR-02](PR-02.md)、[PR-03](PR-03.md)、[PR-04](PR-04.md)、[PR-05](PR-05.md) 与 [PR-06](PR-06.md)。阶段尚未完成；[PR-07](PR-07.md) 已进入验收，独立审查发现的 P9a-F1（非连续多维能量提前复制）已修复，84076a4f 的 CPU/CUDA 定向与 quick 60 项通过，第一轮远程 suite 为 REGRESSION（7 个新失败 / 4 类机制），完整 stage 为 KNOWN_ONLY；suite 问题及独立发现的 cable owner 重绑 P1 已修复并通过 CPU10/CUDA9 定向验证，8775416f quick CLEAN60；用户改为本机完整 suite/E2E，远程重复卡片已取消。
 
 ## 1. 身份与范围
 

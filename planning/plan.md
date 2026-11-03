@@ -1,6 +1,6 @@
 # P9a 实施计划
 
-2026-11-04。状态：IN_PROGRESS（PR-01/02/03/04/05/06 COMPLETE；[PR-07](PR-07.md) 验收中，已发现并修复多维非连续能量摘要问题，第一轮 suite REGRESSION、stage KNOWN_ONLY；已修复四类 suite 问题与 cable owner 重绑 P1，CPU10/CUDA9 通过，8775416f quick CLEAN60；远程重验因夜间保护窗口已排队；L3 合成限制及性能留项 OPEN）。需求与范围以 [PRD](PRD.md) 为准。实现顺序固定为 **PR-01 H1 → PR-02 H2/R1 → PR-03 M1 → PR-04 M2/M3/M4 批处理收尾 → PR-05 M5 → PR-06 L1/L2/L3 → PR-07 阶段验收**。
+2026-11-04。状态：IN_PROGRESS（PR-01/02/03/04/05/06 COMPLETE；[PR-07](PR-07.md) 验收中，已发现并修复多维非连续能量摘要问题，第一轮 suite REGRESSION、stage KNOWN_ONLY；已修复四类 suite 问题与 cable owner 重绑 P1，CPU10/CUDA9 通过，8775416f quick CLEAN60；用户改为本机完整 suite/E2E，远程重复卡片已取消；L3 合成限制及性能留项 OPEN）。需求与范围以 [PRD](PRD.md) 为准。实现顺序固定为 **PR-01 H1 → PR-02 H2/R1 → PR-03 M1 → PR-04 M2/M3/M4 批处理收尾 → PR-05 M5 → PR-06 L1/L2/L3 → PR-07 阶段验收**。
 
 PR-01 可以按内部里程碑分多个可审查提交，但它仍是一个完整交付 PR。中间保留旧路径仅用于迁移对照；最终必须删掉。不能以“材料后续再接”关闭 H1。
 
@@ -14,7 +14,7 @@ PR-01 可以按内部里程碑分多个可审查提交，但它仍是一个完�
 | PR-04 | cable gauge、material reaction、control 校验的类型批处理收尾 | PR-01 已完成设备迁移 | COMPLETE；[验收](PR-04.md)：材料设备提交固定，48 组阶段对照、三组成对测量、CPU/CUDA/E2E/quick 通过；首捕获 reset 防护及性能留项单列 |
 | PR-05 | Stats 完整向量只作最终快照，序列化按需 | PR-01 的发布边界 | COMPLETE；[验收](PR-05.md)：独立只读快照、失败诊断/JSON 兼容、CPU 21/CUDA 14 与 quick 60 项通过；无导出/完整导出三组成对成本已记录 |
 | PR-06 | binding 元数据复用、dt 数值化、有界 graph 档位策略 | PR-01/02；M 项测量 | COMPLETE；[验收](PR-06.md)：L1/L2、CPU 25/CUDA 23、quick 60；三组成对整步/机器人复核完成，L3 保留现策略及合成限制，整体性能 OPEN |
-| PR-07 | 所有 requirement 关闭审查、全组件与完整 E2E、性能报告 | 前述 PR | IN_PROGRESS；[验收记录](PR-07.md)，P9a-F1 已修复；84076a4f 完整结果已取回；suite 四类机制与独立 cable 重绑 P1 已通过 CPU10/CUDA9 和 quick CLEAN60；8775416f 远程任务已排队，不复用旧版本 PASS |
+| PR-07 | 所有 requirement 关闭审查、全组件与完整 E2E、性能报告 | 前述 PR | IN_PROGRESS；[验收记录](PR-07.md)，P9a-F1 已修复；84076a4f 完整结果已取回；suite 四类机制与独立 cable 重绑 P1 已通过 CPU10/CUDA9 和 quick CLEAN60；用户要求本机完整 suite/E2E，远程重复卡片已取消，不复用旧版本 PASS |
 
 M2/M3/M4、L4/L5 中阻止统一设备契约的部分已经属于 PR-01，后续不重新实现另一套逻辑。PR-04 开始前审查 PR-01 的完成记录：若已达相应结构与成本目标，直接以证据关闭该项，只处理剩余批处理缺口，禁止为凑 PR 新造抽象。
 
