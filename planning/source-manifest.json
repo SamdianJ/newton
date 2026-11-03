@@ -2,7 +2,7 @@
   "date": "2026-11-03",
   "timezone": "Asia/Tokyo",
   "stage": "P9a",
-  "status": "PR01_PR02_PR03_PR04_PR05_COMPLETE_STAGE_IN_PROGRESS_PERFORMANCE_OPEN",
+  "status": "PR01_PR02_PR03_PR04_PR05_PR06_COMPLETE_STAGE_IN_PROGRESS_PERFORMANCE_OPEN",
   "branch": "SamiulJ/monolithic-p9a",
   "worktree": "worktrees/Monolithic-p9a",
   "base_commit": "8fa80ba7ce3fd7ce2483f2ec098e66d410bc434e",
@@ -24,12 +24,12 @@
   "runtime_environment": {
     "venv": "shared symlink to ../Monolithic-refactor/.venv; use uv run --no-sync; do not uv sync this shared environment",
     "assets": "read-only reuse of ../Monolithic-refactor/asset/monolithic/data through relative symlink",
-    "solver_runtime_tests": "PR01–PR05 affected CPU/CUDA components, small E2E and FP64/FP32 quick PASS; actual scopes and tested commits documented per PR. PR05 CPU21/CUDA14 distinct methods, original2 loader errors retained/corrected. Stage suite/stage NOT_RUN; OBS01 open and OBS02 mitigated with dependency attribution open.",
-    "performance": "PR04 cable batching and PR05 snapshot/serialization costs measured separately. PR05 3 serial alternating pairs, 12 full-step +16 isolated cases,21samples/version/case; same input/work/vectors. q+x FP64 with JSON +7.58% remains unattributed. PERF01 including robot and PR04 trees observations remains OPEN.",
+    "solver_runtime_tests": "PR01–PR06 affected CPU/CUDA components and small E2E/quick documented per tested commit. PR06 clean f43d5cf7 CPU25/CUDA23, zero failure/error/skip; quick CLEAN60. Stage suite/stage/nightly NOT_RUN; OBS01 and OBS02 attribution remain open.",
+    "performance": "PR06: 3 AB/BA/AB pairs for20 incremental small cases,8 original-baseline cases,and4 FP32 robot windows. Exact input/work identities checked. Alpha recaptures removed; dynamic-span production strategy retained. qx FP64 noJSON+5.13%,trees FP64 noJSON+1.49% vsPR05; overall PERF01 OPEN.",
     "superdex_runtime": "NOT_RUN"
   },
   "planning_snapshot_workspace_index_sha256": "a61a092cc6dbc9e34ac17cd2a9c06b7e1ba354e9dd70f53f53053c97412daad9",
-  "workspace_index_sha256": "993e40d4e86a50f393f2962d5ed6e5670d88d15270ee627c3a8b34908ede7d33",
+  "workspace_index_sha256": "37544c259d56935f61d411fdb3f57c3439dcee409726c7442e677661a98038d0",
   "implementation": {
     "tested_commit": "2220971595d36ea7bd5ffa52d219a340f7d83ef9",
     "solver_tree_sha256": "dda3dde1962db7ed10cdae6bbaf7a4d93af843dacb9ae6d28c08369574bf18d2",
@@ -228,5 +228,80 @@
       "P9a-OBS-02 dependency attribution"
     ],
     "completion_commit_scope": "Only planning documents differ from tested source. No push/merge; full suite/stage/nightly NOT_RUN."
+  },
+  "pr06_completion": {
+    "base_commit": "b5868dc4c5882d368e982569dec8ee37102a76a4",
+    "original_baseline_commit": "8fa80ba7ce3fd7ce2483f2ec098e66d410bc434e",
+    "tested_commit": "f43d5cf7fe867e262700b6139725f9f0a25bac13",
+    "solver_tree_sha256": "758b39ed9af0b4db5f6cdd0e66cc63d549c98c254b62c87d07737e441b176786",
+    "results": "dev/monolithic/test/results/P9/P9a/PR-06/20261103-01",
+    "cpu": {
+      "pass": 25,
+      "failure": 0,
+      "error": 0,
+      "skip": 0
+    },
+    "cuda": {
+      "pass": 23,
+      "failure": 0,
+      "error": 0,
+      "skip": 0
+    },
+    "composed_e2e": "CPU6/CUDA12 combinations x64 steps; strict checkpoint continuation and rejected-trial/publication rollback PASS.",
+    "quick_results": "dev/monolithic/test/results/P9/P9a/PR-06/quick-f43d5cf7",
+    "quick_verdict": "CLEAN",
+    "quick_pass_items": 60,
+    "quick_result_sha256": "e9c88fefe7b050a230e7cb587cb0d7e191dcf01d6c0d0937458df9cd5b4e76b7",
+    "measurement": {
+      "pairs": 3,
+      "order": "AB/BA/AB",
+      "incremental_cases": 20,
+      "original_baseline_cases": 8,
+      "samples_per_case_per_version": 21,
+      "robot_measured_windows": 24,
+      "robot_warmup_windows": 24,
+      "robot_physical_gates": "PASS",
+      "per_step_work": "IDENTICAL",
+      "robot_changes_pct": {
+        "franka": -5.952471888545386,
+        "sharpa": 2.3900091494192477
+      }
+    },
+    "l3": "MEASURED/RETAINED: no measured span recaptures in chosen real windows; power2/LRU6 retained; synthetic seven-span thrashing unfixed. Local policies not installed in production.",
+    "performance": "OPEN; same-direction incremental qx64 noJSON+5.13%,trees64 noJSON+1.49%; all original-baseline and robot results reported separately.",
+    "interruption": "Robot third-pair baseline interrupted with no completed cases; archived and rerun. Completed earlier pairs retained; no gate failure discarded.",
+    "memory_scope": "New numerical payload16/32B; registrycontainers6072–66976B. Does not measure complete setup/RSS/native/CUDA allocator or opaque graph storage.",
+    "workspace_index_sha256": "37544c259d56935f61d411fdb3f57c3439dcee409726c7442e677661a98038d0",
+    "open_items": [
+      "P9a-PERF-01",
+      "L3 synthetic seven-span limitation",
+      "P9a-OBS-01",
+      "P9a-OBS-02 dependency attribution"
+    ],
+    "completion_commit_scope": "Planning documentation only; runtime binds tested_commit, solver tree unchanged. No push/merge. Full suite/stage/nightly NOT_RUN.",
+    "evidence_sha256": {
+      "validation-summary.json": "28b915e4f35edd471c2918edc197f9c51844887ca3239e73b4dc92a8daefb505",
+      "final-cpu.json": "02d8d8ead077b1bd6ca736fb24ebf80ff5d88aaa5ae69af1f86885dfc46ed0d0",
+      "final-cuda.json": "65c168f250a97d9e8718a41bbce6cef556077bfaa58d42450ef533717e7aaf49",
+      "final-tests.py": "f20ce10b22547c187e7e99af1f51cbb1a435f5a7bbe372d84ab93bb6dd93a869",
+      "red-baseline.json": "c8f0211739ff1bff4838dcf912b0145ee18d89819fbe409df83ea8791f6424e9",
+      "red-baseline-tests.py": "03a6f0c65019ebb697ab53e6498b850750e9e74275fb65f75cdf16703aad0842",
+      "paired-step.py": "13a2484787b0d905f5c3126e25c32a3ae38f1abea8e215ff0e7c82f37813756d",
+      "summarize.py": "6d1b31f96c8a666ebce591b80527db16e9d1705b939d1bc6b9c9330b6a0d4f5a",
+      "paired-summary.json": "93acaa82c301d76db77c1fd84da1b818651fab5efa4850a6f9a8ad4a49afa16c",
+      "legacy-small/paired-step.py": "53df5cb458c666e05fc1ba33ae70ec5ebf0820f811c34684aa9629b3d9491524",
+      "legacy-small/summarize.py": "457e6fdebe92a71bd627e75ce5fa967a36a7e01457d50dfe60cce592e8b29e96",
+      "legacy-small/paired-summary.json": "4e1c805193ddaf1e2525acc72e966a58e6e1d13bc80c02a5d9dca103d499fb11",
+      "robot/series.json": "abc98adde212665842eddb95cab9877a6e687718f1bc574cebde669e712a497f",
+      "robot/summarize.py": "eca4bccc8e28723c23785436d9e22c8d6c28afb466844b4639b18e7dec7e727f",
+      "robot/comparison.json": "2cd6597ec7d7158062b8c7235ccbbe7d4a230f9485ecd0e9fc2b79e5d1607b90",
+      "robot/series-interrupted.json": "452f696bd93d6315c59b25dfca3868cd4137d02627563624f43eb179edc01708",
+      "span-probe.py": "8d8bd0775321d8ac5fac7c4eb2bb83bb72c3ac15ca27b54a2dd5cd45fb58b384",
+      "span-probe.json": "bb046c7f9596712096af82d548abfd59e8968e85dd6000f8136c09db294c0acd",
+      "span-tail-probe.py": "319422771afed944186b91dd9810a48a2ecc598282457affe63b97311827405a",
+      "span-tail-probe.json": "8cb8ba53852ac49643c946f4c1e0de96cfa1633d686fe0b3a51a052629a8109e",
+      "span-summary.json": "6fa3dbdb59f556374ae7d947d9a6fc3006fe8e9923929ff644926962aaed4b27",
+      "reviews.json": "1c1695f264fb4a6702b4f49c0dc986b0a037f52af10e5b9a18cb597196c517d2"
+    }
   }
 }
