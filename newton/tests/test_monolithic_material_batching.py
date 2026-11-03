@@ -220,14 +220,17 @@ def test_operator_and_band(test, device):
                 operator.add_product(x_device, scale_device, out, magnitude=magnitude, active=active)
 
             buffers = [*operator.buffers(), x_device, scale_device, out, magnitude, active]
-            for _ in range(2):
+            for replay in range(2):
                 run._graphs.run("test_material_product", (), buffers, execute)
                 expected = scale.astype(float) * (dense @ (scale.astype(float) * x.astype(float)))
                 np.testing.assert_allclose(
                     out.numpy(), expected, rtol=64 * np.finfo(native).eps, atol=64 * np.finfo(native).eps
                 )
                 np.testing.assert_allclose(
-                    magnitude.numpy(), scale * (absolute @ abs(scale * x)), rtol=64 * np.finfo(native).eps
+                    magnitude.numpy(),
+                    scale * (absolute @ abs(scale * x)),
+                    rtol=64 * np.finfo(native).eps,
+                    err_msg=f"{precision}, binding={binding}, replay={replay}",
                 )
             coordinates = wp.array(abs(x), dtype=run._dtype, device=device)
             out.zero_()
@@ -255,6 +258,8 @@ def test_operator_and_band(test, device):
             for row in range(n):
                 matrix[row, columns[offsets[row] : offsets[row + 1]]] += values[offsets[row] : offsets[row + 1]]
             matrix = scales[:, None] * matrix * scales[None, :]
+            band = preconditioner.band.numpy().reshape(-1, 11)
+            expected_band, band_bound = np.zeros_like(band, dtype=float), np.zeros_like(band, dtype=float)
             for actor, (start, end) in enumerate(preconditioner.spans.numpy()):
                 indices = rows[start:end]
                 expected = matrix[np.ix_(indices, indices)].copy()
@@ -266,9 +271,15 @@ def test_operator_and_band(test, device):
                 for i in range(end - start):
                     for j in range(max(0, i - 10), i + 1):
                         lower[i, j] = factors[start + i, i - j]
+                        row, column = indices[i], indices[j]
+                        scale_product = float(scales[row]) * float(scales[column])
+                        expected_band[start + i, i - j] = scale_product * dense[row, column]
+                        band_bound[start + i, i - j] = 64 * np.finfo(native).eps * scale_product * absolute[row, column]
                 np.testing.assert_allclose(
                     lower @ lower.T, expected, rtol=256 * np.finfo(native).eps, atol=256 * np.finfo(native).eps
                 )
+            # Check element terms directly: the inertial diagonal can hide FP32 band errors.
+            np.testing.assert_array_less(np.abs(band - expected_band), band_bound + np.finfo(native).tiny)
         if device.is_cuda:
             test.assertEqual(run._graphs.summary()["segments"]["test_material_product"]["captures"], 2)
         bad = operator.cables[-1].stretch_matrix

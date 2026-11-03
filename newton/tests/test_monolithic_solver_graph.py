@@ -29,6 +29,38 @@ def _increment(result: wp.array[int]):
     result[wp.tid()] += 1
 
 
+@wp.kernel
+def _add_scaled(source: wp.array[float], result: wp.array[float], factor: float):
+    i = wp.tid()
+    result[i] += factor * source[i]
+
+
+def test_segment_reset_after_pending_work(test, device):
+    """Clear both accumulators on first capture and replay after pending device writes."""
+    for warmup in (False, True):
+        cache = _SegmentGraphCache(device, enabled=True)
+        source = wp.ones(52, device=device)
+        scratch, result, magnitude = [wp.zeros_like(source) for _ in range(3)]
+        for binding in range(256):
+            factor = float(binding % 9 + 1)
+
+            def execute(factor=factor, source=source, scratch=scratch, result=result, magnitude=magnitude):
+                result.zero_()
+                magnitude.zero_()
+                wp.launch(_copy_scaled, 52, [source, scratch, factor], device=device)
+                wp.launch(_add_scaled, 52, [scratch, result, 1.0], device=device)
+                wp.launch(_add_scaled, 52, [scratch, magnitude, 2.0], device=device)
+
+            for replay in range(2):
+                result.fill_(19)
+                magnitude.fill_(17)
+                cache.run("reset", (factor,), (source, scratch, result, magnitude), execute, warmup=warmup)
+                with test.subTest(warmup=warmup, binding=binding, replay=replay):
+                    np.testing.assert_array_equal(result.numpy(), factor)
+                    np.testing.assert_array_equal(magnitude.numpy(), 2 * factor)
+        test.assertEqual(cache.captures["reset"], 256)
+
+
 def test_segment_additive_capture(test, device):
     """Execute additive work once on first capture, replay and buffer rebinding."""
     cache = _SegmentGraphCache(device, enabled=True)
@@ -255,6 +287,7 @@ class TestMonolithicSegmentGraphs(unittest.TestCase):
 
 
 for function in (
+    test_segment_reset_after_pending_work,
     test_segment_additive_capture,
     test_segments_continuous,
     test_segment_warm_replay,
