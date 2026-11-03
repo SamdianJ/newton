@@ -91,7 +91,9 @@ def test_spatial_rounds(test, device):
             np.testing.assert_array_equal(run._contact._spatial.x0.numpy(), start)
             test.assertFalse(run.last_stats.variational["contact_spatial"]["tainted"])
             assert_physical(test, frame(full, states[1]), frame(run, states[0]))
-            np.testing.assert_allclose(run._reference_residual, full._reference_residual, rtol=1e-8, atol=1e-10)
+            np.testing.assert_allclose(
+                run._reference_residual.numpy(), full._reference_residual.numpy(), rtol=1e-8, atol=1e-10
+            )
             expected = run._contact.pool.force.result.numpy()
             force = run.get_contact_forces(states[0])
             n = 3 * run.model.particle_count

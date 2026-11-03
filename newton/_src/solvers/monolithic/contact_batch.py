@@ -467,7 +467,6 @@ class _ContactBatch:
     def __init__(self, contact, *, batch_capacity, capacity, contact_factor_capacity=None, use_cuda_graph=False):
         self.contact, self.device = contact, contact.model.device
         self.dtype, self.vector, self.matrix = contact.dtype, contact.vector, contact.matrix
-        self._falloff = wp.zeros(1, dtype=self.dtype, device=self.device)
         self._falloff_value = None
         self._falloff_binding = None
         self._buffer_fields = None
@@ -485,6 +484,7 @@ class _ContactBatch:
             or not 0 <= capacity < 2**31
         ):
             raise ValueError("Invalid native contact pool capacity")
+        self._falloff = wp.zeros(1, dtype=self.dtype, device=self.device)
         samples_type, support_type = _batch_types(self.dtype)
         self.support = support_type()
         actors = None if contact.actor_samples is None else contact.actor_samples.actors

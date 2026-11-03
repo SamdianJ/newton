@@ -191,17 +191,19 @@ def test_operator_and_band(test, device):
         old_plan = linear._masked_pcg_plan
         test.assertIsNotNone(old_plan)
         old_plan._validate_storage()
-        for binding in range(2):
+        retained = []
+        for binding in range(3):
             if binding:
-                cable = operator.cables[-1]
-                cable.stretch_matrix = wp.array(
-                    cable.stretch_matrix.numpy() * native(1.5), dtype=run._dtype, device=device
-                )
+                owner = run._cables[-1].objective
+                field = "stretch_b" if binding == 1 else "bend_twist_b"
+                old = getattr(owner, field)
+                retained.append((old, old.numpy().copy()))
+                setattr(owner, field, wp.array(old.numpy() * native(1.5), dtype=run._dtype, device=device))
                 with test.assertRaisesRegex(ValueError, "storage changed"):
                     old_plan._validate_storage()
             dense, absolute = np.zeros((n, n)), np.zeros((n, n))
-            for cable in operator.cables:
-                matrices = cable.stretch_matrix.numpy(), cable.bend_matrix.numpy()
+            for cable, block in zip(operator.cables, run._cables, strict=True):
+                matrices = block.objective.stretch_b.numpy(), block.objective.bend_twist_b.numpy()
                 for kind, element, a, b, row_a, row_b in cable.entries():
                     value = float(matrices[kind][element, a, b])
                     dense[row_a, row_b] += value
@@ -280,13 +282,16 @@ def test_operator_and_band(test, device):
                 )
             # Check element terms directly: the inertial diagonal can hide FP32 band errors.
             np.testing.assert_array_less(np.abs(band - expected_band), band_bound + np.finfo(native).tiny)
+            for old, values in retained:
+                np.testing.assert_array_equal(old.numpy(), values)
         if device.is_cuda:
-            test.assertEqual(run._graphs.summary()["segments"]["test_material_product"]["captures"], 2)
-        bad = operator.cables[-1].stretch_matrix
-        operator.cables[-1].stretch_matrix = wp.zeros((1, 6, 6), dtype=run._dtype, device=device)
+            test.assertEqual(run._graphs.summary()["segments"]["test_material_product"]["captures"], 3)
+        owner = run._cables[-1].objective
+        bad = owner.stretch_b
+        owner.stretch_b = wp.zeros((1, 6, 6), dtype=run._dtype, device=device)
         with test.assertRaisesRegex(ValueError, "layout"):
             operator.buffers()
-        operator.cables[-1].stretch_matrix = bad
+        owner.stretch_b = bad
 
 
 def test_control_boundaries(test, device):

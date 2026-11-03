@@ -180,11 +180,10 @@ class _Cable:
     """Element-to-row maps and output storage of one cable."""
 
     def __init__(self, block, dtype, device):
-        objective = block.objective
+        self.objective = block.objective
         nv = block.ids.size
         local = block.rows_host
         ne, ni = nv - 1, nv - 2
-        self.stretch_matrix, self.bend_matrix = objective.stretch_b, objective.bend_twist_b
         self.stretch_rows_host = np.array([local[3 * e : 3 * e + 6] for e in range(ne)], dtype=np.int32).reshape(ne, 6)
         self.bend_rows_host = np.array(
             [np.r_[local[3 * k : 3 * k + 9], local[3 * nv + k : 3 * nv + k + 2]] for k in range(ni)], dtype=np.int32
@@ -252,8 +251,8 @@ class CableOperator:
         for cable in self.cables:
             elements.extend(
                 (
-                    (cable.stretch_rows, cable.stretch_matrix, cable.stretch_out, cable.stretch_size, 6),
-                    (cable.bend_rows, cable.bend_matrix, cable.bend_out, cable.bend_size, 9),
+                    (cable.stretch_rows, cable.objective.stretch_b, cable.stretch_out, cable.stretch_size, 6),
+                    (cable.bend_rows, cable.objective.bend_twist_b, cable.bend_out, cable.bend_size, 9),
                 )
             )
             gathers.append((*cable.gather, cable.stretch_out, cable.bend_out, cable.stretch_size, cable.bend_size))
@@ -320,7 +319,7 @@ class CableOperator:
         """Return the cable element part as a dense matrix, for tests and diagnostics."""
         result = np.zeros((self.size, self.size))
         for cable in self.cables:
-            values = (cable.stretch_matrix.numpy(), cable.bend_matrix.numpy())
+            values = (cable.objective.stretch_b.numpy(), cable.objective.bend_twist_b.numpy())
             for kind, element, a, b, row_a, row_b in cable.entries():
                 result[row_a, row_b] += values[kind][element, a, b]
         return result

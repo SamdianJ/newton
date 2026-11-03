@@ -170,7 +170,7 @@ class CablePreconditioner:
 
     def _views(self):
         return [
-            (*table, cable.stretch_matrix, cable.bend_matrix)
+            (*table, cable.objective.stretch_b, cable.objective.bend_twist_b)
             for cable, table in zip(self._operator.cables, self._band_table, strict=True)
         ]
 

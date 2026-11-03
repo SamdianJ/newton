@@ -346,8 +346,8 @@ def test_rigid_failures_and_reset(test, device):
     original, previous = snapshot(state), snapshot(output)
     evaluate = run._rigid.evaluate
 
-    def nonfinite_tangent(candidate, steps, dt, tangent):
-        evaluate(candidate, steps, dt, tangent)
+    def nonfinite_tangent(candidate, steps, dt, tangent, *, dt_buffer=None):
+        evaluate(candidate, steps, dt, tangent, dt_buffer=dt_buffer)
         if tangent:
             run._rigid.tangent.fill_(float("nan"))
 

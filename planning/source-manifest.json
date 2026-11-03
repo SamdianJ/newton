@@ -1,5 +1,5 @@
 {
-  "date": "2026-11-03",
+  "date": "2026-11-04",
   "timezone": "Asia/Tokyo",
   "stage": "P9a",
   "status": "PR01_PR02_PR03_PR04_PR05_PR06_COMPLETE_PR07_ACCEPTANCE_IN_PROGRESS",
@@ -24,12 +24,12 @@
   "runtime_environment": {
     "venv": "shared symlink to ../Monolithic-refactor/.venv; use uv run --no-sync; do not uv sync this shared environment",
     "assets": "read-only reuse of ../Monolithic-refactor/asset/monolithic/data through relative symlink",
-    "solver_runtime_tests": "PR01–PR06 affected CPU/CUDA components and small E2E/quick documented per tested commit. PR06 clean f43d5cf7 CPU25/CUDA23, zero failure/error/skip; quick CLEAN60. Stage suite/stage/nightly NOT_RUN; OBS01 and OBS02 attribution remain open.",
+    "solver_runtime_tests": "PR01\u2013PR06 results remain bound to their original commits. PR07 first candidate 84076a4f: local targeted CPU2/CUDA2 and quick CLEAN60; remote suite REGRESSION, stage KNOWN_ONLY (47 jobs). Repairs in progress; no stage PASS.",
     "performance": "PR06: 3 AB/BA/AB pairs for20 incremental small cases,8 original-baseline cases,and4 FP32 robot windows. Exact input/work identities checked. Alpha recaptures removed; dynamic-span production strategy retained. qx FP64 noJSON+5.13%,trees FP64 noJSON+1.49% vsPR05; overall PERF01 OPEN.",
     "superdex_runtime": "NOT_RUN"
   },
   "planning_snapshot_workspace_index_sha256": "a61a092cc6dbc9e34ac17cd2a9c06b7e1ba354e9dd70f53f53053c97412daad9",
-  "workspace_index_sha256": "f8fd91eae2d78982725802cf796cbae9c4392dfc3507712685f38c52528fdbff",
+  "workspace_index_sha256": "b2d0f427917bbe87681287e1c7d856c8d9805ddc8f201080f6130ef6c5e584dc",
   "implementation": {
     "tested_commit": "2220971595d36ea7bd5ffa52d219a340f7d83ef9",
     "solver_tree_sha256": "dda3dde1962db7ed10cdae6bbaf7a4d93af843dacb9ae6d28c08369574bf18d2",
@@ -165,14 +165,14 @@
         "skipped": 0
       }
     },
-    "composed_e2e": "Final clean commit:CPU6/CUDA12 combinations×64steps, checkpoint continuation and rejected-trial/publication-failure rollback PASS.",
+    "composed_e2e": "Final clean commit:CPU6/CUDA12 combinations\u00d764steps, checkpoint continuation and rejected-trial/publication-failure rollback PASS.",
     "quick_results": "dev/monolithic/test/results/P9/P9a/PR-04/quick-c3dc0714",
     "quick_verdict": "CLEAN",
     "quick_pass_items": 60,
     "quick_result_sha256": "ac86f70f2f1529200566d3192aeba8d066f36aa5194d07bf2611c9d487e2577a",
     "phase_comparison_sha256": "6bc3b5c081612dca2745da26273c1991f001ea95cce3124f7379495fe2699146",
     "paired_summary_sha256": "5add4c99f65fc1814f8260b62e04be3534f0c2721474356a8d01f5a7fb345e8e",
-    "cost_scope": "48 phase comparisons;3 alternating pairs×24cases,15timed samples per case/version. Steady direct phase H2D0 and explicit stream sync0; complete-step existing transfers unchanged. Newly captured segments drain current stream; capture waits remain in timing.",
+    "cost_scope": "48 phase comparisons;3 alternating pairs\u00d724cases,15timed samples per case/version. Steady direct phase H2D0 and explicit stream sync0; complete-step existing transfers unchanged. Newly captured segments drain current stream; capture waits remain in timing.",
     "observation_status": "P9a-OBS-02 MITIGATED; exact dependency layer cause unassigned",
     "observation_sha256": "76f5a8d9888b5a437493f0bc55812db5261803a68dad1bb6e18aa6f8457b9852",
     "open_items": [
@@ -270,7 +270,7 @@
     "l3": "MEASURED/RETAINED: no measured span recaptures in chosen real windows; power2/LRU6 retained; synthetic seven-span thrashing unfixed. Local policies not installed in production.",
     "performance": "OPEN; same-direction incremental qx64 noJSON+5.13%,trees64 noJSON+1.49%; all original-baseline and robot results reported separately.",
     "interruption": "Robot third-pair baseline interrupted with no completed cases; archived and rerun. Completed earlier pairs retained; no gate failure discarded.",
-    "memory_scope": "New numerical payload16/32B; registrycontainers6072–66976B. Does not measure complete setup/RSS/native/CUDA allocator or opaque graph storage.",
+    "memory_scope": "New numerical payload16/32B; registrycontainers6072\u201366976B. Does not measure complete setup/RSS/native/CUDA allocator or opaque graph storage.",
     "workspace_index_sha256": "37544c259d56935f61d411fdb3f57c3439dcee409726c7442e677661a98038d0",
     "open_items": [
       "P9a-PERF-01",
@@ -305,7 +305,7 @@
     }
   },
   "pr07_acceptance": {
-    "status": "WAITING_REMOTE",
+    "status": "LOCAL_CHECKED",
     "results": "dev/monolithic/test/results/P9/P9a/PR-07/20261103-01",
     "initial_candidate": "8a83c3abcd2197c8aae6dc347ac44406d6816179",
     "superseded_runs": {
@@ -373,24 +373,73 @@
     },
     "suite": {
       "run_id": 41615619651,
-      "state": "DISPATCHED/RUNNING",
-      "verdict": null,
+      "state": "COMPLETE",
+      "verdict": "REGRESSION",
       "planned_cpu": 885,
       "planned_cuda": 512,
-      "planned_checks": 83
+      "planned_checks": 83,
+      "counts": {
+        "diagnostic:FAIL": 25,
+        "diagnostic:PASS": 6,
+        "gate:NEW_FAIL": 7,
+        "gate:PASS": 1393,
+        "gate:PASS_AFTER_RETRY": 2,
+        "gate:SKIPPED": 78
+      },
+      "files_sha256": "ab1251198bb690e07972b77c1a587c180f5ec220c8d34fe76f01ca871a3288a6"
     },
     "stage": {
       "run_id": 41615727514,
-      "state": "DISPATCHED/pending",
-      "verdict": null,
+      "state": "COMPLETE",
+      "verdict": "KNOWN_ONLY",
       "jobs": 47,
       "precisions": [
         "fp64",
         "fp32"
       ],
       "skip": [],
-      "baseline": null
+      "baseline": null,
+      "counts": {
+        "diagnostic:FAIL": 2,
+        "gate:KNOWN_FAIL": 24,
+        "gate:PASS": 77
+      },
+      "files_sha256": "40ac467788c835487f83f0006004371e18c83c823fd2385b3cc46c99f2703cd6"
     },
-    "record_commit_scope": "Documentation only; runtime remains bound to tested_commit; full acceptance not complete"
+    "record_commit_scope": "Documentation only; runtime remains bound to tested_commit; full acceptance not complete",
+    "followup_repairs": {
+      "results": "dev/monolithic/test/results/P9/P9a/PR-07/20261104-fixes-01",
+      "status": "LOCAL_VERIFIED",
+      "issues": [
+        "contact capacity allocation",
+        "rigid injection dt_buffer",
+        "offline friction displacement scale",
+        "CUDA residual NumPy transfer",
+        "P9a-PRE-F1 cable owner tangent rebinding"
+      ],
+      "gates_modified": false,
+      "new_waivers": false,
+      "cpu": {
+        "run": 10,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0,
+        "seconds": 762.9021349730001,
+        "success": true
+      },
+      "cuda": {
+        "run": 9,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0,
+        "seconds": 14.948874212999726,
+        "success": true
+      },
+      "cuda_composed": "CANCELLED/INCONCLUSIVE locally during cold compilation; covered by pending authorized full remote suite.",
+      "validation_summary_sha256": "9b7ad8d4ff98f131069ada1069e420ba1ca93572556467af327e9c0e6a4aede4",
+      "quick": "NOT_RUN",
+      "remote": "NOT_SUBMITTED"
+    },
+    "tested_commit_scope": "First completed remote candidate; current repairs are described in followup_repairs."
   }
 }

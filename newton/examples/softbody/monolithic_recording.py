@@ -109,6 +109,7 @@ def measure(run, state):
         _MEASURE_BATCHES[contact] = batch
     start = _native_inputs(run, run._original)
     batch.begin_step(*start[:5], rigid_com=start[5], rigid_rotation=start[6])
+    batch._set_falloff(contact.numpy_dtype(contact.parameters[2]) * contact.numpy_dtype(run._dt))
     # Leaves the solver kinematics at the accepted state, as before measurement.
     args = batch._state(*_native_inputs(run, state))
     gaps, slips, load, work = [], [], 0.0, 0.0
