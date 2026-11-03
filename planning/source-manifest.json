@@ -2,7 +2,7 @@
   "date": "2026-11-03",
   "timezone": "Asia/Tokyo",
   "stage": "P9a",
-  "status": "PR01_PR02_PR03_PR04_COMPLETE_STAGE_IN_PROGRESS_PERFORMANCE_OPEN",
+  "status": "PR01_PR02_PR03_PR04_PR05_COMPLETE_STAGE_IN_PROGRESS_PERFORMANCE_OPEN",
   "branch": "SamiulJ/monolithic-p9a",
   "worktree": "worktrees/Monolithic-p9a",
   "base_commit": "8fa80ba7ce3fd7ce2483f2ec098e66d410bc434e",
@@ -24,12 +24,12 @@
   "runtime_environment": {
     "venv": "shared symlink to ../Monolithic-refactor/.venv; use uv run --no-sync; do not uv sync this shared environment",
     "assets": "read-only reuse of ../Monolithic-refactor/asset/monolithic/data through relative symlink",
-    "solver_runtime_tests": "PR01\u2013PR04 affected CPU/CUDA components, small E2E and FP64/FP32 quick PASS; capability skips and exact tested commits documented per PR. Stage suite/stage NOT_RUN; OBS01 remains open. OBS02 capture boundary mitigation has red/green and final regressions; dependency internal attribution remains open.",
-    "performance": "PR04: three serial alternating pairs across24 FP32/FP64 tiny cases; input/config/work identical. Material phase structural contract PASS, cable8 median -13.1%/-15.6%; FP64 trees +1.6% retained under PERF01. Overall stage/robot performance qualification remains OPEN.",
+    "solver_runtime_tests": "PR01–PR05 affected CPU/CUDA components, small E2E and FP64/FP32 quick PASS; actual scopes and tested commits documented per PR. PR05 CPU21/CUDA14 distinct methods, original2 loader errors retained/corrected. Stage suite/stage NOT_RUN; OBS01 open and OBS02 mitigated with dependency attribution open.",
+    "performance": "PR04 cable batching and PR05 snapshot/serialization costs measured separately. PR05 3 serial alternating pairs, 12 full-step +16 isolated cases,21samples/version/case; same input/work/vectors. q+x FP64 with JSON +7.58% remains unattributed. PERF01 including robot and PR04 trees observations remains OPEN.",
     "superdex_runtime": "NOT_RUN"
   },
   "planning_snapshot_workspace_index_sha256": "a61a092cc6dbc9e34ac17cd2a9c06b7e1ba354e9dd70f53f53053c97412daad9",
-  "workspace_index_sha256": "39d416426525a9da20130ec75c7b461223ce419c5f6a337c2c007b11c54d06be",
+  "workspace_index_sha256": "993e40d4e86a50f393f2962d5ed6e5670d88d15270ee627c3a8b34908ede7d33",
   "implementation": {
     "tested_commit": "2220971595d36ea7bd5ffa52d219a340f7d83ef9",
     "solver_tree_sha256": "dda3dde1962db7ed10cdae6bbaf7a4d93af843dacb9ae6d28c08369574bf18d2",
@@ -165,14 +165,14 @@
         "skipped": 0
       }
     },
-    "composed_e2e": "Final clean commit:CPU6/CUDA12 combinations\u00d764steps, checkpoint continuation and rejected-trial/publication-failure rollback PASS.",
+    "composed_e2e": "Final clean commit:CPU6/CUDA12 combinations×64steps, checkpoint continuation and rejected-trial/publication-failure rollback PASS.",
     "quick_results": "dev/monolithic/test/results/P9/P9a/PR-04/quick-c3dc0714",
     "quick_verdict": "CLEAN",
     "quick_pass_items": 60,
     "quick_result_sha256": "ac86f70f2f1529200566d3192aeba8d066f36aa5194d07bf2611c9d487e2577a",
     "phase_comparison_sha256": "6bc3b5c081612dca2745da26273c1991f001ea95cce3124f7379495fe2699146",
     "paired_summary_sha256": "5add4c99f65fc1814f8260b62e04be3534f0c2721474356a8d01f5a7fb345e8e",
-    "cost_scope": "48 phase comparisons;3 alternating pairs\u00d724cases,15timed samples per case/version. Steady direct phase H2D0 and explicit stream sync0; complete-step existing transfers unchanged. Newly captured segments drain current stream; capture waits remain in timing.",
+    "cost_scope": "48 phase comparisons;3 alternating pairs×24cases,15timed samples per case/version. Steady direct phase H2D0 and explicit stream sync0; complete-step existing transfers unchanged. Newly captured segments drain current stream; capture waits remain in timing.",
     "observation_status": "P9a-OBS-02 MITIGATED; exact dependency layer cause unassigned",
     "observation_sha256": "76f5a8d9888b5a437493f0bc55812db5261803a68dad1bb6e18aa6f8457b9852",
     "open_items": [
@@ -181,5 +181,52 @@
       "P9a-OBS-02 dependency attribution"
     ],
     "completion_commit_scope": "Planning documentation only; runtime evidence binds tested_commit. No push or merge."
+  },
+  "pr05_completion": {
+    "base_commit": "4f053afe240a3313d0c5289660936325c1cc8508",
+    "tested_commit": "d0fc86db63125fbd3ce1b96dd3baed1429e5612e",
+    "solver_tree_sha256": "5f17ffa43e2840f7cdbfcf720809192c2e509952e545c69386d314591c3e107f",
+    "results": "dev/monolithic/test/results/P9/P9a/PR-05/20261103-01",
+    "cpu": {
+      "pass": 21,
+      "failure": 0,
+      "error": 0,
+      "skip": 0
+    },
+    "cuda": {
+      "distinct_pass": 14,
+      "runtime_failure": 0,
+      "runtime_error": 0,
+      "skip": 0,
+      "initial_loader_errors": 2,
+      "corrected_missing_tests_pass": 2
+    },
+    "validation_summary_sha256": "9c652433a5f2b6982ac4204f0fc0f6f42e45ca9af8963c55c49549380d309779",
+    "composed_e2e": "CPU 6 / CUDA 12 combinations x 64 steps, FP32/FP64, CUDA graph off/on, strict checkpoint continuation and failure rollback PASS.",
+    "quick_results": "dev/monolithic/test/results/P9/P9a/PR-05/quick-d0fc86db",
+    "quick_verdict": "CLEAN",
+    "quick_pass_items": 60,
+    "quick_result_sha256": "d18f12042a00ae65d6f034a55bad6090170467d5b6f4b9fcfb74093363bca7b5",
+    "paired_summary_sha256": "91ee3fe08ef80bf27df076ebecab35f5e98728e106543813efdf77c87c29780d",
+    "pairs": 3,
+    "full_step_cases": 12,
+    "isolated_snapshot_cases": 16,
+    "samples_per_case_per_version": 21,
+    "cost_scope": "Three serial AB/BA/AB pairs. Same source/input/config/work and diagnostic identities. Full-step and complete JSON costs separate; traced host allocations are not RSS. Transfers/submissions unchanged in separate samples; timed nonlinear segment captures/evictions zero.",
+    "retained_65536_vector_bytes": {
+      "base": 2097208,
+      "fp32": 262256,
+      "fp64": 524400
+    },
+    "performance": "M5 structural/correctness/compatibility FIXED; overall stage/robot qualification OPEN. q+x FP64 plus JSON +7.58%, pair ratios0.958/1.115/1.084 remains unattributed under PERF01/PR06.",
+    "consumer_audit_sha256": "4c823781ca30a3fef433c5367f4f16f150d69f1bcf797b60504e88e499199e3a",
+    "reviews_sha256": "33ae953f6d8558a336fbfc85564cebba3067dd9747d6149466f8d7ee82e39c8a",
+    "workspace_index_sha256": "993e40d4e86a50f393f2962d5ed6e5670d88d15270ee627c3a8b34908ede7d33",
+    "open_items": [
+      "P9a-PERF-01",
+      "P9a-OBS-01",
+      "P9a-OBS-02 dependency attribution"
+    ],
+    "completion_commit_scope": "Only planning documents differ from tested source. No push/merge; full suite/stage/nightly NOT_RUN."
   }
 }

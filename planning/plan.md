@@ -1,6 +1,6 @@
 # P9a 实施计划
 
-2026-11-03。状态：IN_PROGRESS（PR-01/02/03/04 COMPLETE；下一步 PR-05；性能留项 OPEN）。需求与范围以 [PRD](PRD.md) 为准。实现顺序固定为 **PR-01 H1 → PR-02 H2/R1 → PR-03 M1 → PR-04 M2/M3/M4 批处理收尾 → PR-05 M5 → PR-06 L1/L2/L3 → PR-07 阶段验收**。
+2026-11-03。状态：IN_PROGRESS（PR-01/02/03/04/05 COMPLETE；下一步 PR-06；性能留项 OPEN）。需求与范围以 [PRD](PRD.md) 为准。实现顺序固定为 **PR-01 H1 → PR-02 H2/R1 → PR-03 M1 → PR-04 M2/M3/M4 批处理收尾 → PR-05 M5 → PR-06 L1/L2/L3 → PR-07 阶段验收**。
 
 PR-01 可以按内部里程碑分多个可审查提交，但它仍是一个完整交付 PR。中间保留旧路径仅用于迁移对照；最终必须删掉。不能以“材料后续再接”关闭 H1。
 
@@ -12,7 +12,7 @@ PR-01 可以按内部里程碑分多个可审查提交，但它仍是一个完�
 | PR-02 | 固定绑定 PCG 复用；异常 replay 生命周期 | PR-01 的 binding/generation 合同 | COMPLETE；[验收](PR-02.md)：CPU/CUDA 机制与 E2E、两精度 quick 通过，8 组稳态布局回读为 0；保留未复现观察项 |
 | PR-03 | 多向量后验与收敛结果 packet 融合 | PR-01 通用组归约，PR-02 稳定 plan | COMPLETE；[验收](PR-03.md)：两类摘要各一次读取，独立公式/CPU/CUDA/E2E/quick 通过，三组成对成本与额外存储已记录 |
 | PR-04 | cable gauge、material reaction、control 校验的类型批处理收尾 | PR-01 已完成设备迁移 | COMPLETE；[验收](PR-04.md)：材料设备提交固定，48 组阶段对照、三组成对测量、CPU/CUDA/E2E/quick 通过；首捕获 reset 防护及性能留项单列 |
-| PR-05 | Stats 完整向量只作最终快照，序列化按需 | PR-01 的发布边界 | 旧 Stats 不被下步覆盖，失败诊断和 JSON 兼容，导出成本实测 |
+| PR-05 | Stats 完整向量只作最终快照，序列化按需 | PR-01 的发布边界 | COMPLETE；[验收](PR-05.md)：独立只读快照、失败诊断/JSON 兼容、CPU 21/CUDA 14 与 quick 60 项通过；无导出/完整导出三组成对成本已记录 |
 | PR-06 | binding 元数据复用、dt 数值化、有界 graph 档位策略 | PR-01/02；M 项测量 | L1/L2/L3 实际触发证据、失效验证、总耗时/内存对照 |
 | PR-07 | 所有 requirement 关闭审查、全组件与完整 E2E、性能报告 | 前述 PR | 最终 SHA suite/stage 及问题处置；不复用旧版本 PASS |
 
@@ -64,6 +64,8 @@ PR-01 已经必须完成以下设备语义，此 PR 只合并剩余按 block 展
 
 ## 5. M5：PR-05
 
+已在 `d0fc86db` 完成验收，详见 [PR-05](PR-05.md)。最终 residual/reactions 保存独立、只读 NumPy 数组，现有 serial/save 按需导出列表，两个失败 runner 补完整 JSON。65,536 行快照保留存储减少约 87.5%/75.0%（FP32/FP64），但完整 JSON 仍约 39 ms；实际整步 q+x FP64 + JSON median +7.6%（三组两升一降）保留于性能项，不宣称全场景提速。以下保留实施要求。
+
 涉及 `solver_monolithic.py`、`solver_types.py` 及现有 recording/serial 工具的必要消费者。
 
 1. PR-01 中已取消每 Newton 轮 residual list 转换。盘点 Stats 消费者，明确最终发布、停止发布、硬失败分别保存哪个 residual/reaction 和对应 generation。
@@ -73,6 +75,8 @@ PR-01 已经必须完成以下设备语义，此 PR 只合并剩余按 block 展
 验证：保存前一步 Stats 后运行下一步/失败步，旧数据不变；JSON/recording roundtrip；最终 residual/reaction 数值与 snapshot 一致。分别测无序列化和实际序列化的耗时、host 内存及字节量，不把成本移到导出后隐去。
 
 ## 6. L1/L2/L3：PR-06
+
+PR-05 新观察：q+x FP64 + JSON 三组 median 比值 0.958/1.115/1.084，汇总 +7.6%；对应无导出 -3.8%，输入/物理工作量/诊断向量和传输一致。PR-06 复核这项未归因的耗时上升及组间差异，当前不归因于快照或 graph；见 [PR-05](PR-05.md)。
 
 同时处理 `P9a-PERF-01`：PR-04 新记录 FP64 trees 三组成对 median +1.6%（0.9%/0.9%/3.3%），独立插桩样本无新增显式 stream 同步，仍须归因；统一 phase 增加了 graph/binding 工作；须归因并处理稳定退化，复用 PR-01 三组成对测量合同，不把材料场景的收益抵消为其他场景已通过。
 
