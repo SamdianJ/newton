@@ -2,7 +2,7 @@
   "date": "2026-11-04",
   "timezone": "Asia/Tokyo",
   "stage": "P9a",
-  "status": "PR01_PR02_PR03_PR04_PR05_PR06_COMPLETE_PR07_ACCEPTED_WITH_OPEN_ITEM",
+  "status": "P9A_MERGED_ACCEPTED_WITH_OPEN_ITEM",
   "branch": "SamiulJ/monolithic-p9a",
   "worktree": "worktrees/Monolithic-p9a",
   "base_commit": "8fa80ba7ce3fd7ce2483f2ec098e66d410bc434e",
@@ -29,7 +29,7 @@
     "superdex_runtime": "NOT_RUN"
   },
   "planning_snapshot_workspace_index_sha256": "a61a092cc6dbc9e34ac17cd2a9c06b7e1ba354e9dd70f53f53053c97412daad9",
-  "workspace_index_sha256": "bb7f68f8e174fe1c0336e39bf21846daafac6b4a3fa0356f0edd6b3dc7991bca",
+  "workspace_index_sha256": "56af3b0e19f97c3261b495c87ae7ae5d1faa9f18a2d154873a135bc26367afb7",
   "implementation": {
     "tested_commit": "2220971595d36ea7bd5ffa52d219a340f7d83ef9",
     "solver_tree_sha256": "dda3dde1962db7ed10cdae6bbaf7a4d93af843dacb9ae6d28c08369574bf18d2",
@@ -590,8 +590,33 @@
       ],
       "ci_expectations_sha256": "ffd1784ed42f65bc96bfb952857ab70c338ed2fed90fbf47742f6fd52cc35acf",
       "workspace_open_items_sha256": "e5711d23120897723729b6967ee4f2e63d533a2cc419cc59693acf16ed2e7f37",
-      "merged": false,
+      "merged": true,
       "public_push": false
     }
+  },
+  "integration": {
+    "state": "MERGED",
+    "date": "2026-11-04T07:16:34.745189+00:00",
+    "authorization": "\u597d\u7684\uff0c\u73b0\u5728\u53ef\u4ee5\u628a\u8fd9\u4e2aP9a\u5408\u5e76\u5230\u4e3b\u5e72\u5427",
+    "method": "git merge --ff-only",
+    "target_branch": "SamiulJ/monolithic-refactor",
+    "source_branch": "SamiulJ/monolithic-p9a",
+    "before": "8fa80ba7ce3fd7ce2483f2ec098e66d410bc434e",
+    "merged_head": "0a093f7e4a396a803698273c57c6c03c8162b250",
+    "merged_tree": "eeacb3737a023c6b5d47d18eaef294316b423d1c",
+    "source_and_target_tree_identical": true,
+    "conflicts": false,
+    "runtime_tested_commit": "51ceabe788101dbc492d654af3522eeea35ec789",
+    "runtime_equivalent_to": "8775416f5f1a8a6cf6e1dc12957b5049692721e1",
+    "acceptance": "ACCEPTED_WITH_OPEN_ITEM",
+    "suite": "CLEAN",
+    "stage": "KNOWN_ONLY",
+    "public_push": false,
+    "cleanup": "Stage branch/worktree retained; shared environment unchanged.",
+    "merge_receipt": "dev/monolithic/test/results/P9/P9a/integration/20261104-01/merge.json",
+    "merge_receipt_sha256": "d4878f1538792775a8ab35c70ade36c0e9f70581a961532dbae8c04c326cb9a1",
+    "verification_receipt": "dev/monolithic/test/results/P9/P9a/integration/20261104-01/verification.json",
+    "handoff": "planning/HANDOFF.md",
+    "record_commit_scope": "Documentation only after the implementation fast-forward; integration branch will fast-forward the record commit too."
   }
 }
