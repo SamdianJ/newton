@@ -24,12 +24,12 @@
   "runtime_environment": {
     "venv": "shared symlink to ../Monolithic-refactor/.venv; use uv run --no-sync; do not uv sync this shared environment",
     "assets": "read-only reuse of ../Monolithic-refactor/asset/monolithic/data through relative symlink",
-    "solver_runtime_tests": "PR01\u2013PR06 remain bound to their original commits. PR07 first candidate 84076a4f suite REGRESSION/stage KNOWN_ONLY. Repair 8775416f CPU10/CUDA9 and quick CLEAN60; full suite/stage queued during nightly quiet window. Local duplicate CUDA composed run CANCELLED/INCONCLUSIVE; no stage PASS.",
+    "solver_runtime_tests": "PR01\u2013PR06 remain bound to their original commits. PR07 repair 8775416f CPU10/CUDA9 and quick CLEAN60. Runtime-equivalent clean 51ceabe7 complete local suite CLEAN, full FP64/FP32 stage KNOWN_ONLY (47/47); no new gate failures or retries. Prior cancelled CUDA batch retained; CPU/CUDA composed continuation now PASS in complete suite. No stage PASS.",
     "performance": "PR06: 3 AB/BA/AB pairs for20 incremental small cases,8 original-baseline cases,and4 FP32 robot windows. Exact input/work identities checked. Alpha recaptures removed; dynamic-span production strategy retained. qx FP64 noJSON+5.13%,trees FP64 noJSON+1.49% vsPR05; overall PERF01 OPEN.",
     "superdex_runtime": "NOT_RUN"
   },
   "planning_snapshot_workspace_index_sha256": "a61a092cc6dbc9e34ac17cd2a9c06b7e1ba354e9dd70f53f53053c97412daad9",
-  "workspace_index_sha256": "268fb592f5aa99592ee04022d764b73d8b12a9f73515f0acd2dfe5b01b525435",
+  "workspace_index_sha256": "4e969779cdb5e305a4b1350d2e3e427c3bbc62ec3edd9b2b3ba89eb56cb86b52",
   "implementation": {
     "tested_commit": "2220971595d36ea7bd5ffa52d219a340f7d83ef9",
     "solver_tree_sha256": "dda3dde1962db7ed10cdae6bbaf7a4d93af843dacb9ae6d28c08369574bf18d2",
@@ -305,7 +305,7 @@
     }
   },
   "pr07_acceptance": {
-    "status": "LOCAL_ACCEPTANCE_PLANNED",
+    "status": "LOCAL_RUN_COMPLETE_SUITE_CLEAN_STAGE_KNOWN_ONLY",
     "results": "dev/monolithic/test/results/P9/P9a/PR-07/20261103-01",
     "initial_candidate": "8a83c3abcd2197c8aae6dc347ac44406d6816179",
     "superseded_runs": {
@@ -406,10 +406,10 @@
       },
       "files_sha256": "40ac467788c835487f83f0006004371e18c83c823fd2385b3cc46c99f2703cd6"
     },
-    "record_commit_scope": "Documentation only; runtime remains bound to tested_commit; full acceptance not complete",
+    "record_commit_scope": "Documentation only; each result remains bound to its recorded tested commit. Local execution complete; stage qualification still open.",
     "followup_repairs": {
       "results": "dev/monolithic/test/results/P9/P9a/PR-07/20261104-fixes-01",
-      "status": "LOCAL_VERIFIED_WAITING_REMOTE",
+      "status": "FIXED_FULL_SUITE_VERIFIED_STAGE_KNOWN_ONLY",
       "issues": [
         "contact capacity allocation",
         "rigid injection dt_buffer",
@@ -435,7 +435,7 @@
         "seconds": 14.948874212999726,
         "success": true
       },
-      "cuda_composed": "CANCELLED/INCONCLUSIVE locally during cold compilation; covered by pending authorized full remote suite.",
+      "cuda_composed": "Earlier local cold-compilation run remains CANCELLED/INCONCLUSIVE; new complete local suite at 51ceabe7 reports CPU/CUDA composed continuation PASS.",
       "validation_summary_sha256": "3adcb46eb9f1a50be3c5bd721f3297539317570dba25b4ee48fcb633f026278b",
       "quick": {
         "state": "COMPLETE",
@@ -460,7 +460,7 @@
     },
     "tested_commit_scope": "First completed remote candidate; current repairs are described in followup_repairs.",
     "local_acceptance": {
-      "status": "PLANNED",
+      "status": "COMPLETE_SUITE_CLEAN_STAGE_KNOWN_ONLY",
       "results": "dev/monolithic/test/results/P9/P9a/PR-07/local-20261104-01",
       "authorization": "User 2026-11-04: \u672c\u5730\u6d4b\u8bd5suite\u548cE2E\u5427; retain complete FP64/FP32 scope.",
       "suite": "Complete CI discovery and check set; CPU4/CUDA1, warm caches; wall budget adapted only",
@@ -472,7 +472,54 @@
       "skip": [],
       "baseline": null,
       "ci_commit": "df0927a7b1227af6ccb721154c7a455ed18bf1cb",
-      "planned_stage_sha256": "8ba3931d6051eadf58de8f4bf772c5e4ca29df44c910350d7b7c8b1e8f89bd5a"
+      "planned_stage_sha256": "8ba3931d6051eadf58de8f4bf772c5e4ca29df44c910350d7b7c8b1e8f89bd5a",
+      "tested_commit": "51ceabe788101dbc492d654af3522eeea35ec789",
+      "runtime_equivalent_to": "8775416f5f1a8a6cf6e1dc12957b5049692721e1",
+      "started_at": "2026-11-03T16:51:16+00:00",
+      "finished_at": "2026-11-03T21:07:49+00:00",
+      "new_waivers": false,
+      "gates_modified": false,
+      "suite_result": {
+        "state": "COMPLETE",
+        "verdict": "CLEAN",
+        "counts": {
+          "diagnostic:FAIL": 25,
+          "diagnostic:PASS": 6,
+          "gate:PASS": 1409,
+          "gate:SKIPPED": 74
+        },
+        "run_errors": [],
+        "files_sha256": "fdec4cd2404b9e50cfcd64061650212a9df3895c627db424895c42b66d6e71ea",
+        "verified_files": 16,
+        "hash_mismatches": 0,
+        "discover": {
+          "cpu": 887,
+          "cuda": 513,
+          "required_checks": 83
+        },
+        "retried": 0
+      },
+      "stage_result": {
+        "state": "COMPLETE",
+        "verdict": "KNOWN_ONLY",
+        "counts": {
+          "diagnostic:FAIL": 2,
+          "gate:KNOWN_FAIL": 22,
+          "gate:PASS": 77,
+          "gate:UNEXPECTED_PASS": 1
+        },
+        "run_errors": [],
+        "files_sha256": "1d2046bd13012b2353ffea821e07a0e972c1e2438edcc702cf006c4e781e3b88",
+        "verified_files": 501,
+        "hash_mismatches": 0,
+        "completed_jobs": 47,
+        "known_failure_groups": {
+          "P8b2-F2-sharpa-fp64-stopped": 1,
+          "Q1-fp32-cable-cantilever": 18,
+          "P8b-F3-fp32-tet-cantilever-8": 3
+        },
+        "unexpected_pass": "P8s-F1-fp32-tet-vibration-bias; not established as a portable fix"
+      }
     }
   }
 }
