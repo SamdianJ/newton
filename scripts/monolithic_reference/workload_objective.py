@@ -63,15 +63,19 @@ def arrays_for(run):
             )
             for name, array in zip(("rows", "ids", "local", "values", "count"), batch.reference_inputs, strict=True):
                 arrays["contact.reference.input." + name] = array
-    if not run._device_iteration or run._contact_pool:
-        owners["_rigid"] = run._rigid
+    owners["_rigid"] = run._rigid
     for state_name in ("_original", "_accepted", "_trial"):
         state = getattr(run, state_name)
         owners[state_name] = state
         owners[state_name + ".history"] = state._monolithic_coupled
+        for index, increment in enumerate(run._steps[id(state)]):
+            arrays[f"{state_name}.step.{index}"] = increment
     for prefix, owner in owners.items():
         fields = (f.name for f in dataclasses.fields(owner)) if dataclasses.is_dataclass(owner) else vars(owner)
         for name in fields:
+            # Recomputed from dt on evaluation, with a host-side value cache.
+            if prefix == "contact.batch" and name == "_falloff":
+                continue
             value = getattr(owner, name)
             if isinstance(value, wp.array) and name not in HANDLES:
                 # Struct arrays can contain process-specific device pointers.
@@ -93,21 +97,20 @@ def capture_input(run, boundary, args, kwargs):
         "dt": float(run._dt),
         "iteration": int(args[0]) if boundary == "assembly" else None,
         "build_tangent": kwargs.get("build_tangent", True),
-        "device_result": kwargs.get("device_result", False),
+        "device_result": kwargs.get("device_result", boundary == "objective"),
         "step_generation": run._step_generation,
         "assembly_sequence": run._assembly_sequence,
         "contact_started": run._contact._batch._started if run._contact_pool else run._contact._started,
         "contact_evaluated": run._contact._evaluated,
         "physical_digest": run._kinematics.digest.hex(),
     }
-    if not run._device_iteration or run._contact_pool:
-        metadata.update(
-            adapter="pool-objective/1" if run._contact_pool else "actor-objective/1",
-            layout=serial(dataclasses.asdict(run._layout)),
-            actor_maps=serial(run._actors.maps),
-            rigid_has_torque=run._rigid.has_torque,
-            source_hashes=provenance()["source_hashes"],
-        )
+    metadata.update(
+        adapter="pool-objective/1" if run._contact_pool else "actor-objective/1",
+        layout=serial(dataclasses.asdict(run._layout)),
+        actor_maps=serial(run._actors.maps),
+        rigid_has_torque=run._rigid.has_torque,
+        source_hashes=provenance()["source_hashes"],
+    )
     if run._contact_pool:
         c = run._contact
         metadata.update(
@@ -188,12 +191,11 @@ def capture_output(run, boundary, result):
             tet_failure=run._tet_assembly.failure_flags.numpy().copy(),
             actor_dense=run._linear.aq_actor_dense.numpy().copy(),
         )
-    if not run._device_iteration or run._contact_pool:
-        arrays.update(
-            rigid_energy=run._rigid.energy.numpy().copy(),
-            rigid_residual=run._rigid.residual.numpy().copy(),
-            rigid_tangent=run._rigid.tangent.numpy().copy(),
-        )
+    arrays.update(
+        rigid_energy=run._rigid.energy.numpy().copy(),
+        rigid_residual=run._rigid.residual.numpy().copy(),
+        rigid_tangent=run._rigid.tangent.numpy().copy(),
+    )
     return arrays
 
 
@@ -276,15 +278,14 @@ def replay_objective(arrays, metadata, expected, *, scene, device, graph, repeat
     )
     if run._kinematics.digest.hex() != metadata["physical_digest"]:
         raise ValueError("Hotspot physical identity differs")
-    if not run._device_iteration or run._contact_pool:
-        if (
-            metadata.get("adapter") != ("pool-objective/1" if run._contact_pool else "actor-objective/1")
-            or metadata.get("layout") != serial(dataclasses.asdict(run._layout))
-            or metadata.get("actor_maps") != serial(run._actors.maps)
-            or metadata.get("source_hashes") != provenance()["source_hashes"]
-            or type(metadata.get("rigid_has_torque")) is not bool
-        ):
-            raise ValueError("Mixed hotspot adapter, source or layout identity differs")
+    if (
+        metadata.get("adapter") != ("pool-objective/1" if run._contact_pool else "actor-objective/1")
+        or metadata.get("layout") != serial(dataclasses.asdict(run._layout))
+        or metadata.get("actor_maps") != serial(run._actors.maps)
+        or metadata.get("source_hashes") != provenance()["source_hashes"]
+        or type(metadata.get("rigid_has_torque")) is not bool
+    ):
+        raise ValueError("Mixed hotspot adapter, source or layout identity differs")
     if run._contact_pool:
         pool = metadata.get("pool", {})
         if (
@@ -314,6 +315,10 @@ def replay_objective(arrays, metadata, expected, *, scene, device, graph, repeat
             raise ValueError("Invalid pooled hotspot generations")
     for name in ("_original", "_accepted", "_trial"):
         setattr(run, name, run._states.copy(state))
+    run._steps = {
+        id(getattr(run, name)): tuple(wp.zeros_like(array) for array in run._external_steps)
+        for name in ("_original", "_accepted", "_trial")
+    }
     if run._contact_spatial:
         spatial = metadata["spatial"]
         if (
@@ -437,8 +442,7 @@ def replay_objective(arrays, metadata, expected, *, scene, device, graph, repeat
                 spatial["capacity_dropped"],
                 spatial["warned"],
             )
-        if not run._device_iteration or run._contact_pool:
-            run._rigid.has_torque = metadata["rigid_has_torque"]
+        run._rigid.has_torque = metadata["rigid_has_torque"]
         run._current_state = getattr(run, metadata["state"])
         wp.synchronize_device(model.device)
         restore = time.perf_counter() - start

@@ -230,7 +230,7 @@ class TestMonolithicCableSolver(unittest.TestCase):
         state.particle_f.assign(f)
         solver.step(state, state, control, dt=0.1)
         self.assertTrue(solver.last_stats.converged, solver.last_stats)
-        self.assertFalse(solver._temporary_gauges)
+        self.assertTrue(np.all(solver._gauges.pins.numpy() < 0))
         self.assertGreater(abs(np.mean(state._monolithic_coupled.cable_theta.numpy() - theta)), 1e-3)
 
     def test_stopped_publication_remains_distinct(self):

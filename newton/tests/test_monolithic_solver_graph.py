@@ -29,6 +29,38 @@ def _increment(result: wp.array[int]):
     result[wp.tid()] += 1
 
 
+@wp.kernel
+def _add_scaled(source: wp.array[float], result: wp.array[float], factor: float):
+    i = wp.tid()
+    result[i] += factor * source[i]
+
+
+def test_segment_reset_after_pending_work(test, device):
+    """Clear both accumulators on first capture and replay after pending device writes."""
+    for warmup in (False, True):
+        cache = _SegmentGraphCache(device, enabled=True)
+        source = wp.ones(52, device=device)
+        scratch, result, magnitude = [wp.zeros_like(source) for _ in range(3)]
+        for binding in range(256):
+            factor = float(binding % 9 + 1)
+
+            def execute(factor=factor, source=source, scratch=scratch, result=result, magnitude=magnitude):
+                result.zero_()
+                magnitude.zero_()
+                wp.launch(_copy_scaled, 52, [source, scratch, factor], device=device)
+                wp.launch(_add_scaled, 52, [scratch, result, 1.0], device=device)
+                wp.launch(_add_scaled, 52, [scratch, magnitude, 2.0], device=device)
+
+            for replay in range(2):
+                result.fill_(19)
+                magnitude.fill_(17)
+                cache.run("reset", (factor,), (source, scratch, result, magnitude), execute, warmup=warmup)
+                with test.subTest(warmup=warmup, binding=binding, replay=replay):
+                    np.testing.assert_array_equal(result.numpy(), factor)
+                    np.testing.assert_array_equal(magnitude.numpy(), 2 * factor)
+        test.assertEqual(cache.captures["reset"], 256)
+
+
 def test_segment_additive_capture(test, device):
     """Execute additive work once on first capture, replay and buffer rebinding."""
     cache = _SegmentGraphCache(device, enabled=True)
@@ -125,15 +157,32 @@ def test_objective_contact_rebinding(test, device):
     for device_result in (False, True):
         energy, residual, absolute = solver._evaluate(solver._accepted, 0.001, device_result=device_result)
         expected = residual.numpy().copy() if device_result else residual.copy()
-        owners = solver._graphs.captures["coupled_objective_owners"]
-        results = solver._graphs.captures["coupled_objective_result"]
+        owners = solver._graphs.captures["problem_owners"]
+        results = solver._graphs.captures["problem_summary"]
         solver._contact.pool.residual.result = wp.clone(solver._contact.pool.residual.result)
         got, residual, total = solver._evaluate(solver._accepted, 0.001, device_result=device_result)
         np.testing.assert_array_equal(residual.numpy() if device_result else residual, expected)
         test.assertEqual(got, energy)
         test.assertEqual(total, absolute)
-        test.assertEqual(solver._graphs.captures["coupled_objective_owners"], owners)
-        test.assertEqual(solver._graphs.captures["coupled_objective_result"], results + 1)
+        test.assertEqual(solver._graphs.captures["problem_owners"], owners)
+        test.assertEqual(solver._graphs.captures["problem_summary"], results + 1)
+
+
+def test_assembly_result_rebinding(test, device):
+    """Write replaced tet assembly storage after warming the owner phase graph."""
+    model = coupled.scene(device)
+    solver = coupled.solver(model, mode="production", graph=True)
+    state = solver.create_state(dt=0.001)
+    solver.step(state, state, model.control(), dt=0.001)
+    test.assertTrue(solver.last_stats.converged)
+    solver._assemble(0, device_result=True)
+    expected = solver._tet_assembly_residual.numpy().copy()
+    previous = solver._tet_assembly_residual
+    solver._tet_assembly_residual = wp.empty_like(previous)
+    solver._tet_assembly_residual.fill_(np.nan)
+    solver._assemble(0, device_result=True)
+    np.testing.assert_array_equal(solver._tet_assembly_residual.numpy(), expected)
+    np.testing.assert_array_equal(previous.numpy(), expected)
 
 
 def test_binding_and_stream_changes(test, device):
@@ -238,11 +287,13 @@ class TestMonolithicSegmentGraphs(unittest.TestCase):
 
 
 for function in (
+    test_segment_reset_after_pending_work,
     test_segment_additive_capture,
     test_segments_continuous,
     test_segment_warm_replay,
     test_objective_contact_rebinding,
     test_objective_candidate_reuse,
+    test_assembly_result_rebinding,
     test_binding_and_stream_changes,
     test_factor_scaling_and_failures,
     test_graph_transactions,

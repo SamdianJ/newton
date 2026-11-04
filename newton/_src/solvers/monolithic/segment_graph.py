@@ -38,6 +38,9 @@ class _SegmentGraphCache:
             # and the single launch below performs it exactly once.
             if warmup:
                 execute()
+            # Pending writes can survive a first-launch memset (reproduced with
+            # Warp 1.17, CUDA driver 12.8 / toolkit 12.9). Replay stays async.
+            wp.synchronize_stream(stream)
             with wp.ScopedCapture(stream=stream) as capture:
                 execute()
             graph = capture.graph

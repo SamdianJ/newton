@@ -11,6 +11,33 @@ import warp as wp
 from .articulation import _inner
 from .articulation_state import _initial_symmetric, _predict, _skew, _store_rates
 from .convergence import abs3, axial_absolute
+from .numeric_parameters import scalar_value
+
+
+@wp.kernel
+def _freeze_forces(
+    body_force: wp.array[wp.spatial_vector],
+    joint_force: wp.array[float],
+    gravity: wp.array[wp.vec3],
+    worlds: wp.array[int],
+    bodies: wp.array[int],
+    dofs: wp.array[int],
+    mass: wp.array[Any],
+    force: wp.array[Any],
+    torque: wp.array[Any],
+    has_torque: wp.array[int],
+):
+    i = wp.tid()
+    body, dof = bodies[i], dofs[i]
+    f, t = type(force[0])(), type(torque[0])()
+    for axis in range(3):
+        f[axis] = type(mass[0])(body_force[body][axis]) + type(mass[0])(joint_force[dof + axis])
+        f[axis] += mass[i] * type(mass[0])(gravity[worlds[body]][axis])
+        t[axis] = type(mass[0])(body_force[body][axis + 3]) + type(mass[0])(joint_force[dof + axis + 3])
+        if t[axis] != type(mass[0])(0):
+            wp.atomic_max(has_torque, 0, 1)
+    force[i] = f
+    torque[i] = t
 
 
 @wp.kernel
@@ -109,12 +136,13 @@ def _predict_pose(
     predicted_step: wp.array[Any],
     quat_n: wp.array[Any],
     omega: wp.array[Any],
-    h: Any,
+    h_arg: Any,
     com: wp.array[Any],
     rotation: wp.array[Any],
     step: wp.array[Any],
     rotation_step: wp.array[Any],
 ):
+    h = scalar_value(h_arg)
     i = wp.tid()
     dr = h * omega[i]
     angle = wp.length(dr)
@@ -134,7 +162,7 @@ def _trial(
     rotation_step: wp.array[Any],
     rows: wp.array2d[int],
     direction: wp.array[Any],
-    alpha: Any,
+    alpha_arg: Any,
     tn: wp.array[Any],
     quat_n: wp.array[Any],
     out_step: wp.array[Any],
@@ -142,6 +170,7 @@ def _trial(
     out_com: wp.array[Any],
     out_rotation: wp.array[Any],
 ):
+    alpha = scalar_value(alpha_arg)
     i = wp.tid()
     dc = type(tn[0])(
         type(alpha)(direction[rows[i, 0]]), type(alpha)(direction[rows[i, 1]]), type(alpha)(direction[rows[i, 2]])
@@ -182,11 +211,12 @@ def _derive_steps(
 def _recover(
     step: wp.array[Any],
     rotation_step: wp.array[Any],
-    h: Any,
+    h_arg: Any,
     v: wp.array[Any],
     omega: wp.array[Any],
     sym: wp.array2d[Any],
 ):
+    h = scalar_value(h_arg)
     i = wp.tid()
     _store_rates(step[i], _rotation_step(rotation_step[i]), h, i, v, omega, sym)
 
@@ -205,7 +235,7 @@ def _terms(
     second: wp.array[Any],
     force: wp.array[Any],
     torque: wp.array[Any],
-    h: Any,
+    h_arg: Any,
     tangent: bool,
     energy: wp.array[Any],
     residual: wp.array2d[Any],
@@ -213,6 +243,7 @@ def _terms(
     b: wp.array3d[Any],
     diagonal: wp.array2d[Any],
 ):
+    h = scalar_value(h_arg)
     i = wp.tid()
     r = wp.quat_to_matrix(rotation[i])
     rotations[i] = r
@@ -354,6 +385,7 @@ class RigidObjective:
         self._maps = {name: getattr(self, name) for name in ("rows", "qs", "vs", "bodies")}
         self._map_values = {name: value.numpy().copy() for name, value in self._maps.items()}
         self.has_torque = False
+        self._torque_flag = wp.zeros(1, dtype=int, device=self.device)
 
     def validate_identity(self):
         for name, source in self._maps.items():
@@ -473,13 +505,25 @@ class RigidObjective:
         if not self.count:
             return
         history = state._monolithic_coupled
-        force = state.body_f.numpy()[self.body_indices].astype(self.numpy_dtype) + control.joint_f.numpy()[
-            self.dof_indices
-        ].astype(self.numpy_dtype)
-        gravity = self.model.gravity.numpy()[self.model.body_world.numpy()[self.body_indices]]
-        self.force.assign(force[:, :3] + self.mass.numpy()[:, None] * gravity)
-        self.torque.assign(force[:, 3:])
-        self.has_torque = bool(np.any(force[:, 3:] != 0))
+        self._torque_flag.zero_()
+        wp.launch(
+            _freeze_forces,
+            self.count,
+            [
+                state.body_f,
+                control.joint_f,
+                self.model.gravity,
+                self.model.body_world,
+                self.bodies,
+                self.vs,
+                self.mass,
+                self.force,
+                self.torque,
+                self._torque_flag,
+            ],
+            device=self.device,
+        )
+        self.has_torque = bool(self._torque_flag.numpy()[0])
         wp.copy(self.tn, history.rigid_com)
         wp.copy(self.quat_n, history.rigid_rotation)
         wp.launch(_matrices, self.count, [history.rigid_rotation, self.rn], device=self.device)
@@ -501,7 +545,7 @@ class RigidObjective:
             device=self.device,
         )
 
-    def predict_pose(self, state_in, accepted, steps, dt):
+    def predict_pose(self, state_in, accepted, steps, dt, *, dt_buffer=None):
         """Initialize both translations and rotations without changing the inertial objective."""
         if self.count:
             history = accepted._monolithic_coupled
@@ -513,7 +557,7 @@ class RigidObjective:
                     self.step_t,
                     self.quat_n,
                     state_in._monolithic_coupled.rigid_omega,
-                    self.dtype(dt),
+                    (self.dtype(dt) if dt_buffer is None else dt_buffer),
                     history.rigid_com,
                     history.rigid_rotation,
                     *steps,
@@ -533,7 +577,7 @@ class RigidObjective:
             )
         return self.external_steps
 
-    def evaluate(self, state, steps, dt, tangent):
+    def evaluate(self, state, steps, dt, tangent, *, dt_buffer=None):
         if not self.count:
             return
         history = state._monolithic_coupled
@@ -552,7 +596,7 @@ class RigidObjective:
                 self.second,
                 self.force,
                 self.torque,
-                self.dtype(dt),
+                (self.dtype(dt) if dt_buffer is None else dt_buffer),
                 tangent,
                 self.energy,
                 self.residual,
@@ -563,7 +607,7 @@ class RigidObjective:
             device=self.device,
         )
 
-    def trial(self, source_steps, target, target_steps, direction, alpha):
+    def trial(self, source_steps, target, target_steps, direction, alpha, *, alpha_buffer=None):
         if not self.count:
             return
         b = target._monolithic_coupled
@@ -574,7 +618,7 @@ class RigidObjective:
                 *source_steps,
                 self.rows,
                 direction,
-                self.dtype(alpha),
+                (self.dtype(alpha) if alpha_buffer is None else alpha_buffer),
                 self.tn,
                 self.quat_n,
                 *target_steps,
@@ -584,20 +628,20 @@ class RigidObjective:
             device=self.device,
         )
 
-    def recover(self, state, steps, dt):
+    def recover(self, state, steps, dt, *, dt_buffer=None):
         if not self.count:
             return
         history = state._monolithic_coupled
         wp.launch(
             _recover,
             self.count,
-            [*steps, self.dtype(dt), history.rigid_v_com, history.rigid_omega, history.rigid_vsym],
+            [
+                *steps,
+                (self.dtype(dt) if dt_buffer is None else dt_buffer),
+                history.rigid_v_com,
+                history.rigid_omega,
+                history.rigid_vsym,
+            ],
             device=self.device,
         )
         self.publish(state)
-
-    def domain(self, state):
-        if not self.count:
-            return True
-        wp.launch(_matrices, self.count, [state._monolithic_coupled.rigid_rotation, self.rotations], device=self.device)
-        return bool(np.all(np.einsum("bij,bij->b", self.rotations.numpy(), self.rn.numpy()) > 1))

@@ -139,7 +139,7 @@ class TestMonolithicPcgProductionGraph(unittest.TestCase):
 
 
 def test_workspace_graph_reuse(test, device):
-    """Reuse numeric generations but reject stale factors, changed topology and storage."""
+    """Reuse sparse contents but reject stale factors and rebind storage or schedules."""
     case = benchmark.synthetic_cases()[0]
     runner = benchmark.Runner(case, "production_graph", device, benchmark.pcg_config())
     test.assertTrue(runner.solve().graph_rebuilt)
@@ -188,6 +188,8 @@ def test_workspace_graph_reuse(test, device):
     with test.assertRaises(ValueError):
         plan.replay()
     test.assertTrue(runner.solve().graph_rebuilt)
+    plan = runner.workspace._masked_pcg_plan
+    graph = plan.graph
     runner.refresh_generation()
     # Equivalent matrix with each row's entries reversed: valid but a different layout.
     columns = matrix.columns.numpy().reshape(case.n, case.n)[:, ::-1].copy().reshape(-1)
@@ -195,7 +197,15 @@ def test_workspace_graph_reuse(test, device):
     matrix.columns.assign(columns)
     matrix.values.assign(values)
     runner.factor()
+    result = runner.solve()
+    test.assertEqual(result.status, impl.MonolithicLinearStatus.SUCCESS)
+    test.assertFalse(result.graph_rebuilt)
+    test.assertIs(runner.workspace._masked_pcg_plan, plan)
+    test.assertIs(plan.graph, graph)
+    test.assertTrue(benchmark.Reference(changed, runner.config).measure(runner.y.numpy())["independent_residual_pass"])
+    runner.config = replace(runner.config, maximum_iterations=runner.config.maximum_iterations - 1)
     test.assertTrue(runner.solve().graph_rebuilt)
+    test.assertIsNot(runner.workspace._masked_pcg_plan, plan)
 
 
 def test_conditional_slot_budget(test, device):

@@ -55,6 +55,7 @@ def test_hotspot_dependencies(test, device):
             test.assertEqual(final["state"], "_accepted")
             test.assertTrue(final["build_tangent"])
             flags, states = set(), set()
+            checked_step = False
             for name in manifest["snapshots"]:
                 path = root / name
                 metadata = json.loads((path / "call.json").read_text())
@@ -63,6 +64,15 @@ def test_hotspot_dependencies(test, device):
                 if metadata["boundary"] == "objective":
                     flags.add(metadata["build_tangent"])
                     states.add(metadata["state"])
+                    step_key = metadata["state"] + ".step.2"
+                    if not checked_step and np.any(arrays[step_key]):
+                        damaged = {key: values.copy() for key, values in arrays.items()}
+                        damaged[step_key].fill(0)
+                        with test.assertRaises(AssertionError):
+                            replay_objective(
+                                damaged, metadata, output, scene="tiny-contact", device=device, graph=graph, repeat=1
+                            )
+                        checked_step = True
                 else:
                     bad = {k: v.copy() for k, v in output.items()}
                     # Removing true A-T cross terms must be observable.
@@ -98,6 +108,7 @@ def test_hotspot_dependencies(test, device):
                             damaged, metadata, output, scene="tiny-contact", device=device, graph=graph, repeat=1
                         )
             test.assertEqual(flags, {False, True})
+            test.assertTrue(checked_step)
             # The predictor (first accepted iterate) sets the relative tolerance;
             # the step-start state itself is no longer evaluated.
             test.assertTrue({"_accepted", "_trial"} <= states)

@@ -11,6 +11,7 @@ import warp as wp
 from ...sim import JointType, Model
 from . import state_checks
 from .articulation import _packed_column
+from .numeric_parameters import scalar_value
 
 
 @wp.func
@@ -105,11 +106,12 @@ def _store_rates(step: Any, e: Any, h: Any, i: int, v: wp.array[Any], omega: wp.
 def _recover_step(
     step: wp.array[Any],
     rotation_step: wp.array[Any],
-    h: Any,
+    h_arg: Any,
     v: wp.array[Any],
     omega: wp.array[Any],
     sym: wp.array2d[Any],
 ):
+    h = scalar_value(h_arg)
     i = wp.tid()
     _store_rates(step[i], rotation_step[i], h, i, v, omega, sym)
 
@@ -121,12 +123,13 @@ def _predict(
     v: wp.array[Any],
     omega: wp.array[Any],
     sym: wp.array2d[Any],
-    h: Any,
+    h_arg: Any,
     predicted_t: wp.array[Any],
     predicted_r: wp.array[Any],
     step_t: wp.array[Any],
     step_r: wp.array[Any],
 ):
+    h = scalar_value(h_arg)
     i = wp.tid()
     # The predicted increments are kept exactly; R_p = (I + step_r) R_n.
     step_t[i] = h * v[i]

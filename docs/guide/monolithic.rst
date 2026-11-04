@@ -25,6 +25,15 @@ retains their cross blocks in the shared sparse operator. Fixed links can be
 zero-Jacobian endpoints. Articulation contacts with FREE actors and materials
 retain their existing paths.
 
+All supported actor combinations share one nonlinear problem on CPU and CUDA,
+with the same physical contributions when CUDA graphs are enabled. Actors own
+state and degrees of freedom; physical contributions, preconditioner blocks,
+linear norm groups and physical convergence groups remain separate. An actor
+can have several preconditioner blocks or both force and torque convergence
+groups. These groups do not split a coupled world into independent solves.
+The iteration collects energy, validity and group summaries from device buffers;
+full residual and material-reaction diagnostics are collected at publication.
+
 Model-selected articulation contacts with static world shapes also participate
 in the shared solve, including scenes with only one articulation. The dynamic
 surface is sampled at full area and its force is projected through its joint
@@ -179,12 +188,13 @@ The experimental constructor parameter ``precision`` accepts
 It cannot change after construction and selects one precision for every
 solver array: state, history, contact forces, energy and residual, the global
 matrix and its scaling, preconditioner factors, and PCG vectors and scalars.
-There is no mixed-precision correction or higher-precision accumulation; the
-only exception is the PCG stopping test, whose per-block thresholds are stored
-in FP32 and compared with the residual norms in FP64.
+There is no mixed-precision correction. The PCG stopping test stores per-block
+thresholds in FP32 and compares them with residual norms in FP64; cable
+common-angle direction projection retains its FP64 mean before storing the
+projected direction in the selected precision.
 Reductions use fixed orders: global matrix assembly orders duplicate
 contributions by row, column and value bits and sums them with a fixed pairwise
-tree, residual, energy and PCG reductions use fixed trees, and the solve path
+tree, residual, energy and PCG reductions use fixed traversal orders, and the solve path
 uses no floating-point atomic additions (only order-independent atomic maxima).
 On one device, repeated runs and CUDA graph replay give bitwise identical
 trajectories. Changing the Model numbering of bodies, joints and shapes while

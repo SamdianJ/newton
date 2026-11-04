@@ -8,6 +8,7 @@ import unittest
 import numpy as np
 import warp as wp
 
+from newton.tests.test_monolithic_material_state import scene
 from scripts.monolithic_reference.cable_benchmarks import CableBenchmark
 
 
@@ -50,7 +51,7 @@ class TestMonolithicCableOperator(unittest.TestCase):
         # which is what lets it act on displacements relative to its first vertex.
         cable = operator.cables[0]
         shift = np.array([0.3, -0.2, 0.7])
-        for matrix, width in ((cable.stretch_matrix.numpy(), 6), (cable.bend_matrix.numpy(), 11)):
+        for matrix, width in ((cable.objective.stretch_b.numpy(), 6), (cable.objective.bend_twist_b.numpy(), 11)):
             translation = np.zeros(width)
             translation[: 3 * (width // 3)] = np.tile(shift, width // 3)
             np.testing.assert_allclose(matrix @ translation, 0, atol=1e-12 * np.abs(matrix).max())
@@ -71,6 +72,42 @@ class TestMonolithicCableOperator(unittest.TestCase):
         solver._take_trial(1.0, case.dt)
         self.assertIsNotNone(solver._trial_evaluation(case.dt))
         np.testing.assert_array_equal(operator.dense(), accepted)
+
+    def test_owner_tangent_rebinding(self):
+        """Use newly evaluated owner tangents after replacing both cable matrix buffers."""
+        for precision in ("fp32", "fp64"):
+            _, run = scene(
+                cloth=False,
+                cables=1,
+                precision=precision,
+                device=self.device,
+                pcg_mode="production",
+                use_cuda_graph=wp.get_device(self.device).is_cuda,
+            )
+            state = run.create_state(dt=0.001)
+            run.step(state, state, run.create_control(), dt=0.001)
+            self.assertTrue(run.last_stats.converged, run.last_stats)
+            operator = run._linear._material_operator
+            owner = run._cables[0].objective
+            old = owner.stretch_b, owner.bend_twist_b
+            saved = [array.numpy().copy() for array in old]
+            owner.stretch_b, owner.bend_twist_b = (wp.zeros_like(array) for array in old)
+            run._delta.assign(np.linspace(-0.0002, 0.0003, operator.size))
+            run._take_trial(0.25, 0.001)
+            run._evaluate(run._trial, 0.001, build_tangent=True)
+            run._assemble(0, device_result=True)
+            dense = np.zeros((operator.size, operator.size))
+            matrices = owner.stretch_b.numpy(), owner.bend_twist_b.numpy()
+            for kind, element, a, b, row_a, row_b in operator.cables[0].entries():
+                dense[row_a, row_b] += matrices[kind][element, a, b]
+            direction = wp.array(np.linspace(-0.2, 0.3, operator.size), dtype=run._dtype, device=self.device)
+            actual = wp.zeros_like(direction)
+            operator.add_product(direction, operator.ones, actual)
+            expected = dense @ direction.numpy()
+            tolerance = 64 * np.finfo(run._numpy_dtype).eps
+            np.testing.assert_allclose(actual.numpy(), expected, rtol=tolerance, atol=tolerance)
+            for array, values in zip(old, saved, strict=True):
+                np.testing.assert_array_equal(array.numpy(), values)
 
     def test_float32_soft_mode_is_resolved(self):
         """Keep the FP32 product on a rotated rod's soft bending mode accurate where the assembly is not."""

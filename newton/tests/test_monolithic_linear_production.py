@@ -255,7 +255,10 @@ def test_binding_and_adapter(test, device):
     np.testing.assert_allclose(delta.numpy(), workspace.scale.numpy() * y.numpy(), rtol=1e-6)
     test.assertFalse(hasattr(workspace, "_diagnostic_vector"))
     old_plan = workspace._masked_pcg_plan
-    result = workspace.solve_pcg(rhs, y, **{**kwargs, "warm_start": MonolithicPcgWarmStart.SAME_GENERATION})
+    with patch.object(impl, "vars", side_effect=AssertionError("hot reflection"), create=True):
+        result = workspace.solve_pcg(rhs, y, **{**kwargs, "warm_start": MonolithicPcgWarmStart.SAME_GENERATION})
+    with patch.object(old_plan, "rhs", None), test.assertRaisesRegex(ValueError, "bound storage"):
+        old_plan._validate_storage()
     test.assertEqual(result.iterations, 0)
     test.assertIs(workspace._masked_pcg_plan, old_plan)
     workspace.set_regularization(0.5, generation=generation)

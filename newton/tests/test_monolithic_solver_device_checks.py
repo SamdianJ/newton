@@ -127,7 +127,7 @@ def test_device_iteration(test, device):
         with patch.object(run, "_iterate_articulation", iterate):
             run.step(state, state, run.model.control(), dt=0.001)
         test.assertTrue(run.last_stats.converged, run.last_stats)
-        test.assertIsInstance(run.last_stats.variational["residual"], list)
+        test.assertIsInstance(run.last_stats.variational["residual"], np.ndarray)
         test.assertEqual(len(run.last_stats.variational["residual"]), run._complete_r.size)
 
 
@@ -156,7 +156,6 @@ def test_free_coordinate_history(test, device):
     run = rigid_solver(rigid_scene(device, before=True, contact=False), mode="production", graph=device.is_cuda)
     state = run.create_state(dt=0.001)
     test.assertGreater(state.joint_q.size, state.joint_qd.size)
-    test.assertFalse(run._device_iteration)
     history = state._monolithic_coupled
     for name in ("bound_q", "bound_qd"):
         array = getattr(history, name)

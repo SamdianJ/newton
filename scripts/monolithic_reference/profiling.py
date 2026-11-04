@@ -142,16 +142,19 @@ class SolverProfiler:
         for method in (
             "step",
             "_prepare_step",
-            "_evaluate",
             "_assemble",
-            "_take_trial",
-            "_trial_evaluation",
             "_physical_linear_error",
             "_validate_final",
             "_finish_candidate",
             "_restore",
         ):
             self._wrap(run, method, method.lstrip("_"))
+        for method, name in (
+            ("evaluate", "evaluate"),
+            ("candidate", "take_trial"),
+            ("evaluate_trial", "trial_evaluation"),
+        ):
+            self._wrap(run._problem, method, name)
         for method in (
             "begin_assembly",
             "finalize_assembly",
@@ -178,9 +181,9 @@ class SolverProfiler:
             self._wrap(run._contact._batch.reference_rows, "reduce", "contact.reference.tree")
         original = run._graphs.run
 
-        def graph(name, parameters, buffers, execute):
+        def graph(name, parameters, buffers, execute, *, warmup=True):
             with self.scope("segment." + name):
-                return original(name, parameters, buffers, execute)
+                return original(name, parameters, buffers, execute, warmup=warmup)
 
         self._patches.enter_context(patch.object(run._graphs, "run", graph))
         if self.activities and self.device.is_cuda:

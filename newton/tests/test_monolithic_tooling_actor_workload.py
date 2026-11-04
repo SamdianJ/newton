@@ -124,12 +124,11 @@ class TestActorWorkload(unittest.TestCase):
         state = run.create_state(dt=0.001)
         # One step begins the spatial lifecycle whose owners are snapshotted.
         run.step(state, state, run.model.control(), dt=0.001)
-        for name in ("_original", "_accepted", "_trial"):
-            setattr(run, name, run._states.copy(state))
         arrays = arrays_for(run)
         self.assertIn("_rigid.predicted_r", arrays)
         self.assertIn("contact.batch.current.rotation", arrays)
         self.assertIn("_trial.history.rigid_vsym", arrays)
+        self.assertIn("_trial.step.2", arrays)
         self.assertFalse(any(name.endswith(".table") for name in arrays))
 
 

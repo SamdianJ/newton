@@ -1,0 +1,1 @@
+Use one device nonlinear evaluation and state-geometry path for articulation, rigid, tet, cloth and cable combinations in the experimental monolithic solver. Existing Model, State and Control calls require no migration.

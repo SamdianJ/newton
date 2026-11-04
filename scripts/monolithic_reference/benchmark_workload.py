@@ -69,13 +69,13 @@ def benchmark(root, *, device="cuda:0", warmup=2, repeat=5, contact_diagnostics=
             for prefix, target in (("inputs", inputs), ("state", expected)):
                 key = f"{prefix}-{step}.npz"
                 target[step] = load_arrays(root / key, manifest["array_schemas"][key])
-        objective = run._evaluate
+        objective = run._problem.evaluate
         objective_seconds = []
 
         def timed_objective(*args, objective=objective, objective_seconds=objective_seconds, **kwargs):
             start = time.perf_counter()
             result = objective(*args, **kwargs)
-            # _evaluate already reads E/r back before returning.
+            # The objective already collects its decision summary before returning.
             objective_seconds.append(time.perf_counter() - start)
             return result
 
@@ -89,11 +89,7 @@ def benchmark(root, *, device="cuda:0", warmup=2, repeat=5, contact_diagnostics=
                 offset = max(run._step_generation - initial_generation, 0)
                 restore_seconds = time.perf_counter() - start
                 captures = capture_count(run)
-                objective_names = (
-                    ("coupled_objective_owners", "coupled_objective_result")
-                    if run._contact_pool
-                    else ("coupled_objective",)
-                )
+                objective_names = ("problem_owners", "problem_summary", "problem_interaction_rows")
                 objective_captures = sum(run._graphs.captures[name] for name in objective_names)
                 contact_caches = (run._contact._batch.graphs, run._contact.pool.graphs) if run._contact_pool else ()
                 if run._contact_spatial:
@@ -103,7 +99,7 @@ def benchmark(root, *, device="cuda:0", warmup=2, repeat=5, contact_diagnostics=
                 objective_seconds.clear()
                 with (
                     contact_pair_diagnostics(run, enabled=contact_diagnostics),
-                    patch.object(run, "_evaluate", timed_objective) if scope == "objective" else nullcontext(),
+                    patch.object(run._problem, "evaluate", timed_objective) if scope == "objective" else nullcontext(),
                 ):
                     for step in range(first, last + 1):
                         apply_inputs(inputs[step], model, state, control)

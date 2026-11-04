@@ -8,6 +8,7 @@ from typing import Any
 import warp as wp
 
 from .articulation import _packed_column
+from .numeric_parameters import scalar_value
 
 
 @wp.kernel(module="unique", module_options={"fuse_fp": False})
@@ -52,33 +53,21 @@ def freeze_step_forces(
 
 
 @wp.kernel
-def combine(
-    q: wp.array[Any], x: wp.array[Any], contact: wp.array[Any], q_local: wp.array[int], x_start: int, out: wp.array[Any]
-):
-    i = wp.tid()
-    value = contact[i]
-    if q_local[i] >= 0:
-        value += q[q_local[i]]
-    elif i >= x_start and i < x_start + 3 * x.shape[0]:
-        j = i - x_start
-        value += x[j / 3][j % 3]
-    out[i] = value
-
-
-@wp.kernel
 def particle_trial(
     accepted: wp.array[Any],
     xn: wp.array[Any],
     mapping: wp.array[int],
     direction: wp.array[Any],
     x_start: int,
-    alpha: Any,
-    dt: Any,
+    alpha_arg: Any,
+    dt_arg: Any,
     out: wp.array[Any],
     velocity: wp.array[Any],
     displacement: wp.array[Any],
 ):
     """Advance the step displacement of dynamic tet particles; positions are formed once from it."""
+    alpha = scalar_value(alpha_arg)
+    dt = scalar_value(dt_arg)
     i = wp.tid()
     j = mapping[i]
     out[i] = xn[i]
@@ -107,12 +96,13 @@ def particle_predict(
     xn: wp.array[Any],
     vn: wp.array[Any],
     mapping: wp.array[int],
-    dt: Any,
+    dt_arg: Any,
     out: wp.array[Any],
     velocity: wp.array[Any],
     displacement: wp.array[Any],
 ):
     """Predict the step displacement dt v_n of dynamic tet particles."""
+    dt = scalar_value(dt_arg)
     i = wp.tid()
     out[i] = xn[i]
     velocity[i] = type(xn[0])(0.0)
@@ -216,15 +206,17 @@ def _coordinate_trial(
     accepted_step: wp.array[Any],
     direction: wp.array[Any],
     rows: wp.array[int],
-    alpha: Any,
+    alpha_arg: Any,
     qn: wp.array[Any],
-    h: Any,
+    h_arg: Any,
     coords: wp.array[int],
     dofs: wp.array[int],
     out: wp.array[Any],
     vout: wp.array[Any],
     step: wp.array[Any],
 ):
+    alpha = scalar_value(alpha_arg)
+    h = scalar_value(h_arg)
     i = wp.tid()
     # Advance the exact step; coordinates and rates are formed from it once.
     step[i] = accepted_step[i] + alpha * type(h)(direction[rows[i]])
@@ -236,13 +228,14 @@ def _coordinate_trial(
 def _coordinate_predictor(
     q: wp.array[Any],
     v: wp.array[Any],
-    h: Any,
+    h_arg: Any,
     coords: wp.array[int],
     dofs: wp.array[int],
     out: wp.array[Any],
     vout: wp.array[Any],
     step: wp.array[Any],
 ):
+    h = scalar_value(h_arg)
     i = wp.tid()
     step[i] = h * v[i]
     out[coords[i]] = q[i] + step[i]

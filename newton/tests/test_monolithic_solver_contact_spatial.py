@@ -91,7 +91,9 @@ def test_spatial_rounds(test, device):
             np.testing.assert_array_equal(run._contact._spatial.x0.numpy(), start)
             test.assertFalse(run.last_stats.variational["contact_spatial"]["tainted"])
             assert_physical(test, frame(full, states[1]), frame(run, states[0]))
-            np.testing.assert_allclose(run._reference_residual, full._reference_residual, rtol=1e-8, atol=1e-10)
+            np.testing.assert_allclose(
+                run._reference_residual.numpy(), full._reference_residual.numpy(), rtol=1e-8, atol=1e-10
+            )
             expected = run._contact.pool.force.result.numpy()
             force = run.get_contact_forces(states[0])
             n = 3 * run.model.particle_count
@@ -113,7 +115,7 @@ def test_spatial_retry_freeze(test, device):
     state = contact_state(run, "chain")
     before = snapshot(state)
     calls, queries = [], []
-    original_refresh, original_evaluate = run._refresh_candidates, run._evaluate
+    original_refresh, original_evaluate = run._refresh_candidates, run._problem.evaluate
     original_acceptance = solver_monolithic.iterate.__globals__["acceptance"]
 
     def refresh():
@@ -141,7 +143,7 @@ def test_spatial_retry_freeze(test, device):
 
     with (
         patch.object(run, "_refresh_candidates", refresh),
-        patch.object(run, "_evaluate", evaluate),
+        patch.object(run._problem, "evaluate", evaluate),
         patch.dict(solver_monolithic.iterate.__globals__, acceptance=reject_first_retry),
     ):
         run.step(state, state, run.model.control(), dt=0.001)
@@ -294,7 +296,6 @@ def test_spatial_device_iteration(test, device):
             contact_dataflow=algorithm,
             spatial={"candidate_capacity": 256} if algorithm == "spatial" else None,
         )
-        test.assertTrue(run._device_iteration)
         run.step(state, state, model.control(), dt=0.001)
         test.assertTrue(run.last_stats.converged, run.last_stats)
         runs.append(run)

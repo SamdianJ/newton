@@ -14,6 +14,8 @@ from pathlib import Path
 import numpy as np
 import warp as wp
 
+from newton.examples.softbody.monolithic_recording import save
+
 from .material_acceptance import MaterialAcceptance
 from .material_recipes import MATERIAL_RECIPE_PATH
 from .profiling import provenance
@@ -83,6 +85,7 @@ def run_case(name, args, source):
                 (output / "restart-history.json").write_text(json.dumps(case.restart.records, indent=2) + "\n")
             if receipt["status"] == "FAIL":
                 (output / "failure-stats.txt").write_text(str(case.solver.last_stats))
+                save(output / "failure-stats.json", case.solver.last_stats)
                 try:
                     case.solver.save_checkpoint(case.state, output / "failed-state.npz")
                 except Exception as error:

@@ -58,7 +58,7 @@ def observe_linear(solver, directory, direction_iteration=None):
                     block.triplet_offset : block.triplet_offset + len(block.triplet_rows)
                 ]
             captured.update(
-                arrays=arrays,
+                arrays={name: value.copy() for name, value in arrays.items()},
                 call=calls,
                 state=solver._states._copy_unchecked(solver._accepted),
                 increments=tuple(wp.clone(a) for a in solver._steps[id(solver._accepted)]),
@@ -99,12 +99,15 @@ def probe_direction(solver, captured, directory, dt):
             np.add.at(part, (a[name + "_rows"], a[name + "_columns"]), a[name + "_values"])
         components[producer.name] = part
     components["contact"] = matrix - sum(components.values())
+    # This terminal probe reads each producer on the host; cached owner graphs
+    # would bypass those hooks or capture their device-to-host copies.
+    solver._graphs.enabled = False
     parts = {}
     for producer in solver._producers:
         evaluate = producer.evaluate
 
         def observed(owner, state, step_dt, residual, *, build_tangent, original=evaluate, name=producer.name):
-            before = residual.numpy()
+            before = residual.numpy().copy()
             result = original(owner, state, step_dt, residual, build_tangent=build_tangent)
             parts[name] = residual.numpy() - before
             return result

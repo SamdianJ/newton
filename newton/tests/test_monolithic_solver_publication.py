@@ -188,7 +188,7 @@ def test_current_iterate_publication(test, device):
                 current._trial.particle_q.fill_(wp.vec3d(float("nan")))
                 raise _StepFailure(current.Status(reason), "zero-update stop injection")
 
-            with patch.object(run, "_take_trial", stop):
+            with patch.object(run._problem, "candidate", stop):
                 run.step(before, after, model.control(), dt=0.001)
             stats = run.last_stats
             test.assertFalse(stats.rolled_back, stats)
@@ -217,7 +217,7 @@ def test_current_iterate_publication(test, device):
                 run._accepted.particle_q.fill_(wp.vec3d(float("nan")))
                 return final_check(dt, status)
 
-            with patch.object(run, "_take_trial", stop), patch.object(run, "_validate_final", invalid_final):
+            with patch.object(run._problem, "candidate", stop), patch.object(run, "_validate_final", invalid_final):
                 run.step(before, after, model.control(), dt=0.001)
             test.assertTrue(run.last_stats.rolled_back)
             test.assertFalse(run.last_stats.variational["zero_accepted_publication"])

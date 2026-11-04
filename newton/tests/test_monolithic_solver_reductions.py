@@ -4,11 +4,16 @@
 """Compare nonlinear device reductions with independent host arithmetic."""
 
 import unittest
+from types import SimpleNamespace
+from unittest.mock import patch
 
 import numpy as np
 import warp as wp
 
 from newton._src.solvers.monolithic import iteration_device as kernels
+from newton._src.solvers.monolithic.producers import _articulation_domain
+from newton._src.solvers.monolithic.reductions import SegmentedReduction
+from newton.tests.test_monolithic_material_state import scene as material_scene
 from newton.tests.unittest_utils import add_function_test, get_test_devices
 
 
@@ -22,73 +27,128 @@ def test_reductions(test, device):
         direction = rng.normal(size=n).astype(native)
         arrays = [wp.array(v, dtype=dtype, device=device) for v in (r, reference, trial, effective)]
         ds, dd = [wp.array(v, dtype=dtype, device=device) for v in (scale, direction)]
-        terms = wp.empty((9, n), dtype=dtype, device=device)
-        sums = wp.empty((9, 1), dtype=dtype, device=device)
+        terms = wp.empty((5, n), dtype=dtype, device=device)
         rhs = wp.empty(n, dtype=dtype, device=device)
-        tolerance = 32 * np.finfo(native).eps
-        for nq in (0, 3, n):
-            parts = (slice(0, n), slice(0, nq), slice(nq, n))
-            wp.launch(kernels.measure_terms, n, [arrays[0], arrays[1], ds, nq, terms, rhs], device=device)
-            wp.utils.array_sum(terms, out=sums, axis=1)
+        tau = np.geomspace(1e-4, 1e2, n).astype(native)
+        dtau = wp.array(tau, dtype=dtype, device=device)
+        tolerance = 64 * np.finfo(native).eps
+        for groups in (
+            [np.arange(n), np.arange(3), np.arange(3, n)],
+            [np.arange(n), np.arange(0, n, 2), np.arange(1, n, 2), np.empty(0, dtype=int)],
+            [np.arange(n), np.arange(n), np.empty(0, dtype=int)],
+        ):
+            plan = SegmentedReduction(n, groups, 5, dtype=dtype, device=device)
+            wp.launch(kernels.assessment_rows, n, [arrays[0], arrays[1], dtau, ds, terms, rhs], device=device)
+            plan.reduce(terms, minimum=4)
             expected = [
-                [np.sum((scale[p].astype(native) * v[p]) ** 2) for v in (r, reference)] + [np.sum(r[p] ** 2)]
-                for p in parts
+                [
+                    np.sum((scale[p] * r[p]) ** 2),
+                    np.sum(r[p] ** 2),
+                    np.sum((r[p] / tau[p]) ** 2),
+                    np.sum((reference[p] / tau[p]) ** 2),
+                    np.min(scale[p] * tau[p], initial=np.inf),
+                ]
+                for p in groups
             ]
-            np.testing.assert_allclose(sums.numpy().reshape(3, 3), expected, rtol=tolerance, atol=0)
+            np.testing.assert_allclose(plan.result.numpy(), expected, rtol=tolerance, atol=0)
             np.testing.assert_array_equal(rhs.numpy(), -scale * r)
-            wp.launch(kernels.trial_terms, n, [arrays[0], arrays[2], ds, dd, arrays[3], nq, terms], device=device)
-            wp.utils.array_sum(terms, out=sums, axis=1)
-            d, s = direction.astype(native), scale.astype(native)
+            wp.launch(kernels.trial_rows, n, [arrays[0], ds, dd, arrays[3], terms], device=device)
+            plan.reduce(terms)
+            moved = effective / scale
             expected = [
-                r @ effective,
-                np.sum((s * trial) ** 2),
-                np.sum(s * s),
-                np.sum(d * d),
-                np.sum(abs(d)),
-                np.sum(abs(r * d)),
-                *[np.sum((effective[p] / s[p]) ** 2) for p in parts],
+                [
+                    r[p] @ effective[p],
+                    np.sum(abs(r[p] * direction[p])),
+                    np.sum(moved[p] ** 2),
+                    np.sum(effective[p] ** 2),
+                    0,
+                ]
+                for p in groups
             ]
-            np.testing.assert_allclose(sums.numpy().ravel(), expected, rtol=tolerance, atol=tolerance)
+            actual = plan.result.numpy()
+            np.testing.assert_allclose(actual, expected, rtol=tolerance, atol=tolerance)
+            plan.reduce(terms)
+            np.testing.assert_array_equal(plan.result.numpy(), actual)
+            if device.is_cuda:
+                with wp.ScopedCapture(device=device) as capture:
+                    plan.reduce(terms)
+                terms.fill_(native(2))
+                wp.capture_launch(capture.graph)
+                np.testing.assert_array_equal(plan.result.numpy(), [[2 * len(p)] * 5 for p in groups])
         arrays[0].fill_(native(float("nan")))
-        wp.launch(kernels.measure_terms, n, [arrays[0], arrays[1], ds, 3, terms, rhs], device=device)
-        wp.utils.array_sum(terms, out=sums, axis=1)
-        test.assertTrue(np.isnan(sums.numpy()[0, 0]))
+        wp.launch(kernels.assessment_rows, n, [arrays[0], arrays[1], dtau, ds, terms, rhs], device=device)
+        plan.reduce(terms, minimum=4)
+        test.assertTrue(np.isnan(plan.result.numpy()[0, 0]))
+        dtau.fill_(native(float("nan")))
+        wp.launch(kernels.assessment_rows, n, [arrays[0], arrays[1], dtau, ds, terms, rhs], device=device)
+        plan.reduce(terms, minimum=4)
+        test.assertTrue(np.isnan(plan.result.numpy()[0, 4]))
+        test.assertEqual(plan.result.numpy()[-1, 4], np.inf)
+
+
+def test_segment_storage(test, device):
+    """Keep row and partial storage linear while allowing many tiny or empty groups."""
+    n = 1025
+    groups = [np.arange(n), *(np.array([i]) for i in range(n)), np.empty(0, dtype=int)]
+    plan = SegmentedReduction(n, groups, 3, dtype=wp.float64, device=device)
+    test.assertEqual(plan.rows.size, 2 * n)
+    test.assertLessEqual(plan.partials.size, 3 * (2 * n // plan.CHUNK_SIZE + len(groups)))
+    terms = wp.ones((3, n), dtype=wp.float64, device=device)
+    result = plan.reduce(terms, minimum=2).numpy()
+    np.testing.assert_array_equal(result[0], [n, n, 1])
+    np.testing.assert_array_equal(result[1:-1], np.ones((n, 3)))
+    np.testing.assert_array_equal(result[-1], [0, 0, np.inf])
+    empty = SegmentedReduction(0, [np.empty(0, dtype=int)], 3, dtype=wp.float64, device=device)
+    np.testing.assert_array_equal(
+        empty.reduce(wp.zeros((3, 0), dtype=wp.float64, device=device), minimum=2).numpy(), [[0, 0, np.inf]]
+    )
+    for group in ([n], [-1], [0.5], [[0]]):
+        with test.assertRaises(ValueError):
+            SegmentedReduction(n, [group], 3, dtype=wp.float64, device=device)
 
 
 class TestReductions(unittest.TestCase):
     pass
 
 
-def test_host_energy_packet(test, device):
-    """Keep term order, native bits and error metadata through the fused readback."""
-    for dtype, native in ((wp.float32, np.float32), (wp.float64, np.float64)):
-        for lengths in ((0, 0, 0, 0, 0), (1, 2, 3, 4, 2), (3, 0, 5, 3, 6)):
-            host = [np.arange(n, dtype=native) - 2 for n in lengths]
-            terms = [wp.array(a, dtype=dtype, device=device) for a in host]
-            absolute = wp.array([11, 13], dtype=dtype, device=device)
-            tet_flags = wp.array([5], dtype=int, device=device)
-            contact_flags = wp.array([9, 7], dtype=int, device=device)
-            det = wp.array([-0.5], dtype=dtype, device=device)
-            packet = wp.empty(5 + sum(lengths), dtype=dtype, device=device)
-            for pooled in (False, True):
-                for value in (-0.0, np.inf, np.nan):
-                    if lengths[-1]:
-                        host[-1][0] = value
-                        terms[-1].assign(host[-1])
-                    packet.fill_(99)
-                    wp.launch(
-                        kernels.host_evaluation_packet,
-                        packet.size,
-                        [*terms, absolute, tet_flags, contact_flags, det, pooled, packet],
-                        device=device,
-                    )
-                    result = packet.numpy()
-                    np.testing.assert_array_equal(result[:5], [5, 9, -0.5, 11 if pooled else 0, 13 if pooled else 0])
-                    test.assertEqual(result[5:].tobytes(), np.concatenate(host).tobytes())
+def test_layout_group_norms(test, device):
+    """Measure every mixed actor group without assuming a q/x row partition."""
+    for precision, dtype, native in (("fp32", wp.float32, np.float32), ("fp64", wp.float64, np.float64)):
+        _, solver = material_scene(
+            mechanical=True,
+            rigid=True,
+            tet=True,
+            precision=precision,
+            device=device,
+            pcg_mode="production",
+            use_cuda_graph=device.is_cuda,
+        )
+        layout = solver._layout
+        values = np.arange(1, layout.scalar_dof_count + 1, dtype=native)
+        vector = wp.array(values, dtype=dtype, device=device)
+        expected = [np.linalg.norm(values[start : start + count]) for _, start, count in layout.groups]
+        solver._rhs.assign(2 * values)
+        solver._post_magnitude.assign(3 * values)
+        solver._post_original.fill_(float("nan"))
+        solver._post_regularization.fill_(float("nan"))
+        solver._post_lambda.zero_()
+        internal = wp.full(4 * len(expected), 7, dtype=dtype, device=device)
+        with patch.object(solver._linear, "_masked_pcg_plan", SimpleNamespace(norms=internal), create=True):
+            actual = kernels.posterior(solver, vector).copy()
+            solver._linear._masked_pcg_plan.norms = wp.full(4 * len(expected), 11, dtype=dtype, device=device)
+            np.testing.assert_array_equal(kernels.posterior(solver, vector)[:, 5], 11)
+            if device.is_cuda:
+                test.assertEqual(solver._graphs.summary()["segments"]["nonlinear_posterior_norms"]["captures"], 2)
+        test.assertEqual(len(actual), len(expected))
+        expected = np.array([[v, 2 * v, 3 * v, v, 0, 7] for v in expected])
+        np.testing.assert_allclose(actual, expected, rtol=32 * np.finfo(native).eps)
 
 
-add_function_test(TestReductions, "test_host_energy_packet", test_host_energy_packet, devices=get_test_devices())
+add_function_test(TestReductions, "test_layout_group_norms", test_layout_group_norms, devices=get_test_devices())
+
+
 add_function_test(TestReductions, "test_reductions", test_reductions, devices=get_test_devices())
+add_function_test(TestReductions, "test_segment_storage", test_segment_storage, devices=get_test_devices())
 
 
 def test_domain_boundary(test, device):
@@ -116,7 +176,7 @@ def test_domain_boundary(test, device):
             rotations.assign(mats)
             flag.zero_()
             wp.launch(
-                kernels.domain_check, 2, [q, qn, ids, types, rotations, rn, 1, dtype(np.pi / 2), flag], device=device
+                _articulation_domain, 2, [q, qn, ids, types, rotations, rn, 1, dtype(np.pi / 2), flag], device=device
             )
             test.assertEqual(bool(flag.numpy()[0]), case in (1, 3, 4))
 

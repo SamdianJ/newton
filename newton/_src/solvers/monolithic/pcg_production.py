@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 The Newton Developers
 # SPDX-License-Identifier: Apache-2.0
-"""Fixed-topology, device-masked PCG for the monolithic linear workspace.
+"""Fixed-storage, device-masked PCG for the monolithic linear workspace.
 
 The synchronous adapter at the end of this file implements the production
 dispatch from ``solve_pcg``; diagnostic retains its separate host policy.
@@ -182,9 +182,10 @@ def _overlap(a, b):
 class MaskedPcgPlan:
     """Preallocated plan bound to one scalar-BSR matrix and actor factors.
 
-    Array addresses, layout and config are immutable for this plan/graph.
-    Contents may be updated in place between solves. Rebind (construct another
-    plan) when a BSR rebuild reallocates storage. Calls on a plan must be
+    Array addresses, actor layout and config are immutable for this plan/graph.
+    Workspace assemblies may change sparse contents within those capacities;
+    standalone plans authenticate their external layout during preparation.
+    Rebind (construct another plan) when a BSR rebuild reallocates storage. Calls on a plan must be
     serialized on one stream; it is not reentrant.
     """
 
@@ -361,8 +362,11 @@ class MaskedPcgPlan:
         self._generation = None
         self._stream = self._stream_id()
         self._in_flight = False
+        self._failed = False
+        self._bound_stream = wp.get_stream(self.device) if self.device.is_cuda else None
         self._prepared_regularization = None
-        self._storage = tuple(value for value in vars(self).values() if isinstance(value, wp.array))
+        self._storage_names = tuple(name for name, value in vars(self).items() if isinstance(value, wp.array))
+        self._storage = tuple(getattr(self, name) for name in self._storage_names)
         self._storage_signature = tuple(map(_signature, self._storage))
         self._schedule_signature = (
             _plan_identity(self.config),
@@ -431,9 +435,10 @@ class MaskedPcgPlan:
             raise ValueError("Cable factor storage changed; construct a new PCG plan")
         if self._material_operator is not None and self._material_signature != self._material_operator.signature():
             raise ValueError("Material operator storage changed; construct a new PCG plan")
-        arrays = tuple(value for value in vars(self).values() if isinstance(value, wp.array))
+        arrays = tuple(getattr(self, name) for name in self._storage_names)
         if (
             self._stream_id() != self._stream
+            or any(not isinstance(array, wp.array) for array in arrays)
             or tuple(map(_signature, arrays)) != self._storage_signature
             or (_plan_identity(self.config), self.n, self.nq, self.nx, self.layout, self._conditional_graph_supported)
             != self._schedule_signature
@@ -453,7 +458,7 @@ class MaskedPcgPlan:
                 raise ValueError("Stale generation, scaling or regularization factors")
 
     def matches_workspace(self, workspace, rhs_hat, y, config, delta=None):
-        """Check bindings; authenticate sparse layout once per numerical generation."""
+        """Check bindings; the workspace owns validation of sealed sparse contents."""
         matrix = workspace.k_global_scalar_bsr
         arrays = (
             matrix.offsets,
@@ -482,9 +487,9 @@ class MaskedPcgPlan:
             and _plan_identity(config) == _plan_identity(self.config)
             and tuple(map(_signature, arrays)) == self._binding_signature
         )
-        if not bindings_match:
-            return False
-        return self._generation == workspace._generation or self._layout_signature() == self._layout_digest
+        # Captured matvecs read offsets/columns on device. A new sealed assembly
+        # changes their contents, not the launch schedule or bound capacities.
+        return bindings_match
 
     def set_solve_parameters(self, *, regularization: float, zero_initial_guess: bool = True):
         """Update device parameters before enqueue/replay; matrix/factors must match."""
@@ -505,6 +510,12 @@ class MaskedPcgPlan:
         self._validate_workspace(regularization)
         if self._workspace is None and self._layout_signature() != self._layout_digest:
             raise ValueError("BSR layout changed; construct a new PCG plan")
+        if self._failed:
+            # External graphs also call enqueue_solve(). Invalidate the old
+            # packet before rearming, so only a newly completed solve can be
+            # collected, even when its launch is owned by the caller.
+            self.state.zero_()
+            self._failed = False
         self._prepared_regularization = regularization
         self.regularization.fill_(float(regularization))
         self.zero_guess.fill_(int(zero_initial_guess))
@@ -671,8 +682,23 @@ class MaskedPcgPlan:
         checkpoint of an uncaptured solve; it may read device data but must not
         write any bound buffer, so the numerical path is unchanged.
         """
-        if observer is not None and self.device.is_capturing:
+        capturing = self.device.is_capturing
+        if observer is not None and capturing:
             raise RuntimeError("A checkpoint observer requires an uncaptured solve")
+        if self._in_flight:
+            raise RuntimeError("Collect the previous result before enqueueing")
+        if self._prepared_regularization is None:
+            raise RuntimeError("Prepare the plan before enqueueing")
+        if not capturing:
+            self._in_flight = True
+            self._failed = False
+        try:
+            return self._enqueue_solve(observer)
+        except Exception:
+            self._abort_solve(submitted=not capturing)
+            raise
+
+    def _enqueue_solve(self, observer):
         nslots = self.config.maximum_iterations
         interval = self.config.true_residual_interval
         self._launch(_initialize_state, 1, [self.state, self.error, self.scalars, nslots])
@@ -737,8 +763,12 @@ class MaskedPcgPlan:
         wp.load_module(module=_initialize_state.module, device=self.device)
         if self._products_kernel is not None:
             wp.load_module(module=self._products_kernel.module, device=self.device, block_dim=128)
-        with wp.ScopedCapture(device=self.device) as capture:
-            self.enqueue_solve()
+        try:
+            with wp.ScopedCapture(device=self.device) as capture:
+                self.enqueue_solve()
+        except Exception:
+            self._abort_solve(submitted=False)
+            raise
         self.graph = capture.graph
         return self.graph
 
@@ -750,35 +780,64 @@ class MaskedPcgPlan:
             raise RuntimeError("Collect the previous result before replaying")
         self._validate_workspace(self._prepared_regularization)
         self._in_flight = True
-        wp.capture_launch(self.graph)
+        self._failed = False
+        try:
+            wp.capture_launch(self.graph)
+        except Exception:
+            self._abort_solve(submitted=True)
+            raise
+
+    def _abort_solve(self, *, submitted):
+        """Fence possibly submitted work before permitting reuse after failure."""
+        self._failed = True
+        self._prepared_regularization = None
+        if submitted:
+            self._in_flight = True
+        if self._workspace is not None:
+            self._workspace._warm_start_key = None
+            self._workspace._last_masked_pcg_result = None
+        # A failed launch/read does not prove that nothing reached the GPU.
+        # If draining also fails, leave the plan busy and failed: neither reuse
+        # nor collecting an old packet may release its bound buffers.
+        if submitted and self.device.is_cuda:
+            wp.synchronize_stream(self._bound_stream)
+        self.graph = None
+        self._in_flight = False
 
     def collect_result(self):
         """One packet readback at the PCG boundary. Never call during capture."""
         if self.device.is_capturing:
             raise RuntimeError("collect_result() is a host boundary, not capture-safe")
-        item = self.state.numpy()[0]
+        if self._failed:
+            raise RuntimeError("Cannot collect a failed solve; prepare and solve again")
+        try:
+            item = self.state.numpy()[0]
+            status = ProductionStatus(int(item["status"]))
+            if status == ProductionStatus.RUNNING or (
+                status == ProductionStatus.SUCCESS and not bool(item["output_valid"])
+            ):
+                raise RuntimeError("PCG has no terminal result")
+            result = MaskedPcgResult(
+                status=status,
+                enabled=bool(item["enabled"]),
+                pending_check=int(item["pending_check"]),
+                iteration_slots=int(item["slots"]),
+                iterations=int(item["effective_iterations"]),
+                true_residual_checks=int(item["true_residual_checks"]),
+                residual_replacements=int(item["residual_replacements"]),
+                last_true_slot=int(item["last_true_slot"]),
+                convergence_slot=int(item["convergence_slot"]),
+                failure_slot=int(item["failure_slot"]),
+                residual_matches_y=bool(item["residual_current"]),
+                output_valid=bool(item["output_valid"]),
+                ratios=tuple(map(float, item["ratios"])),
+                current_drifts=tuple(map(float, item["drifts"])),
+            )
+        except Exception:
+            self._abort_solve(submitted=True)
+            raise
         self._in_flight = False
-        status = ProductionStatus(int(item["status"]))
-        if status == ProductionStatus.RUNNING or (
-            status == ProductionStatus.SUCCESS and not bool(item["output_valid"])
-        ):
-            raise RuntimeError("PCG has no terminal result")
-        return MaskedPcgResult(
-            status=status,
-            enabled=bool(item["enabled"]),
-            pending_check=int(item["pending_check"]),
-            iteration_slots=int(item["slots"]),
-            iterations=int(item["effective_iterations"]),
-            true_residual_checks=int(item["true_residual_checks"]),
-            residual_replacements=int(item["residual_replacements"]),
-            last_true_slot=int(item["last_true_slot"]),
-            convergence_slot=int(item["convergence_slot"]),
-            failure_slot=int(item["failure_slot"]),
-            residual_matches_y=bool(item["residual_current"]),
-            output_valid=bool(item["output_valid"]),
-            ratios=tuple(map(float, item["ratios"])),
-            current_drifts=tuple(map(float, item["drifts"])),
-        )
+        return result
 
 
 def solve_pcg_production(
@@ -876,7 +935,6 @@ def solve_pcg_production(
                 norms = plan.norms.numpy()[: plan.group_count]
                 history.append((int(state["last_true_slot"]), tuple(map(float, norms))))
 
-        plan._in_flight = True
         plan.enqueue_solve(observer if observe else None)
     result = plan.collect_result()
     workspace._last_masked_pcg_result = result

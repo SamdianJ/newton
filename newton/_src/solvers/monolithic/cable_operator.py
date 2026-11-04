@@ -17,12 +17,40 @@ cable preconditioner's band. Every output row is gathered in a fixed order;
 no floating atomic runs.
 """
 
+from functools import cache
 from typing import Any
 
 import numpy as np
 import warp as wp
 
+from .material_batch import _DeviceRecords
+
 wp.set_module_options({"enable_backward": False})
+
+
+@cache
+def _record_types(dtype):
+    @wp.struct
+    class Elements:
+        rows: wp.array2d[int]
+        matrix: wp.array3d[dtype]
+        out: wp.array2d[dtype]
+        magnitude: wp.array2d[dtype]
+        positions: int
+
+    @wp.struct
+    class Gather:
+        targets: wp.array[int]
+        offsets: wp.array[int]
+        kinds: wp.array[int]
+        elements: wp.array[int]
+        slots: wp.array[int]
+        stretch: wp.array2d[dtype]
+        bend: wp.array2d[dtype]
+        stretch_size: wp.array2d[dtype]
+        bend_size: wp.array2d[dtype]
+
+    return Elements, Gather
 
 
 @wp.func
@@ -43,28 +71,28 @@ def _relative(x: wp.array[Any], scale: wp.array[Any], rows: wp.array2d[int], ele
 
 @wp.kernel
 def _element_apply(
-    rows: wp.array2d[int],
-    matrix: wp.array3d[Any],
-    positions: int,
+    batches: wp.array[Any],
+    jobs: wp.array[wp.vec2i],
     x: wp.array[Any],
     scale: wp.array[Any],
     active: wp.array[int],
-    out: wp.array2d[Any],
-    magnitude: wp.array2d[Any],
 ):
-    element = wp.tid()
+    job = jobs[wp.tid()]
+    batch, index = job[0], job[1]
     if active[0] == 0:
         return
+    data = batches[batch]
+    rows, matrix, out, magnitude = data.rows, data.matrix, data.out, data.magnitude
     width = rows.shape[1]
+    element = index
     for a in range(width):
         value = out.dtype(0.0)
         size = out.dtype(0.0)
         for b in range(width):
             entry = matrix[element, a, b]
-            value = value + entry * _relative(x, scale, rows, element, b, positions)
-            # The product is formed from relative motion, but the vector it acts on
-            # is stored to its own precision: |B| |x| bounds what that representation
-            # lets any product resolve, as for the assembled rows.
+            value = value + entry * _relative(x, scale, rows, element, b, data.positions)
+            # The product uses relative motion, but |B| |x| still bounds the
+            # rounding of the stored vector, as for the assembled rows.
             size = size + wp.abs(entry * _value(x, scale, rows[element, b]))
         out[element, a] = value
         magnitude[element, a] = size
@@ -72,13 +100,16 @@ def _element_apply(
 
 @wp.kernel
 def _element_abs(
-    rows: wp.array2d[int],
-    matrix: wp.array3d[Any],
+    batches: wp.array[Any],
+    jobs: wp.array[wp.vec2i],
     coordinates: wp.array[Any],
-    out: wp.array2d[Any],
 ):
-    element = wp.tid()
+    job = jobs[wp.tid()]
+    batch, index = job[0], job[1]
+    data = batches[batch]
+    rows, matrix, out = data.rows, data.matrix, data.magnitude
     width = rows.shape[1]
+    element = index
     for a in range(width):
         size = out.dtype(0.0)
         for b in range(width):
@@ -90,29 +121,34 @@ def _element_abs(
 
 @wp.kernel
 def _gather(
-    targets: wp.array[int],
-    offsets: wp.array[int],
-    kinds: wp.array[int],
-    elements: wp.array[int],
-    slots: wp.array[int],
-    stretch: wp.array2d[Any],
-    bend: wp.array2d[Any],
+    batches: wp.array[Any],
+    jobs: wp.array[wp.vec2i],
+    magnitude: bool,
     scale: wp.array[Any],
     active: wp.array[int],
     out: wp.array[Any],
     error: wp.array[int],
     code: int,
 ):
-    i = wp.tid()
+    job = jobs[wp.tid()]
+    batch, index = job[0], job[1]
     if active[0] == 0:
         return
-    row = targets[i]
+    data = batches[batch]
+    i = index
+    row = data.targets[i]
     total = out.dtype(0.0)
-    for k in range(offsets[i], offsets[i + 1]):
-        if kinds[k] == 0:
-            total = total + stretch[elements[k], slots[k]]
+    for k in range(data.offsets[i], data.offsets[i + 1]):
+        if magnitude:
+            if data.kinds[k] == 0:
+                total = total + data.stretch_size[data.elements[k], data.slots[k]]
+            else:
+                total = total + data.bend_size[data.elements[k], data.slots[k]]
         else:
-            total = total + bend[elements[k], slots[k]]
+            if data.kinds[k] == 0:
+                total = total + data.stretch[data.elements[k], data.slots[k]]
+            else:
+                total = total + data.bend[data.elements[k], data.slots[k]]
     value = out[row] + scale[row] * total
     out[row] = value
     if not wp.isfinite(value):
@@ -121,39 +157,33 @@ def _gather(
 
 @wp.kernel
 def _band(
-    targets: wp.array[int],
-    offsets: wp.array[int],
-    kinds: wp.array[int],
-    elements: wp.array[int],
-    first: wp.array[int],
-    second: wp.array[int],
-    row_a: wp.array[int],
-    row_b: wp.array[int],
-    stretch: wp.array3d[Any],
-    bend: wp.array3d[Any],
+    batches: wp.array[Any],
+    jobs: wp.array[wp.vec2i],
     scale: wp.array[Any],
     band: wp.array[Any],
 ):
-    slot = wp.tid()
+    job = jobs[wp.tid()]
+    batch, index = job[0], job[1]
+    data = batches[batch]
+    slot = index
     total = band.dtype(0.0)
-    for k in range(offsets[slot], offsets[slot + 1]):
-        if kinds[k] == 0:
-            entry = stretch[elements[k], first[k], second[k]]
+    for k in range(data.offsets[slot], data.offsets[slot + 1]):
+        if data.kinds[k] == 0:
+            entry = data.stretch[data.elements[k], data.first[k], data.second[k]]
         else:
-            entry = bend[elements[k], first[k], second[k]]
-        total = total + entry * scale[row_a[k]] * scale[row_b[k]]
-    band[targets[slot]] = total
+            entry = data.bend[data.elements[k], data.first[k], data.second[k]]
+        total = total + entry * scale[data.row_a[k]] * scale[data.row_b[k]]
+    band[data.targets[slot]] = total
 
 
 class _Cable:
     """Element-to-row maps and output storage of one cable."""
 
     def __init__(self, block, dtype, device):
-        objective = block.objective
+        self.objective = block.objective
         nv = block.ids.size
         local = block.rows_host
         ne, ni = nv - 1, nv - 2
-        self.stretch_matrix, self.bend_matrix = objective.stretch_b, objective.bend_twist_b
         self.stretch_rows_host = np.array([local[3 * e : 3 * e + 6] for e in range(ne)], dtype=np.int32).reshape(ne, 6)
         self.bend_rows_host = np.array(
             [np.r_[local[3 * k : 3 * k + 9], local[3 * nv + k : 3 * nv + k + 2]] for k in range(ni)], dtype=np.int32
@@ -189,19 +219,6 @@ class _Cable:
             for v in (targets, offsets, kinds, elements, slots)
         ]
 
-    def buffers(self):
-        return (
-            self.stretch_matrix,
-            self.bend_matrix,
-            self.stretch_rows,
-            self.bend_rows,
-            self.stretch_out,
-            self.bend_out,
-            self.stretch_size,
-            self.bend_size,
-            *self.gather,
-        )
-
     def entries(self):
         """Yield ``(kind, element, a, b, row_a, row_b)`` for every free element entry, in element order."""
         for kind, rows in ((0, self.stretch_rows_host), (1, self.bend_rows_host)):
@@ -222,41 +239,55 @@ class CableOperator:
         self.always = wp.ones(1, dtype=int, device=self.device)
         self.error = wp.zeros(1, dtype=int, device=self.device)
         self.rows = np.unique(np.concatenate([c.targets_host for c in self.cables])) if self.cables else np.empty(0)
+        elements, gathers = self._views()
+        element_type, gather_type = _record_types(dtype)
+        self._elements = _DeviceRecords(
+            element_type, elements, [row[0].shape[0] for row in elements], device=self.device
+        )
+        self._gathers = _DeviceRecords(gather_type, gathers, [row[0].size for row in gathers], device=self.device)
+
+    def _views(self):
+        elements, gathers = [], []
+        for cable in self.cables:
+            elements.extend(
+                (
+                    (cable.stretch_rows, cable.objective.stretch_b, cable.stretch_out, cable.stretch_size, 6),
+                    (cable.bend_rows, cable.objective.bend_twist_b, cable.bend_out, cable.bend_size, 9),
+                )
+            )
+            gathers.append((*cable.gather, cable.stretch_out, cable.bend_out, cable.stretch_size, cable.bend_size))
+        return elements, gathers
+
+    def _bind(self):
+        elements, gathers = self._views()
+        self._elements.bind(elements)
+        self._gathers.bind(gathers)
 
     def buffers(self):
         """Return every owned or referenced array for plan and graph binding."""
-        arrays = [self.ones, self.always, self.error]
-        for cable in self.cables:
-            arrays.extend(cable.buffers())
-        return tuple(arrays)
+        self._bind()
+        return (self.ones, self.always, self.error, *self._elements.buffers(), *self._gathers.buffers())
 
     def signature(self):
         return tuple((a.ptr, a.shape, a.strides, a.dtype, a.device) for a in self.buffers())
 
     def _launch_elements(self, x, scale, active):
-        for cable in self.cables:
-            for rows, matrix, out, size, positions in (
-                (cable.stretch_rows, cable.stretch_matrix, cable.stretch_out, cable.stretch_size, 6),
-                (cable.bend_rows, cable.bend_matrix, cable.bend_out, cable.bend_size, 9),
-            ):
-                if rows.shape[0]:
-                    wp.launch(
-                        _element_apply,
-                        rows.shape[0],
-                        [rows, matrix, positions, x, scale, active, out, size],
-                        device=self.device,
-                    )
+        if self.cables:
+            wp.launch(
+                _element_apply,
+                self._elements.jobs.size,
+                [self._elements.array, self._elements.jobs, x, scale, active],
+                device=self.device,
+            )
 
     def _launch_gather(self, scale, active, out, *, magnitude, error, code):
-        for cable in self.cables:
-            stretch, bend = (cable.stretch_size, cable.bend_size) if magnitude else (cable.stretch_out, cable.bend_out)
-            if cable.gather[0].size:
-                wp.launch(
-                    _gather,
-                    cable.gather[0].size,
-                    [*cable.gather, stretch, bend, scale, active, out, error, code],
-                    device=self.device,
-                )
+        if self.cables:
+            wp.launch(
+                _gather,
+                self._gathers.jobs.size,
+                [self._gathers.array, self._gathers.jobs, magnitude, scale, active, out, error, code],
+                device=self.device,
+            )
 
     def add_product(self, x, scale, out, *, magnitude=None, active=None, error=None, code=0):
         """Add ``S B S x`` of the cable elements to ``out`` and optionally ``S |B| |S x|`` to ``magnitude``.
@@ -264,6 +295,7 @@ class CableOperator:
         ``scale`` may be :attr:`ones` for a product in physical units. Rows of
         no cable are untouched. ``active`` gates every launch from the device.
         """
+        self._bind()
         active = self.always if active is None else active
         error = self.error if error is None else error
         self._launch_elements(x, scale, active)
@@ -273,20 +305,21 @@ class CableOperator:
 
     def add_abs_coordinates(self, coordinates, out):
         """Add ``|B| |u|`` of the cable elements, the assembled operator's term in the rounding magnitude."""
-        for cable in self.cables:
-            for rows, matrix, size in (
-                (cable.stretch_rows, cable.stretch_matrix, cable.stretch_size),
-                (cable.bend_rows, cable.bend_matrix, cable.bend_size),
-            ):
-                if rows.shape[0]:
-                    wp.launch(_element_abs, rows.shape[0], [rows, matrix, coordinates, size], device=self.device)
+        self._bind()
+        if self.cables:
+            wp.launch(
+                _element_abs,
+                self._elements.jobs.size,
+                [self._elements.array, self._elements.jobs, coordinates],
+                device=self.device,
+            )
         self._launch_gather(self.ones, self.always, out, magnitude=True, error=self.error, code=0)
 
     def dense(self):
         """Return the cable element part as a dense matrix, for tests and diagnostics."""
         result = np.zeros((self.size, self.size))
         for cable in self.cables:
-            values = (cable.stretch_matrix.numpy(), cable.bend_matrix.numpy())
+            values = (cable.objective.stretch_b.numpy(), cable.objective.bend_twist_b.numpy())
             for kind, element, a, b, row_a, row_b in cable.entries():
                 result[row_a, row_b] += values[kind][element, a, b]
         return result

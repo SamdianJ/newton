@@ -10,6 +10,7 @@ import numpy as np
 import warp as wp
 
 from ...sim.model import Model
+from .numeric_parameters import scalar_value
 from .residual import _accumulate_rows, _row_gather_map
 from .tet_common import (
     _validate_candidate_particles,
@@ -116,12 +117,13 @@ def _scatter_internal_block(slot: int, block: Any, ax_values: wp.array[Any], glo
 
 @wp.kernel
 def _assemble_inertia_tangent(
-    inv_dt_sq: Any,
+    inv_dt_sq_arg: Any,
     particle_mass: wp.array[float],
     dynamic_particle_ids: wp.array[int],
     ax_values: wp.array[Any],
     global_values: wp.array[Any],
 ):
+    inv_dt_sq = scalar_value(inv_dt_sq_arg)
     index = wp.tid()
     mass = type(inv_dt_sq)(particle_mass[dynamic_particle_ids[index]])
     _scatter_internal_block(
@@ -149,7 +151,7 @@ def _initialize_consistent_residual(
 
 @wp.kernel
 def _add_consistent_inertia(
-    dt: Any,
+    dt_arg: Any,
     indices: wp.array2d[int],
     mapping: wp.array[int],
     coefficients: wp.array[float],
@@ -158,6 +160,7 @@ def _add_consistent_inertia(
     vn: wp.array[Any],
     terms: wp.array[Any],
 ):
+    dt = scalar_value(dt_arg)
     tet, a = wp.tid()
     if mapping[indices[tet, a]] >= 0:
         r = terms.dtype()
@@ -172,7 +175,7 @@ def _add_consistent_inertia(
 
 @wp.kernel
 def _evaluate_inertia_residual(
-    dt: Any,
+    dt_arg: Any,
     gravity: wp.array[wp.vec3],
     worlds: wp.array[int],
     xn: wp.array[Any],
@@ -183,6 +186,7 @@ def _evaluate_inertia_residual(
     ids: wp.array[int],
     residual: wp.array[Any],
 ):
+    dt = scalar_value(dt_arg)
     i = wp.tid()
     p = ids[i]
     world = worlds[p]
@@ -197,7 +201,7 @@ def _evaluate_inertia_residual(
 def _assemble_elastic_residual_tangent(
     material_model: int,
     consistent: int,
-    inv_dt_sq: Any,
+    inv_dt_sq_arg: Any,
     epsilon: Any,
     mass_coefficients: wp.array[float],
     min_det_f_guard: Any,
@@ -214,6 +218,7 @@ def _assemble_elastic_residual_tangent(
     min_det_f: wp.array[Any],
     failure_flags: wp.array[int],
 ):
+    inv_dt_sq = scalar_value(inv_dt_sq_arg)
     tet = wp.tid()
     valid, stress, projected = _elastic_state(
         tet,
@@ -288,6 +293,8 @@ def _prepare_evaluation(model, args):
     native = _validate_evaluation(model, args)
     scalar = wp.float64 if native == np.float64 else wp.float32
     dt, workspace = scalar(native(args["dt"])), args["workspace"]
+    if args.get("dt_buffer") is not None:
+        dt = args["dt_buffer"]
     workspace.failure_flags.zero_()
     workspace.min_det_f.fill_(float("inf"))
     workspace.tet_energy.zero_()
@@ -374,6 +381,8 @@ def assemble_tet_residual_tangent(
     workspace: TetAssemblyWorkspace,
     scatter: TetScatterBuffers,
     frozen_gravity: wp.array[wp.vec3] | None = None,
+    dt_buffer=None,
+    inv_dt_sq_buffer=None,
 ) -> None:
     """Write exact residual and identical projected/inertial owner and global blocks.
 
@@ -412,7 +421,7 @@ def assemble_tet_residual_tangent(
             _assemble_inertia_tangent,
             dynamic_particle_ids.size,
             [
-                scalar(inv_dt_sq),
+                scalar(inv_dt_sq) if inv_dt_sq_buffer is None else inv_dt_sq_buffer,
                 physics.mass if physics is not None else model.particle_mass,
                 dynamic_particle_ids,
                 scatter.ax_values,
@@ -426,7 +435,7 @@ def assemble_tet_residual_tangent(
         [
             mode,
             consistent,
-            scalar(inv_dt_sq),
+            scalar(inv_dt_sq) if inv_dt_sq_buffer is None else inv_dt_sq_buffer,
             scalar(np.finfo(native).eps),
             physics.coefficients if physics is not None else model.particle_mass,
             scalar(native(min_det_f_guard)),

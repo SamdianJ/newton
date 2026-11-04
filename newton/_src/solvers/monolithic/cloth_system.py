@@ -10,6 +10,7 @@ import warp as wp
 
 from .cable_system import _gather
 from .cloth import ClothObjective
+from .numeric_parameters import scalar_value
 
 
 @wp.kernel
@@ -17,7 +18,8 @@ def _residual(
     step: wp.array[Any],
     vn: wp.array[Any],
     forces: wp.array[wp.vec3],
-    gravity: wp.vec3,
+    gravity: wp.array[wp.vec3],
+    world: int,
     mass: wp.array[Any],
     fixed: wp.array[int],
     offsets: wp.array[int],
@@ -25,12 +27,13 @@ def _residual(
     local: wp.array2d[Any],
     rounding: wp.array2d[Any],
     rows: wp.array[int],
-    dt: Any,
+    dt_arg: Any,
     raw: wp.array[Any],
     absolute: wp.array[Any],
     output: wp.array[Any],
     energy: wp.array[Any],
 ):
+    dt = scalar_value(dt_arg)
     row = wp.tid()
     vertex, axis = row // 3, row % 3
     value = type(dt)(0.0)
@@ -39,7 +42,7 @@ def _residual(
         entry = entries[i]
         value += local[entry // 18, entry % 18]
         magnitude += rounding[entry // 18, entry % 18]
-    force = type(dt)(forces[vertex][axis]) + mass[vertex] * type(dt)(gravity[axis])
+    force = type(dt)(forces[vertex][axis]) + mass[vertex] * type(dt)(gravity[world][axis])
     displacement = step[vertex][axis]
     difference = displacement - dt * vn[vertex][axis]
     value -= force
@@ -61,10 +64,11 @@ def _tangent(
     entries: wp.array[int],
     mass: wp.array[Any],
     matrix: wp.array3d[Any],
-    dt: Any,
+    dt_arg: Any,
     offset: int,
     output: wp.array[Any],
 ):
+    dt = scalar_value(dt_arg)
     i = wp.tid()
     entry = entries[i]
     value = output.dtype(0.0)
@@ -83,15 +87,21 @@ def _candidate(
     original: wp.array[Any],
     velocity: wp.array[Any],
     delta: wp.array[Any],
-    alpha: Any,
-    dt: Any,
+    alpha_arg: Any,
+    dt_arg: Any,
     predict: bool,
+    fallback: bool,
+    path_status: wp.array[int],
     trial: wp.array[Any],
     trial_velocity: wp.array[Any],
     trial_step: wp.array[Any],
 ):
     """Advance the exact step displacement; positions and velocity are formed once from it."""
+    alpha = scalar_value(alpha_arg)
+    dt = scalar_value(dt_arg)
     i = wp.tid()
+    if fallback and path_status[0] == 0:
+        return
     p = ids[i]
     step = type(original[0])()
     if rows[3 * i] >= 0:
@@ -198,15 +208,13 @@ class ClothBlock:
         ):
             wp.launch(_gather, self.ids.size, [source, self.ids, target], device=self.device)
 
-    def evaluate(self, step, gravity, dt, complete, *, build_tangent):
+    def evaluate(self, step, gravity, dt, complete, *, build_tangent, dt_buffer=None):
         """Combine exact internal forces, external work and positional inertia.
 
         ``step`` is the state's particle displacement from the step start.
         """
         wp.launch(_gather, self.ids.size, [step, self.ids, self.step], device=self.device)
         self.objective.evaluate(self.original_x, build_tangent=build_tangent, step=self.step)
-        if self.objective.flags.numpy()[0]:
-            raise ValueError("Invalid cloth geometry or membrane projection")
         wp.launch(
             _residual,
             self.raw.size,
@@ -215,6 +223,7 @@ class ClothBlock:
                 self.original_v,
                 self.forces,
                 gravity,
+                int(self.reference["world"]),
                 self.mass,
                 self.fixed,
                 self.offsets,
@@ -222,7 +231,7 @@ class ClothBlock:
                 self.objective.residual,
                 self.objective.rounding,
                 self.rows,
-                self.dtype(dt),
+                self.dtype(dt) if dt_buffer is None else dt_buffer,
                 self.raw,
                 self.absolute,
                 complete,
@@ -230,12 +239,8 @@ class ClothBlock:
             ],
             device=self.device,
         )
-        parts = np.r_[self.objective.energy.numpy().ravel(), self.external_energy.numpy()]
-        if not np.isfinite(parts).all() or not np.isfinite(self.raw.numpy()).all():
-            raise ValueError("Nonfinite cloth energy or residual")
-        return parts.sum(), abs(parts).sum()
 
-    def assemble(self, assembly, dt):
+    def assemble(self, assembly, dt, *, dt_buffer=None):
         """Retain every free-coordinate shell block and inertia entry."""
         wp.launch(
             _tangent,
@@ -244,14 +249,28 @@ class ClothBlock:
                 self.tangent_entries,
                 self.mass,
                 self.objective.tangent,
-                self.dtype(dt),
+                self.dtype(dt) if dt_buffer is None else dt_buffer,
                 self.triplet_offset,
                 assembly.global_scalar_triplets.values,
             ],
             device=self.device,
         )
 
-    def candidate(self, accepted_step, original, trial, trial_step, delta, alpha, dt, *, predict=False):
+    def candidate(
+        self,
+        accepted_step,
+        original,
+        trial,
+        trial_step,
+        delta,
+        alpha,
+        dt,
+        *,
+        predict=False,
+        fallback=False,
+        dt_buffer=None,
+        alpha_buffer=None,
+    ):
         """Update free positions in the common trial and retain prescribed vertices.
 
         The trial step displacement is advanced exactly from the accepted one,
@@ -267,9 +286,11 @@ class ClothBlock:
                 original.particle_q,
                 original.particle_qd,
                 delta,
-                self.dtype(alpha),
-                self.dtype(dt),
+                self.dtype(alpha) if alpha_buffer is None else alpha_buffer,
+                self.dtype(dt) if dt_buffer is None else dt_buffer,
                 predict,
+                fallback,
+                self.path_status,
                 trial.particle_q,
                 trial.particle_qd,
                 trial_step,
@@ -277,9 +298,8 @@ class ClothBlock:
             device=self.device,
         )
 
-    def path_valid(self, original, accepted_step, trial_step):
+    def check_path(self, original, accepted_step, trial_step, flags):
         """Reject triangle collapse along the entire actual trial segment."""
-        self.path_status.zero_()
         wp.launch(
             _path,
             self.objective.stencils.shape[0],
@@ -290,8 +310,7 @@ class ClothBlock:
                 accepted_step,
                 trial_step,
                 self.objective.areas,
-                self.path_status,
+                flags,
             ],
             device=self.device,
         )
-        return not bool(self.path_status.numpy()[0])

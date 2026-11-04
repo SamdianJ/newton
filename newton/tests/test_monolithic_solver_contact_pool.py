@@ -316,7 +316,7 @@ def test_pooled_output_rebind(test, device):
     run._evaluate(run._accepted, 0.001)
     test.assertEqual(c.flags.numpy()[0], 0)
     if device.is_cuda:
-        test.assertGreaterEqual(run._graphs.captures["coupled_objective_result"], 5)
+        test.assertGreaterEqual(run._graphs.captures["problem_summary"], 5)
 
 
 def test_pooled_device_energy(test, device):

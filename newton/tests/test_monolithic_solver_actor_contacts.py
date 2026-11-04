@@ -413,7 +413,11 @@ def test_contact_transactions(test, device):
         assert_snapshot(test, state, source)
         assert_snapshot(test, output, target)
         np.testing.assert_array_equal(run.get_contact_forces(state).body_wrench, previous_forces)
-        with patch.object(run, "_physical_linear_error", return_value=np.full(run._layout.scalar_dof_count, np.nan)):
+        with patch.object(
+            run,
+            "_physical_linear_error",
+            return_value=wp.full(run._layout.scalar_dof_count, np.nan, dtype=run._dtype, device=device),
+        ):
             run.step(state, output, control, dt=0.001)
         test.assertTrue(run.last_stats.rolled_back)
         assert_snapshot(test, state, source)
