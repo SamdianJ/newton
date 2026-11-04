@@ -1,6 +1,6 @@
 # P9a 实施计划
 
-2026-11-04。状态：IN_PROGRESS（PR-01/02/03/04/05/06 COMPLETE；[PR-07](PR-07.md) 验收中，已发现并修复多维非连续能量摘要问题，第一轮 suite REGRESSION、stage KNOWN_ONLY；已修复四类 suite 问题与 cable owner 重绑 P1，CPU10/CUDA9 通过，8775416f quick CLEAN60；本机完整复验已完成：51ceabe7 suite CLEAN、两精度 stage KNOWN_ONLY（47/47 作业，无新增失败）；既有物理失败未关闭；L3 合成限制及性能留项 OPEN）。需求与范围以 [PRD](PRD.md) 为准。实现顺序固定为 **PR-01 H1 → PR-02 H2/R1 → PR-03 M1 → PR-04 M2/M3/M4 批处理收尾 → PR-05 M5 → PR-06 L1/L2/L3 → PR-07 阶段验收**。
+2026-11-04。状态：**ACCEPTED_WITH_OPEN_ITEM**。PR-01～PR-06 的实现与验证、PR-07 的完整 suite/E2E、审查修复与性能确认均已完成；用户决定将 `P9a-PERF-01` 列为已知并暂不修复。既有物理失败、L3 限制与 OBS 跟踪按 [PR-07 最终处置](PR-07.md#最终人工处置) 保留。需求与范围以 [PRD](PRD.md) 为准；本轮没有开始后续优化、推送或合并。
 
 PR-01 可以按内部里程碑分多个可审查提交，但它仍是一个完整交付 PR。中间保留旧路径仅用于迁移对照；最终必须删掉。不能以“材料后续再接”关闭 H1。
 
@@ -14,7 +14,7 @@ PR-01 可以按内部里程碑分多个可审查提交，但它仍是一个完�
 | PR-04 | cable gauge、material reaction、control 校验的类型批处理收尾 | PR-01 已完成设备迁移 | COMPLETE；[验收](PR-04.md)：材料设备提交固定，48 组阶段对照、三组成对测量、CPU/CUDA/E2E/quick 通过；首捕获 reset 防护及性能留项单列 |
 | PR-05 | Stats 完整向量只作最终快照，序列化按需 | PR-01 的发布边界 | COMPLETE；[验收](PR-05.md)：独立只读快照、失败诊断/JSON 兼容、CPU 21/CUDA 14 与 quick 60 项通过；无导出/完整导出三组成对成本已记录 |
 | PR-06 | binding 元数据复用、dt 数值化、有界 graph 档位策略 | PR-01/02；M 项测量 | COMPLETE；[验收](PR-06.md)：L1/L2、CPU 25/CUDA 23、quick 60；三组成对整步/机器人复核完成，L3 保留现策略及合成限制，整体性能 OPEN |
-| PR-07 | 所有 requirement 关闭审查、全组件与完整 E2E、性能报告 | 前述 PR | IN_PROGRESS；[验收记录](PR-07.md)，P9a-F1 已修复；84076a4f 完整结果已取回；suite 四类机制与独立 cable 重绑 P1 已通过 CPU10/CUDA9 和 quick CLEAN60；本机 51ceabe7 suite CLEAN、两精度 stage KNOWN_ONLY（47/47，无新增失败）；既有资格及性能留项未关闭 |
+| PR-07 | 所有 requirement 关闭审查、全组件与完整 E2E、性能报告 | 前述 PR | **ACCEPTED_WITH_OPEN_ITEM**；[最终处置](PR-07.md#最终人工处置)：完整 suite CLEAN、两精度 stage KNOWN_ONLY（47/47）；新增缺陷已修复并复验；性能按用户决定列为已知暂缓，既有物理/L3/OBS 留项保留 |
 
 M2/M3/M4、L4/L5 中阻止统一设备契约的部分已经属于 PR-01，后续不重新实现另一套逻辑。PR-04 开始前审查 PR-01 的完成记录：若已达相应结构与成本目标，直接以证据关闭该项，只处理剩余批处理缺口，禁止为凑 PR 新造抽象。
 
@@ -106,10 +106,10 @@ L4/L5 已由 PR-01 的 domain/gauge 设备合同关闭，在本 PR 汇总其结�
    两精度 frozen quick 不改清单/阈值/快照。新失败说明能否提炼为组件机制或短窗口；增加冻结窗口另按项目流程处理。
 4. `uvx pre-commit run -a`、独立正确性/架构审查、更新本 PR 文档并本地提交。没有推送请求不推送；不为本次规划修改 CI 调度。
 
-PR-07 完整验收已按用户指示改为本机执行：受验 51ceabe7（运行源码等同 8775416f）suite CLEAN，完整两精度 stage KNOWN_ONLY，47/47 作业完成，无新增 gate 失败、无重试。22 条既有失败记录与 1 条 UNEXPECTED_PASS 的处置见 [PR-07](PR-07.md#本机最终结果)。性能成对测量与物理验收分别报告，已知失败不能自行登记为豁免；整体性能资格与 P9a-PERF-01 保持 OPEN，阶段仍 IN_PROGRESS。
+PR-07 完整验收已按用户指示改为本机执行：受验 51ceabe7（运行源码等同 8775416f）suite CLEAN，完整两精度 stage KNOWN_ONLY，47/47 作业完成，无新增 gate 失败、无重试。22 条既有失败记录与 1 条 UNEXPECTED_PASS 的处置见 [PR-07](PR-07.md#本机最终结果)。性能成对测量与物理验收分别报告，已知失败不能自行登记为豁免；P9a-PERF-01 已按用户决定列为 KNOWN / DEFERRED，阶段按 [最终处置](PR-07.md#最终人工处置) 记为 ACCEPTED_WITH_OPEN_ITEM；物理与性能开放项仍保留。
 
 PR-07 同时回看 `P9a-OBS-01`：PR-02 最初 CUDA 批次有一次 rigid FP32 graph-on checkpoint 的微小逐位差异；最小场景与后续严格复跑未复现，失败注入测试清理已补齐，但因果关系未证实。原 FAIL 和诊断证据保留在 [PR-02 第 5 节](PR-02.md#5-一次未复现的-checkpoint-观察)，不改门槛或登记为豁免。
 
 PR-07 同时回看 `P9a-OBS-02` 的依赖版本处置：首次捕获 reset 问题在 Warp-only 程序复现；Newton 的 capture-miss 同步防护和组件回归已通过。依赖内部根因未归属，升级后须重验再考虑移除防护；不自动合并 OBS01 的原因。
 
-2026-11-04 性能留项确认完成，详见 [PR-07 性能确认](PR-07-performance.md)：当前 q+x/trees 未稳定复现旧退化；Sharpa close 三组成对均更慢，stopped 步骤成本 +14%～20%，重复绑定与 graph key 为优化候选。建议仅对该机制做受控修复实验，整体 PERF01 保持 OPEN；本轮未修改求解器。
+2026-11-04 性能留项确认完成，详见 [PR-07 性能确认](PR-07-performance.md)：当前 q+x/trees 未稳定复现旧退化；Sharpa close 三组成对均更慢，stopped 步骤成本 +14%～20%，重复绑定与 graph key 为优化候选。用户随后决定将该机制列为已知、暂不修复；PERF01 为 KNOWN / DEFERRED，PR-07 按带开放项完成验收。本轮未修改求解器。

@@ -1,6 +1,6 @@
 # PR-07：性能留项确认
 
-2026-11-04。状态：**诊断完成，未修改求解器**。用户要求先确认问题，再决定是否修复。结论：Sharpa close 的 stopped 步骤存在稳定的执行成本退化，值得针对重复绑定元数据做受控优化实验；q+x/trees 的历史退化在当前版本未稳定复现，不据此修改实现。整体性能资格仍 OPEN。
+2026-11-04。状态：**KNOWN / DEFERRED（用户决定暂不修复）**。性能确认后，用户决定“先不用修复了，列为已知问题继续”。Sharpa close 的 stopped 步骤执行成本退化登记为 `P9a-PERF-01`，保留测量和后续优化方向；q+x/trees 的历史退化在当前版本未稳定复现，继续监测。未修改求解器，不将该已知问题记为 FIXED 或性能 PASS。
 
 ## 身份与测量范围
 
@@ -68,11 +68,11 @@ close 的 19 步每窗多耗时约 0.72–1.02 秒，普通收敛步骤节省部
 
 源码与热点吻合：`problem.py::_buffers` 每次构建全量状态/历史/owner 列表并验证布局；`segment_graph.py::run` 每次为所有 buffers 重建 pointer/shape/strides/dtype/device key。candidate、difference、domain、evaluate 在大量 trial 中反复执行这些工作。此为明确的优化候选，尚未通过受控消融证明它解释全部退化或预先保证收益。
 
-## 处置建议
+## 处置与后续方向
 
-- **建议进入小范围修复实验**：Sharpa close 的高 trial/retry 成本。先减少重复绑定描述和 graph signature 构建，保留合法重绑失效、无效绑定拒绝、状态角色切换和完整物理检查；以相同三组窗口复测决定是否保留实现。
+- **用户决定暂缓修复**：Sharpa close 的高 trial/retry 成本列为已知问题继续推进，不再启动本轮优化实验。后续若重启，可先减少重复绑定描述和 graph signature 构建，保留合法重绑失效、无效绑定拒绝、状态角色切换和完整物理检查，再以相同三组窗口验证。
 - **本轮不修**：q+x FP64、trees FP64、trees FP32 JSON，当前没有稳定复现证据；保留历史观察与监测。
 - **L3 保留限制**：七档合成抖动仍是既有证据；本轮真实窗口零重捕获，没有理由把扩大缓存或改变 span 策略作为此处性能修复。
-- 本轮未修改 solver、测试门槛、资产、基线或 CI；整体 PERF01 与 PR-07/P9a 状态仍 OPEN / IN_PROGRESS，不把局部诊断完成记为整体性能 PASS。
+- 本轮未修改 solver、测试门槛、资产、基线或 CI。PERF01 保留为 KNOWN / DEFERRED；PR-07/P9a 按带开放项验收收尾，具体依据见 [PR-07 最终处置](PR-07.md#最终人工处置)。整体性能仍不记为 PASS。
 
 `validation-summary.json`、`comparison.json`、`publication-costs.json` 和 `profile-focus.json` 分别保存验收核对、成对结果、分组成本和热点。`files.sha256` 覆盖 56 个证据文件，其 SHA256 为 `fa57fd6c9b090fb1051e631d7c24d07b54c351c0016a8bc490902c712b2ee1c5`。原始日志与首次采用“合计三组全慢”条件而未执行的 profile 记录均保留；随后按稳定复现的 close 窗口单独执行两份 profile，没有混入正式计时。

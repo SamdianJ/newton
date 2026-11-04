@@ -1,6 +1,6 @@
 # P9a PRD：统一非线性问题接口与主机开销治理
 
-2026-11-04。状态：**IN_PROGRESS / PR-01、PR-02、PR-03、PR-04、PR-05、PR-06 COMPLETE**。统一接口、PCG 复用、摘要融合、材料设备批处理、最终 Stats 快照与 L1/L2 合同已通过验收（L3 仅完成测量处置，合成限制保留）；`P9a-PERF-01` 与未复现观察 `P9a-OBS-01` 仍 OPEN。OBS02 已加入捕获边界防护并通过回归，依赖内部归因待查。证据见 [PR-01](PR-01.md)、[PR-02](PR-02.md)、[PR-03](PR-03.md)、[PR-04](PR-04.md)、[PR-05](PR-05.md) 与 [PR-06](PR-06.md)。阶段尚未完成；[PR-07](PR-07.md) 已进入验收，独立审查发现的 P9a-F1（非连续多维能量提前复制）已修复，84076a4f 的 CPU/CUDA 定向与 quick 60 项通过，第一轮远程 suite 为 REGRESSION（7 个新失败 / 4 类机制），完整 stage 为 KNOWN_ONLY；suite 问题及独立发现的 cable owner 重绑 P1 已修复并通过 CPU10/CUDA9 定向验证，8775416f quick CLEAN60；本机完整复验已完成：51ceabe7 suite CLEAN、两精度 stage KNOWN_ONLY（47/47 作业，无新增失败）；既有物理失败未关闭。
+2026-11-04。状态：**ACCEPTED_WITH_OPEN_ITEM / PR-01～PR-07 已完成阶段验收与处置**。统一接口、PCG 复用、摘要融合、材料设备批处理、最终 Stats 快照与 L1/L2 已实现并验证；修复后完整 suite CLEAN、两精度 stage KNOWN_ONLY（47/47 作业完成、无新增失败）。既有物理失败沿用已批准登记，用户本次将 `P9a-PERF-01` 列为已知问题并决定暂不修复；L3 合成限制、OBS01 未复现观察及 OBS02 依赖归因继续保留。性能和已知失败均不记为 FIXED/PASS。完整证据及逐项依据见 [PR-07 最终处置](PR-07.md#最终人工处置)；未推送或合并。
 
 ## 1. 身份与范围
 
@@ -39,7 +39,7 @@
 | R1 | replay launch 抛异常后 `_in_flight` 保持 true，下一次使用被阻塞 | `pcg_production.py:745` | PR-02；失败注入、重入拒绝、清理与后续合法使用测试 |
 | C1 | 多个 graph 共享 scratch，仅串行使用安全 | `iteration_device.py`；`pcg_production.py:188` | 全阶段保持单 stream、非重入合同；这是约束，不宣称当前已有并发错误 |
 
-PR-06 后的状态：
+问题处置（PR-07 收尾更新）：
 
 | 条目 | 当前处置 |
 | --- | --- |
@@ -51,7 +51,7 @@ PR-06 后的状态：
 | L1、L2 | FIXED；构造或首次绑定时注册、生产绑定检查、稳定 dt/alpha 数值缓冲；CPU 25/CUDA 23、64 步 E2E、quick 60 项及三组成对整步/机器人测量见 [PR-06](PR-06.md)。属性扫描消除不等于所有元数据耗时下降 |
 | L3 | MEASURED / RETAINED；真实所选窗口无 span 重捕获，保留 power2 + LRU 6。合成七档循环仍会抖动，替代策略有空算/复合键代价；不标记通用修复，见 [PR-06](PR-06.md) |
 | C1 | 持续约束；保留单 stream、非重入合同 |
-| P9a-PERF-01 | OPEN；PR-06 已消除 Sharpa alpha 图抖动，但总耗时未全面改善：相对 PR-05，q+x FP64 无导出 +5.13%、trees FP64 无导出 +1.49%（均三对同向），trees FP32 JSON +4.81%；原始基线 q+x/rigid 与 Franka/Sharpa FP32 的最新三对结果及历史观察均见 [PR-06](PR-06.md)。不以捕获数归零宣称性能 PASS。2026-11-04 [PR-07 复测](PR-07-performance.md) 未稳定复现 q+x/trees 退化，确认 Sharpa close 高 trial/retry 成本；建议局部优化实验，本轮未改实现 |
+| P9a-PERF-01 | **KNOWN / DEFERRED**；用户 2026-11-04 决定暂不修复、列为已知继续。Sharpa close 三组分别 +6.45% / +2.35% / +7.08%，19 个 stopped 步骤成本 +14%～20%；重复绑定与 graph key 为候选原因。q+x/trees 旧退化未稳定复现，保留监测；见 [PR-07 性能确认](PR-07-performance.md)，历史证据保留于 [PR-06](PR-06.md) |
 | P9a-OBS-01 | OPEN / 未复现观察；最初 PR-02 CUDA 批次一次 rigid FP32 checkpoint 逐位差异，随后小例与完整严格复跑通过。测试清理已修复，因果未证实，PR-07 回看；原 FAIL 不覆盖、不改门槛，见 [诊断](PR-02.md#5-一次未复现的-checkpoint-观察) |
 | P9a-OBS-02 | MITIGATED；首次 CUDA graph 执行的 magnitude/reset 错误已在独立 Warp 程序复现；capture miss 同步防护、组件 red/green、200 次材料重放及最终 CPU/CUDA/quick 通过。依赖内部根因待查，PR-07 回看；见 [PR-04](PR-04.md) |
 
@@ -167,4 +167,6 @@ uv run --no-sync python -B -m scripts.monolithic_reference.run_cloth_benchmark p
 
 已有 P9-P1（池容量与全配对元数据）、P9-P2（完整接触执行规模/图缓存）、浮动基座、多 world 外层设备循环、world 压缩、P5-I2/P6b-P1 性能资格继续保留。P9a 的 L3 只覆盖实际命中的局部 graph 成本，不自动关闭整个 P9-P2。它们见 workspace `dev/monolithic/P9/performance-plan.md` 与 `dev/monolithic/open_items.md`。
 
-P9a 收尾要求问题表逐项给出 FIXED/验证证据或明确未完成项；未完成 PRD 必需项不得标记阶段完成。PR-01 的最终 runtime、quick、结构审计和成对性能结果，PR-02 的组件/E2E、quick、成本对照与观察项，以及 PR-03 的 packet 机制、PR-04 的材料批处理与首捕获防护、PR-05 的快照/导出成本、各自的三组成对测量及两精度 quick，以及 PR-06 的绑定/参数、L3 对照与原始基线复核已记录；第一轮阶段 suite/stage 为 **REGRESSION / KNOWN_ONLY**；修复后 51ceabe7 本机完整复验为 **CLEAN / KNOWN_ONLY**，47/47 E2E 作业完成、无新增失败，既有物理失败未关闭，整体性能资格为 **OPEN**（含 `P9a-PERF-01`），`P9a-OBS-01` 留待阶段回看。
+P9a 收尾要求问题表逐项给出 FIXED/验证证据或明确未完成项；未完成 PRD 必需项不得标记阶段完成。PR-01 的最终 runtime、quick、结构审计和成对性能结果，PR-02 的组件/E2E、quick、成本对照与观察项，以及 PR-03 的 packet 机制、PR-04 的材料批处理与首捕获防护、PR-05 的快照/导出成本、各自的三组成对测量及两精度 quick，以及 PR-06 的绑定/参数、L3 对照与原始基线复核已记录；第一轮阶段 suite/stage 为 **REGRESSION / KNOWN_ONLY**；修复后 51ceabe7 本机完整复验为 **CLEAN / KNOWN_ONLY**，47/47 E2E 作业完成、无新增失败，既有物理失败未关闭，整体性能资格为 **OPEN**（含 `P9a-PERF-01`），`P9a-OBS-01` 本轮未复现，继续保留观察。
+
+2026-11-04 最终处置：性能按本次用户决定暂缓，既有物理失败沿用已批准的 CI 登记，L3/OBS 按既有测量与观察处置保留；因此阶段人工结论为 **ACCEPTED_WITH_OPEN_ITEM**，机器 stage 仍为 KNOWN_ONLY。上述历史未完成状态由 [PR-07 最终处置](PR-07.md#最终人工处置) 更新；没有将问题改写为已修复。

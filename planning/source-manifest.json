@@ -2,7 +2,7 @@
   "date": "2026-11-04",
   "timezone": "Asia/Tokyo",
   "stage": "P9a",
-  "status": "PR01_PR02_PR03_PR04_PR05_PR06_COMPLETE_PR07_ACCEPTANCE_IN_PROGRESS",
+  "status": "PR01_PR02_PR03_PR04_PR05_PR06_COMPLETE_PR07_ACCEPTED_WITH_OPEN_ITEM",
   "branch": "SamiulJ/monolithic-p9a",
   "worktree": "worktrees/Monolithic-p9a",
   "base_commit": "8fa80ba7ce3fd7ce2483f2ec098e66d410bc434e",
@@ -25,11 +25,11 @@
     "venv": "shared symlink to ../Monolithic-refactor/.venv; use uv run --no-sync; do not uv sync this shared environment",
     "assets": "read-only reuse of ../Monolithic-refactor/asset/monolithic/data through relative symlink",
     "solver_runtime_tests": "PR01\u2013PR06 remain bound to their original commits. PR07 repair 8775416f CPU10/CUDA9 and quick CLEAN60. Runtime-equivalent clean 51ceabe7 complete local suite CLEAN, full FP64/FP32 stage KNOWN_ONLY (47/47); no new gate failures or retries. Prior cancelled CUDA batch retained; CPU/CUDA composed continuation now PASS in complete suite. No stage PASS.",
-    "performance": "PR06: 3 AB/BA/AB pairs for20 incremental small cases,8 original-baseline cases,and4 FP32 robot windows. Exact input/work identities checked. Alpha recaptures removed; dynamic-span production strategy retained. qx FP64 noJSON+5.13%,trees FP64 noJSON+1.49% vsPR05; overall PERF01 OPEN. PR07 confirmation at d8da652b: qx/trees prior regressions not consistent; Sharpa close3/3 slower, matched stopped steps14\u201320% slower; total Sharpa direction mixed. Profile points to repeated binding/signature work. Diagnosis only; PERF01 remains OPEN.",
+    "performance": "PR06: 3 AB/BA/AB pairs for20 incremental small cases,8 original-baseline cases,and4 FP32 robot windows. Exact input/work identities checked. Alpha recaptures removed; dynamic-span production strategy retained. qx FP64 noJSON+5.13%,trees FP64 noJSON+1.49% vsPR05; overall PERF01 OPEN. PR07 confirmation at d8da652b: qx/trees prior regressions not consistent; Sharpa close3/3 slower, matched stopped steps14\u201320% slower; total Sharpa direction mixed. Profile points to repeated binding/signature work. Diagnosis only; PERF01 remains OPEN. User2026-11-04 deferred P9a-PERF-01 as a known issue; stage accepted with open items, no performance PASS.",
     "superdex_runtime": "NOT_RUN"
   },
   "planning_snapshot_workspace_index_sha256": "a61a092cc6dbc9e34ac17cd2a9c06b7e1ba354e9dd70f53f53053c97412daad9",
-  "workspace_index_sha256": "4e969779cdb5e305a4b1350d2e3e427c3bbc62ec3edd9b2b3ba89eb56cb86b52",
+  "workspace_index_sha256": "bb7f68f8e174fe1c0336e39bf21846daafac6b4a3fa0356f0edd6b3dc7991bca",
   "implementation": {
     "tested_commit": "2220971595d36ea7bd5ffa52d219a340f7d83ef9",
     "solver_tree_sha256": "dda3dde1962db7ed10cdae6bbaf7a4d93af843dacb9ae6d28c08369574bf18d2",
@@ -305,7 +305,7 @@
     }
   },
   "pr07_acceptance": {
-    "status": "LOCAL_RUN_COMPLETE_SUITE_CLEAN_STAGE_KNOWN_ONLY",
+    "status": "ACCEPTED_WITH_OPEN_ITEM",
     "results": "dev/monolithic/test/results/P9/P9a/PR-07/20261103-01",
     "initial_candidate": "8a83c3abcd2197c8aae6dc347ac44406d6816179",
     "superseded_runs": {
@@ -406,7 +406,7 @@
       },
       "files_sha256": "40ac467788c835487f83f0006004371e18c83c823fd2385b3cc46c99f2703cd6"
     },
-    "record_commit_scope": "Documentation only; each result remains bound to its recorded tested commit. Local execution complete; stage qualification still open.",
+    "record_commit_scope": "Documentation only; each result remains bound to its recorded tested commit. Local execution complete; human disposition ACCEPTED_WITH_OPEN_ITEM, physical/performance issues retained.",
     "followup_repairs": {
       "results": "dev/monolithic/test/results/P9/P9a/PR-07/20261104-fixes-01",
       "status": "FIXED_FULL_SUITE_VERIFIED_STAGE_KNOWN_ONLY",
@@ -522,7 +522,7 @@
       }
     },
     "performance_confirmation": {
-      "status": "COMPLETE_DIAGNOSIS_ONLY",
+      "status": "KNOWN_DEFERRED_BY_USER",
       "tested_commit": "d8da652b55ae9a67b75d8e84a1949dbb9e499595",
       "results": "dev/monolithic/test/results/P9/P9a/PR-07/performance-confirm-20261104-01",
       "report": "planning/PR-07-performance.md",
@@ -547,9 +547,51 @@
         -0.6204303688442381,
         2.270004256638103
       ],
-      "recommendation": "Target repeated buffer binding/signature construction in high-trial steps with a controlled optimization experiment; no implementation yet.",
       "L3": "Synthetic7-span limitation retained; measured production windows have zero captures.",
-      "files_sha256": "fa57fd6c9b090fb1051e631d7c24d07b54c351c0016a8bc490902c712b2ee1c5"
+      "files_sha256": "fa57fd6c9b090fb1051e631d7c24d07b54c351c0016a8bc490902c712b2ee1c5",
+      "prior_recommendation": "Target repeated buffer binding/signature construction in high-trial steps with a controlled optimization experiment; no implementation yet.",
+      "disposition": {
+        "date": "2026-11-04",
+        "status": "KNOWN_DEFERRED",
+        "user_quote": "\u660e\u767d\u4e86\uff0c\u90a3\u6211\u89c9\u5f97\u6211\u4eec\u5148\u4e0d\u7528\u4fee\u590d\u4e86\uff0c\u5217\u4e3a\u5df2\u77e5\u95ee\u9898\u7ee7\u7eed\u5427",
+        "scope": "P9a-PERF-01 performance; no optimization implementation; retain evidence and monitoring."
+      }
+    },
+    "human_disposition": {
+      "status": "ACCEPTED_WITH_OPEN_ITEM",
+      "date": "2026-11-04",
+      "result_run": "local-20261104-01",
+      "suite": "CLEAN",
+      "stage": "KNOWN_ONLY",
+      "runtime_tested_commit": "51ceabe788101dbc492d654af3522eeea35ec789",
+      "runtime_equivalent_to": "8775416f5f1a8a6cf6e1dc12957b5049692721e1",
+      "record_head_before_closure": "ba1bf302abceedec1954bd6356f6db82408a4d33",
+      "record_scope": "Documentation only; no runtime changes or new simulations.",
+      "known_failures": {
+        "P8b2-F2-sharpa-fp64-stopped": {
+          "count": 1,
+          "approval": "2026-10-31 user, existing CI expectations"
+        },
+        "Q1-fp32-cable-cantilever": {
+          "count": 18,
+          "approval": "2026-10-31 user, existing CI expectations"
+        },
+        "P8b-F3-fp32-tet-cantilever-8": {
+          "count": 3,
+          "approval": "2026-10-31 user, existing CI expectations"
+        }
+      },
+      "unexpected_pass": "P8s-F1-fp32-tet-vibration-bias; retain cross-GPU known item",
+      "performance_disposition": "2026-11-04 user: defer and continue with known performance issue",
+      "other_tracking": [
+        "L3 measured/retained synthetic limitation",
+        "OBS01 unreplicated checkpoint observation",
+        "OBS02 mitigation verified; dependency attribution retained"
+      ],
+      "ci_expectations_sha256": "ffd1784ed42f65bc96bfb952857ab70c338ed2fed90fbf47742f6fd52cc35acf",
+      "workspace_open_items_sha256": "e5711d23120897723729b6967ee4f2e63d533a2cc419cc59693acf16ed2e7f37",
+      "merged": false,
+      "public_push": false
     }
   }
 }
