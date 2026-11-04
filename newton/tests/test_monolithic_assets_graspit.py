@@ -13,10 +13,25 @@ import numpy as np
 import warp as wp
 
 import newton
+from newton._src.solvers.monolithic.articulation import _TreeKinematics
+from newton._src.solvers.monolithic.contact_sweep import _ArticulationSweep
 from scripts.monolithic_reference.graspit_hand import build_hand
 
 
 class TestGraspItAsset(unittest.TestCase):
+    def test_fp32_initial_sweep(self):
+        """Accept the hand's initial sweep without exhausting the native FK roundoff bound."""
+        asset = os.environ.get("NEWTON_GRASPIT_ASSET_DIR")
+        if not asset:
+            self.skipTest("Set NEWTON_GRASPIT_ASSET_DIR for the external hand asset")
+        builder, _ = build_hand(asset, device="cpu")
+        model = builder.finalize(device="cpu")
+        k = _TreeKinematics(model, dtype=wp.float32)
+        sweep = _ArticulationSweep(k, np.full(model.body_count, 0.2))
+        q = wp.array(model.joint_q.numpy(), dtype=wp.float32, device="cpu")
+        sweep.update(q, q)
+        self.assertEqual(int(sweep.status.numpy()[0]), 0)
+
     def test_source_fk_and_mass(self):
         """Preserve the source joint tree and derive physical inertia from closed proxies."""
         import trimesh
@@ -39,12 +54,25 @@ class TestGraspItAsset(unittest.TestCase):
         )
         rows = json.loads((asset / "manifest.json").read_text())["meshes"]
         for row in rows:
-            body = model.body_label.index("HumanHand20DOF/" + row["link"])
+            name = "base_link" if row["link"] == "palm" else row["link"] + "_joint"
+            body = model.body_label.index("HumanHand20DOF/" + name)
             mass = model.body_mass.numpy()[body]
             mesh = trimesh.load_mesh(asset / "derived/collision" / (row["link"] + ".obj"))
+            shapes = [
+                i
+                for i, b in enumerate(model.shape_body.numpy())
+                if b == body and not model.shape_flags.numpy()[i] & int(newton.ShapeFlags.VISIBLE)
+            ]
+            self.assertEqual(len(shapes), 1)
+            pose = model.shape_transform.numpy()[shapes[0]]
+            matrix = trimesh.transformations.quaternion_matrix(pose[[6, 3, 4, 5]])
+            matrix[:3, 3] = pose[:3]
+            mesh.apply_transform(matrix)
+            mesh.density = manifest["density_kg_m3"]
             self.assertTrue(mesh.is_volume)
             self.assertAlmostEqual(mass, mesh.volume * manifest["density_kg_m3"], delta=1e-7)
             np.testing.assert_allclose(model.body_com.numpy()[body], mesh.center_mass, atol=1e-7)
+            np.testing.assert_allclose(model.body_inertia.numpy()[body], mesh.moment_inertia, atol=1e-10, rtol=1e-5)
             self.assertGreater(np.linalg.eigvalsh(model.body_inertia.numpy()[body]).min(), 0)
 
         def rotation(axis, angle):

@@ -60,7 +60,7 @@ def run(asset, output, *, device, precision, scenario):
         state = reference.state()
         state.joint_q.assign(closed_pose(reference, scenario))
         newton.eval_fk(reference, state.joint_q, state.joint_qd, state)
-        body = reference.body_label.index("HumanHand20DOF/index3")
+        body = reference.body_label.index("HumanHand20DOF/index3_joint")
         center = transform(reference.body_com.numpy()[body], state.body_q.numpy()[body])
         probe = {"center_m": center.tolist(), "radius_m": 0.006}
         builder.add_shape_sphere(

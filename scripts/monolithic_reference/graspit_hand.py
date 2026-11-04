@@ -130,12 +130,38 @@ def build_hand(asset, *, device="cpu", contact=False):
     builder.add_urdf(
         str(asset / "derived/HumanHand20DOF.urdf"),
         floating=False,
-        # Collapsing the fixed palm would leave five world roots in one articulation.
         collapse_fixed_joints=False,
         enable_self_collisions=False,
         force_position_velocity_actuation=True,
         mesh_maxhullvert=512,
     )
+    # Retain the world anchor; removing it leaves five roots in one articulation.
+    # Other fixed frames only deepen the FP32 swept-FK roundoff bound.
+    roots = [i for i, parent in enumerate(builder.joint_parent) if parent == -1]
+    if len(roots) != 1:
+        raise ValueError("Expected one fixed palm root")
+    physical = []
+    for shape, flags in enumerate(builder.shape_flags):
+        if flags & int(newton.ShapeFlags.COLLIDE_SHAPES):
+            body = builder.shape_body[shape]
+            if not np.allclose(builder.shape_transform[shape], wp.transform_identity()):
+                raise ValueError("Expected identity source collision frames")
+            physical.append((shape, builder.body_mass[body], builder.body_com[body], builder.body_inertia[body]))
+    builder.collapse_fixed_joints(joints_to_keep=roots)
+    # Each surviving physical body owns exactly one source solid. Restore its
+    # COM inertia by rotation only: generic fixed collapse adds origin offsets.
+    assigned = set()
+    for shape, mass, com, inertia in physical:
+        body = builder.shape_body[shape]
+        if body < 0 or body in assigned:
+            raise ValueError("Expected one source solid per retained physical body")
+        assigned.add(body)
+        pose = builder.shape_transform[shape]
+        rotation = wp.quat_to_matrix(wp.transform_get_rotation(pose))
+        rotated_inertia = rotation @ wp.mat33(inertia) @ wp.transpose(rotation)
+        builder.body_mass[body], builder.body_inv_mass[body] = mass, 1.0 / mass
+        builder.body_com[body] = wp.transform_point(pose, com)
+        builder.body_inertia[body], builder.body_inv_inertia[body] = rotated_inertia, wp.inverse(rotated_inertia)
     if builder.joint_dof_count != 20:
         raise ValueError("Import changed the hand's 20 DOFs")
     for i in range(20):
