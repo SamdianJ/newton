@@ -111,3 +111,5 @@ PR-07 完整验收已按用户指示改为本机执行：受验 51ceabe7（运�
 PR-07 同时回看 `P9a-OBS-01`：PR-02 最初 CUDA 批次有一次 rigid FP32 graph-on checkpoint 的微小逐位差异；最小场景与后续严格复跑未复现，失败注入测试清理已补齐，但因果关系未证实。原 FAIL 和诊断证据保留在 [PR-02 第 5 节](PR-02.md#5-一次未复现的-checkpoint-观察)，不改门槛或登记为豁免。
 
 PR-07 同时回看 `P9a-OBS-02` 的依赖版本处置：首次捕获 reset 问题在 Warp-only 程序复现；Newton 的 capture-miss 同步防护和组件回归已通过。依赖内部根因未归属，升级后须重验再考虑移除防护；不自动合并 OBS01 的原因。
+
+2026-11-04 性能留项确认完成，详见 [PR-07 性能确认](PR-07-performance.md)：当前 q+x/trees 未稳定复现旧退化；Sharpa close 三组成对均更慢，stopped 步骤成本 +14%～20%，重复绑定与 graph key 为优化候选。建议仅对该机制做受控修复实验，整体 PERF01 保持 OPEN；本轮未修改求解器。

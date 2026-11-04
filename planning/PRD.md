@@ -51,7 +51,7 @@ PR-06 后的状态：
 | L1、L2 | FIXED；构造或首次绑定时注册、生产绑定检查、稳定 dt/alpha 数值缓冲；CPU 25/CUDA 23、64 步 E2E、quick 60 项及三组成对整步/机器人测量见 [PR-06](PR-06.md)。属性扫描消除不等于所有元数据耗时下降 |
 | L3 | MEASURED / RETAINED；真实所选窗口无 span 重捕获，保留 power2 + LRU 6。合成七档循环仍会抖动，替代策略有空算/复合键代价；不标记通用修复，见 [PR-06](PR-06.md) |
 | C1 | 持续约束；保留单 stream、非重入合同 |
-| P9a-PERF-01 | OPEN；PR-06 已消除 Sharpa alpha 图抖动，但总耗时未全面改善：相对 PR-05，q+x FP64 无导出 +5.13%、trees FP64 无导出 +1.49%（均三对同向），trees FP32 JSON +4.81%；原始基线 q+x/rigid 与 Franka/Sharpa FP32 的最新三对结果及历史观察均见 [PR-06](PR-06.md)。不以捕获数归零宣称性能 PASS |
+| P9a-PERF-01 | OPEN；PR-06 已消除 Sharpa alpha 图抖动，但总耗时未全面改善：相对 PR-05，q+x FP64 无导出 +5.13%、trees FP64 无导出 +1.49%（均三对同向），trees FP32 JSON +4.81%；原始基线 q+x/rigid 与 Franka/Sharpa FP32 的最新三对结果及历史观察均见 [PR-06](PR-06.md)。不以捕获数归零宣称性能 PASS。2026-11-04 [PR-07 复测](PR-07-performance.md) 未稳定复现 q+x/trees 退化，确认 Sharpa close 高 trial/retry 成本；建议局部优化实验，本轮未改实现 |
 | P9a-OBS-01 | OPEN / 未复现观察；最初 PR-02 CUDA 批次一次 rigid FP32 checkpoint 逐位差异，随后小例与完整严格复跑通过。测试清理已修复，因果未证实，PR-07 回看；原 FAIL 不覆盖、不改门槛，见 [诊断](PR-02.md#5-一次未复现的-checkpoint-观察) |
 | P9a-OBS-02 | MITIGATED；首次 CUDA graph 执行的 magnitude/reset 错误已在独立 Warp 程序复现；capture miss 同步防护、组件 red/green、200 次材料重放及最终 CPU/CUDA/quick 通过。依赖内部根因待查，PR-07 回看；见 [PR-04](PR-04.md) |
 

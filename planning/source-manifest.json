@@ -25,7 +25,7 @@
     "venv": "shared symlink to ../Monolithic-refactor/.venv; use uv run --no-sync; do not uv sync this shared environment",
     "assets": "read-only reuse of ../Monolithic-refactor/asset/monolithic/data through relative symlink",
     "solver_runtime_tests": "PR01\u2013PR06 remain bound to their original commits. PR07 repair 8775416f CPU10/CUDA9 and quick CLEAN60. Runtime-equivalent clean 51ceabe7 complete local suite CLEAN, full FP64/FP32 stage KNOWN_ONLY (47/47); no new gate failures or retries. Prior cancelled CUDA batch retained; CPU/CUDA composed continuation now PASS in complete suite. No stage PASS.",
-    "performance": "PR06: 3 AB/BA/AB pairs for20 incremental small cases,8 original-baseline cases,and4 FP32 robot windows. Exact input/work identities checked. Alpha recaptures removed; dynamic-span production strategy retained. qx FP64 noJSON+5.13%,trees FP64 noJSON+1.49% vsPR05; overall PERF01 OPEN.",
+    "performance": "PR06: 3 AB/BA/AB pairs for20 incremental small cases,8 original-baseline cases,and4 FP32 robot windows. Exact input/work identities checked. Alpha recaptures removed; dynamic-span production strategy retained. qx FP64 noJSON+5.13%,trees FP64 noJSON+1.49% vsPR05; overall PERF01 OPEN. PR07 confirmation at d8da652b: qx/trees prior regressions not consistent; Sharpa close3/3 slower, matched stopped steps14\u201320% slower; total Sharpa direction mixed. Profile points to repeated binding/signature work. Diagnosis only; PERF01 remains OPEN.",
     "superdex_runtime": "NOT_RUN"
   },
   "planning_snapshot_workspace_index_sha256": "a61a092cc6dbc9e34ac17cd2a9c06b7e1ba354e9dd70f53f53053c97412daad9",
@@ -520,6 +520,36 @@
         },
         "unexpected_pass": "P8s-F1-fp32-tet-vibration-bias; not established as a portable fix"
       }
+    },
+    "performance_confirmation": {
+      "status": "COMPLETE_DIAGNOSIS_ONLY",
+      "tested_commit": "d8da652b55ae9a67b75d8e84a1949dbb9e499595",
+      "results": "dev/monolithic/test/results/P9/P9a/PR-07/performance-confirm-20261104-01",
+      "report": "planning/PR-07-performance.md",
+      "solver_changed": false,
+      "paired_measurements": {
+        "small": 3,
+        "robot_fp32": 3,
+        "same_version_small_runs": 2
+      },
+      "profiles": 2,
+      "identity_work_checks": "PASS",
+      "robot_gates": "PASS",
+      "scope": "Original20 small combinations and4 frozen robot windows; no full trajectories or suite.",
+      "small_case_disposition": "No consistent regression at current HEAD; retain historical observations, no fix recommended from this evidence.",
+      "sharpa_close_pair_change_pct": [
+        6.445245635637087,
+        2.348087434025059,
+        7.078118384061471
+      ],
+      "sharpa_total_pair_change_pct": [
+        3.8357632267565167,
+        -0.6204303688442381,
+        2.270004256638103
+      ],
+      "recommendation": "Target repeated buffer binding/signature construction in high-trial steps with a controlled optimization experiment; no implementation yet.",
+      "L3": "Synthetic7-span limitation retained; measured production windows have zero captures.",
+      "files_sha256": "fa57fd6c9b090fb1051e631d7c24d07b54c351c0016a8bc490902c712b2ee1c5"
     }
   }
 }
