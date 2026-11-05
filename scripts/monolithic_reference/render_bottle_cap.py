@@ -30,16 +30,23 @@ def render(result, *, video=True):
     body = data["bottle_vertices"][data["bottle_faces"]][:, :, [0, 2, 1]]
     colors = np.tile([0.38, 0.73, 0.77, 0.85], (len(body), 1))
     colors[np.abs(body[:, :, 2].mean(1)) < 0.025] = [0.76, 0.08, 0.12, 1]
-    caps, marks = [], []
+    cap_centers = data["cap_vertices"][data["cap_faces"]].mean(1)
+    cap_colors = np.tile([0.14, 0.45, 0.73, 1.0], (len(cap_centers), 1))
+    stripe = (
+        (cap_centers[:, 1] > data["cap_vertices"][:, 1].max() - 1e-6)
+        & (cap_centers[:, 0] > 0)
+        & (np.abs(cap_centers[:, 2]) < 0.002)
+    )
+    cap_colors[stripe] = [1, 1, 1, 1]
+    caps = []
     for view in (ax, zoom):
         view.set_facecolor("#f4f7fa")
         view.add_collection3d(
             Poly3DCollection(body, facecolors=colors, edgecolors=(0.1, 0.3, 0.3, 0.12), linewidths=0.2)
         )
-        cap = Poly3DCollection([], facecolors="#2372ba", edgecolors=(0.03, 0.12, 0.3, 0.2), linewidths=0.3)
+        cap = Poly3DCollection([], facecolors=cap_colors, edgecolors=(0.03, 0.12, 0.3, 0.2), linewidths=0.3)
         view.add_collection3d(cap)
         caps.append(cap)
-        marks.append(view.plot([], [], [], color="white", lw=3)[0])
         view.view_init(elev=22, azim=-65)
         view.set_axis_off()
     ax.set(xlim=(-0.05, 0.10), ylim=(-0.045, 0.045), zlim=(-0.09, 0.15))
@@ -57,7 +64,7 @@ def render(result, *, video=True):
         "Fixed neck fixture. Recorded FREE rigid body; no prescribed cap poses or hand control.",
         fontsize=11,
     )
-    info = fig.text(0.04, 0.78, "", fontsize=11, linespacing=1.6)
+    info = fig.text(0.04, 0.84, "", fontsize=11, va="top", linespacing=1.6)
     fig.text(0.58, 0.86, "Neck detail / cap removal", fontsize=11)
     fig.text(
         0.04,
@@ -77,18 +84,13 @@ def render(result, *, video=True):
     trace.set(xlabel="Time [s]", ylabel="Rise [mm]")
     trace.legend(fontsize=8)
     cursor = trace.axvline(0, color="#333333", lw=1)
-    local_mark = np.array(
-        [[0.002, data["cap_vertices"][:, 1].max() + 0.0001, 0], [0.012, data["cap_vertices"][:, 1].max() + 0.0001, 0]]
-    )
 
     def update(frame):
         pose = data["body_q"][frame]
         r = rotation(pose[3:])
         vertices = data["cap_vertices"] @ r.T + pose[:3]
-        mark = local_mark @ r.T + pose[:3]
-        for mesh, line in zip(caps, marks, strict=True):
+        for mesh in caps:
             mesh.set_verts(vertices[data["cap_faces"]][:, :, [0, 2, 1]])
-            line.set_data_3d(mark[:, 0], mark[:, 2], mark[:, 1])
         if frame:
             row = rows[frame - 1]
             cursor.set_xdata([row["time_s"], row["time_s"]])
