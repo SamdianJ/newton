@@ -19,18 +19,42 @@ from scripts.monolithic_reference.graspit_hand import build_hand
 
 
 class TestGraspItAsset(unittest.TestCase):
+    def test_lift_axis_preserves_hand(self):
+        """Translate the complete hand without changing its geometry or physical inertia."""
+        asset = os.environ.get("NEWTON_GRASPIT_ASSET_DIR")
+        if not asset:
+            self.skipTest("Set NEWTON_GRASPIT_ASSET_DIR for the external hand asset")
+        fixed = build_hand(asset)[0].finalize(device="cpu")
+        lift = build_hand(asset, lift=True)[0].finalize(device="cpu")
+        self.assertEqual(lift.joint_dof_count, 21)
+        self.assertEqual(lift.articulation_count, 1)
+        self.assertEqual(lift.joint_type.numpy()[0], newton.JointType.PRISMATIC)
+        np.testing.assert_array_equal(lift.body_mass.numpy(), fixed.body_mass.numpy())
+        np.testing.assert_array_equal(lift.body_inertia.numpy(), fixed.body_inertia.numpy())
+        q = np.linspace(0, 0.2, 20)
+        states = [fixed.state(), lift.state()]
+        states[0].joint_q.assign(q)
+        states[1].joint_q.assign(np.r_[0.08, q])
+        for model, state in zip((fixed, lift), states, strict=True):
+            newton.eval_fk(model, state.joint_q, state.joint_qd, state)
+        expected = states[0].body_q.numpy()
+        expected[:, 1] += 0.08
+        np.testing.assert_allclose(states[1].body_q.numpy(), expected, atol=2e-7)
+
     def test_fp32_initial_sweep(self):
         """Accept the hand's initial sweep without exhausting the native FK roundoff bound."""
         asset = os.environ.get("NEWTON_GRASPIT_ASSET_DIR")
         if not asset:
             self.skipTest("Set NEWTON_GRASPIT_ASSET_DIR for the external hand asset")
-        builder, _ = build_hand(asset, device="cpu")
-        model = builder.finalize(device="cpu")
-        k = _TreeKinematics(model, dtype=wp.float32)
-        sweep = _ArticulationSweep(k, np.full(model.body_count, 0.2))
-        q = wp.array(model.joint_q.numpy(), dtype=wp.float32, device="cpu")
-        sweep.update(q, q)
-        self.assertEqual(int(sweep.status.numpy()[0]), 0)
+        for lift in (False, True):
+            with self.subTest(lift=lift):
+                builder, _ = build_hand(asset, device="cpu", lift=lift)
+                model = builder.finalize(device="cpu")
+                k = _TreeKinematics(model, dtype=wp.float32)
+                sweep = _ArticulationSweep(k, np.full(model.body_count, 0.2))
+                q = wp.array(model.joint_q.numpy(), dtype=wp.float32, device="cpu")
+                sweep.update(q, q)
+                self.assertEqual(int(sweep.status.numpy()[0]), 0)
 
     def test_source_fk_and_mass(self):
         """Preserve the source joint tree and derive physical inertia from closed proxies."""

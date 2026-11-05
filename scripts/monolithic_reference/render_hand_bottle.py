@@ -25,6 +25,7 @@ def render(asset, result, *, video=True):
     recording = np.load(result / "trajectory.npz")
     rows = [json.loads(line) for line in (result / "steps.jsonl").read_text().splitlines()]
     summary = json.loads((result / "summary.json").read_text())
+    lifting = recording["joint_q"].shape[1] == 21
     builder, _ = build_hand(asset)
     model = builder.finalize(device="cpu")
     shapes = [i for i, flags in enumerate(model.shape_flags.numpy()) if not flags & int(newton.ShapeFlags.VISIBLE)]
@@ -61,7 +62,12 @@ def render(asset, result, *, video=True):
         ]
     )
     ax.add_collection3d(Poly3DCollection(table, facecolors="#d7dce2", alpha=0.55))
-    fig.text(0.05, 0.95, "Human hand | admittance squeeze | empty open bottle", fontsize=17, weight="bold")
+    title = (
+        "Human hand | admittance grasp + lift | open bottle"
+        if lifting
+        else "Human hand | admittance squeeze | empty open bottle"
+    )
+    fig.text(0.05, 0.95, title, fontsize=17, weight="bold")
     fig.text(
         0.05, 0.90, f"Complete task gates: {'PASS' if summary['passed'] else 'FAIL — see summary.json'}", fontsize=11
     )
@@ -69,7 +75,7 @@ def render(asset, result, *, video=True):
     fig.text(
         0.05,
         0.04,
-        "Recorded collision hulls, fixed palm, four controlled fingers. Elastic proxy; no liquid, gas or plasticity.",
+        f"Recorded collision hulls, {'vertical hand slide' if lifting else 'fixed palm'}. Elastic proxy; no liquid, gas or plasticity.",
         fontsize=10,
     )
     trace = fig.add_axes([0.74, 0.18, 0.23, 0.25])
@@ -95,7 +101,8 @@ def render(asset, result, *, video=True):
             r = rows[frame - 1]
             cursor.set_xdata([r["time_s"], r["time_s"]])
             info.set_text(
-                f"{summary['precision'].upper()}  {r['time_s']:.2f} s\n{r['phase'].upper()}\n{r['publication']}\n\nWall motion\n{r['deformation_max_m'] * 1000:.2f} mm\n\nSampled overlap\n{r['sampled_penetration_m'] * 1000:.2f} mm"
+                f"{summary['precision'].upper()}  {r['time_s']:.2f} s\n{r['phase'].upper()}\n{r['publication']}\n\nWall: {r['deformation_max_m'] * 1000:.2f} mm\nOverlap: {r['sampled_penetration_m'] * 1000:.2f} mm"
+                + (f"\nBottom: {r['bottle_bottom_clearance_m'] * 1000:.1f} mm" if lifting else "")
             )
         else:
             info.set_text("INITIAL STATE")

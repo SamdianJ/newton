@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 The Newton Developers
 # SPDX-License-Identifier: Apache-2.0
 
-"""Squeeze an empty open elastic bottle with force-feedback human-hand curls."""
+"""Grasp, deform and lift a free open bottle from a table using hand admittance."""
 
 import argparse
 import json
@@ -21,14 +21,29 @@ from scripts.monolithic_reference.plastic_bottle import add_bottle
 from scripts.monolithic_reference.retained_assets import sha
 from scripts.monolithic_reference.run_graspit_hand import transform
 
-DT, STEPS = 0.005, 2000
+DT, STEPS = 0.005, 1400
 TABLE_Y = -0.080125
 CONTACT_STIFFNESS = 5e7
 
 
 def phase_at(t):
-    """Settle, squeeze, hold, then explicitly open the fingers."""
-    return "settle" if t <= 0.25 else "squeeze" if t <= 4.0 else "hold" if t <= 6.0 else "release"
+    """Grasp on the table, raise the hand, then hold the bottle airborne."""
+    return "settle" if t <= 0.25 else "grasp" if t <= 4.0 else "lift" if t <= 6.0 else "hold"
+
+
+def lift_target(t):
+    """Raise the hand 80 mm in two seconds with zero endpoint velocity and acceleration."""
+    u = np.clip((t - 4.0) / 2.0, 0.0, 1.0)
+    return 0.08 * (10 * u**3 - 15 * u**4 + 6 * u**5), 0.04 * 30 * u**2 * (1 - u) ** 2
+
+
+def finger_feedback(forces):
+    """Separate the hand's 20 revolute torques from the vertical slide force."""
+    return SimpleNamespace(
+        force_valid=forces.force_valid,
+        force_generation=forces.force_generation,
+        joint_force=forces.joint_force[1:],
+    )
 
 
 class BottleMetrics:
@@ -82,42 +97,52 @@ class BottleMetrics:
             gap = np.max(local @ equations[:, :3].T + equations[:, 3], axis=1)
             depth = max(depth, float(0.000125 - gap.min()))
             hand_table_depth = max(hand_table_depth, TABLE_Y - float(transform(vertices, pose)[:, 1].min()))
-        projected = np.zeros(20)
+        projected = np.zeros(self.model.joint_dof_count)
         com = np.array([transform(c, p) for c, p in zip(self.com, poses, strict=True)])
         for j, kind in enumerate(self.types):
-            if kind != newton.JointType.REVOLUTE:
+            if kind not in (newton.JointType.REVOLUTE, newton.JointType.PRISMATIC):
                 continue
-            frame = wp.transform_multiply(wp.transform(*poses[self.parents[j]]), wp.transform(*self.joint_frames[j]))
+            parent = wp.transform_identity() if self.parents[j] < 0 else wp.transform(*poses[self.parents[j]])
+            frame = wp.transform_multiply(parent, wp.transform(*self.joint_frames[j]))
             axis = np.array(wp.transform_vector(frame, wp.vec3(self.axes[self.qd_start[j]])))
             ids = self.descendants[j]
             wrench = forces.body_wrench[ids]
-            torque = wrench[:, 3:] + np.cross(com[ids] - np.array(frame)[:3], wrench[:, :3])
-            projected[self.q_start[j]] = np.sum(torque @ axis)
+            if kind == newton.JointType.PRISMATIC:
+                projected[self.q_start[j]] = np.sum(wrench[:, :3] @ axis)
+            else:
+                torque = wrench[:, 3:] + np.cross(com[ids] - np.array(frame)[:3], wrench[:, :3])
+                projected[self.q_start[j]] = np.sum(torque @ axis)
         return result | {
             "deformation_rms_m": float(np.sqrt(np.mean(displacement**2))),
             "deformation_max_m": float(displacement.max()),
             "sampled_penetration_m": depth,
             "hand_table_penetration_m": hand_table_depth,
-            "projection_error_Nm": float(np.max(np.abs(projected - forces.joint_force))),
+            "projection_error_Nm": float(np.max(np.abs(projected[1:] - forces.joint_force[1:]))),
+            "lift_projection_error_N": float(abs(projected[0] - forces.joint_force[0])),
             "bottle_center_m": x.mean(0).tolist(),
+            "bottle_bottom_clearance_m": float(x[:, 1].min() - 0.000125 - TABLE_Y),
+            "bottle_center_speed_m_s": float(np.linalg.norm(state.particle_qd.numpy().mean(axis=0))),
+            "hand_vertical_reaction_N": float(-forces.body_wrench[:, 1].sum()),
+            "hand_lift_m": float(state.joint_q.numpy()[0]),
+            "hand_lift_speed_m_s": float(state.joint_qd.numpy()[0]),
             "limit_violation_rad": float(
                 max(
                     0,
-                    np.max(self.model.joint_limit_lower.numpy() - state.joint_q.numpy()),
-                    np.max(state.joint_q.numpy() - self.model.joint_limit_upper.numpy()),
+                    np.max(self.model.joint_limit_lower.numpy()[1:] - state.joint_q.numpy()[1:]),
+                    np.max(state.joint_q.numpy()[1:] - self.model.joint_limit_upper.numpy()[1:]),
                 )
             ),
-            "max_joint_speed_rad_s": float(np.abs(state.joint_qd.numpy()).max()),
+            "max_joint_speed_rad_s": float(np.abs(state.joint_qd.numpy()[1:]).max()),
         }
 
 
 def build_scene(asset, *, device, precision):
-    """Build free bottle, static support, and a fixed-palm articulated hand."""
-    builder, _ = build_hand(asset, device=device, contact=True)
+    """Build a free bottle, static support, and a hand on an actuated vertical slide."""
+    builder, _ = build_hand(asset, device=device, contact=True, lift=True)
     builder.gravity = (0, -9.81, 0)
     # The zero-gravity import probe used a very soft servo. Hold the palm's
     # finger frames against gravity while letting the outer admittance yield.
-    for i in range(builder.joint_dof_count):
+    for i in range(1, builder.joint_dof_count):
         builder.joint_target_ke[i] = 2.0
         builder.joint_target_kd[i] = 0.05
         builder.joint_effort_limit[i] = 0.2
@@ -132,12 +157,14 @@ def build_scene(asset, *, device, precision):
         cfg=builder.ShapeConfig(density=0, margin=0, has_particle_collision=True),
     )
     model = builder.finalize(device=device)
-    controller = HandAdmittance(model.joint_limit_lower.numpy(), model.joint_limit_upper.numpy())
+    controller = HandAdmittance(model.joint_limit_lower.numpy()[1:], model.joint_limit_upper.numpy()[1:])
     smooth = build_smooth_sdf(model)
     solver = SolverMonolithic(
         model,
         precision=precision,
-        joint_terms=SolverMonolithic.JointTerms(implicit_pd=True, limits=True, limit_width=np.full(20, 0.01)),
+        joint_terms=SolverMonolithic.JointTerms(
+            implicit_pd=True, limits=True, limit_width=np.r_[0.001, np.full(20, 0.01)]
+        ),
         cloth_inputs=(
             SolverMonolithic.ClothInput(
                 triangle_ids=tuple(range(model.tri_count)),
@@ -162,34 +189,39 @@ def build_scene(asset, *, device, precision):
         smooth_sdf=smooth,
     )
     source = model.state()
-    source.joint_q.assign(controller.opening)
+    source.joint_q.assign(np.r_[0, controller.opening])
     newton.eval_fk(model, source.joint_q, source.joint_qd, source)
     state, control = solver.create_state(dt=DT, source=source), solver.create_control()
-    control.joint_target_q.assign(controller.opening)
+    # Use a PD target bias for hand weight, within the same finite actuator cap.
+    weight_bias = float(model.body_mass.numpy().sum()) * 9.81 / float(model.joint_target_ke.numpy()[0])
+    control.joint_target_q.assign(np.r_[weight_bias, controller.opening])
     return model, solver, state, control, controller, material, smooth
 
 
-def evaluate(rows, *, target_force):
-    """Keep numerical publication, deformation, tracking and release gates separate."""
-    steady = [r for r in rows if 5.5 < r["time_s"] <= 6.0]
-    release = [r for r in rows if r["time_s"] > 9.75]
+def evaluate(rows):
+    """Qualify airborne retention and deformation, without requiring all fingers to contact."""
+    steady = [r for r in rows if 6.5 < r["time_s"] <= 7.0]
     return {
         "complete": len(rows) == STEPS,
-        "visible_deformation": bool(steady) and max(r["deformation_max_m"] for r in steady) >= 0.003,
-        "force_tracking": len(steady) == 100
-        and max(max(abs(f - target_force) for f in r["load_N"]) for r in steady) <= 0.3,
+        "visible_deformation": len(steady) == 100 and min(r["deformation_max_m"] for r in steady) >= 0.003,
+        "airborne_hold": len(steady) == 100 and min(r["bottle_bottom_clearance_m"] for r in steady) >= 0.05,
+        "hold_speed": len(steady) == 100 and max(r["bottle_center_speed_m_s"] for r in steady) <= 0.01,
+        "contact_support": len(steady) == 100 and min(r["hand_vertical_reaction_N"] for r in steady) >= 0.05,
         "penetration": bool(rows)
         and max(max(r["sampled_penetration_m"], r["hand_table_penetration_m"]) for r in rows) <= 0.002,
         "joint_limits": bool(rows) and max(r["limit_violation_rad"] for r in rows) <= 0.01,
         "joint_speed": bool(rows) and max(r["max_joint_speed_rad_s"] for r in rows) <= 2.0,
+        "lift_motion": bool(rows)
+        and min(r["hand_lift_m"] for r in rows) >= -0.01
+        and max(r["hand_lift_m"] for r in rows) <= 0.15
+        and max(abs(r["hand_lift_speed_m_s"]) for r in rows) <= 0.1,
         "no_self_intersection": bool(rows) and max(r["self_intersections"] for r in rows) == 0,
         "area": bool(rows)
         and min(r["area_ratio_min"] for r in rows) >= 0.2
         and max(r["area_ratio_max"] for r in rows) <= 2,
-        "projection": bool(rows) and max(r["projection_error_Nm"] for r in rows) <= 1e-4,
-        "release": len(release) == 50
-        and max(max(abs(f) for f in r["load_N"]) for r in release) <= 0.1
-        and max(max(r["command_travel_m"]) for r in release) <= 1e-6,
+        "projection": bool(rows)
+        and max(r["projection_error_Nm"] for r in rows) <= 1e-4
+        and max(r["lift_projection_error_N"] for r in rows) <= 1e-4,
     }
 
 
@@ -228,6 +260,16 @@ def run(args):
                 "servo_kd_Nms_rad": 0.05,
                 "servo_effort_cap_Nm": 0.2,
                 "contact_stiffness_N_m3": CONTACT_STIFFNESS,
+                "task": "table_grasp_lift_hold; simultaneous four-finger contact not required",
+                "lift_axis": {
+                    "height_m": 0.08,
+                    "start_s": 4,
+                    "end_s": 6,
+                    "ke_N_m": 2e4,
+                    "kd_Ns_m": 200,
+                    "effort_cap_N": 100,
+                    "hand_weight_target_bias": "sum(hand_mass)*9.81/ke",
+                },
             },
             indent=2,
         )
@@ -236,13 +278,16 @@ def run(args):
     model, solver, state, control, controller, material, smooth = build_scene(
         args.asset_dir, device=args.device, precision=args.precision
     )
+    lift_bias = float(control.joint_target_q.numpy()[0])
     metrics = BottleMetrics(model)
     initial = metrics.measure(
-        state, SimpleNamespace(body_wrench=np.zeros((model.body_count, 6)), joint_force=np.zeros(20))
+        state, SimpleNamespace(body_wrench=np.zeros((model.body_count, 6)), joint_force=np.zeros(21))
     )
     (output / "initial-geometry.json").write_text(json.dumps(initial, indent=2) + "\n")
     if initial["sampled_penetration_m"] > 1e-6 or initial["hand_table_penetration_m"] > 1e-6:
         raise ValueError("Initial hand/bottle/support geometry overlaps")
+    if abs(initial["bottle_bottom_clearance_m"]) > 1e-4:
+        raise ValueError("Bottle must start on the table")
     rows, xs, poses, qs = [], [state.particle_q.numpy()], [state.body_q.numpy()], [state.joint_q.numpy()]
     failure = None
     early_stop = None
@@ -255,10 +300,14 @@ def run(args):
             try:
                 if step > 1:
                     target, velocity = controller.command(
-                        phase, solver.get_contact_forces(state), DT, target_force=args.force
+                        "settle" if phase == "settle" else "hold",
+                        finger_feedback(solver.get_contact_forces(state)),
+                        DT,
+                        target_force=args.force,
                     )
-                    control.joint_target_q.assign(target)
-                    control.joint_target_qd.assign(velocity)
+                    height, speed = lift_target(time)
+                    control.joint_target_q.assign(np.r_[height + lift_bias, target])
+                    control.joint_target_qd.assign(np.r_[speed, velocity])
                 solver.step(state, state, control, dt=DT)
                 stats = solver.last_stats
                 publication = stats.variational.get("publication_status")
@@ -286,10 +335,10 @@ def run(args):
                     "converged": stats.converged,
                     "newton_iterations": stats.nonlinear_iterations,
                     "convergence_ratio": stats.convergence_ratio,
-                    "load_N": controller.loads(forces).tolist(),
+                    "load_N": controller.loads(finger_feedback(forces)).tolist(),
                     "command_travel_m": [a.position for a in controller.axes],
                     "command_velocity_m_s": [a.velocity for a in controller.axes],
-                    "target_force_N": args.force if phase in ("squeeze", "hold") else 0,
+                    "target_force_N": args.force if phase != "settle" else 0,
                     **metrics.measure(state, forces),
                 }
                 rows.append(row)
@@ -308,6 +357,8 @@ def run(args):
                     or row["area_ratio_max"] > 2
                     or row["limit_violation_rad"] > 0.01
                     or row["max_joint_speed_rad_s"] > 2
+                    or abs(row["hand_lift_speed_m_s"]) > 0.1
+                    or not -0.01 <= row["hand_lift_m"] <= 0.15
                 ):
                     early_stop = {"step": step, "reason": "Physical all-frame gate violated; checkpoint retained"}
                     break
@@ -321,7 +372,7 @@ def run(args):
     np.savez_compressed(
         output / "trajectory.npz", particle_q=xs, body_q=poses, joint_q=qs, triangles=model.tri_indices.numpy()
     )
-    gates = evaluate(rows, target_force=args.force)
+    gates = evaluate(rows)
     summary = {
         "passed": all(gates.values()) and failure is None,
         "gates": gates,
@@ -336,13 +387,14 @@ def run(args):
         "requested_steps": args.max_steps,
         "dt_s": DT,
         "target_force_N": args.force,
+        "hand_weight_target_bias_m": lift_bias,
         "max_deformation_m": max((r["deformation_max_m"] for r in rows), default=None),
         "max_penetration_m": max((r["sampled_penetration_m"] for r in rows), default=None),
         "newton_import": str(Path(newton.__file__).resolve()),
         **identity,
         "asset_manifest_sha256": sha(args.asset_dir / "manifest.json"),
         "smooth_sdf": smooth.build_metadata,
-        "scope": "four-finger virtual-tendon admittance; fixed palm, held thumb, free elastic bottle on support; no self-contact response or PET calibration",
+        "scope": "virtual-tendon admittance with vertical hand slide; grasp/lift/deform free bottle from table, no all-fingers contact requirement; held thumb; no self-contact response or PET calibration",
         "penetration_scope": "all nodes and triangle centroids against original convex hull planes; conservative outside, exact inside; not continuous collision certification",
     }
     (output / "summary.json").write_text(json.dumps(summary, indent=2) + "\n")

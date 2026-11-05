@@ -24,8 +24,6 @@ class HandAdmittance:
         self.mapping = np.zeros((20, 4))
         for finger in range(4):
             self.mapping[4 * finger + 1 : 4 * finger + 4, finger] = [20.0, 16.0, 12.0]
-        # The shorter little finger otherwise curls away before reaching load.
-        self.mapping[13:16, 3] = [20.0, 12.0, 8.0]
         lower, upper = np.asarray(lower), np.asarray(upper)
         if lower.shape != (20,) or upper.shape != (20,) or not np.all(np.isfinite([lower, upper])):
             raise ValueError("Require finite HumanHand20DOF limits")

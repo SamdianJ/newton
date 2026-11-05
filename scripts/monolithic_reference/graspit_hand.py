@@ -114,8 +114,8 @@ def prepare(asset):
     return manifest
 
 
-def build_hand(asset, *, device="cpu", contact=False):
-    """Import 20 dynamic revolute DOFs with fixed palm and optional CUDA mesh contact."""
+def build_hand(asset, *, device="cpu", contact=False, lift=False):
+    """Import the hand with a fixed palm or one actuated vertical slide and optional mesh contact."""
     asset = Path(asset).resolve()
     manifest = json.loads((asset / "manifest.json").read_text())
     for relative, expected in (manifest["source_sha256"] | manifest["derived_sha256"]).items():
@@ -129,13 +129,33 @@ def build_hand(asset, *, device="cpu", contact=False):
     builder.default_shape_cfg.has_particle_collision = False
     builder.add_urdf(
         str(asset / "derived/HumanHand20DOF.urdf"),
-        floating=False,
+        floating=None if lift else False,
+        base_joint={
+            "joint_type": newton.JointType.PRISMATIC,
+            "linear_axes": [
+                builder.JointDofConfig(
+                    axis=(0, 1, 0),
+                    target_ke=2e4,
+                    target_kd=200,
+                    effort_limit=100,
+                    limit_lower=-0.01,
+                    limit_upper=0.15,
+                    limit_ke=2e4,
+                    limit_kd=200,
+                    armature=0,
+                    damping=0,
+                    actuator_mode=newton.JointTargetMode.POSITION_VELOCITY,
+                )
+            ],
+        }
+        if lift
+        else None,
         collapse_fixed_joints=False,
         enable_self_collisions=False,
         force_position_velocity_actuation=True,
         mesh_maxhullvert=512,
     )
-    # Retain the world anchor; removing it leaves five roots in one articulation.
+    # Retain the world connection; removing it leaves five roots in one articulation.
     # Other fixed frames only deepen the FP32 swept-FK roundoff bound.
     roots = [i for i, parent in enumerate(builder.joint_parent) if parent == -1]
     if len(roots) != 1:
@@ -162,9 +182,9 @@ def build_hand(asset, *, device="cpu", contact=False):
         builder.body_mass[body], builder.body_inv_mass[body] = mass, 1.0 / mass
         builder.body_com[body] = wp.transform_point(pose, com)
         builder.body_inertia[body], builder.body_inv_inertia[body] = rotated_inertia, wp.inverse(rotated_inertia)
-    if builder.joint_dof_count != 20:
+    if builder.joint_dof_count != 20 + int(lift):
         raise ValueError("Import changed the hand's 20 DOFs")
-    for i in range(20):
+    for i in range(int(lift), builder.joint_dof_count):
         builder.joint_target_ke[i] = 0.2  # N m/rad
         builder.joint_target_kd[i] = 0.01  # N m s/rad
         builder.joint_effort_limit[i] = 0.05  # N m, finite actuator saturation.
