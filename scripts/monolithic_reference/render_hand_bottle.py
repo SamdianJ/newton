@@ -68,9 +68,18 @@ def render(asset, result, *, video=True):
         else "Human hand | admittance squeeze | empty open bottle"
     )
     fig.text(0.05, 0.95, title, fontsize=17, weight="bold")
-    fig.text(
-        0.05, 0.90, f"Complete task gates: {'PASS' if summary['passed'] else 'FAIL — see summary.json'}", fontsize=11
-    )
+    if lifting:
+        gates = summary["gates"]
+        achieved = all(gates[k] for k in ("complete", "airborne_hold", "visible_deformation"))
+        checks = (
+            "all checks passed"
+            if summary["passed"]
+            else "checks failed: " + ", ".join(k.replace("_", " ") for k, passed in gates.items() if not passed)
+        )
+        caption = f"Lift + deformation: {'achieved' if achieved else 'not achieved'} | {checks}"
+    else:
+        caption = f"Complete task gates: {'PASS' if summary['passed'] else 'FAIL — see summary.json'}"
+    fig.text(0.05, 0.90, caption, fontsize=11)
     info = fig.text(0.73, 0.81, "", fontsize=12, va="top", linespacing=1.7, family="monospace")
     fig.text(
         0.05,
