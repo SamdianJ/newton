@@ -50,16 +50,26 @@ def render(asset, result, *, video=True):
         mesh = Poly3DCollection([], facecolors="#d9aa8e", edgecolors=(0.35, 0.2, 0.1, 0.12), linewidths=0.2)
         ax.add_collection3d(mesh)
         hands.append(mesh)
+    floor_low = np.minimum([-0.26, -0.14], recording["particle_q"][:, :, [0, 2]].min(axis=(0, 1)) - 0.04)
+    floor_high = np.maximum([0, 0.04], recording["particle_q"][:, :, [0, 2]].max(axis=(0, 1)) + 0.04)
     table = np.array(
-        [[[-0.26, -0.14, -0.080125], [0, -0.14, -0.080125], [0, 0.04, -0.080125], [-0.26, 0.04, -0.080125]]]
+        [
+            [
+                [x, y, -0.080125]
+                for x, y in (floor_low, (floor_high[0], floor_low[1]), floor_high, (floor_low[0], floor_high[1]))
+            ]
+        ]
     )
     ax.add_collection3d(Poly3DCollection(table, facecolors="#d7dce2", alpha=0.55))
     fig.text(0.05, 0.95, "Human hand | admittance squeeze | empty open bottle", fontsize=17, weight="bold")
+    fig.text(
+        0.05, 0.90, f"Complete task gates: {'PASS' if summary['passed'] else 'FAIL — see summary.json'}", fontsize=11
+    )
     info = fig.text(0.73, 0.81, "", fontsize=12, va="top", linespacing=1.7, family="monospace")
     fig.text(
         0.05,
         0.04,
-        "Recorded physics, fixed palm, four controlled fingers. Elastic proxy; no liquid, gas pressure or plasticity.",
+        "Recorded collision hulls, fixed palm, four controlled fingers. Elastic proxy; no liquid, gas or plasticity.",
         fontsize=10,
     )
     trace = fig.add_axes([0.74, 0.18, 0.23, 0.25])
@@ -72,6 +82,11 @@ def render(asset, result, *, video=True):
 
     def update(frame):
         x, poses = recording["particle_q"][frame], recording["body_q"][frame]
+        # Widen the view when the released bottle rolls away; never hide its motion.
+        low = np.minimum([-0.255, -0.14, -0.09], x[:, [0, 2, 1]].min(axis=0) - 0.015)
+        high = np.maximum([0.01, 0.045, 0.1], x[:, [0, 2, 1]].max(axis=0) + 0.015)
+        ax.set(xlim=(low[0], high[0]), ylim=(low[1], high[1]), zlim=(low[2], high[2]))
+        ax.set_box_aspect(high - low)
         collection.set_verts(x[faces][:, :, [0, 2, 1]])
         for shape, mesh in zip(shapes, hands, strict=True):
             vertices = shape_vertices(model, poses, shape)
