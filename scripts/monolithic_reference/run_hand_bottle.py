@@ -23,6 +23,7 @@ from scripts.monolithic_reference.run_graspit_hand import transform
 
 DT, STEPS = 0.005, 2000
 TABLE_Y = -0.080125
+CONTACT_STIFFNESS = 5e7
 
 
 def phase_at(t):
@@ -146,7 +147,7 @@ def build_scene(asset, *, device, precision):
             ),
         ),
         mass_mode="lumped",
-        contact_stiffness=1e7,
+        contact_stiffness=CONTACT_STIFFNESS,
         friction_coefficient=0.5,
         friction_velocity_scale=0.01,
         normal_smoothing=1e-4,
@@ -226,6 +227,7 @@ def run(args):
                 "servo_ke_Nm_rad": 2,
                 "servo_kd_Nms_rad": 0.05,
                 "servo_effort_cap_Nm": 0.2,
+                "contact_stiffness_N_m3": CONTACT_STIFFNESS,
             },
             indent=2,
         )
