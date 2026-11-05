@@ -80,9 +80,15 @@ def render(asset, result, *, video=True):
     )
     trace = fig.add_axes([0.74, 0.18, 0.23, 0.25])
     times = np.array([r["time_s"] for r in rows])
-    for i in range(4):
-        trace.plot(times, [r["load_N"][i] for r in rows], lw=1, label=("index", "middle", "ring", "little")[i])
-    trace.set(xlabel="Time [s]", ylabel="Virtual tendon load [N]")
+    if lifting:
+        for field, label in (("bottle_bottom_clearance_m", "bottle bottom"), ("deformation_max_m", "wall motion")):
+            trace.plot(times, [1000 * r[field] for r in rows], lw=1.5, label=label)
+        trace.axhline(0, color="grey", lw=0.7)
+        trace.set(xlabel="Time [s]", ylabel="Height / deformation [mm]")
+    else:
+        for i in range(4):
+            trace.plot(times, [r["load_N"][i] for r in rows], lw=1, label=("index", "middle", "ring", "little")[i])
+        trace.set(xlabel="Time [s]", ylabel="Virtual tendon load [N]")
     trace.legend(fontsize=7, ncol=2)
     cursor = trace.axvline(0, color="black", lw=1)
 
