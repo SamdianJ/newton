@@ -11,9 +11,10 @@ from scripts.monolithic_reference.admittance_control import AxisAdmittance
 class HandAdmittance:
     """Map four virtual tendon travels [m] to flexion angles [rad].
 
-    q = q_open + A*x, where A [rad/m] uses a 50 mm virtual lever, not a
-    measured fingertip Jacobian. The resisting force is -A.T @ tau_contact
-    [N], so tau_contact @ qdot = -load @ xdot exactly. Target forces therefore
+    q_ref = q_open + A*x, where A [rad/m] uses a 50 mm virtual lever with
+    progressively less distal curl, not a measured fingertip Jacobian.
+    The resisting force is -A.T @ tau_contact [N], preserving virtual power
+    along qdot_ref = A*xdot (the actual compliant hand can lag). Target forces therefore
     refer to virtual tendons, not fingertip normal-force magnitudes.
     """
 
@@ -22,7 +23,7 @@ class HandAdmittance:
         self.opening[17] = -0.65  # Retract the thumb clear of both bottle and table.
         self.mapping = np.zeros((20, 4))
         for finger in range(4):
-            self.mapping[4 * finger + 1 : 4 * finger + 4, finger] = 20.0
+            self.mapping[4 * finger + 1 : 4 * finger + 4, finger] = [20.0, 16.0, 12.0]
         lower, upper = np.asarray(lower), np.asarray(upper)
         if lower.shape != (20,) or upper.shape != (20,) or not np.all(np.isfinite([lower, upper])):
             raise ValueError("Require finite HumanHand20DOF limits")
@@ -31,7 +32,7 @@ class HandAdmittance:
         self.axes = []
         for column in self.mapping.T:
             active = column > 0
-            travel = min(0.065, float(np.min(upper[active] / column[active])))
+            travel = min(0.075, float(np.min(upper[active] / column[active])))
             self.axes.append(AxisAdmittance(mass=0.2, damping=100.0, position_limits=(0, travel), max_speed=0.02))
         self.last_generation = -1
 

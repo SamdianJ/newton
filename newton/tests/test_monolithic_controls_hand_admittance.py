@@ -33,7 +33,7 @@ class TestHandAdmittance(unittest.TestCase):
         for generation in range(1, 51):
             controller.command("squeeze", self.feedback(generation=generation), 0.005, target_force=2)
         torque = np.zeros(20)
-        torque[1:4] = -0.05  # Three Nm torques project to 3 N, above the 2 N target.
+        torque[1:4] = -0.1  # Opposing torques exceed the target even during deceleration.
         _, qd = controller.command("hold", self.feedback(torque, generation=51), 0.005, target_force=2)
         self.assertLess(qd[1], 0)
         self.assertGreater(qd[5], 0)

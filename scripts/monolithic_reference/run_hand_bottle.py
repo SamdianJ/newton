@@ -21,7 +21,7 @@ from scripts.monolithic_reference.plastic_bottle import add_bottle
 from scripts.monolithic_reference.retained_assets import sha
 from scripts.monolithic_reference.run_graspit_hand import transform
 
-DT, STEPS = 0.005, 1900
+DT, STEPS = 0.005, 2000
 TABLE_Y = -0.080125
 
 
@@ -114,6 +114,12 @@ def build_scene(asset, *, device, precision):
     """Build free bottle, static support, and a fixed-palm articulated hand."""
     builder, _ = build_hand(asset, device=device, contact=True)
     builder.gravity = (0, -9.81, 0)
+    # The zero-gravity import probe used a very soft servo. Hold the palm's
+    # finger frames against gravity while letting the outer admittance yield.
+    for i in range(builder.joint_dof_count):
+        builder.joint_target_ke[i] = 2.0
+        builder.joint_target_kd[i] = 0.05
+        builder.joint_effort_limit[i] = 0.2
     for s, flags in enumerate(builder.shape_flags):
         if flags & int(newton.ShapeFlags.COLLIDE_SHAPES):
             builder.shape_flags[s] = flags | int(newton.ShapeFlags.COLLIDE_PARTICLES)
@@ -165,7 +171,7 @@ def build_scene(asset, *, device, precision):
 def evaluate(rows, *, target_force):
     """Keep numerical publication, deformation, tracking and release gates separate."""
     steady = [r for r in rows if 5.5 < r["time_s"] <= 6.0]
-    release = [r for r in rows if r["time_s"] > 9.25]
+    release = [r for r in rows if r["time_s"] > 9.75]
     return {
         "complete": len(rows) == STEPS,
         "visible_deformation": bool(steady) and max(r["deformation_max_m"] for r in steady) >= 0.003,
@@ -190,6 +196,41 @@ def run(args):
     """Retain trajectory and per-frame feedback; roll back command state on hard failure."""
     output = args.output
     output.mkdir(parents=True, exist_ok=False)
+    source = Path(__file__).resolve().parents[2]
+    identity = {
+        "source_head": subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=source, text=True).strip(),
+        "source_files": {
+            p.name: sha(p)
+            for p in [
+                Path(__file__),
+                *[
+                    Path(__file__).with_name(n)
+                    for n in (
+                        "plastic_bottle.py",
+                        "hand_admittance.py",
+                        "graspit_hand.py",
+                        "admittance_control.py",
+                    )
+                ],
+            ]
+        },
+    }
+    (output / "input.json").write_text(
+        json.dumps(
+            identity
+            | {
+                "precision": args.precision,
+                "target_force_N": args.force,
+                "dt_s": DT,
+                "requested_steps": args.max_steps,
+                "servo_ke_Nm_rad": 2,
+                "servo_kd_Nms_rad": 0.05,
+                "servo_effort_cap_Nm": 0.2,
+            },
+            indent=2,
+        )
+        + "\n"
+    )
     model, solver, state, control, controller, material, smooth = build_scene(
         args.asset_dir, device=args.device, precision=args.precision
     )
@@ -202,6 +243,7 @@ def run(args):
         raise ValueError("Initial hand/bottle/support geometry overlaps")
     rows, xs, poses, qs = [], [state.particle_q.numpy()], [state.body_q.numpy()], [state.joint_q.numpy()]
     failure = None
+    early_stop = None
     with (output / "steps.jsonl").open("w") as stream:
         for step in range(1, min(args.max_steps, STEPS) + 1):
             time = step * DT
@@ -256,6 +298,17 @@ def run(args):
                 stream.flush()
                 if step % 50 == 0:
                     print(json.dumps(row), flush=True)
+                # These are all-frame gates: later recovery cannot erase a violation.
+                if (
+                    max(row["sampled_penetration_m"], row["hand_table_penetration_m"]) > 0.002
+                    or row["self_intersections"] > 0
+                    or row["area_ratio_min"] < 0.2
+                    or row["area_ratio_max"] > 2
+                    or row["limit_violation_rad"] > 0.01
+                    or row["max_joint_speed_rad_s"] > 2
+                ):
+                    early_stop = {"step": step, "reason": "Physical all-frame gate violated; checkpoint retained"}
+                    break
             except Exception as exc:
                 controller.restore(before)
                 control.joint_target_q.assign(old_q)
@@ -267,11 +320,11 @@ def run(args):
         output / "trajectory.npz", particle_q=xs, body_q=poses, joint_q=qs, triangles=model.tri_indices.numpy()
     )
     gates = evaluate(rows, target_force=args.force)
-    source = Path(__file__).resolve().parents[2]
     summary = {
         "passed": all(gates.values()) and failure is None,
         "gates": gates,
         "failure": failure,
+        "early_stop": early_stop,
         "precision": args.precision,
         "device": args.device,
         "material": material,
@@ -284,22 +337,7 @@ def run(args):
         "max_deformation_m": max((r["deformation_max_m"] for r in rows), default=None),
         "max_penetration_m": max((r["sampled_penetration_m"] for r in rows), default=None),
         "newton_import": str(Path(newton.__file__).resolve()),
-        "source_head": subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=source, text=True).strip(),
-        "source_files": {
-            p.name: sha(p)
-            for p in [
-                Path(__file__),
-                *[
-                    Path(__file__).with_name(n)
-                    for n in (
-                        "plastic_bottle.py",
-                        "hand_admittance.py",
-                        "graspit_hand.py",
-                        "admittance_control.py",
-                    )
-                ],
-            ]
-        },
+        **identity,
         "asset_manifest_sha256": sha(args.asset_dir / "manifest.json"),
         "smooth_sdf": smooth.build_metadata,
         "scope": "four-finger virtual-tendon admittance; fixed palm, held thumb, free elastic bottle on support; no self-contact response or PET calibration",
