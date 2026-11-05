@@ -107,7 +107,8 @@ def render(asset, result, *, video=True):
         else:
             info.set_text("INITIAL STATE")
 
-    peak = 1 + int(np.argmax([r["deformation_max_m"] for r in rows]))
+    candidates = [i for i, r in enumerate(rows) if not lifting or r["phase"] == "hold"] or list(range(len(rows)))
+    peak = 1 + max(candidates, key=lambda i: rows[i]["deformation_max_m"])
     update(peak)
     fig.savefig(result / "preview.png", dpi=160)
     if video:
