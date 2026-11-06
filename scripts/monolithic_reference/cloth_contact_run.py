@@ -132,7 +132,7 @@ def execute(scene_factory, args):
     hashes = {str(p): hashlib.sha256(p.read_bytes()).hexdigest() for p in files}
     (args.output / "dirty.patch").write_text(git("diff", "--binary", "HEAD"))
     manifest = {
-        "schema_version": 1,
+        "schema_version": 2,
         "status": "STARTING",
         "source": source,
         "source_sha": git("rev-parse", "HEAD"),
@@ -147,6 +147,7 @@ def execute(scene_factory, args):
         },
         "geometry_observer": {"stride": args.geometry_stride, "continuous_check": False, "affects_dynamics": False},
         "kinetic_energy_scope": "cloth particle translational energy only",
+        "method_particle_force_storage": "state chunk method_particle_force in N when available; omitted otherwise",
         "unavailable_measurements": {
             "solver_stats.matrix_nnz": "base Stats field is not populated",
             "solver_stats.triplet_count": "base Stats field is not populated; contact_pool reports its own scope",
@@ -304,7 +305,8 @@ def execute(scene_factory, args):
                     diagnostics = {"method": "off", "active": 0, "compressive_load_N": 0.0}
                     if args.method != "off":
                         adapter = importlib.import_module(".cloth_contact_method", __package__)
-                        diagnostics = adapter.diagnostics(scene.solver, scene.state)
+                        diagnostics = dict(adapter.diagnostics(scene.solver, scene.state))
+                    method_force = diagnostics.pop("particle_force_N", None)
                     row["method_diagnostics"] = diagnostics
                     row["contact_spatial"] = (stats.variational or {}).get("contact_spatial")
                     row["contact_pool"] = (stats.variational or {}).get("contact_pool")
@@ -319,6 +321,11 @@ def execute(scene_factory, args):
                         "joint_force": forces.joint_force,
                         "external_particle_force": scene.state.particle_f.numpy(),
                     }
+                    if method_force is not None:
+                        method_force = np.asarray(method_force)
+                        if method_force.shape != x.shape or not np.isfinite(method_force).all():
+                            raise RuntimeError("Invalid method particle force feedback")
+                        frame["method_particle_force"] = method_force
                     for name in ("body_q", "body_qd"):
                         value = getattr(scene.state, name, None)
                         if value is not None:
@@ -327,6 +334,8 @@ def execute(scene_factory, args):
                         value = getattr(getattr(scene, "control", None), name, None)
                         if value is not None:
                             frame[name] = value.numpy()
+                    if frames and frames[0].keys() != frame.keys():
+                        flush()
                     frames.append(frame)
                     if hasattr(scene, "fixture_work"):
                         row["fixture_external_work_J"] = scene.fixture_work

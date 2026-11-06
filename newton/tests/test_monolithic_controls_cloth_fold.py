@@ -5,16 +5,21 @@
 
 import copy
 import unittest
+from itertools import product
 from types import SimpleNamespace
 from unittest.mock import Mock
 
 import numpy as np
+import warp as wp
 
+import newton
 from scripts.monolithic_reference.cloth_franka_scene import (
     DEFAULT_RECIPE,
     FrankaClothScene,
+    build_model,
     fold_targets,
     load_recipe,
+    plan_joint_targets,
     tcp_targets,
 )
 
@@ -31,6 +36,98 @@ class Array:
 
 
 class TestClothFoldControls(unittest.TestCase):
+    def test_low_grasp_targets_clear_actual_finger_boxes(self):
+        """Keep the real fingertip boxes above the table while preserving low grasp reach."""
+        recipe = load_recipe(DEFAULT_RECIPE)
+        recipe["keyframes"] = recipe["keyframes"][:3]
+        model, _, _ = build_model(recipe, device="cpu", cache="/tmp/cloth-fold-test", prepare_sdf=False)
+        times, targets, phases, plan = plan_joint_targets(model, recipe)
+        bodies, flags = model.shape_body.numpy(), model.shape_flags.numpy()
+        ids = [
+            i
+            for i, b in enumerate(bodies)
+            if b >= 0 and "finger" in model.body_label[b] and flags[i] & int(newton.ShapeFlags.COLLIDE_PARTICLES)
+        ]
+        state = model.state()
+        signs = np.array(list(product((-1, 1), repeat=3)))
+        minima = []
+        for i, phase in enumerate(phases):
+            if phase not in ("left_sleeve_approach", "left_sleeve_close"):
+                continue
+            for fraction in (0.0, 0.5, 1.0):
+                q, _, _ = fold_targets(
+                    times,
+                    targets,
+                    times[i] + fraction * (times[i + 1] - times[i]),
+                    phase_times=np.asarray(plan["phase_times_s"]),
+                )
+                state.joint_q.assign(q)
+                newton.eval_fk(model, state.joint_q, state.joint_qd, state)
+                poses = state.body_q.numpy()
+                minimum = min(
+                    float(
+                        wp.transform_point(
+                            wp.transform(*poses[bodies[s]]) * wp.transform(*model.shape_transform.numpy()[s]),
+                            wp.vec3(corner * model.shape_scale.numpy()[s]),
+                        )[2]
+                    )
+                    for s in ids
+                    for corner in signs
+                )
+                self.assertGreaterEqual(minimum, 0.2)
+                if phase == "left_sleeve_close":
+                    minima.append(minimum)
+        self.assertTrue(minima)
+        self.assertLess(max(minima), 0.201)
+
+    def test_only_finger_table_rigid_collision_is_enabled(self):
+        """Preserve particle colliders and activate exactly the supported eight static pairs."""
+        recipe = load_recipe(DEFAULT_RECIPE)
+        model, _, _ = build_model(recipe, device="cpu", cache="/tmp/cloth-fold-test", prepare_sdf=False)
+        body, flags = model.shape_body.numpy(), model.shape_flags.numpy()
+        enabled = set(np.flatnonzero(flags & int(newton.ShapeFlags.COLLIDE_SHAPES)))
+        fingers = {
+            i
+            for i, b in enumerate(body)
+            if b >= 0 and "finger" in model.body_label[b] and flags[i] & int(newton.ShapeFlags.COLLIDE_PARTICLES)
+        }
+        table = {i for i, b in enumerate(body) if b < 0 and model.shape_type.numpy()[i] == newton.GeoType.BOX}
+        self.assertEqual(len(fingers), 8)
+        self.assertEqual(enabled, fingers | table)
+        pairs = {tuple(sorted(p)) for p in model.shape_contact_pairs.numpy() if all(s in enabled for s in p)}
+        self.assertEqual(pairs, {tuple(sorted((s, t))) for s in fingers for t in table})
+
+    def test_cartesian_nodes_do_not_add_stops(self):
+        """Keep target velocity continuous through IK nodes and stop only at phase boundaries."""
+        times = np.linspace(0, 2, 9)
+        poses = np.sin(times)[:, None]
+        boundaries = np.array([0.0, 2.0])
+        for time in (0.0, 2.0):
+            _, velocity, _ = fold_targets(times, poses, time, phase_times=boundaries)
+            np.testing.assert_allclose(velocity, 0.0, atol=1e-12)
+        left = fold_targets(times, poses, 1 - 1e-7, phase_times=boundaries)
+        right = fold_targets(times, poses, 1 + 1e-7, phase_times=boundaries)
+        self.assertGreater(left[1][0], 0.1)
+        np.testing.assert_allclose(left[0], right[0], atol=3e-7)
+        np.testing.assert_allclose(left[1], right[1], atol=1e-6)
+        for time in (0.37, 0.81, 1.43):
+            h = 1e-6
+            numeric = (
+                fold_targets(times, poses, time + h, phase_times=boundaries)[0]
+                - fold_targets(times, poses, time - h, phase_times=boundaries)[0]
+            ) / (2 * h)
+            analytic = fold_targets(times, poses, time, phase_times=boundaries)[1]
+            np.testing.assert_allclose(analytic, numeric, rtol=1e-7, atol=1e-9)
+
+    def test_ik_interpolation_does_not_overshoot_joint_range(self):
+        """Prevent valid IK nodes near a joint limit from producing out-of-range commands."""
+        times = np.array([0.0, 1.0, 2.0, 3.0])
+        poses = np.array([[0.0], [0.99], [1.0], [0.99]])
+        for time in np.linspace(0, 3, 121):
+            value, _, _ = fold_targets(times, poses, time, phase_times=np.array([0.0, 3.0]))
+            self.assertGreaterEqual(value[0], 0.0)
+            self.assertLessEqual(value[0], 1.0)
+
     def test_targets_use_absolute_physical_time(self):
         times = np.array([0.0, 2.0, 5.0])
         q = np.array([[0.0, 0.04], [1.0, 0.001], [-0.5, 0.04]])
@@ -84,6 +181,7 @@ class TestClothFoldControls(unittest.TestCase):
         scene.dt, scene.total_steps, scene.steps, scene.failed = 0.1, 4, 0, False
         scene.last_forces, scene._published_generation = None, 0
         scene.times = np.array([0.0, 0.4])
+        scene.phase_times = scene.times
         scene.joint_targets = np.array([np.zeros(9), np.ones(9)])
         scene.phases, scene.phase = ["grasp"], "initial"
         scene.control = SimpleNamespace(joint_target_q=Array(np.zeros(9)), joint_target_qd=Array(np.zeros(9)))

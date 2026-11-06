@@ -142,7 +142,16 @@ class TestClothPublication(unittest.TestCase):
             forces = SimpleNamespace(force_valid=valid, force_generation=generation)
             self.assertEqual(publication(stats, forces, previous_generation=previous), "HARD_FAILURE")
 
-    def _record(self, directory, *, fail_read=False, fail_observer=False, fail_step=False, fail_body_read=False):
+    def _record(
+        self,
+        directory,
+        *,
+        fail_read=False,
+        fail_observer=False,
+        fail_step=False,
+        fail_body_read=False,
+        method_force=None,
+    ):
         def array(value):
             return SimpleNamespace(numpy=lambda: np.asarray(value))
 
@@ -218,19 +227,35 @@ class TestClothPublication(unittest.TestCase):
             output=Path(directory) / "run",
             recipe=recipe,
             method_config=None,
-            method="off",
+            method="off" if method_force is None else "point-cloud",
         )
         with (
             patch("scripts.monolithic_reference.cloth_contact_run.wp.synchronize_device"),
+            patch("scripts.monolithic_reference.cloth_contact_run.inspect_geometry") as observer,
+            patch(
+                "scripts.monolithic_reference.cloth_contact_run.importlib.import_module",
+                return_value=SimpleNamespace(
+                    diagnostics=lambda solver, state: {"method": "point-cloud", "particle_force_N": method_force}
+                ),
+            ),
             contextlib.redirect_stdout(io.StringIO()),
         ):
-            with patch("scripts.monolithic_reference.cloth_contact_run.inspect_geometry") as observer:
-                observer.side_effect = [{}, RuntimeError("observer failed")] if fail_observer else None
-                observer.return_value = {}
-                execute(lambda: scene, args)
+            observer.side_effect = [{}, RuntimeError("observer failed")] if fail_observer else None
+            observer.return_value = {}
+            execute(lambda: scene, args)
         return json.loads((args.output / "summary.json").read_text()), json.loads(
             (args.output / "steps.jsonl").read_text().splitlines()[-1]
         )
+
+    def test_method_force_is_retained_in_state_chunk(self):
+        """Retain separate method force once without duplicating the full array in JSON."""
+        expected = np.full((3, 3), 0.125)
+        with tempfile.TemporaryDirectory() as folder:
+            summary, row = self._record(folder, method_force=expected)
+            self.assertEqual(summary["published_steps"], 1)
+            self.assertNotIn("particle_force_N", row["method_diagnostics"])
+            with np.load(Path(folder) / "run/states-0000.npz") as states:
+                np.testing.assert_array_equal(states["method_particle_force"][0], expected)
 
     def test_partial_frame_does_not_discard_earlier_states(self):
         """Retain complete earlier frames when optional state readback fails."""
@@ -241,6 +266,15 @@ class TestClothPublication(unittest.TestCase):
             with np.load(Path(folder) / "run/states-0000.npz") as states:
                 np.testing.assert_array_equal(states["step"], [1])
                 self.assertEqual(states["body_q"].shape, (1, 0, 7))
+
+    def test_invalid_method_force_preserves_publication(self):
+        """Reject malformed feedback without reclassifying an already published step."""
+        with tempfile.TemporaryDirectory() as folder:
+            summary, row = self._record(folder, method_force=np.zeros((2, 3)))
+            self.assertEqual(summary["published_steps"], 1)
+            self.assertEqual(row["publication_status"], "CONVERGED")
+            self.assertIn("Invalid method particle force", row["recording_error_after_publication"])
+            self.assertFalse(list((Path(folder) / "run").glob("states-*.npz")))
 
     def test_readback_failure_preserves_publication(self):
         """Keep valid advancement when later evidence collection fails."""

@@ -109,7 +109,8 @@
   "source_trajectory": {
     "path": "newton/examples/cloth/example_cloth_franka.py",
     "position_units": "cm converted to m",
-    "tcp_mapping": "preserve source link pose using source_tcp_offset_m -> tcp_offset_m and tcp_rotation_xyzw",
+    "tcp_mapping": "map source link pose using source_tcp_offset_m -> tcp_offset_m and tcp_rotation_xyzw, then minimally lift actual finger boxes above table by half material thickness",
+    "control_path": "8 Cartesian IK nodes per moving phase with continuous seed; Hermite joint interpolation under the original phase quintic time law; discrete finger/table preflight only",
     "timing": "source segment durations scaled; explicit initial and final holds; no task duration gate"
   },
   "keyframes": [

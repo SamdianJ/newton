@@ -6,6 +6,7 @@
 import copy
 import hashlib
 import json
+from itertools import product
 from pathlib import Path
 
 import numpy as np
@@ -86,17 +87,72 @@ def tcp_targets(recipe):
     return np.asarray(positions), np.asarray(rotations)
 
 
-def fold_targets(times, poses, time_s):
+def fold_targets(times, poses, time_s, *, phase_times=None):
     """Interpolate joint targets with zero endpoint velocity on the physical clock."""
     if not np.isfinite(time_s) or time_s < 0:
         raise ValueError("Trajectory time must be finite and nonnegative")
-    index = min(int(np.searchsorted(times[1:], time_s, side="right")), len(times) - 2)
-    duration = times[index + 1] - times[index]
-    u = np.clip((time_s - times[index]) / duration, 0, 1)
+    boundaries = times if phase_times is None else phase_times
+    phase = min(int(np.searchsorted(boundaries[1:], time_s, side="right")), len(boundaries) - 2)
+    duration = boundaries[phase + 1] - boundaries[phase]
+    u = np.clip((time_s - boundaries[phase]) / duration, 0, 1)
     blend = u**3 * (10 + u * (-15 + 6 * u))
     rate = 30 * u**2 * (1 - u) ** 2 / duration
+    if phase_times is not None:
+        # One time law per original phase; IK nodes do not introduce extra stops.
+        path_time = boundaries[phase] + duration * blend
+        lo, hi = np.searchsorted(times, boundaries[phase : phase + 2])
+        index = min(max(int(np.searchsorted(times, path_time, side="right")) - 1, lo), hi - 1)
+        width = times[index + 1] - times[index]
+        v = np.clip((path_time - times[index]) / width, 0, 1)
+
+        def tangent(node):
+            if node in (lo, hi):
+                a, b = (lo, lo + 1) if node == lo else (hi - 1, hi)
+                return (poses[b] - poses[a]) / (times[b] - times[a])
+            left = (poses[node] - poses[node - 1]) / (times[node] - times[node - 1])
+            right = (poses[node + 1] - poses[node]) / (times[node + 1] - times[node])
+            # Equal path intervals: harmonic slopes preserve each joint's range.
+            return np.divide(2 * left * right, left + right, out=np.zeros_like(left), where=left * right > 0)
+
+        a, b = poses[index], poses[index + 1]
+        da, db = tangent(index) * width, tangent(index + 1) * width
+        value = (
+            (2 * v**3 - 3 * v**2 + 1) * a + (v**3 - 2 * v**2 + v) * da + (-2 * v**3 + 3 * v**2) * b + (v**3 - v**2) * db
+        )
+        derivative = (
+            (6 * v**2 - 6 * v) * a + (3 * v**2 - 4 * v + 1) * da + (-6 * v**2 + 6 * v) * b + (3 * v**2 - 2 * v) * db
+        )
+        return value, derivative * duration * rate / width, index
+    index = phase
     delta = poses[index + 1] - poses[index]
     return poses[index] + blend * delta, rate * delta, index
+
+
+def _finger_shapes(model):
+    bodies, flags, kinds = model.shape_body.numpy(), model.shape_flags.numpy(), model.shape_type.numpy()
+    ids = [
+        i
+        for i, body in enumerate(bodies)
+        if body >= 0 and "finger" in model.body_label[body] and flags[i] & int(newton.ShapeFlags.COLLIDE_PARTICLES)
+    ]
+    if len(ids) != 8 or any(kinds[i] != newton.GeoType.BOX for i in ids):
+        raise ValueError("Folding clearance requires the eight actual Franka finger boxes")
+    return ids
+
+
+def _finger_corners(model, state):
+    poses, bodies = state.body_q.numpy(), model.shape_body.numpy()
+    local, sizes = model.shape_transform.numpy(), model.shape_scale.numpy()
+    return np.asarray(
+        [
+            wp.transform_point(
+                wp.transform(*poses[bodies[i]]) * wp.transform(*local[i]), wp.vec3(np.asarray(sign) * sizes[i])
+            )
+            for i in _finger_shapes(model)
+            for sign in product((-1, 1), repeat=3)
+        ],
+        dtype=float,
+    )
 
 
 def build_model(recipe, *, device, cache, prepare_sdf=True):
@@ -184,6 +240,8 @@ def build_model(recipe, *, device, cache, prepare_sdf=True):
     model = builder.finalize(device=device)
     flags = model.shape_flags.numpy()
     flags &= ~int(newton.ShapeFlags.COLLIDE_SHAPES)
+    table_id = model.shape_count - 1
+    flags[[*_finger_shapes(model), table_id]] |= int(newton.ShapeFlags.COLLIDE_SHAPES)
     model.shape_flags.assign(flags)
     cloth = [
         SolverMonolithic.ClothInput(
@@ -207,7 +265,9 @@ def build_model(recipe, *, device, cache, prepare_sdf=True):
         "cloth_mass_kg": float(mass.sum()),
         "material": material,
         "removed_mimic": mimic,
-        "collision_scope": "cloth-shape and method cloth-cloth; robot-table rigid collision is not enabled",
+        "collision_scope": "cloth-shape, method cloth-cloth and eight finger-box/table A-static pairs; no arm-table collision",
+        "finger_table_pairs": [[i, table_id] for i in _finger_shapes(model)],
+        "finger_table_actor_samples": 288,
         "cloth_attachment": "none",
         "robot_gravity": "enabled",
         "sdf_prepared": prepare_sdf,
@@ -243,71 +303,136 @@ def plan_joint_targets(model, recipe):
         jacobian_mode=ik.IKJacobianType.ANALYTIC,
     )
     q = wp.array(np.asarray([robot["initial_q"]], dtype=np.float32), dtype=float, device=model.device)
-    poses, errors = [], []
     lower, upper = model.joint_limit_lower.numpy(), model.joint_limit_upper.numpy()
     state = model.state()
-    for i, (point, rotation) in enumerate(zip(positions, rotations, strict=True)):
-        position.set_target_position(0, wp.vec3(point))
+    table_top = sum((recipe["table"]["center_m"][2], recipe["table"]["half_extents_m"][2]))
+    clearance = recipe["material"]["thickness_m"] / 2
+    tcp_local = wp.transform(robot["tcp_offset_m"], robot["tcp_rotation_xyzw"])
+    times, phase_times, targets, phases, errors, lifts = [0.0], [0.0], [], [], [], []
+
+    def solve(point, rotation, opening, frame, fraction):
+        # Geometry is expressed in the requested TCP frame before solving the arm.
+        seed = q.numpy()[0]
+        seed[7:] = opening
+        state.joint_q.assign(seed)
+        newton.eval_fk(model, state.joint_q, state.joint_qd, state)
+        actual_tcp = wp.transform(*state.body_q.numpy()[body]) * tcp_local
+        mapping = wp.transform(point, rotation) * wp.transform_inverse(actual_tcp)
+        corners = np.asarray([wp.transform_point(mapping, wp.vec3(p)) for p in _finger_corners(model, state)])
+        lift = max(0.0, table_top + clearance - float(corners[:, 2].min()))
+        corrected = np.asarray(point, dtype=float).copy()
+        corrected[2] += lift
+        position.set_target_position(0, wp.vec3(corrected))
         orientation.set_target_rotation(0, wp.quat(rotation))
-        for restart in range(2):
-            if restart:
-                q.assign(np.asarray([robot["initial_q"]], dtype=np.float32))
-            solver.step(q, q, iterations=robot["ik_iterations"])
-            result = q.numpy()[0].astype(float)
-            gripper = "open" if i == 0 else recipe["keyframes"][i - 1]["gripper"]
-            result[7:] = robot[f"finger_{gripper}_m"]
-            state.joint_q.assign(result)
-            newton.eval_fk(model, state.joint_q, state.joint_qd, state)
-            transform = wp.transform(*state.body_q.numpy()[body])
-            actual_position = np.asarray(wp.transform_point(transform, wp.vec3(robot["tcp_offset_m"])))
-            actual_rotation = np.asarray(wp.transform_get_rotation(transform) * wp.quat(robot["tcp_rotation_xyzw"]))
-            position_error = float(np.linalg.norm(actual_position - point))
-            rotation_error = float(
-                2 * np.arccos(np.clip(abs(actual_rotation @ rotation) / np.linalg.norm(actual_rotation), 0, 1))
-            )
-            valid = (
-                np.isfinite(result).all()
-                and np.all(result >= lower)
-                and np.all(result <= upper)
-                and position_error <= robot["ik_position_tolerance_m"]
-                and rotation_error <= robot["ik_rotation_tolerance_rad"]
-            )
-            if valid:
-                break
-        errors.append(
-            {"keyframe": i - 1, "position_m": position_error, "rotation_rad": rotation_error, "seed_restarts": restart}
+        q.assign(seed[None])
+        solver.step(q, q, iterations=robot["ik_iterations"])
+        result = q.numpy()[0].astype(float)
+        result[7:] = opening
+        q.assign(result[None].astype(np.float32))
+        state.joint_q.assign(result)
+        newton.eval_fk(model, state.joint_q, state.joint_qd, state)
+        transform = wp.transform(*state.body_q.numpy()[body])
+        actual_position = np.asarray(wp.transform_point(transform, wp.vec3(robot["tcp_offset_m"])))
+        actual_rotation = np.asarray(wp.transform_get_rotation(transform) * wp.quat(robot["tcp_rotation_xyzw"]))
+        position_error = float(np.linalg.norm(actual_position - corrected))
+        rotation_error = float(
+            2 * np.arccos(np.clip(abs(actual_rotation @ rotation) / np.linalg.norm(actual_rotation), 0, 1))
         )
-        if not valid:
-            raise ValueError(f"Unreachable folding keyframe {i - 1}: {errors[-1]}")
-        poses.append(result)
-    times, targets, phases = [0.0], [poses[0]], []
+        error = {"keyframe": frame, "fraction": fraction, "position_m": position_error, "rotation_rad": rotation_error}
+        if not (
+            np.isfinite(result).all()
+            and np.all(result >= lower)
+            and np.all(result <= upper)
+            and position_error <= robot["ik_position_tolerance_m"]
+            and rotation_error <= robot["ik_rotation_tolerance_rad"]
+        ):
+            raise ValueError(f"Unreachable continuous-seed folding node: {error}; target={corrected.tolist()}")
+        node_gap = float(_finger_corners(model, state)[:, 2].min() - table_top)
+        if node_gap < 0:
+            raise ValueError(f"Finger/table overlap at IK node {frame}, fraction {fraction}: {node_gap} m")
+        error["finger_table_gap_m"] = node_gap
+        errors.append(error)
+        lifts.append(
+            {
+                "keyframe": frame,
+                "fraction": fraction,
+                "vertical_correction_m": lift,
+                "tcp_position_m": corrected.tolist(),
+            }
+        )
+        return result
+
+    targets.append(solve(positions[0], rotations[0], robot["finger_open_m"], -1, 0.0))
     if recipe["initial_hold_s"]:
         times.append(recipe["initial_hold_s"])
-        targets.append(poses[0])
+        phase_times.append(times[-1])
+        targets.append(targets[-1].copy())
         phases.append("settle")
+    opening = robot["finger_open_m"]
     for i, frame in enumerate(recipe["keyframes"]):
-        times.append(times[-1] + frame["duration_s"] * recipe["time_scale"])
-        targets.append(poses[i + 1])
-        phases.append(frame["phase"])
+        end_opening = robot[f"finger_{frame['gripper']}_m"]
+        moving = not (
+            np.allclose(positions[i], positions[i + 1]) and np.isclose(abs(rotations[i] @ rotations[i + 1]), 1)
+        )
+        nodes = 8 if moving else 1
+        start = times[-1]
+        duration = frame["duration_s"] * recipe["time_scale"]
+        for node in range(1, nodes + 1):
+            fraction = node / nodes
+            point = (1 - fraction) * positions[i] + fraction * positions[i + 1]
+            rotation = np.asarray(
+                wp.quat_slerp(wp.quat(rotations[i]), wp.quat(rotations[i + 1]), fraction), dtype=float
+            )
+            targets.append(solve(point, rotation, opening + fraction * (end_opening - opening), i, fraction))
+            times.append(start + fraction * duration)
+            phases.append(frame["phase"])
+        opening = end_opening
+        phase_times.append(times[-1])
     if recipe["final_hold_s"]:
         times.append(times[-1] + recipe["final_hold_s"])
-        targets.append(poses[-1])
+        phase_times.append(times[-1])
+        targets.append(targets[-1].copy())
         phases.append("released_hold")
+    times, targets, phase_times = np.asarray(times), np.asarray(targets), np.asarray(phase_times)
+    minimum = min(row["finger_table_gap_m"] for row in errors)
+    max_speed = np.zeros(9)
+    for i in range(len(times) - 1):
+        for fraction in (0.0, 0.5, 1.0):
+            value, velocity, _ = fold_targets(
+                times, targets, times[i] + fraction * (times[i + 1] - times[i]), phase_times=phase_times
+            )
+            max_speed = np.maximum(max_speed, np.abs(velocity))
+            if np.any(value < lower) or np.any(value > upper):
+                raise ValueError(f"Interpolated folding target violates joint limits in {phases[i]} at node {i}")
+            state.joint_q.assign(value)
+            newton.eval_fk(model, state.joint_q, state.joint_qd, state)
+            gap = float(_finger_corners(model, state)[:, 2].min() - table_top)
+            minimum = min(minimum, gap)
+            if gap < 0:
+                raise ValueError(f"Finger/table overlap in planned {phases[i]} node {i}, fraction {fraction}: {gap} m")
     return (
-        np.asarray(times),
-        np.asarray(targets),
+        times,
+        targets,
         phases,
         {
             "tcp_positions_m": positions.tolist(),
             "tcp_rotations_xyzw": rotations.tolist(),
             "ik_errors": errors,
-            "joint_targets": np.asarray(targets).tolist(),
-            "interpolation": "quintic joint targets; IK is not written to dynamic state",
+            "joint_targets": targets.tolist(),
+            "times_s": times.tolist(),
+            "phase_times_s": phase_times.tolist(),
+            "phases": phases,
+            "interpolation": "eight Cartesian nodes per moving phase, continuous-seed IK; shape-preserving Hermite q with one quintic time law per original phase; IK never writes dynamic state",
+            "tcp_height_adjustments": lifts,
+            "finger_table_clearance_m": clearance,
+            "clearance_reason": "half material thickness leaves fingertip at the thin cloth layer, using actual eight BOX corners",
             "max_joint_segment_delta": np.max(np.abs(np.diff(targets, axis=0)), axis=0).tolist(),
-            "max_joint_target_speed": np.max(
-                1.875 * np.abs(np.diff(targets, axis=0)) / np.diff(times)[:, None], axis=0
-            ).tolist(),
-            "path_clearance": "not certified; endpoint IK does not check the interpolated robot-table path",
+            "max_sampled_joint_target_speed": max_speed.tolist(),
+            "path_clearance": {
+                "scope": "eight actual finger boxes above tabletop; IK nodes and uniform physical-time samples, not continuous certification",
+                "minimum_sampled_gap_m": minimum,
+                "samples": len(errors) + 3 * (len(times) - 1),
+            },
         },
     )
 
@@ -333,6 +458,7 @@ class FrankaClothScene:
         cache.mkdir(parents=True, exist_ok=True)
         self.model, cloth_inputs, self.metadata = build_model(r, device=device, cache=cache)
         self.times, self.joint_targets, self.phases, plan = plan_joint_targets(self.model, r)
+        self.phase_times = np.asarray(plan["phase_times_s"])
         smooth = build_smooth_sdf(self.model)
         widths = (0.01,) * 7 + (0.001,) * 2
         options = r["solver"] | {
@@ -379,7 +505,9 @@ class FrankaClothScene:
         """Advance exactly one physical step; retain clock and commands on failure."""
         if self.failed or self.steps >= self.total_steps:
             return None
-        q, v, index = fold_targets(self.times, self.joint_targets, (self.steps + 1) * self.dt)
+        q, v, index = fold_targets(
+            self.times, self.joint_targets, (self.steps + 1) * self.dt, phase_times=self.phase_times
+        )
         old_q, old_v = self.control.joint_target_q.numpy(), self.control.joint_target_qd.numpy()
         try:
             self.control.joint_target_q.assign(q)
