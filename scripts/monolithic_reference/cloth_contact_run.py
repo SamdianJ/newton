@@ -46,6 +46,30 @@ def write_json(path, value):
     Path(path).write_text(json.dumps(_plain(value), indent=2, allow_nan=False) + "\n")
 
 
+def _memory(device):
+    result = {
+        "cpu_rss_high_bytes": None,
+        "cuda_pool_current_bytes": None,
+        "cuda_pool_high_bytes": None,
+        "total_device_peak_bytes": None,
+        "scope": "process RSS and CUDA pool high-water marks; total device peak is not measured",
+    }
+    try:
+        import resource  # noqa: PLC0415 - optional on Windows
+
+        unit = 1 if platform.system() == "Darwin" else 1024
+        result["cpu_rss_high_bytes"] = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss * unit
+    except ImportError:
+        result["cpu_rss_unavailable"] = "resource module is unavailable"
+    if getattr(device, "is_cuda", False):
+        try:
+            result["cuda_pool_current_bytes"] = wp.get_mempool_used_mem_current(device)
+            result["cuda_pool_high_bytes"] = wp.get_mempool_used_mem_high(device)
+        except (ValueError, RuntimeError) as failure:
+            result["cuda_pool_unavailable"] = str(failure)
+    return result
+
+
 def publication(stats, forces, *, previous_generation):
     """Classify a fresh publication without inferring success from absence of rollback."""
     label = (stats.variational or {}).get("publication_status")
@@ -122,11 +146,18 @@ def execute(scene_factory, args):
             "newton": newton.__file__,
         },
         "geometry_observer": {"stride": args.geometry_stride, "continuous_check": False, "affects_dynamics": False},
+        "kinetic_energy_scope": "cloth particle translational energy only",
+        "unavailable_measurements": {
+            "solver_stats.matrix_nnz": "base Stats field is not populated",
+            "solver_stats.triplet_count": "base Stats field is not populated; contact_pool reports its own scope",
+            "solver_stats.triplet_capacity": "base Stats field is not populated",
+        },
     }
     write_json(args.output / "manifest.json", manifest)
     scene, error, rollout_start, rollout_seconds = None, None, None, None
     counts = dict.fromkeys(("CONVERGED", "STOPPED_ACCEPTED", "HARD_FAILURE"), 0)
     frames, chunks, publications, stopped, construction_start = [], [], 0, [], time.perf_counter()
+    attempted_requests, stage = 0, "construction"
 
     def flush():
         if not frames:
@@ -147,6 +178,11 @@ def execute(scene_factory, args):
             planned_steps=scene.total_steps,
             dt_s=scene.dt,
             construction_seconds=time.perf_counter() - construction_start,
+            device=str(scene.model.device),
+            body_labels=getattr(scene.model, "body_label", None),
+            joint_labels=getattr(scene.model, "joint_label", None),
+            timing_scope="cold construction and rollout; lazy JIT/capture remain included, no isolated warmup",
+            performance_qualification="EXPLORATORY",
         )
         write_json(args.output / "manifest.json", manifest)
         np.savez_compressed(
@@ -164,6 +200,7 @@ def execute(scene_factory, args):
             axis=1,
         )
         masses = scene.model.particle_mass.numpy() if hasattr(scene.model, "particle_mass") else None
+        stage = "initial_observation"
         write_json(
             args.output / "initial-geometry.json",
             inspect_geometry(
@@ -173,8 +210,10 @@ def execute(scene_factory, args):
         stop = min(args.max_steps or scene.total_steps, scene.total_steps)
         wp.synchronize_device(scene.model.device)
         rollout_start = time.perf_counter()
+        stage = "rollout"
         with (args.output / "steps.jsonl").open("w") as stream:
             for request in range(stop):
+                attempted_requests += 1
                 previous = scene.solver.last_stats.step_generation
                 before_steps = scene.steps
                 step_start = time.perf_counter()
@@ -192,6 +231,33 @@ def execute(scene_factory, args):
                     failure_reason=stats.failure_reason,
                     phase=scene.phase,
                 )
+                row["solver_stats"] = (
+                    {
+                        name: getattr(stats, name, None)
+                        for name in (
+                            "nonlinear_iterations",
+                            "linear_iterations",
+                            "linear_scheduled_slots",
+                            "line_search_iterations",
+                            "regularization_retries",
+                            "matrix_assembly_count",
+                            "merit_initial",
+                            "merit_final",
+                            "convergence_ratio",
+                            "joint_force_generation",
+                            "joint_pd_force",
+                            "joint_limit_force",
+                            "joint_friction_force",
+                            "joint_pd_saturated",
+                            "joint_limit_damping_power",
+                            "joint_friction_power",
+                        )
+                    }
+                    if row["stats_fresh"]
+                    else None
+                )
+                if row["solver_stats"] is not None:
+                    row["solver_stats"].update(matrix_nnz=None, triplet_count=None, triplet_capacity=None)
                 try:
                     forces = getattr(scene, "last_forces", None)
                     if forces is None or forces.force_generation != stats.step_generation:
@@ -235,21 +301,6 @@ def execute(scene_factory, args):
                     row["kinetic_energy_J"] = (
                         float(np.sum(masses[:, None] * velocity.astype(float) ** 2) / 2) if masses is not None else None
                     )
-                    row["solver_stats"] = {
-                        name: getattr(stats, name, None)
-                        for name in (
-                            "nonlinear_iterations",
-                            "linear_iterations",
-                            "line_search_iterations",
-                            "regularization_retries",
-                            "triplet_count",
-                            "triplet_capacity",
-                            "matrix_nnz",
-                            "merit_initial",
-                            "merit_final",
-                            "convergence_ratio",
-                        )
-                    }
                     diagnostics = {"method": "off", "active": 0, "compressive_load_N": 0.0}
                     if args.method != "off":
                         adapter = importlib.import_module(".cloth_contact_method", __package__)
@@ -257,18 +308,26 @@ def execute(scene_factory, args):
                     row["method_diagnostics"] = diagnostics
                     row["contact_spatial"] = (stats.variational or {}).get("contact_spatial")
                     row["contact_pool"] = (stats.variational or {}).get("contact_pool")
-                    frames.append(
-                        {
-                            "step": before_steps + 1,
-                            "x": x,
-                            "v": velocity,
-                            "q": scene.state.joint_q.numpy(),
-                            "qd": scene.state.joint_qd.numpy(),
-                            "particle_force": forces.particle_force,
-                            "joint_force": forces.joint_force,
-                            "external_particle_force": scene.state.particle_f.numpy(),
-                        }
-                    )
+                    frame = {
+                        "step": before_steps + 1,
+                        "x": x,
+                        "v": velocity,
+                        "q": scene.state.joint_q.numpy(),
+                        "qd": scene.state.joint_qd.numpy(),
+                        "particle_force": forces.particle_force,
+                        "body_wrench": forces.body_wrench,
+                        "joint_force": forces.joint_force,
+                        "external_particle_force": scene.state.particle_f.numpy(),
+                    }
+                    for name in ("body_q", "body_qd"):
+                        value = getattr(scene.state, name, None)
+                        if value is not None:
+                            frame[name] = value.numpy()
+                    for name in ("joint_target_q", "joint_target_qd"):
+                        value = getattr(getattr(scene, "control", None), name, None)
+                        if value is not None:
+                            frame[name] = value.numpy()
+                    frames.append(frame)
                     if hasattr(scene, "fixture_work"):
                         row["fixture_external_work_J"] = scene.fixture_work
                 except Exception as failure:
@@ -338,11 +397,23 @@ def execute(scene_factory, args):
             else "PARTIAL",
             "task_verdict": "OBSERVATION_ONLY",
             "error": error,
+            "failure_stage": stage if error else None,
+            "attempted_requests": attempted_requests,
+            "rollout_status": "NOT_RUN"
+            if not attempted_requests
+            else "HARD_FAILURE"
+            if error
+            else "COMPLETE"
+            if publications == scene.total_steps
+            else "PARTIAL",
             "published_steps": publications,
             "planned_steps": scene.total_steps if scene is not None else None,
             "publication_counts": counts,
             "stopped_steps": stopped,
             "rollout_seconds": rollout_seconds,
+            "construction_seconds": manifest.get("construction_seconds", time.perf_counter() - construction_start),
+            "memory": _memory(None if scene is None else scene.model.device),
+            "performance_qualification": "EXPLORATORY",
             "published_time_s": publications * scene.dt if scene is not None else 0,
             "offline_geometry_seconds": time.perf_counter() - observer_start,
             "geometry_checked_frames": checked,
@@ -350,6 +421,11 @@ def execute(scene_factory, args):
             "continuous_check": False,
             "observer_errors": observer_errors,
         }
+        manifest["source_files_changed_during_run"] = [
+            name
+            for name, digest in hashes.items()
+            if not Path(name).is_file() or hashlib.sha256(Path(name).read_bytes()).hexdigest() != digest
+        ]
         manifest["status"] = summary["status"]
         write_json(args.output / "manifest.json", manifest)
         write_json(args.output / "summary.json", summary)

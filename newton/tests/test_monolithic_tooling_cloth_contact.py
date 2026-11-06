@@ -15,11 +15,60 @@ from unittest.mock import patch
 import numpy as np
 
 from newton._src.solvers.monolithic.solver_types import Stats, Status
-from scripts.monolithic_reference.cloth_contact_geometry import inspect_geometry
+from scripts.monolithic_reference.cloth_contact_geometry import (
+    _segment_points,
+    _segment_points_batch,
+    _triangle_pair,
+    _triangle_pairs,
+    inspect_geometry,
+)
 from scripts.monolithic_reference.cloth_contact_run import execute, publication, write_json
 
 
 class TestClothContactGeometry(unittest.TestCase):
+    def test_batched_witnesses_match_scalar_reference(self):
+        """Preserve scalar distances, event classification and witness order in a batch."""
+        rng = np.random.default_rng(2718)
+        a, b = rng.normal(size=(2, 48, 3, 3)) * 0.01
+        b[:8] = a[:8] + np.array([0, 0, 0.0003])
+        b[8:16, :, 2] = a[8:16, :, 2] = 0
+        distances, hits, mask, coplanar, _, _ = _triangle_pairs(a, b, 1e-9)
+        for index in range(len(a)):
+            expected_distance, expected_hits, expected_coplanar = _triangle_pair(a[index], b[index], 1e-9)
+            self.assertAlmostEqual(distances[index], expected_distance, places=14)
+            self.assertEqual(bool(coplanar[index]), expected_coplanar)
+            np.testing.assert_allclose(
+                hits[index, mask[index]], np.asarray(expected_hits).reshape(-1, 3), atol=2e-16, rtol=1e-12
+            )
+
+    def test_nearly_parallel_crossing_segments(self):
+        """Keep the cross-product denominator for edges whose dot determinant cancels."""
+        a = np.tile([-1.0, 0, 0], (3, 1))
+        b = -a
+        c = np.array([[-1.0, -angle, 0] for angle in (1e-8, 1e-10, 1e-12)])
+        d = -c
+        p, q = _segment_points_batch(a, b, c, d)
+        np.testing.assert_allclose(p, 0, atol=1e-15)
+        np.testing.assert_allclose(q, 0, atol=1e-15)
+        for index in range(3):
+            expected = _segment_points(a[index], b[index], c[index], d[index])
+            np.testing.assert_array_equal(p[index], expected[0])
+            np.testing.assert_array_equal(q[index], expected[1])
+
+    def test_tolerance_boundary_uses_scalar_witnesses(self):
+        """Retain the scalar decision immediately on either side of the event tolerance."""
+        a = np.array([[0, 0, 0], [0.02, 0, 0], [0, 0.02, 0]])
+        for height in (np.nextafter(1e-9, 0), 1e-9, np.nextafter(1e-9, np.inf)):
+            b = a + np.array([0, 0, height])
+            result = inspect_geometry(np.vstack((a, b)), [[0, 1, 2], [3, 4, 5]], [0, 1], [0.0005] * 2)
+            distance, hits, coplanar = _triangle_pair(a, b, 1e-9)
+            self.assertEqual(result["minimum_distance_m"], distance)
+            self.assertEqual(result["intersections"], [[0, 1]] if hits else [])
+            self.assertEqual(
+                result["intersection_kinds"],
+                ["coplanar_overlap_or_touch" if coplanar else "surface_intersection_or_touch"] if hits else [],
+            )
+
     def test_parallel_layers(self):
         """Measure known layer spacing and thickness compression independently."""
         a = np.array([[0, 0, 0], [1, 0, 0], [0, 1, 0]], dtype=float)
@@ -93,7 +142,7 @@ class TestClothPublication(unittest.TestCase):
             forces = SimpleNamespace(force_valid=valid, force_generation=generation)
             self.assertEqual(publication(stats, forces, previous_generation=previous), "HARD_FAILURE")
 
-    def _record(self, directory, *, fail_read=False, fail_observer=False):
+    def _record(self, directory, *, fail_read=False, fail_observer=False, fail_step=False, fail_body_read=False):
         def array(value):
             return SimpleNamespace(numpy=lambda: np.asarray(value))
 
@@ -107,15 +156,19 @@ class TestClothPublication(unittest.TestCase):
             variational={"publication_status": "CONVERGED"},
         )
         forces = SimpleNamespace(
-            force_valid=True, force_generation=1, particle_force=np.zeros((3, 3)), joint_force=np.zeros(0)
+            force_valid=True,
+            force_generation=1,
+            particle_force=np.zeros((3, 3)),
+            joint_force=np.zeros(0),
+            body_wrench=np.zeros((0, 6)),
         )
         scene = SimpleNamespace(
             metadata={},
             dt=0.1,
-            total_steps=1,
+            total_steps=2 if fail_body_read else 1,
             steps=0,
             phase="test",
-            model=SimpleNamespace(device="cpu", particle_q=array(x)),
+            model=SimpleNamespace(device="cpu", particle_q=array(x), body_label=[], joint_label=[]),
             triangles=[[0, 1, 2]],
             owners=[0],
             thicknesses=[0.001],
@@ -129,12 +182,31 @@ class TestClothPublication(unittest.TestCase):
         )
         if fail_read:
             scene.state.joint_q.numpy = lambda: (_ for _ in ()).throw(RuntimeError("readback failed"))
+        if fail_body_read:
+
+            def body_positions():
+                if scene.steps == 2:
+                    raise RuntimeError("body readback failed")
+                return np.zeros((0, 7))
+
+            scene.state.body_q = SimpleNamespace(numpy=body_positions)
         scene.solver = SimpleNamespace(
             last_stats=stats, get_contact_forces=lambda state: forces, save_checkpoint=lambda state, path: None
         )
 
         def step():
             stats.step_generation += 1
+            forces.force_generation = stats.step_generation
+            if fail_step:
+                stats.linear_iterations = 7
+                stats.matrix_assembly_count = 3
+                stats.rolled_back = True
+                stats.converged = False
+                stats.status = "LINEAR_MAX_ITERATIONS"
+                stats.failure_reason = "injected linear failure"
+                stats.variational = {"publication_status": "HARD_FAILURE"}
+                forces.force_valid = False
+                raise RuntimeError("step failed")
             scene.steps += 1
 
         scene.step = step
@@ -157,8 +229,18 @@ class TestClothPublication(unittest.TestCase):
                 observer.return_value = {}
                 execute(lambda: scene, args)
         return json.loads((args.output / "summary.json").read_text()), json.loads(
-            (args.output / "steps.jsonl").read_text()
+            (args.output / "steps.jsonl").read_text().splitlines()[-1]
         )
+
+    def test_partial_frame_does_not_discard_earlier_states(self):
+        """Retain complete earlier frames when optional state readback fails."""
+        with tempfile.TemporaryDirectory() as folder:
+            summary, row = self._record(folder, fail_body_read=True)
+            self.assertEqual(summary["published_steps"], 2)
+            self.assertIn("body readback failed", row["recording_error_after_publication"])
+            with np.load(Path(folder) / "run/states-0000.npz") as states:
+                np.testing.assert_array_equal(states["step"], [1])
+                self.assertEqual(states["body_q"].shape, (1, 0, 7))
 
     def test_readback_failure_preserves_publication(self):
         """Keep valid advancement when later evidence collection fails."""
@@ -169,6 +251,16 @@ class TestClothPublication(unittest.TestCase):
             self.assertEqual(row["publication_status"], "CONVERGED")
             self.assertEqual(row["time_after_s"], 0.1)
             self.assertIn("recording_error_after_publication", row)
+
+    def test_failed_step_preserves_fresh_solver_cost(self):
+        """Retain work spent by a fresh failed attempt without counting a publication."""
+        with tempfile.TemporaryDirectory() as folder:
+            summary, row = self._record(folder, fail_step=True)
+            self.assertEqual(summary["published_steps"], 0)
+            self.assertEqual(row["publication_status"], "HARD_FAILURE")
+            self.assertTrue(row["stats_fresh"])
+            self.assertEqual(row.get("solver_stats", {}).get("linear_iterations"), 7)
+            self.assertEqual(row.get("solver_stats", {}).get("matrix_assembly_count"), 3)
 
     def test_observer_failure_retains_summary(self):
         """Report an offline observer gap without erasing the simulation receipt."""

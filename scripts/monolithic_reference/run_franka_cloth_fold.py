@@ -15,7 +15,7 @@ def main():
     add_arguments(parser)
     args = parser.parse_args()
     method_config = json.loads(args.method_config.read_text()) if args.method_config else None
-    execute(
+    return execute(
         lambda: FrankaClothScene(
             args.recipe,
             device=args.device,
@@ -29,4 +29,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())
