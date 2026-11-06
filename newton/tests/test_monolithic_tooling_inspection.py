@@ -257,13 +257,22 @@ def test_binding_roles(test, device):
     test.assertFalse(schema["describes_state"])
 
 
+def without_wall_clock(value):
+    """Drop wall-clock timing fields (``*_seconds``); they never repeat between runs."""
+    if isinstance(value, dict):
+        return {k: without_wall_clock(v) for k, v in value.items() if not str(k).endswith("_seconds")}
+    if isinstance(value, list):
+        return [without_wall_clock(v) for v in value]
+    return value
+
+
 def frames(run, state, control, steps, *, hook=None):
     result = []
     for step in range(steps):
         step_chain(run, state, control, step)
         if hook is not None:
             hook(run, state, control, step)
-        result.append({"snapshot": snapshot(state), "stats": serial(run.last_stats)})
+        result.append({"snapshot": snapshot(state), "stats": without_wall_clock(serial(run.last_stats))})
     return result
 
 
