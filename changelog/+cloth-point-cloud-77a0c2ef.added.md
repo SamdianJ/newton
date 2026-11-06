@@ -1,0 +1,1 @@
+Add experimental weighted cloth inter/self point-cloud contact to the unified monolithic solver, with two-sided thickness, bounded native candidates, C-IE response, shared force publication and transactional checkpoint support.

@@ -1012,6 +1012,88 @@ class ContactProducer(_Producer):
         solver._variational["actor_contact_pairs"] = solver._contact.publish(state)
 
 
+class _ClothContactProducer(_Producer):
+    """Add weighted shell interactions to the existing shared nonlinear rows."""
+
+    interaction = True
+    scale_policy = "none"
+    energy_fields = ("energy",)
+
+    def __init__(self, solver):
+        super().__init__("cloth_contact", np.empty(0, dtype=np.int32))
+        self.contact = contact = solver._cloth_contact
+        self.energies = ((contact, "energy", "absolute_energy"),)
+        self.checks = ((contact, "flags", {}, "Invalid cloth contact geometry"),)
+        self.assembly_checks = ((contact.pool.records, "flags", {}, "Invalid cloth contact assembly"),)
+        self._materials = tuple(solver._cloths)
+        self._reactions = _DeviceRecords(
+            _reaction_type(solver._dtype),
+            self._reaction_views(),
+            [block.raw.size for block in self._materials],
+            device=solver.model.device,
+        )
+
+    def _reaction_views(self):
+        return [(block.ids, block.rows, block.raw, 0) for block in self._materials]
+
+    def begin_step(self, solver, state_in):
+        self.contact.begin_step(state_in)
+
+    def evaluate(self, solver, state, dt, residual, *, build_tangent):
+        contact = self.contact
+        contact.evaluate(solver._displacement(state), dt)
+        if int(contact.pool.candidates.overflow.numpy()[0]) or int(contact.pool.records.dropped.numpy()[0]):
+            raise _StepFailure(solver.Status.CONTACT_OVERFLOW, "Incomplete cloth contact evaluation")
+        if int(contact.pool.records.flags.numpy()[0]):
+            raise _StepFailure(solver.Status.NONFINITE, "Invalid cloth contact records")
+        wp.launch(_add_values, residual.size, [contact.pool.residual.result, residual], device=solver.model.device)
+        reactions = self._reactions.bind(self._reaction_views())
+        wp.launch(
+            _contact_reaction,
+            self._reactions.jobs.size,
+            [reactions, self._reactions.jobs, contact.pool.residual.result, contact.pool.force.result, False],
+            device=solver.model.device,
+        )
+
+    def candidate(self, solver, accepted, trial, direction, alpha, dt):
+        """Read the trial positions supplied by cloth owners."""
+
+    def difference(self, solver, accepted, trial, out):
+        """Own no independent rows."""
+
+    def domain(self, solver, accepted, candidate, flags):
+        """Use discrete contact; continuous triangle paths are not guarded."""
+
+    def magnitude(self, solver, out):
+        values = self.contact.pool.magnitude
+        wp.launch(_add_absolute, values.size, [values, out], device=solver.model.device)
+
+    def coordinates(self, solver, state, out):
+        records = self.contact.pool.records
+        wp.launch(
+            _raise_coordinates,
+            records.rounding.size,
+            [records.count, records.support_offsets, records.factor_columns, records.rounding, out],
+            device=solver.model.device,
+        )
+
+    def assemble(self, solver, assembly, dt):
+        self.contact.assemble(assembly)
+
+    def publish(self, solver, state):
+        contact, history = self.contact, state._monolithic_coupled
+        if contact.assembled_generation != contact.evaluation_generation:
+            raise ValueError("Cloth forces require the final assembled evaluation")
+        wp.copy(scalar_view(history.cloth_contact_particle_force), contact.pool.force.result)
+        wp.copy(history.cloth_contact_summary, contact.summary)
+        wp.launch(
+            _add_values,
+            contact.pool.force.result.size,
+            [contact.pool.force.result, scalar_view(history.contact_particle_force)],
+            device=solver.model.device,
+        )
+
+
 def build_producers(solver):
     """Order producers as articulation, rigid, tet, cloth, cable and contact."""
     layout = solver._layout
@@ -1026,5 +1108,7 @@ def build_producers(solver):
     producers.extend(CableProducer(solver, block) for block in solver._cables)
     # A contact-free scene keeps its empty contact producer, as it keeps an empty pool.
     producers.append(ContactProducer(solver))
+    if solver._cloth_contact is not None:
+        producers.append(_ClothContactProducer(solver))
     validate_row_partition([p for p in producers if len(p.rows)], layout.scalar_dof_count)
     return producers

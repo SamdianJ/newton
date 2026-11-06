@@ -22,6 +22,7 @@ from .articulation import ArticulationObjective, _TreeKinematics
 from .cable_gauge import CableGauges
 from .cable_operator import CableOperator
 from .cable_system import CableBlock
+from .cloth_contact_point_cloud import _PointCloudContact
 from .cloth_system import ClothBlock
 from .config import GLOBALIZATION, MonolithicConfig
 from .contact_forces import MonolithicContactForces
@@ -108,6 +109,14 @@ class SolverMonolithic(SolverBase):
     energy is not a potential, so Armijo acceptance is heuristic, not a
     variational guarantee.
 
+    Experimental ``cloth_contact`` enables weighted cloth inter/self contact.
+    Its dictionary configures ``inter``/``self``, ``radius`` [m],
+    ``normal_stiffness`` [N/m^3], bounded ``candidate_capacity`` and
+    ``support_capacity``, and optional ``candidate_padding`` [m]. The default
+    is disabled. Radius adds to both half-thicknesses; finite sampling and
+    discrete detection do not guarantee material-layer spacing or no crossing.
+    This configuration is fixed for the solver lifetime and checkpoint identity.
+
     Experimental ``alignment_policy="frozen"`` retains each sample's physical
     step-start orientation weight through Newton and candidate refreshes.
     ``alignment_smoothing`` is its dimensionless C2 transition width (zero is
@@ -169,6 +178,7 @@ class SolverMonolithic(SolverBase):
         use_cuda_graph=False,
         precision=Precision.FP64,
         cloth_inputs=(),
+        cloth_contact=None,
         cable_inputs=(),
     ):
         # Reject invalid options before building actors or allocating storage.
@@ -334,6 +344,18 @@ class SolverMonolithic(SolverBase):
         self._contact_pool = True
         self._contact_spatial = isinstance(self._contact, _SpatialContactObjective)
         self._contact.initialize_pool(capacity, use_cuda_graph=use_cuda_graph)
+        self._cloth_contact = (
+            None
+            if cloth_contact is None
+            else _PointCloudContact(
+                self,
+                cloth_contact,
+                mu=friction_coefficient,
+                smoothing=normal_smoothing,
+                velocity_scale=friction_velocity_scale,
+                use_cuda_graph=use_cuda_graph,
+            )
+        )
         self._guard = min_det_f_guard
 
         # Checkpoint identity.
@@ -380,6 +402,8 @@ class SolverMonolithic(SolverBase):
             self._coupled_config["material_digest"] = np.frombuffer(
                 bytes.fromhex(self._materials.identity), dtype=np.uint8
             )
+        if self._cloth_contact is not None:
+            self._coupled_config["cloth_contact"] = self._cloth_contact.identity
         self._kinematics = self._make_kinematics(
             model,
             extra_config={
@@ -415,7 +439,9 @@ class SolverMonolithic(SolverBase):
         self._linear = MonolithicLinearWorkspace(
             layout,
             MonolithicLinearCapacities(
-                len(global_rows) + self._contact.triplet_capacity,
+                len(global_rows)
+                + self._contact.triplet_capacity
+                + (0 if self._cloth_contact is None else self._cloth_contact.pool.triplet_capacity),
                 len(internal_rows),
                 0,
                 self.linear_max_iterations,
@@ -606,7 +632,32 @@ class SolverMonolithic(SolverBase):
         return _TreeKinematics(model, actors=self._articulation_actors, extra_config=fields, dtype=self._dtype)
 
     def _make_states(self):
-        return CoupledState(self._kinematics, self._actors, self._rigid, self._materials)
+        return CoupledState(
+            self._kinematics,
+            self._actors,
+            self._rigid,
+            self._materials,
+            cloth_contact=self._cloth_contact is not None,
+        )
+
+    def get_cloth_contact_diagnostics(self, state):
+        """Return experimental cloth contact counts and compressive loads [N]."""
+        self._states.validate(state)
+        if self._cloth_contact is None:
+            return {"method": "off", "enabled": False}
+        history = state._monolithic_coupled
+        values = history.cloth_contact_summary.numpy()
+        return {
+            "method": "point-cloud",
+            "enabled": True,
+            "force_valid": bool(history.force_valid.numpy()[0]),
+            "generation": int(history.force_generation.numpy()[0]),
+            "inter": {"candidates": int(values[0]), "active": int(values[1]), "compressive_load_N": float(values[2])},
+            "self": {"candidates": int(values[3]), "active": int(values[4]), "compressive_load_N": float(values[5])},
+            "particle_force_N": history.cloth_contact_particle_force.numpy().copy(),
+            "configuration": dict(self._cloth_contact.config),
+            "protection": {"strategy": "DCD", "continuous_path_checked": False},
+        }
 
     def create_state(self, *, dt, source=None):
         """Initialize full integration history with positive dt, optionally from ordinary model state."""
@@ -943,11 +994,17 @@ class SolverMonolithic(SolverBase):
         state, k = self._accepted, self._kinematics
         try:
             self._contact.refresh(k.gather_q(state), state.particle_q, rigid_com=state._monolithic_coupled.rigid_com)
+            if self._cloth_contact is not None:
+                self._cloth_contact.refresh(state.particle_q)
         except ValueError as error:
             raise _StepFailure(self.Status.NONFINITE, str(error)) from error
 
     def _conservative_energy(self):
-        return self._contact.conservative_energy and not self._rigid.has_torque
+        return (
+            self._contact.conservative_energy
+            and not self._rigid.has_torque
+            and (self._cloth_contact is None or self._cloth_contact.mu == 0.0)
+        )
 
     def _trial_evaluation(self, dt, *, device_result=False):
         result = self._problem.evaluate_trial(dt)

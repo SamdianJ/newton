@@ -10,8 +10,9 @@ Experimental monolithic cloth
    shells, including naturally folded reference geometry. Multiple disjoint
    cloth and cable objects can share the global solve with supported articulation,
    free rigid and tet actors. Cloth contacts supported articulation, free rigid
-   and static shapes. Self-collision, soft-soft contact, attachments and moving
-   cloth boundary controls remain outside this interface.
+   and static shapes. Experimental weighted point-cloud inter/self contact is
+   available through ``cloth_contact``. Attachments and moving cloth boundary
+   controls remain outside this interface.
 
 Use native Model triangles and specify their row IDs in ``cloth_inputs``. The
 triangle ``tri_ke`` and ``tri_ka`` fields supply two-dimensional membrane mu and
@@ -60,6 +61,33 @@ with multiple articulations) also carries cable contact torque. Earlier material
 schemas are rejected because they lack this history. Checkpoints written before
 the current configuration version
 are rejected.
+
+Weighted cloth contact
+----------------------
+
+``cloth_contact=None`` preserves the existing shape-contact path. An experimental
+configuration dictionary enables cloth interactions, for example
+``{"inter": True, "self": True, "radius": 0.012, "normal_stiffness": 1e5,
+"candidate_capacity": 8192}``. Radius L [m] is a numerical support length;
+normal stiffness is a method coefficient [N/m³], not a calibrated physical value.
+Each ordered triangle P1Q3 point/node term has weight ``wA*wB/L**2`` and gap
+``distance - L - (hA+hB)/2``. Both directions are summed. Reference one-ring
+neighbors are excluded from self contact. Finite sampling can introduce
+tangential bias and effective layer spacing larger than the material thickness.
+
+``candidate_padding`` [m] extends the start/current query radius; its default is L.
+``support_capacity`` defaults to twelve times candidate capacity. The native
+spatial hash is queried at Newton boundaries and frozen through trials. This is
+discrete detection with no triangle-path guarantee; out-of-envelope trials can
+miss interactions. A full pool fails and rolls back rather than truncating force.
+The existing C-IE law, PSD approximation, global PCG and acceptance policy remain.
+The complete Jacobian includes terms omitted by the PSD matrix; friction is
+nonconservative and may leave a force-couple torque between separated points.
+
+``get_cloth_contact_diagnostics(state)`` returns publication-bound inter/self
+counts, compressive load sums [N] and particle forces [N]. These forces also enter
+``get_contact_forces()``. Enabled cloth-contact checkpoints use schema 8 and bind
+the method configuration; disabled and differently configured solvers reject them.
 
 Numerical contract
 ------------------

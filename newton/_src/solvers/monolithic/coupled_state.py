@@ -18,7 +18,7 @@ class CoupledState(ArticulationState):
     namespace = "_monolithic_coupled"
     version = 4
 
-    def __init__(self, kinematics, actors, rigid=None, materials=None):
+    def __init__(self, kinematics, actors, rigid=None, materials=None, *, cloth_contact=False):
         self.actors = actors
         self.rigid = rigid
         self.materials = materials
@@ -43,6 +43,13 @@ class CoupledState(ArticulationState):
             force_valid=((1,), wp.int32),
             precision=((1,), wp.int32),
         )
+        self.cloth_contact = cloth_contact
+        if cloth_contact:
+            self.version = 8
+            self.schema.update(
+                cloth_contact_particle_force=((n,), self.vector),
+                cloth_contact_summary=((6,), self.dtype),
+            )
         if materials is not None:
             edges = materials.theta_count
             twists = sum(len(obj["ref_twist"]) for obj in materials.cable)
@@ -268,6 +275,9 @@ class CoupledState(ArticulationState):
         history = getattr(state, self.namespace)
         if self.materials is not None:
             history.contact_cable_torque.zero_()
+        if self.cloth_contact:
+            history.cloth_contact_particle_force.zero_()
+            history.cloth_contact_summary.zero_()
         for name in (
             "contact_particle_force",
             "contact_body_force",
