@@ -17,7 +17,6 @@ def diagnostics(solver, state):
     """Export publication-bound cloth forces and separate inter/self loads [N]."""
     result = solver.get_cloth_contact_diagnostics(state)
     if result.get("enabled"):
-        result["particle_force_N"] = result["particle_force_N"].tolist()
         for field in ("candidates", "active", "compressive_load_N"):
             result[field] = result["inter"][field] + result["self"][field]
         result["unavailable"] = {"continuous_path": "DCD has no continuous triangle path test"}
