@@ -1,0 +1,143 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 The Newton Developers
+# SPDX-License-Identifier: Apache-2.0
+
+"""Check folding targets and the single-step control transaction without a rollout."""
+
+import copy
+import unittest
+from types import SimpleNamespace
+from unittest.mock import Mock
+
+import numpy as np
+
+from scripts.monolithic_reference.cloth_franka_scene import (
+    DEFAULT_RECIPE,
+    FrankaClothScene,
+    fold_targets,
+    load_recipe,
+    tcp_targets,
+)
+
+
+class Array:
+    def __init__(self, value):
+        self.value = np.asarray(value).copy()
+
+    def numpy(self):
+        return self.value.copy()
+
+    def assign(self, value):
+        self.value = np.asarray(value).copy()
+
+
+class TestClothFoldControls(unittest.TestCase):
+    def test_targets_use_absolute_physical_time(self):
+        times = np.array([0.0, 2.0, 5.0])
+        q = np.array([[0.0, 0.04], [1.0, 0.001], [-0.5, 0.04]])
+        for i, time in enumerate(times):
+            actual, velocity, _ = fold_targets(times, q, time)
+            np.testing.assert_allclose(actual, q[i])
+            np.testing.assert_allclose(velocity, 0.0)
+        for time in (0.7, 2.6, 4.0):
+            actual, velocity, index = fold_targets(times, q, time)
+            h = 1e-5
+            numeric = (fold_targets(times, q, time + h)[0] - fold_targets(times, q, time - h)[0]) / (2 * h)
+            np.testing.assert_allclose(velocity, numeric, rtol=1e-7, atol=1e-9)
+            self.assertEqual(index, int(time >= 2))
+            self.assertTrue(np.isfinite(actual).all())
+        np.testing.assert_array_equal(fold_targets(times, q, 20)[0], q[-1])
+
+    def test_tcp_frame_mapping_preserves_link_pose(self):
+        recipe = load_recipe(DEFAULT_RECIPE)
+        positions, rotations = tcp_targets(recipe)
+        row = recipe["keyframes"][0]
+        q = np.asarray(row["quaternion_xyzw"], dtype=float)
+        q /= np.linalg.norm(q)
+        v = np.asarray(recipe["robot"]["tcp_offset_m"]) - recipe["robot"]["source_tcp_offset_m"]
+        rotated = v + 2 * np.cross(q[:3], np.cross(q[:3], v) + q[3] * v)
+        np.testing.assert_allclose(positions[0], np.asarray(row["position_m"]) + rotated)
+        self.assertGreater(np.linalg.norm(positions[0] - row["position_m"]), 0.009)
+        np.testing.assert_allclose(np.linalg.norm(rotations, axis=1), 1.0)
+        self.assertEqual(len(positions), 33)
+
+    def test_invalid_recipe_rejected_before_assets(self):
+        recipe = load_recipe(DEFAULT_RECIPE)
+        for path, value in (
+            (["dt"], 0),
+            (["material", "thickness_m"], -1),
+            (["keyframes", 0, "duration_s"], float("nan")),
+        ):
+            candidate = copy.deepcopy(recipe)
+            current = candidate
+            for key in path[:-1]:
+                current = current[key]
+            current[path[-1]] = value
+            with self.assertRaises(ValueError):
+                load_recipe(candidate)
+        for time in (-1, float("nan"), float("inf")):
+            with self.assertRaises(ValueError):
+                fold_targets(np.array([0, 1]), np.zeros((2, 9)), time)
+
+    @staticmethod
+    def scene(publication="CONVERGED", *, rolled_back=False, error=None):
+        scene = FrankaClothScene.__new__(FrankaClothScene)
+        scene.dt, scene.total_steps, scene.steps, scene.failed = 0.1, 4, 0, False
+        scene.last_forces, scene._published_generation = None, 0
+        scene.times = np.array([0.0, 0.4])
+        scene.joint_targets = np.array([np.zeros(9), np.ones(9)])
+        scene.phases, scene.phase = ["grasp"], "initial"
+        scene.control = SimpleNamespace(joint_target_q=Array(np.zeros(9)), joint_target_qd=Array(np.zeros(9)))
+        scene.state = object()
+        stats = SimpleNamespace(
+            rolled_back=rolled_back,
+            variational={"publication_status": publication},
+            step_generation=1,
+            converged=publication == "CONVERGED",
+        )
+        scene.solver = SimpleNamespace(
+            last_stats=stats,
+            step=Mock(side_effect=error),
+            get_contact_forces=Mock(return_value=SimpleNamespace(force_valid=True, force_generation=1)),
+        )
+        return scene
+
+    def test_one_solver_step_and_clock_advance_for_valid_publication(self):
+        for publication in ("CONVERGED", "STOPPED_ACCEPTED"):
+            scene = self.scene(publication)
+            scene.step()
+            self.assertEqual(scene.steps, 1)
+            self.assertEqual(scene.phase, "grasp")
+            scene.solver.step.assert_called_once_with(scene.state, scene.state, scene.control, dt=0.1)
+            expected = fold_targets(scene.times, scene.joint_targets, 0.1)
+            np.testing.assert_allclose(scene.control.joint_target_q.numpy(), expected[0])
+            np.testing.assert_allclose(scene.control.joint_target_qd.numpy(), expected[1])
+            scene.solver.get_contact_forces.assert_called_once_with(scene.state)
+            self.assertIs(scene.last_forces, scene.solver.get_contact_forces.return_value)
+
+    def test_invalid_force_generation_is_not_published(self):
+        scene = self.scene()
+        scene.solver.get_contact_forces.return_value.force_generation = 0
+        with self.assertRaises(RuntimeError):
+            scene.step()
+        self.assertEqual(scene.steps, 0)
+        self.assertIsNone(scene.last_forces)
+
+    def test_failed_publication_restores_control_and_clock(self):
+        for scene in (
+            self.scene("HARD_FAILURE", rolled_back=True),
+            self.scene("UNKNOWN"),
+            self.scene(error=RuntimeError("failure")),
+        ):
+            with self.assertRaises(RuntimeError):
+                scene.step()
+            self.assertEqual(scene.steps, 0)
+            self.assertTrue(scene.failed)
+            self.assertEqual(scene.phase, "initial")
+            np.testing.assert_array_equal(scene.control.joint_target_q.numpy(), np.zeros(9))
+            np.testing.assert_array_equal(scene.control.joint_target_qd.numpy(), np.zeros(9))
+            scene.step()
+            scene.solver.step.assert_called_once()
+
+
+if __name__ == "__main__":
+    unittest.main()
