@@ -129,6 +129,14 @@ def _shell_adjacency(triangles, positions):
                 pending.extend((neighbors[face] & incident) - fan)
         if fan != incident:
             raise ValueError("Cloth has a nonmanifold vertex")
+    pairs = np.asarray(
+        [(face, other) for face, adjacent in enumerate(neighbors) for other in adjacent if face < other], dtype=np.int32
+    ).reshape(-1, 2)
+    return stencils, _shell_geometry(triangles, positions, pairs)
+
+
+def _shell_geometry(triangles, positions, neighbors):
+    """Validate current geometry using face indices from already validated topology."""
     xyz = positions[triangles]
     e1, e2 = xyz[:, 1] - xyz[:, 0], xyz[:, 2] - xyz[:, 0]
     normal = np.cross(e1, e2)
@@ -140,10 +148,9 @@ def _shell_adjacency(triangles, positions):
         if np.any(twice_area / (np.linalg.norm(left, axis=1) * np.linalg.norm(right, axis=1)) <= 1e-8):
             raise ValueError("Cloth reference triangle is ill-conditioned")
     normals = normal / twice_area[:, None]
-    for face, adjacent in enumerate(neighbors):
-        if any(np.sum((normals[face] + normals[other]) ** 2) <= 1e-8 for other in adjacent):
-            raise ValueError("Cloth reference normals are antiparallel")
-    return stencils, twice_area / 2
+    if np.any(np.sum((normals[neighbors[:, 0]] + normals[neighbors[:, 1]]) ** 2, axis=1) <= 1e-8):
+        raise ValueError("Cloth reference normals are antiparallel")
+    return twice_area / 2
 
 
 class _MaterialInputs:

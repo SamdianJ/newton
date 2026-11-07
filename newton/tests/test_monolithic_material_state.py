@@ -7,11 +7,13 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import numpy as np
 import warp as wp
 
 import newton
+from newton._src.solvers.monolithic import coupled_state, material_inputs
 from newton._src.solvers.monolithic.actors import ActorTable
 from newton._src.solvers.monolithic.linear_types import MonolithicLinearLayout
 from newton._src.solvers.monolithic.pcg_common import group_data, group_policy
@@ -111,6 +113,88 @@ def snapshot(state):
 
 
 class TestMonolithicMaterialState(unittest.TestCase):
+    def test_cloth_topology_validated_once(self):
+        """Reuse frozen topology during state initialization, validation and checkpoint loading."""
+        for precision in SolverMonolithic.Precision:
+            _, solver = scene(cloth=2, cables=0, precision=precision)
+            with (
+                patch.object(material_inputs, "_shell_adjacency", side_effect=AssertionError("Topology rebuilt")),
+                patch.object(
+                    coupled_state, "_shell_adjacency", create=True, side_effect=AssertionError("Topology rebuilt")
+                ),
+                tempfile.TemporaryDirectory() as directory,
+            ):
+                state = solver.create_state(dt=0.001)
+                solver.reset_state(state, dt=0.001)
+                solver.get_contact_forces(state)
+                path = Path(directory) / "cloth.npz"
+                solver.save_checkpoint(state, path)
+                target = solver.create_state(dt=0.001)
+                solver.load_checkpoint(target, path)
+                for name, value in snapshot(state).items():
+                    np.testing.assert_array_equal(snapshot(target)[name], value, err_msg=name)
+
+    def test_current_cloth_geometry_and_atomic_load(self):
+        """Recheck folded normals and relative area without changing invalid states or checkpoints."""
+        for precision in SolverMonolithic.Precision:
+            builder = newton.ModelBuilder(gravity=(0, 0, 0))
+            for position, mass in zip(
+                ((0, 0, 0), (1, 0, 0), (0, 1, 0), (0, -1, 0)), (1 / 3, 1 / 3, 1 / 6, 1 / 6), strict=True
+            ):
+                builder.add_particle(wp.vec3(position), wp.vec3(0), mass)
+            for face in ((0, 1, 2), (1, 0, 3)):
+                builder.add_triangle(*face, tri_ke=2, tri_ka=3, tri_kd=0, tri_drag=0, tri_lift=0)
+            solver = SolverMonolithic(
+                builder.finalize(device="cpu"),
+                cloth_inputs=[
+                    SolverMonolithic.ClothInput(triangle_ids=(0, 1), bending=(1, 2), thickness=0.01, surface_density=1)
+                ],
+                precision=precision,
+                friction_velocity_scale=0.1,
+            )
+            state = solver.create_state(dt=0.001)
+            reference = state.particle_q.numpy().copy()
+            for predicate in ("normals are antiparallel", "state has collapsed triangles"):
+                for factor in (1.01, 0.99):
+                    points = reference.copy()
+                    if predicate == "normals are antiparallel":
+                        delta = factor * 1e-4
+                        points[3] = [0, np.cos(delta), np.sin(delta)]
+                    else:
+                        points *= np.sqrt(factor * 1e-8)
+                    state.particle_q.assign(points)
+                    if factor > 1:
+                        solver.reset_state(state, dt=0.001)
+                        solver.get_contact_forces(state)
+                        continue
+                    history = state._monolithic_coupled
+                    history.force_valid.fill_(1)
+                    history.force_generation.fill_(7)
+                    expected = snapshot(state)
+                    with (
+                        self.subTest(precision=precision, predicate=predicate),
+                        self.assertRaisesRegex(ValueError, predicate),
+                    ):
+                        solver.reset_state(state, dt=0.001)
+                    for name, value in snapshot(state).items():
+                        np.testing.assert_array_equal(value, expected[name], err_msg=name)
+                    # A corrupt checkpoint can bind its invalid coordinates; geometry must still reject it.
+                    expected["history.bound_x"] = points
+                    history.bound_x.assign(points)
+                    with self.assertRaisesRegex(ValueError, predicate):
+                        solver.step(state, state, solver.create_control(), dt=0.001)
+                    for name, value in snapshot(state).items():
+                        np.testing.assert_array_equal(value, expected[name], err_msg=name)
+                    target = solver.create_state(dt=0.001)
+                    before = snapshot(target)
+                    with tempfile.TemporaryDirectory() as directory:
+                        path = Path(directory) / "bad-cloth.npz"
+                        np.savez(path, **expected)
+                        with self.assertRaisesRegex(ValueError, predicate):
+                            solver.load_checkpoint(target, path)
+                    for name, value in snapshot(target).items():
+                        np.testing.assert_array_equal(value, before[name], err_msg=name)
+
     def test_independent_multi_object_layout(self):
         """Map each material coordinate exactly once without dummy bodies or tets."""
         model, solver = scene()
