@@ -113,7 +113,7 @@ def _self_pair_scene(reference_gap, *, thickness, smoothing, padding, precision,
     )
     current = reference.copy()
     current[3:6, 0] = 1 / 128
-    # A remote bridge keeps the cloth connected without making the target pair one-ring neighbors.
+    # A bridge keeps the cloth connected while preserving the selected reference gap.
     faces = ((0, 1, 2), (3, 5, 4), (2, 1, 6), (2, 6, 7), (7, 6, 8), (7, 8, 4), (4, 8, 3))
     builder = newton.ModelBuilder(gravity=(0, 0, 0))
     for point in reference @ rotation.T + offset:
@@ -151,12 +151,11 @@ def _candidate_oracle(solver, start, current):
     for owner, obj in enumerate(objects):
         reference = dict(zip(obj["particle_ids"], obj["positions"], strict=True))
         for tri in obj["triangles"]:
-            neighbors = {int(p) for other in obj["triangles"] if set(tri) & set(other) for p in other}
             for slot in range(3):
                 bary = np.array([2 / 3 if i == slot else 1 / 6 for i in range(3)])
                 for node, (other, particle) in enumerate(nodes):
                     if owner == other:
-                        if not contact.self_enabled or particle in neighbors:
+                        if not contact.self_enabled:
                             continue
                         q = bary @ np.array([reference[p] for p in tri])
                         radius = contact.self_exclusion_ratio * contact.length + obj["thickness"] + contact.smoothing
@@ -385,7 +384,7 @@ class TestPointCloudResponse(unittest.TestCase):
 
 class TestPointCloudSolver(unittest.TestCase):
     def test_flat_reference_excludes_local_two_hop_loads(self):
-        """Suppress local self preload beyond the additional one-ring exclusion."""
+        """Suppress reference-local self preload on a flat two-hop neighborhood."""
         _, solver = _scene(self_owner=True)
         state = solver.create_state(dt=0.001)
         contact = solver._cloth_contact
@@ -628,6 +627,7 @@ class TestPointCloudSolver(unittest.TestCase):
         _, solver = _scene(self_owner=True)
         state = solver.create_state(dt=0.001)
         self.assertEqual(solver._cloth_contact.config["self_exclusion_ratio"], 1.5)
+        self.assertEqual(solver._cloth_contact.config["self_exclusion"], "material-reference-distance")
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "reference.npz"
             solver.save_checkpoint(state, path)

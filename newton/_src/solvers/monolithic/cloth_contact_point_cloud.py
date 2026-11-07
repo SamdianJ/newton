@@ -136,8 +136,6 @@ def _query_points(
     node_owners: wp.array[int],
     thickness: wp.array[Any],
     worlds: wp.array[int],
-    exclusions: wp.array[int],
-    exclusion_offsets: wp.array[int],
     heads: wp.array[int],
     links: wp.array[int],
     width: Any,
@@ -181,9 +179,6 @@ def _query_points(
                     allowed = (owner != other and inter_enabled) or (owner == other and self_enabled)
                     allowed = allowed and (worlds[owner] == -1 or worlds[other] == -1 or worlds[owner] == worlds[other])
                     if owner == other and allowed:
-                        for k in range(exclusion_offsets[face], exclusion_offsets[face + 1]):
-                            if exclusions[k] == particle:
-                                allowed = False
                         # Match SuperDex's strict reference-distance rule with tau = h_bar + epsilon.
                         exclusion_radius = (
                             self_exclusion_ratio * length
@@ -352,24 +347,21 @@ class _PointCloudContact:
         if materials is None or not materials.cloth:
             raise ValueError("Cloth contact requires cloth_inputs")
         triangles, owners, areas, nodes, node_owners, node_areas = [], [], [], [], [], []
-        exclusions, offsets, thickness, worlds = [], [0], [], []
+        thickness, worlds = [], []
         reference = np.zeros((self.model.particle_count, 3), dtype=self.numpy_dtype)
         for owner, obj in enumerate(materials.cloth):
             reference[obj["particle_ids"]] = obj["positions"]
             faces, reference_areas = obj["triangles"], obj["areas"]
             thickness.append(obj["thickness"])
             worlds.append(obj["world"])
-            weights, adjacent = {}, {}
+            weights = {}
             for tri, area in zip(faces, reference_areas, strict=True):
                 for particle in tri:
                     weights[int(particle)] = weights.get(int(particle), 0) + area / 3
-                    adjacent.setdefault(int(particle), set()).update(map(int, tri))
             for tri, area in zip(faces, reference_areas, strict=True):
                 triangles.append(tri)
                 owners.append(owner)
                 areas.append(area / 3)
-                exclusions.extend(sorted(set().union(*(adjacent[int(p)] for p in tri))))
-                offsets.append(len(exclusions))
             for particle, area in sorted(weights.items()):
                 nodes.append(particle)
                 node_owners.append(owner)
@@ -390,7 +382,7 @@ class _PointCloudContact:
             "support_capacity": support_capacity,
             "thickness_rule": "L+(hA+hB)/2",
             "quadrature": "P1Q3-node",
-            "self_exclusion": "vertex-one-ring+material-reference-distance",
+            "self_exclusion": "material-reference-distance",
             "self_exclusion_ratio": self.self_exclusion_ratio,
             "self_exclusion_radius": "alpha*L+(hA+hB)/2+normal_smoothing",
             "self_exclusion_comparison": "reference-distance-squared<radius-squared",
@@ -410,7 +402,6 @@ class _PointCloudContact:
         self.node_area = array(node_areas, self.dtype)
         self.thickness = array(thickness, self.dtype)
         self.worlds = array(worlds, int)
-        self.exclusions, self.exclusion_offsets = array(exclusions, int), array(offsets, int)
         self.rows = array(solver._actors.maps["particle_to_global"], int)
         self.width = self.length + max(thickness) + self.smoothing + self.padding
         self.start = wp.zeros(self.model.particle_count, dtype=self.vector, device=self.device)
@@ -464,8 +455,6 @@ class _PointCloudContact:
             self.node_owners,
             self.thickness,
             self.worlds,
-            self.exclusions,
-            self.exclusion_offsets,
             self.heads,
             self.links,
             self.pairs,
@@ -510,8 +499,6 @@ class _PointCloudContact:
                     self.node_owners,
                     self.thickness,
                     self.worlds,
-                    self.exclusions,
-                    self.exclusion_offsets,
                     self.heads,
                     self.links,
                     self.dtype(self.width),
