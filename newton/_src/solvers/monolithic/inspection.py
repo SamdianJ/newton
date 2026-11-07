@@ -14,11 +14,20 @@ Binding of each field:
 
 * ``state``: read from the state passed in.
 * ``static``: fixed by the solver layout.
-* ``last_evaluation``: held by the solver from its most recent evaluation. It
-  describes the state passed in only when the schema's ``role`` is
-  ``published``; otherwise ``role`` names the internal iterate it belongs to.
+* ``last_evaluation``: held by the solver from an evaluation. It describes the
+  state passed in only when the schema's ``role`` is ``published``. Otherwise each
+  field's own ``role`` says which evaluation it comes from, because a failed or
+  rolled-back step leaves them from different evaluations:
+  ``last_recorded_iterate`` (the residual the iteration last recorded),
+  ``last_launched_evaluation`` (energy terms and contact records, written even
+  by an evaluation that then failed) and ``last_successful_evaluation``
+  (``Stats.min_det_f``).
 * ``derived``: computed here from solver storage; currently the per-element
-  det F of the published step, by the solver's own formula.
+  det F of the published step, by the tet evaluation's formula and compile
+  options.
+
+Non-finite values in the JSON records are written as null; the schema's
+``nonfinite`` maps each such path to its original value.
 """
 
 import json
@@ -29,13 +38,27 @@ from typing import Any
 import numpy as np
 import warp as wp
 
+from . import tet_precision
+from .convergence import Unit
 from .numeric_parameters import scalar_value
 
-wp.set_module_options({"fuse_fp": False})
+# det F must round like tet_precision._elements, so compile with that module's options.
+wp.set_module_options({"fuse_fp": wp.get_module(tet_precision.__name__).options["fuse_fp"]})
 
 SCHEMA_VERSION = 1
 
-ROW_UNITS = ("N", "N m")
+ROW_UNITS = tuple({Unit.FORCE: "N", Unit.TORQUE: "N m"}[unit] for unit in sorted(Unit))
+
+_UNPUBLISHED_ROLES = {
+    "residual": "last_recorded_iterate",
+    "energy_terms": "last_launched_evaluation",
+    "producer_energy": "last_launched_evaluation",
+    "contact_identity": "last_launched_evaluation",
+    "contact_source": "last_launched_evaluation",
+    "contact_target": "last_launched_evaluation",
+    "contact_wrench": "last_launched_evaluation",
+    "tet_min_det_f": "last_successful_evaluation",
+}
 
 # name: (binding, unit, frame, meaning, source, valid_when)
 _FIELDS = {
@@ -43,11 +66,18 @@ _FIELDS = {
         "state",
         "joint",
         "joint",
-        "joint coordinates; m or rad by joint type, FREE joints in Newton's convention",
+        "joint coordinates; m or rad by joint type; a FREE joint is [position 3, quaternion x y z w] of the child relative to its parent frame (rigid.py _mirrors)",
         "state.joint_q",
         "always",
     ),
-    "joint_qd": ("state", "joint_rate", "joint", "joint velocities; m/s or rad/s by DoF", "state.joint_qd", "always"),
+    "joint_qd": (
+        "state",
+        "joint_rate",
+        "joint",
+        "joint velocities; m/s or rad/s by DoF; a FREE joint is [linear 3, angular 3] in its parent frame (rigid.py _mirrors)",
+        "state.joint_qd",
+        "always",
+    ),
     "particle_q": ("state", "m", "world", "particle positions in solver precision", "state.particle_q", "always"),
     "particle_qd": ("state", "m/s", "world", "particle velocities in solver precision", "state.particle_qd", "always"),
     "rigid_com": (
@@ -78,7 +108,7 @@ _FIELDS = {
         "state",
         "rad/s",
         "world",
-        "FREE rigid angular velocity",
+        "FREE rigid angular velocity, world-frame components (rigid.py _initialize)",
         "state._monolithic_coupled.rigid_omega",
         "rigid actors present",
     ),
@@ -102,7 +132,7 @@ _FIELDS = {
         "state",
         "N|N m",
         "world",
-        "published contact wrench on each body, spatial vector as stored",
+        "published contact wrench on each body: [force 3, torque 3 about the body centre of mass] (contact_batch.py)",
         "state._monolithic_coupled.contact_body_force",
         "force_valid == 1",
     ),
@@ -230,7 +260,7 @@ _FIELDS = {
         "last_evaluation",
         "1",
         "none",
-        "source actor of each contact record (negative: static)",
+        "source Newton shape index of each contact record; -1: tet or cloth surface triangle sample, -3: cable edge sample (contact_sampling.py, contact_batch.py)",
         "solver._contact._batch.all_samples.sources",
         "a step evaluated",
     ),
@@ -238,7 +268,7 @@ _FIELDS = {
         "last_evaluation",
         "1",
         "none",
-        "target actor of each contact record",
+        "target Newton shape index of each contact record",
         "solver._contact._batch.all_samples.targets",
         "a step evaluated",
     ),
@@ -246,7 +276,7 @@ _FIELDS = {
         "last_evaluation",
         "N|N m",
         "world",
-        "per-record wrench, 2 ends x [force 3, torque 3]; normal and friction combined",
+        "per-record wrench, end 0 = source, end 1 = target, each [force 3, torque 3 about the world origin, cross(point, force)]; normal and friction combined (contact_batch.py)",
         "solver._contact.pool.records.pairs",
         "a step evaluated",
     ),
@@ -254,7 +284,7 @@ _FIELDS = {
         "last_evaluation",
         "1",
         "none",
-        "source actor of each actor pair",
+        "source of each contact pair: Newton shape index, -1 for tet or cloth surfaces; key of actor_samples.pair_kinds",
         "Stats.variational['actor_contact_pairs']",
         "role == published",
     ),
@@ -262,7 +292,7 @@ _FIELDS = {
         "last_evaluation",
         "1",
         "none",
-        "target actor of each actor pair",
+        "target Newton shape index of each contact pair",
         "Stats.variational['actor_contact_pairs']",
         "role == published",
     ),
@@ -270,7 +300,7 @@ _FIELDS = {
         "last_evaluation",
         "N|N m",
         "world",
-        "actor-pair wrench, 2 ends x [force 3, torque 3], fixed-tree sum",
+        "contact-pair wrench, fixed-tree sum of its records with ends in sorted shape order, each [force 3, torque 3 about the world origin] (contact_pipeline.py pair_diagnostics)",
         "Stats.variational['actor_contact_pairs']",
         "role == published",
     ),
@@ -403,18 +433,22 @@ def _role(solver, state, read):
     return "published", True
 
 
-def _jsonable(value):
-    """Convert to JSON with non-finite numbers as null."""
+def _jsonable(value, path="", nonfinite=None):
+    """Convert to JSON with non-finite numbers as null, recording each such path and value in ``nonfinite``."""
     if isinstance(value, dict):
-        return {str(k): _jsonable(v) for k, v in value.items()}
+        return {str(k): _jsonable(v, f"{path}.{k}", nonfinite) for k, v in value.items()}
     if isinstance(value, (list, tuple)):
-        return [_jsonable(v) for v in value]
+        return [_jsonable(v, f"{path}[{i}]", nonfinite) for i, v in enumerate(value)]
     if isinstance(value, np.ndarray):
-        return _jsonable(value.tolist())
+        return _jsonable(value.tolist(), path, nonfinite)
     if isinstance(value, np.generic):
-        return _jsonable(value.item())
+        return _jsonable(value.item(), path, nonfinite)
     if isinstance(value, float):
-        return value if math.isfinite(value) else None
+        if math.isfinite(value):
+            return value
+        if nonfinite is not None:
+            nonfinite[path] = "nan" if math.isnan(value) else ("inf" if value > 0 else "-inf")
+        return None
     if isinstance(value, (bool, int, str)) or value is None:
         return value
     return str(value)
@@ -553,8 +587,8 @@ def capture(solver, state, fields=None):
             records = solver._contact.pool.records
             count = int(read("solver._contact.pool.records.count", records.count)[0])
             if count:
-                identities = read("solver._contact.pool.records.identities", records.identities)[:count]
-                wrenches = read("solver._contact.pool.records.pairs", records.pairs)[:count]
+                identities = read("solver._contact.pool.records.identities[:count]", records.identities[:count])
+                wrenches = read("solver._contact.pool.records.pairs[:count]", records.pairs[:count])
             else:
                 identities = np.empty(0, dtype=np.uint64)
                 wrenches = np.empty((0, 2, 6), dtype=solver._numpy_dtype)
@@ -600,8 +634,13 @@ def capture(solver, state, fields=None):
     field_specs = {}
     for name, value in arrays.items():
         binding, unit, frame, meaning, source, valid_when = _FIELDS[name]
+        if binding in ("last_evaluation", "derived"):
+            field_role = "published" if role == "published" else _UNPUBLISHED_ROLES[name]
+        else:
+            field_role = binding
         field_specs[name] = {
             "binding": binding,
+            "role": field_role,
             "unit": unit,
             "frame": frame,
             "meaning": meaning,
@@ -610,11 +649,11 @@ def capture(solver, state, fields=None):
             "dtype": str(value.dtype),
             "shape": list(value.shape),
         }
-    records = {}
+    records, nonfinite = {}, {}
     if evaluated:
         for name in ("trials", "linear_postchecks"):
             if name in stats.variational:
-                records[name] = _jsonable(stats.variational[name])
+                records[name] = _jsonable(stats.variational[name], f"records.{name}", nonfinite)
     schema = {
         "schema_version": SCHEMA_VERSION,
         "precision": solver.precision.value,
@@ -640,6 +679,7 @@ def capture(solver, state, fields=None):
             }
         ),
         "not_measured": ["matrix_nnz", "max_penetration", "timings", "contact_force_imbalance"],
+        "nonfinite": nonfinite,
         "host_synchronizing": True,
         "reads": read.reads,
         "fields": field_specs,

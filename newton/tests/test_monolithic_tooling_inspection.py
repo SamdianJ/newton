@@ -14,7 +14,8 @@ import numpy as np
 import warp as wp
 
 import newton.solvers
-from newton._src.solvers.monolithic import inspection
+from newton._src.solvers.monolithic import inspection, tet_precision
+from newton._src.solvers.monolithic.convergence import Unit
 from newton._src.solvers.monolithic.solver_types import _StepFailure
 from newton.examples.softbody.monolithic_recording import serial
 from newton.tests.test_monolithic_material_state import scene
@@ -100,6 +101,29 @@ def test_schema_stable(test, device):
                 test.assertEqual(tuple(spec["shape"]), arrays[name].shape, name)
             for key in ("precision", "device", "configuration", "layout", "step_generation", "role"):
                 test.assertIn(key, schema)
+            for name, spec in schema["fields"].items():
+                binding = FIELDS_V1[name][0]
+                expected_role = "published" if binding in ("last_evaluation", "derived") else binding
+                test.assertEqual(spec["role"], expected_role, name)
+            test.assertEqual(schema["row_units"][Unit.FORCE], "N")
+            test.assertEqual(schema["row_units"][Unit.TORQUE], "N m")
+            test.assertEqual(len(schema["row_units"]), len(Unit))
+            trials = run.last_stats.variational["trials"]
+            trials.append({"energy": float("nan"), "merit": float("inf"), "slope": float("-inf"), "accepted": False})
+            try:
+                marked = inspection.capture(run, state)
+            finally:
+                trials.pop()
+            last = len(trials)
+            test.assertIsNone(marked["records"]["trials"][last]["energy"])
+            test.assertEqual(
+                {k: v for k, v in marked["schema"]["nonfinite"].items() if k.startswith(f"records.trials[{last}]")},
+                {
+                    f"records.trials[{last}].energy": "nan",
+                    f"records.trials[{last}].merit": "inf",
+                    f"records.trials[{last}].slope": "-inf",
+                },
+            )
             test.assertTrue(schema["host_synchronizing"])
             test.assertIsInstance(schema["reads"], list)
             test.assertEqual(schema["precision"], precision)
@@ -128,7 +152,12 @@ def test_schema_stable(test, device):
 
 def test_state_fields(test, device):
     """State-bound fields equal the state and the public force snapshot, and never alias."""
-    run, state, control = chain(device)
+    for precision in precisions():
+        with test.subTest(precision=precision):
+            check_state_fields(test, *chain(device, precision))
+
+
+def check_state_fields(test, run, state, control):
     step_chain(run, state, control, 0)
     result = inspection.capture(run, state)
     arrays = result["arrays"]
@@ -208,6 +237,43 @@ def test_solver_fields_match_stats(test, device):
                 np.testing.assert_array_equal(arrays["pair_wrench"][index], np.asarray(pair["world_wrench"]))
             test.assertGreater(arrays["contact_wrench"].shape[0], 0)
             test.assertEqual(arrays["contact_wrench"].shape[1:], (2, 6))
+            fields = schema["fields"]
+            for name in ("contact_source", "contact_target", "pair_source", "pair_target"):
+                test.assertIn("shape index", fields[name]["meaning"], name)
+            test.assertIn("-1", fields["contact_source"]["meaning"])
+            test.assertIn("-3", fields["contact_source"]["meaning"])
+            for name in ("contact_wrench", "pair_wrench"):
+                test.assertIn("world origin", fields[name]["meaning"], name)
+            test.assertIn("centre of mass", fields["contact_body_force"]["meaning"])
+            # Re-sum the per-contact records with pair_diagnostics' fixed tree; it must give the pairs bit for bit.
+            contact = run._contact
+            kinds = contact.actor_samples.pair_kinds
+            grouped = {pair: [] for pair in kinds}
+            order = np.argsort(arrays["contact_identity"].astype(np.int64), kind="stable")
+            for i in order:
+                if int(arrays["contact_identity"][i]) < contact.legacy_count:
+                    continue
+                source, target = int(arrays["contact_source"][i]), int(arrays["contact_target"][i])
+                label = (source, target) if source < 0 else tuple(sorted((source, target)))
+                test.assertIn(label, kinds)
+                if source >= 0:
+                    test.assertLess(source, run.model.shape_count)
+                wrench = arrays["contact_wrench"][i]
+                grouped[label].append(wrench[::-1] if source >= 0 and source != label[0] else wrench)
+            sums = {}
+            for label, entries in grouped.items():
+                tree = np.zeros((1 << max(0, len(entries) - 1).bit_length(), 2, 6), dtype=run._numpy_dtype)
+                if entries:
+                    tree[: len(entries)] = entries
+                step = 1
+                while step < len(tree):
+                    tree[:: 2 * step] += tree[step :: 2 * step]
+                    step *= 2
+                sums[label] = tree[0]
+            test.assertEqual(len(sums), len(pairs))
+            for index in range(len(pairs)):
+                label = (int(arrays["pair_source"][index]), int(arrays["pair_target"][index]))
+                np.testing.assert_array_equal(sums[label], arrays["pair_wrench"][index], err_msg=str(label))
 
 
 def test_binding_roles(test, device):
@@ -251,10 +317,38 @@ def test_binding_roles(test, device):
     with patch.object(failed, "_finish_candidate", side_effect=fail_after_finish):
         failed.step(failed_state, failed_state, failed_control, dt=0.001)
     test.assertTrue(failed.last_stats.rolled_back)
-    schema = inspection.capture(failed, failed_state)["schema"]
+    check_unpublished_roles(test, failed, failed_state)
+
+    def fail_trial(dt, evaluate=failed._problem.evaluate_trial, run=failed):
+        evaluate(dt)
+        raise _StepFailure(run.Status.NONFINITE, "injected failure inside a trial evaluation")
+
+    with patch.object(failed._problem, "evaluate_trial", side_effect=fail_trial):
+        failed.step(failed_state, failed_state, failed_control, dt=0.001)
+    test.assertTrue(failed.last_stats.rolled_back)
+    check_unpublished_roles(test, failed, failed_state)
+
+
+def check_unpublished_roles(test, run, state):
+    """Off the published path, each solver-held field names the evaluation it came from."""
+    result = inspection.capture(run, state)
+    schema, fields = result["schema"], result["schema"]["fields"]
     test.assertNotEqual(schema["role"], "published")
-    test.assertIn(schema["role"], ("accepted_iterate", "trial", "original"))
     test.assertFalse(schema["describes_state"])
+    expected = {
+        "residual": "last_recorded_iterate",
+        "energy_terms": "last_launched_evaluation",
+        "producer_energy": "last_launched_evaluation",
+        "contact_wrench": "last_launched_evaluation",
+        "contact_identity": "last_launched_evaluation",
+        "tet_min_det_f": "last_successful_evaluation",
+    }
+    for name, role in expected.items():
+        if name in fields:
+            test.assertEqual(fields[name]["role"], role, name)
+    for name in ("pair_source", "pair_target", "pair_wrench", "tet_det_f"):
+        test.assertIn(name, schema["absent"], name)
+    np.testing.assert_array_equal(result["arrays"]["residual"], run.last_stats.variational["residual"])
 
 
 def without_wall_clock(value):
@@ -289,8 +383,8 @@ def same(left, right):
 def test_capture_does_not_perturb(test, device):
     """Capturing after every step leaves every later step, Stats and graph cache bit for bit unchanged."""
     graphs = (False, True) if device.is_cuda else (False,)
-    for graph in graphs:
-        with test.subTest(graph=graph):
+    for precision, graph in [(p, g) for p in precisions() for g in graphs]:
+        with test.subTest(precision=precision, graph=graph):
 
             def captured(run, state, control, step):
                 first = inspection.capture(run, state)
@@ -306,13 +400,27 @@ def test_capture_does_not_perturb(test, device):
                     forces[0, 0] += 1e-6
                     state.particle_f.assign(forces)
 
-            control_a = frames(*chain(device, graph=graph), 6)
-            control_b = frames(*chain(device, graph=graph), 6)
+            control_a = frames(*chain(device, precision, graph=graph), 6)
+            control_b = frames(*chain(device, precision, graph=graph), 6)
             if not same(control_a, control_b):
                 test.skipTest("runs without capture are not bitwise repeatable here; inconclusive")
-            test.assertTrue(same(control_a, frames(*chain(device, graph=graph), 6, hook=captured)))
+            test.assertTrue(same(control_a, frames(*chain(device, precision, graph=graph), 6, hook=captured)))
             # The comparator must see a tiny input change, or the equality above proves nothing.
-            test.assertFalse(same(control_a, frames(*chain(device, graph=graph), 6, hook=nudge)))
+            test.assertFalse(same(control_a, frames(*chain(device, precision, graph=graph), 6, hook=nudge)))
+
+
+def test_det_f_uses_solver_arithmetic(test, device):
+    """Per-element det F compiles like the tet evaluation and its minimum is Stats.min_det_f at every step."""
+    test.assertEqual(
+        wp.get_module(inspection.__name__).options["fuse_fp"], wp.get_module(tet_precision.__name__).options["fuse_fp"]
+    )
+    for precision in precisions():
+        with test.subTest(precision=precision):
+            run, state, control = chain(device, precision)
+            for step in range(4):
+                step_chain(run, state, control, step)
+                arrays = inspection.capture(run, state, fields=["tet_det_f", "tet_min_det_f"])["arrays"]
+                test.assertEqual(arrays["tet_det_f"].min(), run.last_stats.min_det_f, f"step {step}")
 
 
 def test_guards(test, device):
@@ -346,6 +454,7 @@ for function in (
     test_solver_fields_match_stats,
     test_binding_roles,
     test_capture_does_not_perturb,
+    test_det_f_uses_solver_arithmetic,
     test_guards,
 ):
     add_function_test(TestToolingInspection, function.__name__, function, devices=get_test_devices())
