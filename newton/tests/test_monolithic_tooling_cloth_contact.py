@@ -151,9 +151,12 @@ class TestClothPublication(unittest.TestCase):
         fail_step=False,
         fail_body_read=False,
         method_force=None,
+        joint_control=None,
+        mutate_frames=False,
     ):
         def array(value):
-            return SimpleNamespace(numpy=lambda: np.asarray(value))
+            value = np.asarray(value)
+            return SimpleNamespace(numpy=lambda: value)
 
         x = [[0.0, 0, 0], [1, 0, 0], [0, 1, 0]]
         stats = SimpleNamespace(
@@ -174,7 +177,7 @@ class TestClothPublication(unittest.TestCase):
         scene = SimpleNamespace(
             metadata={},
             dt=0.1,
-            total_steps=2 if fail_body_read else 1,
+            total_steps=2 if fail_body_read or mutate_frames else 1,
             steps=0,
             phase="test",
             model=SimpleNamespace(device="cpu", particle_q=array(x), body_label=[], joint_label=[]),
@@ -189,6 +192,16 @@ class TestClothPublication(unittest.TestCase):
             joint_qd=array([]),
             particle_f=array(np.zeros((3, 3))),
         )
+        if joint_control is not None:
+            scene.joint_reference_q = joint_control["joint_reference_q"]
+            scene.joint_gravity_force = joint_control["joint_gravity_force"]
+            scene.control = SimpleNamespace(
+                joint_target_q=array(joint_control["joint_target_q"]),
+                joint_target_qd=array(joint_control["joint_target_qd"]),
+            )
+            scene.state.joint_q, scene.state.joint_qd = array([0.29]), array([-0.01])
+            scene.model.joint_label = ["hinge"]
+            forces.joint_force = np.zeros(1)
         if fail_read:
             scene.state.joint_q.numpy = lambda: (_ for _ in ()).throw(RuntimeError("readback failed"))
         if fail_body_read:
@@ -217,6 +230,9 @@ class TestClothPublication(unittest.TestCase):
                 forces.force_valid = False
                 raise RuntimeError("step failed")
             scene.steps += 1
+            if mutate_frames:
+                scene.state.particle_q.numpy()[:, 2] = scene.steps
+                scene.control.joint_target_q.numpy()[0] = scene.steps / 4
 
         scene.step = step
         recipe = Path(directory) / "recipe.json"
@@ -256,6 +272,42 @@ class TestClothPublication(unittest.TestCase):
             self.assertNotIn("particle_force_N", row["method_diagnostics"])
             with np.load(Path(folder) / "run/states-0000.npz") as states:
                 np.testing.assert_array_equal(states["method_particle_force"][0], expected)
+
+    def test_nominal_target_is_recorded_separately_from_gravity_drive(self):
+        """Retain nominal pose, applied PD target and gravity torque without conflating them."""
+        expected = {
+            name: np.array([value], dtype=np.float32)
+            for name, value in (
+                ("joint_reference_q", 0.3),
+                ("joint_target_q", 0.25),
+                ("joint_target_qd", 0.1),
+                ("joint_gravity_force", -5.0),
+            )
+        }
+        with tempfile.TemporaryDirectory() as folder:
+            summary, _ = self._record(folder, joint_control=expected)
+            self.assertEqual(summary["published_steps"], 1)
+            manifest = json.loads((Path(folder) / "run/manifest.json").read_text())
+            self.assertEqual(manifest["schema_version"], 3)
+            with np.load(Path(folder) / "run/states-0000.npz") as states:
+                for name, value in expected.items():
+                    np.testing.assert_array_equal(states[name][0], value)
+                    self.assertEqual(states[name].dtype, np.float32)
+                np.testing.assert_array_equal(states["q"][0], [0.29])
+
+    def test_recorded_frames_do_not_alias_reused_cpu_arrays(self):
+        """Keep earlier geometry and applied controls when a later step mutates CPU storage."""
+        control = {
+            name: np.zeros(1, dtype=np.float32)
+            for name in ("joint_reference_q", "joint_target_q", "joint_target_qd", "joint_gravity_force")
+        }
+        with tempfile.TemporaryDirectory() as folder:
+            summary, _ = self._record(folder, joint_control=control, mutate_frames=True)
+            self.assertEqual(summary["published_steps"], 2)
+            with np.load(Path(folder) / "run/states-0000.npz") as states:
+                np.testing.assert_array_equal(states["step"], [1, 2])
+                np.testing.assert_array_equal(states["x"][:, :, 2], [[1.0] * 3, [2.0] * 3])
+                np.testing.assert_array_equal(states["joint_target_q"][:, 0], [0.25, 0.5])
 
     def test_partial_frame_does_not_discard_earlier_states(self):
         """Retain complete earlier frames when optional state readback fails."""

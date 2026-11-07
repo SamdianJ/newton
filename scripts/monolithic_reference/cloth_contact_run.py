@@ -132,7 +132,7 @@ def execute(scene_factory, args):
     hashes = {str(p): hashlib.sha256(p.read_bytes()).hexdigest() for p in files}
     (args.output / "dirty.patch").write_text(git("diff", "--binary", "HEAD"))
     manifest = {
-        "schema_version": 2,
+        "schema_version": 3,
         "status": "STARTING",
         "source": source,
         "source_sha": git("rev-parse", "HEAD"),
@@ -334,9 +334,19 @@ def execute(scene_factory, args):
                         value = getattr(getattr(scene, "control", None), name, None)
                         if value is not None:
                             frame[name] = value.numpy()
+                    for name in ("joint_reference_q", "joint_gravity_force"):
+                        value = getattr(scene, name, None)
+                        if value is not None:
+                            frame[name] = np.asarray(value)
                     if frames and frames[0].keys() != frame.keys():
                         flush()
-                    frames.append(frame)
+                    # CPU Warp numpy() views alias live state until the next chunk flush.
+                    frames.append(
+                        {
+                            name: value.copy() if isinstance(value, np.ndarray) else value
+                            for name, value in frame.items()
+                        }
+                    )
                     if hasattr(scene, "fixture_work"):
                         row["fixture_external_work_J"] = scene.fixture_work
                 except Exception as failure:

@@ -7,12 +7,13 @@ import copy
 import unittest
 from itertools import product
 from types import SimpleNamespace
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 import numpy as np
 import warp as wp
 
 import newton
+from newton.solvers.experimental.monolithic import SolverMonolithic
 from scripts.monolithic_reference.cloth_franka_scene import (
     DEFAULT_RECIPE,
     FrankaClothScene,
@@ -36,6 +37,100 @@ class Array:
 
 
 class TestClothFoldControls(unittest.TestCase):
+    @staticmethod
+    def pendulum(*, gravity_compensation):
+        builder = newton.ModelBuilder(gravity=(0.0, 0.0, -9.81))
+        body = builder.add_link(
+            mass=1.0, com=(0.5, 0.0, 0.0), inertia=wp.mat33(0.01, 0.0, 0.0, 0.0, 0.01, 0.0, 0.0, 0.0, 0.01)
+        )
+        joint = builder.add_joint_revolute(
+            -1,
+            body,
+            axis=newton.Axis.Y,
+            target_ke=100.0,
+            target_kd=5.0,
+            actuator_mode=newton.JointTargetMode.POSITION_VELOCITY,
+            effort_limit=100.0,
+            limit_ke=0.0,
+            limit_kd=0.0,
+        )
+        builder.add_articulation([joint])
+        builder.joint_q[0] = 0.3
+        scene = FrankaClothScene.__new__(FrankaClothScene)
+        scene.model = builder.finalize(device="cpu")
+        scene.solver = SolverMonolithic(
+            scene.model,
+            friction_velocity_scale=0.01,
+            joint_terms=SolverMonolithic.JointTerms(implicit_pd=True),
+            precision="fp64",
+        )
+        scene.dt, scene.total_steps, scene.steps, scene.failed = 0.01, 2, 0, False
+        scene.state = scene.solver.create_state(dt=scene.dt)
+        q = scene.state.joint_q.numpy().astype(np.float32)
+        scene.control = scene.solver.create_control()
+        scene.control.joint_target_q.assign(q)
+        scene.control.joint_target_qd.zero_()
+        scene.recipe = {"initial_hold_s": 1.0, "robot": {"gravity_compensation": gravity_compensation}}
+        scene.times = np.array([0.0, 1.0])
+        scene.phase_times = scene.times
+        scene.joint_targets = np.stack((q, q))
+        scene.phases, scene.phase = ["hold"], "initial"
+        scene.last_forces, scene._published_generation = None, 0
+        scene._initial_drag_rate, scene._particle_mass = 0.0, None
+        scene._gravity_state = scene.model.state() if gravity_compensation else None
+        scene._gravity_force = wp.zeros(1, dtype=wp.float32, device="cpu")
+        scene._drive_stiffness = np.array([100.0], dtype=np.float32)
+        scene.joint_reference_q = q.copy()
+        scene.joint_gravity_force = np.zeros(1, dtype=np.float32)
+        return scene
+
+    def test_gravity_compensation_holds_a_loaded_pendulum(self):
+        """Balance a real gravitational joint load through the existing implicit PD drive."""
+        unbalanced = self.pendulum(gravity_compensation=False)
+        initial = unbalanced.state.joint_q.numpy().copy()
+        unbalanced.step()
+        self.assertGreater(unbalanced.state.joint_q.numpy()[0] - initial[0], 1e-4)
+        balanced = self.pendulum(gravity_compensation=True)
+        balanced.step()
+        # The query pose and shifted drive target use FP32, while the solver state is FP64.
+        np.testing.assert_allclose(balanced.state.joint_q.numpy(), initial, rtol=0.0, atol=1e-7)
+        holding_torque = -9.81 * 0.5 * np.cos(initial[0])
+        np.testing.assert_allclose(balanced.joint_gravity_force, [holding_torque], rtol=2e-7, atol=1e-7)
+        np.testing.assert_array_equal(balanced.joint_reference_q, initial.astype(np.float32))
+        np.testing.assert_array_equal(balanced.control.joint_target_qd.numpy(), [0.0])
+        np.testing.assert_array_equal(balanced.control.joint_f.numpy(), [0.0])
+        balanced._gravity_force.zero_()
+        np.testing.assert_allclose(balanced.joint_gravity_force, [holding_torque], rtol=2e-7, atol=1e-7)
+
+    def test_failed_gravity_compensation_preserves_published_diagnostics(self):
+        """Restore drive targets and retain prior diagnostics when a compensated request fails."""
+        scene = self.pendulum(gravity_compensation=True)
+        scene._gravity_state.joint_q.zero_()
+        scene.joint_reference_q = np.array([-0.2], dtype=np.float32)
+        scene.joint_gravity_force = np.array([3.0], dtype=np.float32)
+        old_q = scene.control.joint_target_q.numpy().copy()
+        old_v = scene.control.joint_target_qd.numpy().copy()
+        state = {name: getattr(scene.state, name).numpy().copy() for name in ("joint_q", "joint_qd", "body_q")}
+        applied = []
+
+        def fail(*args, **kwargs):
+            applied.append(scene.control.joint_target_q.numpy().copy())
+            for name, value in state.items():
+                np.testing.assert_array_equal(getattr(scene.state, name).numpy(), value)
+            raise RuntimeError("injected solver failure")
+
+        with patch.object(scene.solver, "step", side_effect=fail), self.assertRaisesRegex(RuntimeError, "injected"):
+            scene.step()
+        self.assertLess(applied[0][0], old_q[0])
+        np.testing.assert_allclose(scene._gravity_force.numpy(), [-4.905 * np.cos(state["joint_q"][0])], rtol=2e-7)
+        np.testing.assert_array_equal(scene.control.joint_target_q.numpy(), old_q)
+        np.testing.assert_array_equal(scene.control.joint_target_qd.numpy(), old_v)
+        np.testing.assert_array_equal(scene.joint_reference_q, np.array([-0.2], dtype=np.float32))
+        np.testing.assert_array_equal(scene.joint_gravity_force, np.array([3.0], dtype=np.float32))
+        self.assertEqual((scene.steps, scene.phase, scene._published_generation), (0, "initial", 0))
+        self.assertIsNone(scene.last_forces)
+        self.assertTrue(scene.failed)
+
     def test_low_grasp_targets_clear_actual_finger_boxes(self):
         """Keep the real fingertip boxes above the table while preserving low grasp reach."""
         recipe = load_recipe(DEFAULT_RECIPE)
@@ -184,6 +279,22 @@ class TestClothFoldControls(unittest.TestCase):
         with self.assertRaises(ValueError):
             load_recipe(recipe | {"initial_velocity_damping_per_s": 2, "initial_hold_s": 0})
 
+    def test_gravity_compensation_requires_bool_and_positive_gains(self):
+        """Reject ambiguous switches and unusable gravity feedforward gains before construction."""
+        recipe = load_recipe(DEFAULT_RECIPE)
+        self.assertFalse(recipe["robot"].get("gravity_compensation", False))
+        for enabled in (False, True):
+            robot = recipe["robot"] | {"gravity_compensation": enabled}
+            self.assertIs(load_recipe(recipe | {"robot": robot})["robot"]["gravity_compensation"], enabled)
+        for value in (1, "true", None):
+            with self.subTest(switch=value), self.assertRaises(ValueError):
+                load_recipe(recipe | {"robot": recipe["robot"] | {"gravity_compensation": value}})
+        for key in ("arm_kp", "finger_kp"):
+            for value in (0.0, -1.0, 1e-50, 1e40, float("nan"), float("inf")):
+                robot = recipe["robot"] | {"gravity_compensation": True, key: value}
+                with self.subTest(gain=key, value=value), self.assertRaises(ValueError):
+                    load_recipe(recipe | {"robot": robot})
+
     def test_initial_drag_uses_published_velocity_and_is_removed(self):
         """Apply mass-weighted lagged forces during preparation and clear them at its boundary."""
         scene = self.scene()
@@ -247,6 +358,10 @@ class TestClothFoldControls(unittest.TestCase):
         scene.dt, scene.total_steps, scene.steps, scene.failed = 0.1, 4, 0, False
         scene.last_forces, scene._published_generation = None, 0
         scene._initial_drag_rate, scene._particle_mass = 0.0, None
+        scene._gravity_state, scene._gravity_force = None, None
+        scene._drive_stiffness = np.ones(9, dtype=np.float32)
+        scene.joint_reference_q = np.zeros(9, dtype=np.float32)
+        scene.joint_gravity_force = np.zeros(9, dtype=np.float32)
         scene.recipe = {"initial_hold_s": 0.2}
         scene.times = np.array([0.0, 0.4])
         scene.phase_times = scene.times
@@ -301,6 +416,8 @@ class TestClothFoldControls(unittest.TestCase):
             self.assertEqual(scene.phase, "initial")
             np.testing.assert_array_equal(scene.control.joint_target_q.numpy(), np.zeros(9))
             np.testing.assert_array_equal(scene.control.joint_target_qd.numpy(), np.zeros(9))
+            np.testing.assert_array_equal(scene.joint_reference_q, np.zeros(9, dtype=np.float32))
+            np.testing.assert_array_equal(scene.joint_gravity_force, np.zeros(9, dtype=np.float32))
             scene.step()
             scene.solver.step.assert_called_once()
 

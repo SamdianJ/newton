@@ -53,6 +53,14 @@ def load_recipe(source):
         raise ValueError("Initial velocity damping must be a finite nonnegative rate [1/s]")
     if drag > 0 and r["initial_hold_s"] == 0:
         raise ValueError("Initial velocity damping requires a positive initial hold")
+    compensate = robot.get("gravity_compensation", False)
+    if not isinstance(compensate, bool):
+        raise ValueError("Gravity compensation must be a boolean")
+    if compensate:
+        with np.errstate(over="ignore", under="ignore"):
+            gains = np.asarray([robot["arm_kp"], robot["finger_kp"]], dtype=np.float32)
+        if not np.isfinite(gains).all() or min(gains) <= 0:
+            raise ValueError("Gravity compensation requires finite positive FP32 PD stiffnesses")
     if not np.isfinite(robot["finger_open_m"]) or robot["finger_open_m"] <= robot["finger_closed_m"]:
         raise ValueError("Open finger target must exceed the closed target")
     for frame in r["keyframes"]:
@@ -450,6 +458,12 @@ class FrankaClothScene:
     Its interval uses step-start time; the first subsequent step clears it.
     This is a controlled preparation force, not implicit material damping.
     Applied forces are recorded for offline displacement-work evaluation.
+
+    Optional ``robot.gravity_compensation`` uses a separate FP32 query state
+    to evaluate lagged ``g(q_n)`` and offset the position drive by ``g/Kp``.
+    Nominal velocity and the existing total drive effort limit are retained.
+    Nominal targets and requested gravity forces [N or N m] are recorded
+    separately from the rounded FP32 drive target and actual limited torque.
     """
 
     def __init__(
@@ -494,6 +508,14 @@ class FrankaClothScene:
         self.control = self.solver.create_control()
         self.control.joint_target_q.assign(self.joint_targets[0])
         self.control.joint_target_qd.zero_()
+        compensate = r["robot"].get("gravity_compensation", False)
+        self._gravity_state = self.model.state() if compensate else None
+        self._gravity_force = (
+            wp.zeros(self.model.joint_dof_count, dtype=wp.float32, device=self.model.device) if compensate else None
+        )
+        self._drive_stiffness = self.model.joint_target_ke.numpy().astype(float) if compensate else None
+        self.joint_reference_q = self.joint_targets[0].astype(np.float32)
+        self.joint_gravity_force = np.zeros(self.model.joint_dof_count, dtype=np.float32)
         self.triangles = self.model.tri_indices.numpy()
         self.owners = np.zeros(len(self.triangles), dtype=np.int32)
         self.thicknesses = np.full(len(self.triangles), r["material"]["thickness_m"])
@@ -511,6 +533,13 @@ class FrankaClothScene:
             sdf_identity=smooth.identity,
             sdf_checks=smooth.build_metadata["checks"],
             sdf_geometric_certification="not certified for folding task",
+            gravity_compensation={
+                "enabled": compensate,
+                "implementation": "lagged g(q_n)/Kp position target bias; nominal velocity; original total effort clipping",
+                "query_precision": "FP32 joint coordinates, FK and inverse dynamics",
+                "reference_array": "joint_reference_q",
+                "requested_gravity_array": "joint_gravity_force",
+            },
             recipe_sha256=hashlib.sha256(json.dumps(r, sort_keys=True).encode()).hexdigest(),
             trajectory_source_sha256=_sha(REPO / r["source_trajectory"]["path"]),
         )
@@ -522,11 +551,21 @@ class FrankaClothScene:
         q, v, index = fold_targets(
             self.times, self.joint_targets, (self.steps + 1) * self.dt, phase_times=self.phase_times
         )
-        old_q, old_v = self.control.joint_target_q.numpy(), self.control.joint_target_qd.numpy()
+        reference = q.astype(np.float32)
+        gravity = np.zeros_like(reference)
+        old_q, old_v = self.control.joint_target_q.numpy().copy(), self.control.joint_target_qd.numpy().copy()
         # Clear the lagged force once after the hold, then leave subsequent controls alone.
         apply_drag = self._initial_drag_rate > 0 and (self.steps - 1) * self.dt < self.recipe["initial_hold_s"]
-        old_f = self.state.particle_f.numpy() if apply_drag else None
+        old_f = self.state.particle_f.numpy().copy() if apply_drag else None
         try:
+            if self._gravity_state is not None:
+                self._gravity_state.joint_q.assign(self.state.joint_q.numpy())
+                newton.eval_fk(
+                    self.model, self._gravity_state.joint_q, self._gravity_state.joint_qd, self._gravity_state
+                )
+                newton.eval_inverse_dynamics_passive(self.model, self._gravity_state, gravity_force=self._gravity_force)
+                gravity = self._gravity_force.numpy().copy()
+                q = q + gravity / self._drive_stiffness
             if apply_drag:
                 force = np.zeros_like(old_f)
                 if self.steps * self.dt < self.recipe["initial_hold_s"]:
@@ -548,5 +587,6 @@ class FrankaClothScene:
             raise
         self.steps += 1
         self.phase = self.phases[index]
+        self.joint_reference_q, self.joint_gravity_force = reference, gravity
         self.last_forces, self._published_generation = forces, stats.step_generation
         return stats
