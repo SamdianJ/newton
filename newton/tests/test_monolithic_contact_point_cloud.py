@@ -28,11 +28,13 @@ def _scene(
     friction=0,
     device="cpu",
     graph=False,
+    contact_options=None,
 ):
     builder = newton.ModelBuilder(gravity=(0, 0, 0))
     shells = []
     if self_owner:
-        for x, z in ((0, 0), (0.015, 0), (0.03, 0), (0.03, 0.005), (0.015, 0.005), (0, 0.005)):
+        # The material's natural reference is flat; folding belongs to the state.
+        for x, z in ((0, 0), (0.015, 0), (0.03, 0), (0.035, 0), (0.05, 0), (0.065, 0)):
             for y in (0.0, 0.02):
                 builder.add_particle(wp.vec3(x, y, z), wp.vec3(0), 0.0)
         for i in range(5):
@@ -68,6 +70,8 @@ def _scene(
         if enabled
         else None
     )
+    if config is not None:
+        config.update(contact_options or {})
     solver = SolverMonolithic(
         model,
         cloth_inputs=shells,
@@ -80,6 +84,103 @@ def _scene(
         use_cuda_graph=graph,
     )
     return model, solver
+
+
+def _folded_strip():
+    return np.array(
+        [
+            (x, y, z)
+            for x, z in ((0, 0), (0.015, 0), (0.03, 0), (0.03, 0.005), (0.015, 0.005), (0, 0.005))
+            for y in (0.0, 0.02)
+        ]
+    )
+
+
+def _self_pair_scene(reference_gap, *, thickness, smoothing, padding, precision, rotation=None, offset=(0, 0, 0)):
+    rotation = np.eye(3) if rotation is None else rotation
+    reference = np.array(
+        [
+            (0, 0, 0),
+            (0, 3 / 64, 0),
+            (0, 0, 3 / 64),
+            (reference_gap, 1 / 128, 1 / 128),
+            (reference_gap, 7 / 128, 1 / 128),
+            (reference_gap, 1 / 128, 7 / 128),
+            (3 / 64, 1 / 16, 1 / 64),
+            (1 / 16, 1 / 32, 3 / 64),
+            (5 / 64, 5 / 64, 5 / 64),
+        ]
+    )
+    current = reference.copy()
+    current[3:6, 0] = 1 / 128
+    # A remote bridge keeps the cloth connected without making the target pair one-ring neighbors.
+    faces = ((0, 1, 2), (3, 5, 4), (2, 1, 6), (2, 6, 7), (7, 6, 8), (7, 8, 4), (4, 8, 3))
+    builder = newton.ModelBuilder(gravity=(0, 0, 0))
+    for point in reference @ rotation.T + offset:
+        builder.add_particle(wp.vec3(point), wp.vec3(0), 0.0)
+    for tri in faces:
+        builder.add_triangle(*tri, tri_ke=2, tri_ka=3, tri_kd=0)
+        a, b, c = np.asarray(builder.particle_q)[list(tri)]
+        for p in tri:
+            builder.particle_mass[p] += np.linalg.norm(np.cross(b - a, c - a)) / 6
+    solver = SolverMonolithic(
+        builder.finalize(device="cpu"),
+        cloth_inputs=[
+            SolverMonolithic.ClothInput(
+                triangle_ids=tuple(range(len(faces))), bending=(0.01, 0.01), thickness=thickness, surface_density=1
+            )
+        ],
+        cloth_contact={"inter": False, "radius": 1 / 64, "candidate_padding": padding},
+        friction_velocity_scale=0.1,
+        friction_coefficient=0.0,
+        normal_smoothing=smoothing,
+        precision=precision,
+        use_cuda_graph=False,
+    )
+    state = solver.create_state(dt=0.001)
+    state.particle_q.assign(current @ rotation.T + offset)
+    return solver, state
+
+
+def _candidate_oracle(solver, start, current):
+    """Enumerate ordered material samples independently of the native spatial hash."""
+    contact = solver._cloth_contact
+    objects = solver._materials.cloth
+    nodes = [(owner, int(p)) for owner, obj in enumerate(objects) for p in obj["particle_ids"]]
+    expected, face = set(), 0
+    for owner, obj in enumerate(objects):
+        reference = dict(zip(obj["particle_ids"], obj["positions"], strict=True))
+        for tri in obj["triangles"]:
+            neighbors = {int(p) for other in obj["triangles"] if set(tri) & set(other) for p in other}
+            for slot in range(3):
+                bary = np.array([2 / 3 if i == slot else 1 / 6 for i in range(3)])
+                for node, (other, particle) in enumerate(nodes):
+                    if owner == other:
+                        if not contact.self_enabled or particle in neighbors:
+                            continue
+                        q = bary @ np.array([reference[p] for p in tri])
+                        radius = contact.self_exclusion_ratio * contact.length + obj["thickness"] + contact.smoothing
+                        if np.sum((q - reference[particle]) ** 2) < radius**2:
+                            continue
+                    elif not contact.inter_enabled:
+                        continue
+                    cutoff = (
+                        contact.length
+                        + (obj["thickness"] + objects[other]["thickness"]) / 2
+                        + contact.smoothing
+                        + contact.padding
+                    )
+                    if any(np.linalg.norm(bary @ x[tri] - x[particle]) <= cutoff for x in (start, current)):
+                        expected.add((3 * face + slot, node))
+            face += 1
+    return expected
+
+
+def _pairs(contact):
+    count = int(contact.pool.candidates.count.numpy()[0])
+    pairs = contact.pairs.numpy()[:count]
+    assert len(set(map(tuple, pairs))) == count
+    return set(map(tuple, pairs))
 
 
 def _penalty(gap, k, smoothing):
@@ -283,6 +384,16 @@ class TestPointCloudResponse(unittest.TestCase):
 
 
 class TestPointCloudSolver(unittest.TestCase):
+    def test_flat_reference_excludes_local_two_hop_loads(self):
+        """Suppress local self preload beyond the additional one-ring exclusion."""
+        _, solver = _scene(self_owner=True)
+        state = solver.create_state(dt=0.001)
+        contact = solver._cloth_contact
+        contact.begin_step(state)
+        contact.evaluate(wp.zeros_like(state.particle_q), 0.001)
+        self.assertEqual(float(contact.summary.numpy()[5]), 0.0)
+        np.testing.assert_array_equal(contact.pool.force.result.numpy(), 0.0)
+
     def test_invalid_configuration_and_grid_domain(self):
         """Reject invalid native lengths and unrepresentable hash coordinates."""
         _, solver = _scene()
@@ -292,9 +403,31 @@ class TestPointCloudSolver(unittest.TestCase):
             {"radius": True},
             {"self": 1},
             {"candidate_capacity": -1},
+            {"self_exclusion_ratio": True},
+            {"self_exclusion_ratio": 1.0},
+            {"self_exclusion_ratio": float("nan")},
+            {"self_exclusion_ratio": float("inf")},
         ):
             with self.subTest(config=config), self.assertRaises(ValueError):
                 _PointCloudContact(solver, config, mu=0, smoothing=1e-4, velocity_scale=0.1, use_cuda_graph=False)
+        _PointCloudContact(
+            solver,
+            {"self": False, "self_exclusion_ratio": 1.0},
+            mu=0,
+            smoothing=1e-4,
+            velocity_scale=0.1,
+            use_cuda_graph=False,
+        )
+        _, native32 = _scene(precision=SolverMonolithic.Precision.FP32)
+        with self.assertRaises(ValueError):
+            _PointCloudContact(
+                native32,
+                {"self_exclusion_ratio": 1 + 1e-9},
+                mu=0,
+                smoothing=1e-4,
+                velocity_scale=0.1,
+                use_cuda_graph=False,
+            )
         contact = solver._cloth_contact
         contact.start.fill_(wp.vec3d(1e20))
         contact.refresh(contact.start)
@@ -388,16 +521,127 @@ class TestPointCloudSolver(unittest.TestCase):
         self.assertGreater(np.linalg.norm(matrix[:9, 9:]), 0)
 
     def test_self_filter_and_native_precision(self):
-        """Keep nonlocal same-owner contacts and exclude each sample's local topology."""
+        """Keep folded nonlocal contact using the flat material reference in both precisions."""
         for precision in (SolverMonolithic.Precision.FP64, SolverMonolithic.Precision.FP32):
             for enabled in (True, False):
                 _, solver = _scene(self_owner=True, self_enabled=enabled, precision=precision)
                 state = solver.create_state(dt=0.001)
+                state.particle_q.assign(_folded_strip())
+                solver.reset_state(state, dt=0.001)
                 solver.step(state, state, solver.create_control(), dt=0.001)
                 self.assertFalse(solver.last_stats.rolled_back, solver.last_stats)
                 diagnostics = solver.get_cloth_contact_diagnostics(state)
                 self.assertEqual(diagnostics["inter"]["active"], 0)
                 self.assertEqual(diagnostics["self"]["active"] > 0, enabled)
+
+    def test_reference_filter_boundary_and_threshold_mapping(self):
+        """Use a strict squared threshold with additive thickness and smoothing, independent of padding."""
+        for precision in (SolverMonolithic.Precision.FP64, SolverMonolithic.Precision.FP32):
+            for thickness, smoothing in ((1 / 128, 1 / 256), (1 / 64, 1 / 128)):
+                radius = 1.5 / 64 + thickness + smoothing
+                for padding in (0.0, 0.125):
+                    for delta in (-1 / 2**20, 0.0, 1 / 2**20):
+                        with self.subTest(precision=precision, thickness=thickness, padding=padding, delta=delta):
+                            solver, state = _self_pair_scene(
+                                radius + delta,
+                                thickness=thickness,
+                                smoothing=smoothing,
+                                padding=padding,
+                                precision=precision,
+                            )
+                            contact = solver._cloth_contact
+                            contact.begin_step(state)
+                            self.assertEqual((0, 3) in _pairs(contact), delta >= 0)
+
+    def test_reference_candidates_match_oracle_and_start_current_union(self):
+        """Keep both ordered nonlocal passes through start/current refreshes without changing reference."""
+        for precision in (SolverMonolithic.Precision.FP64, SolverMonolithic.Precision.FP32):
+            model, solver = _scene(self_owner=True, precision=precision, contact_options={"candidate_padding": 0.0})
+            state = solver.create_state(dt=0.001)
+            contact = solver._cloth_contact
+            reference = model.particle_q.numpy().copy()
+            state.particle_q.assign(_folded_strip())
+            contact.begin_step(state)
+            start = state.particle_q.numpy().copy()
+            current = start.copy()
+            current[:2, 2] -= 0.1
+            current[2:4, 2] += 0.015
+            contact.refresh(wp.array(current, dtype=contact.vector, device="cpu"))
+            expected = _candidate_oracle(solver, start, current)
+            self.assertEqual(_pairs(contact), expected)
+            start_only = _candidate_oracle(solver, start, start)
+            current_only = _candidate_oracle(solver, current, current)
+            self.assertTrue(start_only - current_only)
+            self.assertTrue(current_only - start_only)
+            self.assertTrue(any(sample < 6 and node >= 8 for sample, node in expected))
+            self.assertTrue(any(sample >= 24 and node < 4 for sample, node in expected))
+            # Changing Model storage or the next step's anchor must not replace material reference.
+            model.particle_q.assign(current)
+            state.particle_q.assign(current)
+            contact.begin_step(state)
+            self.assertEqual(_pairs(contact), current_only)
+            np.testing.assert_array_equal(contact.reference.numpy(), reference)
+
+    def test_reference_filter_rigid_transform_and_near_reference_limit(self):
+        """Preserve ordered forces under a rigid transform and permanently exclude reference-near sheets."""
+        rotation = np.array([[0, 0, 1], [1, 0, 0], [0, 1, 0]])
+        pairs, forces = [], []
+        for transform in (np.eye(3), rotation):
+            solver, state = _self_pair_scene(
+                0.125,
+                thickness=1 / 128,
+                smoothing=1 / 256,
+                padding=0.125,
+                precision=SolverMonolithic.Precision.FP64,
+                rotation=transform,
+                offset=(0.25, -0.125, 0.5),
+            )
+            contact = solver._cloth_contact
+            contact.begin_step(state)
+            contact.evaluate(wp.zeros_like(state.particle_q), 0.001)
+            pairs.append(_pairs(contact))
+            forces.append(contact.pool.force.result.numpy().reshape(-1, 3))
+            self.assertEqual(pairs[-1], _candidate_oracle(solver, state.particle_q.numpy(), state.particle_q.numpy()))
+            self.assertTrue(any(sample < 3 and node >= 3 for sample, node in pairs[-1]))
+            self.assertTrue(any(sample >= 3 and node < 3 for sample, node in pairs[-1]))
+            self.assertGreater(np.linalg.norm(forces[-1]), 0)
+            np.testing.assert_allclose(forces[-1].sum(axis=0), 0, atol=1e-15)
+        self.assertEqual(pairs[0], pairs[1])
+        np.testing.assert_allclose(forces[1], forces[0] @ rotation.T, atol=1e-15)
+        solver, state = _self_pair_scene(
+            0.0, thickness=1 / 128, smoothing=1 / 256, padding=0.125, precision=SolverMonolithic.Precision.FP64
+        )
+        contact = solver._cloth_contact
+        contact.begin_step(state)
+        self.assertNotIn((0, 3), _pairs(contact))
+        current = state.particle_q.numpy()
+        far = current.copy()
+        far[3:6, 0] += 0.25
+        state.particle_q.assign(far)
+        contact.begin_step(state)
+        state.particle_q.assign(current)
+        contact.refresh(state.particle_q)
+        self.assertNotIn((0, 3), _pairs(contact))
+
+    def test_reference_filter_checkpoint_identity(self):
+        """Reject changed reference-filter configuration before changing checkpoint state."""
+        _, solver = _scene(self_owner=True)
+        state = solver.create_state(dt=0.001)
+        self.assertEqual(solver._cloth_contact.config["self_exclusion_ratio"], 1.5)
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "reference.npz"
+            solver.save_checkpoint(state, path)
+            for ratio in (1.5, 1.6):
+                _, other = _scene(self_owner=True, contact_options={"self_exclusion_ratio": ratio})
+                target = other.create_state(dt=0.001)
+                before = snapshot(target)
+                if ratio == 1.5:
+                    other.load_checkpoint(target, path)
+                else:
+                    with self.assertRaises(ValueError):
+                        other.load_checkpoint(target, path)
+                for name, value in before.items():
+                    np.testing.assert_array_equal(snapshot(target)[name], value, err_msg=name)
 
     def test_capacity_rollback_and_checkpoint(self):
         """Roll back every published array on overflow and continue from a fresh checkpoint owner."""

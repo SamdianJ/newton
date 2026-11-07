@@ -112,8 +112,13 @@ class SolverMonolithic(SolverBase):
     Experimental ``cloth_contact`` enables weighted cloth inter/self contact.
     Its dictionary configures ``inter``/``self``, ``radius`` [m],
     ``normal_stiffness`` [N/m^3], bounded ``candidate_capacity`` and
-    ``support_capacity``, and optional ``candidate_padding`` [m]. The default
-    is disabled. Radius adds to both half-thicknesses; finite sampling and
+    ``support_capacity``, and optional ``candidate_padding`` [m]. Self contact
+    additionally excludes one-ring neighbors and material-reference distances
+    strictly below ``self_exclusion_ratio * radius + (hA+hB)/2 + normal_smoothing``.
+    The dimensionless ratio defaults to 1.5 and must exceed 1 when self contact
+    is enabled. Reference-near nonlocal sheets remain excluded after deformation.
+    These are runtime-only experimental settings, not USD attributes. The default
+    cloth contact is disabled. Radius adds to both half-thicknesses; finite sampling and
     discrete detection do not guarantee material-layer spacing or no crossing.
     This configuration is fixed for the solver lifetime and checkpoint identity.
 

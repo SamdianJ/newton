@@ -1,0 +1,11 @@
+{
+  "method": "point-cloud",
+  "inter": true,
+  "self": true,
+  "radius": 0.012,
+  "normal_stiffness": 100000.0,
+  "candidate_padding": 0.003,
+  "candidate_capacity": 8192,
+  "support_capacity": 98304,
+  "self_exclusion_ratio": 1.5
+}

@@ -1,0 +1,1 @@
+Fix experimental Monolithic point-cloud self contact to exclude material-reference neighbors using the SuperDex reference-distance rule, in addition to the existing one-ring exclusion. The configurable ``self_exclusion_ratio`` defaults to 1.5; reference-near nonlocal sheets remain excluded after deformation.

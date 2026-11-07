@@ -129,6 +129,7 @@ def _build_grid(
 def _query_points(
     x: wp.array[Any],
     start: wp.array[Any],
+    reference: wp.array[Any],
     triangles: wp.array[wp.vec3i],
     triangle_owners: wp.array[int],
     nodes: wp.array[int],
@@ -142,6 +143,8 @@ def _query_points(
     width: Any,
     length: Any,
     padding: Any,
+    smoothing: Any,
+    self_exclusion_ratio: Any,
     inter_enabled: bool,
     self_enabled: bool,
     from_start: bool,
@@ -157,10 +160,12 @@ def _query_points(
     tri = triangles[face]
     point = type(x[0])(type(length)(0.0))
     point_current = type(x[0])(type(length)(0.0))
+    point_reference = type(x[0])(type(length)(0.0))
     for j in range(3):
         b = _bary(slot, j, length)
         point += b * wp.where(from_start, start[tri[j]], x[tri[j]])
         point_current += b * x[tri[j]]
+        point_reference += b * reference[tri[j]]
     cell = _cell(point, width)
     owner = triangle_owners[face]
     for dx in range(-1, 2):
@@ -179,6 +184,15 @@ def _query_points(
                         for k in range(exclusion_offsets[face], exclusion_offsets[face + 1]):
                             if exclusions[k] == particle:
                                 allowed = False
+                        # Match SuperDex's strict reference-distance rule with tau = h_bar + epsilon.
+                        exclusion_radius = (
+                            self_exclusion_ratio * length
+                            + (thickness[owner] + thickness[other]) / type(length)(2.0)
+                            + smoothing
+                        )
+                        delta_reference = point_reference - reference[particle]
+                        if wp.dot(delta_reference, delta_reference) < exclusion_radius * exclusion_radius:
+                            allowed = False
                     cutoff = length + (thickness[owner] + thickness[other]) / type(length)(2.0) + padding
                     inside = wp.length(point - target) <= cutoff
                     # The second grid contributes only pairs absent from the current query.
@@ -301,6 +315,7 @@ class _PointCloudContact:
             "candidate_capacity",
             "support_capacity",
             "candidate_padding",
+            "self_exclusion_ratio",
         }
         if not isinstance(config, dict) or set(config) - allowed:
             raise ValueError("Invalid cloth_contact fields")
@@ -324,13 +339,23 @@ class _PointCloudContact:
         self.inter_enabled, self.self_enabled = config.get("inter", True), config.get("self", True)
         if type(self.inter_enabled) is not bool or type(self.self_enabled) is not bool:
             raise ValueError("Cloth contact switches must be bool")
+        self.self_exclusion_ratio = float(config.get("self_exclusion_ratio", 1.5))
+        native_ratio = self.numpy_dtype(self.self_exclusion_ratio)
+        if (
+            isinstance(config.get("self_exclusion_ratio"), (bool, np.bool_))
+            or not np.isfinite(native_ratio)
+            or (self.self_enabled and native_ratio <= 1)
+        ):
+            raise ValueError("Cloth contact self_exclusion_ratio must be finite and > 1 when self is enabled")
         self.mu, self.smoothing, self.velocity_scale = mu, smoothing, velocity_scale
         materials = solver._materials
         if materials is None or not materials.cloth:
             raise ValueError("Cloth contact requires cloth_inputs")
         triangles, owners, areas, nodes, node_owners, node_areas = [], [], [], [], [], []
         exclusions, offsets, thickness, worlds = [], [0], [], []
+        reference = np.zeros((self.model.particle_count, 3), dtype=self.numpy_dtype)
         for owner, obj in enumerate(materials.cloth):
+            reference[obj["particle_ids"]] = obj["positions"]
             faces, reference_areas = obj["triangles"], obj["areas"]
             thickness.append(obj["thickness"])
             worlds.append(obj["world"])
@@ -365,7 +390,10 @@ class _PointCloudContact:
             "support_capacity": support_capacity,
             "thickness_rule": "L+(hA+hB)/2",
             "quadrature": "P1Q3-node",
-            "self_exclusion": "vertex-one-ring",
+            "self_exclusion": "vertex-one-ring+material-reference-distance",
+            "self_exclusion_ratio": self.self_exclusion_ratio,
+            "self_exclusion_radius": "alpha*L+(hA+hB)/2+normal_smoothing",
+            "self_exclusion_comparison": "reference-distance-squared<radius-squared",
             "coverage": "newton-frozen-start-and-current-DCD",
         }
         self.identity = np.frombuffer(json.dumps(self.config, sort_keys=True).encode(), dtype=np.uint8)
@@ -374,6 +402,7 @@ class _PointCloudContact:
             return wp.array(data, dtype=dtype, device=self.device)
 
         self.triangles = array(np.asarray(triangles), wp.vec3i)
+        self.reference = array(reference, self.vector)
         self.triangle_owners = array(owners, int)
         self.sample_area = array(areas, self.dtype)
         self.nodes = array(nodes, int)
@@ -428,6 +457,7 @@ class _PointCloudContact:
     def refresh(self, x):
         metadata = (
             self.start,
+            self.reference,
             self.triangles,
             self.triangle_owners,
             self.nodes,
@@ -473,6 +503,7 @@ class _PointCloudContact:
                 [
                     x,
                     self.start,
+                    self.reference,
                     self.triangles,
                     self.triangle_owners,
                     self.nodes,
@@ -486,6 +517,8 @@ class _PointCloudContact:
                     self.dtype(self.width),
                     self.dtype(self.length),
                     self.dtype(self.smoothing + self.padding),
+                    self.dtype(self.smoothing),
+                    self.dtype(self.self_exclusion_ratio),
                     self.inter_enabled,
                     self.self_enabled,
                     from_start,
