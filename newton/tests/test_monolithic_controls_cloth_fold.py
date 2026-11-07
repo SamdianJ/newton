@@ -175,11 +175,79 @@ class TestClothFoldControls(unittest.TestCase):
             with self.assertRaises(ValueError):
                 fold_targets(np.array([0, 1]), np.zeros((2, 9)), time)
 
+    def test_initial_drag_requires_a_finite_rate_and_hold(self):
+        """Reject invalid preparation forces before constructing an asset or solver."""
+        recipe = load_recipe(DEFAULT_RECIPE)
+        for rate in (-1, float("nan"), float("inf"), True, None):
+            with self.subTest(rate=rate), self.assertRaises(ValueError):
+                load_recipe(recipe | {"initial_velocity_damping_per_s": rate})
+        with self.assertRaises(ValueError):
+            load_recipe(recipe | {"initial_velocity_damping_per_s": 2, "initial_hold_s": 0})
+
+    def test_initial_drag_uses_published_velocity_and_is_removed(self):
+        """Apply mass-weighted lagged forces during preparation and clear them at its boundary."""
+        scene = self.scene()
+        scene._initial_drag_rate = 2.0
+        scene._particle_mass = np.array([[1.0], [2.0]])
+        initial = np.array([[1.0, -2.0, 0.0], [0.0, 0.0, -3.0]])
+        scene.state = SimpleNamespace(particle_qd=Array(initial), particle_f=Array(np.full((2, 3), 7.0)))
+        applied = []
+
+        def advance(*args, **kwargs):
+            velocity = scene.state.particle_qd.numpy()
+            np.testing.assert_allclose(velocity, initial * 0.8 ** min(scene.steps, 2))
+            force = scene.state.particle_f.numpy()
+            applied.append(force)
+            scene.state.particle_qd.assign(velocity + scene.dt * force / scene._particle_mass)
+            scene.solver.last_stats.step_generation = scene.steps + 1
+            scene.solver.get_contact_forces.return_value.force_generation = scene.steps + 1
+
+        scene.solver.step.side_effect = advance
+        for _ in range(4):
+            scene.step()
+        np.testing.assert_allclose(applied[0], [[-2, 4, 0], [0, 0, 12]])
+        np.testing.assert_allclose(applied[1], 0.8 * applied[0])
+        np.testing.assert_array_equal(applied[2:], 0.0)
+        np.testing.assert_allclose(scene.state.particle_qd.numpy(), initial * 0.8**2)
+
+    def test_failed_initial_drag_step_restores_external_force(self):
+        """Restore the previous force with the clock and control after a failed request."""
+        scene = self.scene(error=RuntimeError("failure"))
+        scene._initial_drag_rate = 2.0
+        scene._particle_mass = np.ones((2, 1))
+        scene.state = SimpleNamespace(particle_qd=Array(np.ones((2, 3))), particle_f=Array(np.full((2, 3), 7.0)))
+        applied = []
+
+        def fail(*args, **kwargs):
+            applied.append(scene.state.particle_f.numpy())
+            raise RuntimeError("failure")
+
+        scene.solver.step.side_effect = fail
+        with self.assertRaises(RuntimeError):
+            scene.step()
+        np.testing.assert_array_equal(applied[0], -2.0)
+        np.testing.assert_array_equal(scene.state.particle_f.numpy(), 7.0)
+        np.testing.assert_array_equal(scene.state.particle_qd.numpy(), 1.0)
+        self.assertEqual(scene.steps, 0)
+
+    def test_initial_drag_ends_at_the_actual_step_start_boundary(self):
+        """Clear preparation force at an exact time boundary despite division roundoff."""
+        scene = self.scene()
+        scene.steps = 3
+        scene.recipe = {"initial_hold_s": 3 * scene.dt}
+        scene._initial_drag_rate = 2.0
+        scene._particle_mass = np.ones((2, 1))
+        scene.state = SimpleNamespace(particle_qd=Array(np.ones((2, 3))), particle_f=Array(np.full((2, 3), 7.0)))
+        scene.step()
+        np.testing.assert_array_equal(scene.state.particle_f.numpy(), 0.0)
+
     @staticmethod
     def scene(publication="CONVERGED", *, rolled_back=False, error=None):
         scene = FrankaClothScene.__new__(FrankaClothScene)
         scene.dt, scene.total_steps, scene.steps, scene.failed = 0.1, 4, 0, False
         scene.last_forces, scene._published_generation = None, 0
+        scene._initial_drag_rate, scene._particle_mass = 0.0, None
+        scene.recipe = {"initial_hold_s": 0.2}
         scene.times = np.array([0.0, 0.4])
         scene.phase_times = scene.times
         scene.joint_targets = np.array([np.zeros(9), np.ones(9)])

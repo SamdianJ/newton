@@ -48,6 +48,11 @@ def load_recipe(source):
     nonnegative = [r["initial_hold_s"], r["final_hold_s"], r["asset"]["table_clearance_m"], robot["finger_closed_m"]]
     if not np.isfinite(nonnegative).all() or min(nonnegative) < 0:
         raise ValueError("Holds, clearance and finger targets must be finite and nonnegative")
+    drag = r.get("initial_velocity_damping_per_s", 0.0)
+    if isinstance(drag, bool) or not isinstance(drag, (int, float)) or not np.isfinite(drag) or drag < 0:
+        raise ValueError("Initial velocity damping must be a finite nonnegative rate [1/s]")
+    if drag > 0 and r["initial_hold_s"] == 0:
+        raise ValueError("Initial velocity damping requires a positive initial hold")
     if not np.isfinite(robot["finger_open_m"]) or robot["finger_open_m"] <= robot["finger_closed_m"]:
         raise ValueError("Open finger target must exceed the closed target")
     for frame in r["keyframes"]:
@@ -438,7 +443,14 @@ def plan_joint_targets(model, recipe):
 
 
 class FrankaClothScene:
-    """Shared folding task; contact methods only change the solver adapter."""
+    """Shared folding task; contact methods only change the solver adapter.
+
+    The optional recipe rate ``initial_velocity_damping_per_s`` applies the
+    lagged external force ``-rate * mass * velocity`` during the initial hold.
+    Its interval uses step-start time; the first subsequent step clears it.
+    This is a controlled preparation force, not implicit material damping.
+    Applied forces are recorded for offline displacement-work evaluation.
+    """
 
     def __init__(
         self,
@@ -477,6 +489,8 @@ class FrankaClothScene:
         source.joint_qd.zero_()
         newton.eval_fk(self.model, source.joint_q, source.joint_qd, source)
         self.state = self.solver.create_state(dt=self.dt, source=source)
+        self._initial_drag_rate = r.get("initial_velocity_damping_per_s", 0.0)
+        self._particle_mass = self.model.particle_mass.numpy()[:, None] if self._initial_drag_rate else None
         self.control = self.solver.create_control()
         self.control.joint_target_q.assign(self.joint_targets[0])
         self.control.joint_target_qd.zero_()
@@ -509,7 +523,15 @@ class FrankaClothScene:
             self.times, self.joint_targets, (self.steps + 1) * self.dt, phase_times=self.phase_times
         )
         old_q, old_v = self.control.joint_target_q.numpy(), self.control.joint_target_qd.numpy()
+        # Clear the lagged force once after the hold, then leave subsequent controls alone.
+        apply_drag = self._initial_drag_rate > 0 and (self.steps - 1) * self.dt < self.recipe["initial_hold_s"]
+        old_f = self.state.particle_f.numpy() if apply_drag else None
         try:
+            if apply_drag:
+                force = np.zeros_like(old_f)
+                if self.steps * self.dt < self.recipe["initial_hold_s"]:
+                    force = -self._initial_drag_rate * self._particle_mass * self.state.particle_qd.numpy()
+                self.state.particle_f.assign(force)
             self.control.joint_target_q.assign(q)
             self.control.joint_target_qd.assign(v)
             self.solver.step(self.state, self.state, self.control, dt=self.dt)
@@ -520,6 +542,8 @@ class FrankaClothScene:
         except Exception:
             self.control.joint_target_q.assign(old_q)
             self.control.joint_target_qd.assign(old_v)
+            if old_f is not None:
+                self.state.particle_f.assign(old_f)
             self.failed = True
             raise
         self.steps += 1
