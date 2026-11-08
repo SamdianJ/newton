@@ -107,6 +107,8 @@ def test_schema_stable(test, device):
                 binding = FIELDS_V1[name][0]
                 expected_role = "published" if binding in ("last_evaluation", "derived") else binding
                 test.assertEqual(spec["role"], expected_role, name)
+                if binding in ("last_evaluation", "derived"):
+                    test.assertIn("role == published", spec["valid_when"], name)
             test.assertEqual(schema["row_units"][Unit.FORCE], "N")
             test.assertEqual(schema["row_units"][Unit.TORQUE], "N m")
             test.assertEqual(len(schema["row_units"]), len(Unit))
@@ -465,8 +467,13 @@ def test_material_contact_codes(test, device):
             test.assertTrue(set(arrays["contact_source"].tolist()) <= {-1, -2, -3} | set(range(shapes)))
             targets = arrays["contact_target"]
             test.assertTrue(((targets >= 0) & (targets < shapes)).all())
-            bodies = run.model.shape_body.numpy()
-            test.assertTrue(((bodies[targets] >= -1) & (bodies[targets] < run.model.body_count)).all())
+            expected_kind = {-2: "cloth-shape", -3: "cable-shape"}
+            for raw_source, raw_target in zip(arrays["contact_source"], targets, strict=True):
+                source, target = int(raw_source), int(raw_target)
+                label = (source, target) if source < 0 else tuple(sorted((source, target)))
+                test.assertIn(label, kinds)
+                if source in expected_kind:
+                    test.assertEqual(kinds[label], expected_kind[source])
             for source, target in zip(arrays["pair_source"], arrays["pair_target"], strict=True):
                 test.assertIn((int(source), int(target)), kinds)
 
