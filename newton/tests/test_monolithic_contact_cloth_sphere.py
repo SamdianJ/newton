@@ -10,18 +10,28 @@ import numpy as np
 import warp as wp
 
 import newton
-from newton.solvers.experimental.monolithic import SolverMonolithic
+from newton._src.solvers.monolithic.contact_sampling import _surface_samples
+from newton.solvers.experimental.monolithic import SolverMonolithic, build_smooth_sdf
 from newton.tests.test_monolithic_contact_actor_pairs import native_inputs
 from newton.tests.test_monolithic_contact_components import batch_matrix
 from newton.tests.test_monolithic_contact_materials import query
 from newton.tests.unittest_utils import add_function_test, get_test_devices
+from scripts.monolithic_reference.run_cloth_stack import _sphere_mesh
 
 
-def fixture(device, precision, *, capacity=None, spheres=1):
+def fixture(device, precision, *, capacity=None, spheres=1, mesh=False):
     """Build two independent cloth faces with six identities each per sphere."""
     builder = newton.ModelBuilder(gravity=(0, 0, 0))
     for i in range(spheres):
-        builder.add_shape_sphere(-1, radius=0.5, xform=wp.transform((i * 2, 0, 0), wp.quat_identity()))
+        transform = wp.transform((i * 2, 0, 0), wp.quat_identity())
+        if mesh:
+            source = _sphere_mesh(0.5, 8, 16)
+            source.build_sdf(
+                device=device, max_resolution=32, margin=0.1, narrow_band_range=(-0.2, 0.2), texture_format="float32"
+            )
+            builder.add_shape_mesh(-1, mesh=source, xform=transform)
+        else:
+            builder.add_shape_sphere(-1, radius=0.5, xform=transform)
     cloth = []
     for i in range(2):
         first = builder.particle_count
@@ -35,8 +45,9 @@ def fixture(device, precision, *, capacity=None, spheres=1):
         cloth.append(
             SolverMonolithic.ClothInput(triangle_ids=(face,), bending=(1, 1), thickness=0.01, surface_density=1)
         )
+    model = builder.finalize(device=device)
     solver = SolverMonolithic(
-        builder.finalize(device=device),
+        model,
         cloth_inputs=cloth,
         precision=precision,
         contact_candidate_capacity=capacity,
@@ -45,16 +56,17 @@ def fixture(device, precision, *, capacity=None, spheres=1):
         friction_velocity_scale=0.1,
         contact_stiffness=100,
         use_cuda_graph=False,
+        smooth_sdf=build_smooth_sdf(model) if mesh else None,
     )
     state = solver.create_state(dt=0.001)
     query(solver, state, begin=True)
     return solver, state, solver._contact._spatial
 
 
-def test_grouped_candidates(test, device):
+def test_grouped_candidates(test, device, *, mesh=False):
     """Avoid repeated BVH queries while preserving swept candidates, response and replay."""
     for precision in ("fp32", "fp64"):
-        solver, state, spatial = fixture(device, precision)
+        solver, state, spatial = fixture(device, precision, mesh=mesh)
         q = solver._kinematics.gather_q(state)
         x = state.particle_q
         original = x.numpy().copy()
@@ -124,12 +136,25 @@ def test_grouped_candidates(test, device):
                 spatial._order(spatial.capacity)
                 np.testing.assert_array_equal(spatial.identities.numpy()[: int(spatial.count.numpy()[0])], expected)
         test.assertEqual(pointers, [a.ptr for a in spatial.buffers()])
+        if mesh:
+            # Preserve candidates in the SDF domain outside the geometric sphere.
+            outside = original.copy()
+            outside[:, 2] = 0.55
+            x.assign(outside)
+            spatial.begin_step(q, x, solver._kinematics.poses)
+            spatial.update(q, x)
+            expected = spatial.identities.numpy()[: int(spatial.count.numpy()[0])].copy()
+            test.assertEqual(len(expected), 6)
+            test.assertGreater(float(spatial.target_local_hi.numpy()[0, 2]), 0.55)
+            spatial.query.update(spatial.face_lo, spatial.face_hi, spatial.target_lo, spatial.target_hi, sort=False)
+            spatial._order(spatial.capacity)
+            np.testing.assert_array_equal(spatial.identities.numpy()[: int(spatial.count.numpy()[0])], expected)
 
 
-def test_grouped_fallback(test, device):
+def test_grouped_fallback(test, device, *, mesh=False):
     """Retain generic capacity clipping and multiple-target candidate coverage."""
     for capacity, spheres in ((0, 1), (1, 1), (5, 1), (6, 1), (11, 1), (None, 2)):
-        solver, state, spatial = fixture(device, "fp32", capacity=capacity, spheres=spheres)
+        solver, state, spatial = fixture(device, "fp32", capacity=capacity, spheres=spheres, mesh=mesh)
         with patch.object(spatial.query, "update", wraps=spatial.query.update) as generic:
             spatial.update(solver._kinematics.gather_q(state), state.particle_q)
             test.assertEqual(generic.call_count, 1)
@@ -140,11 +165,27 @@ def test_grouped_fallback(test, device):
         test.assertEqual(len(ids), len(set(ids)))
 
 
+def test_grouped_mesh(test, device):
+    """Preserve mesh SDF envelopes, contact response, graph replay and generic fallbacks."""
+    if not device.is_cuda:
+        test.skipTest("Mesh SDF textures require CUDA")
+    test_grouped_candidates(test, device, mesh=True)
+    test_grouped_fallback(test, device, mesh=True)
+
+
 class TestClothSphereQuery(unittest.TestCase):
-    pass
+    def test_sphere_mesh_geometry(self):
+        """Build outward positive-area faces accepted by the actual mesh target sampler."""
+        mesh = _sphere_mesh(0.12, 32, 64)
+        _points, _normals, weights = _surface_samples(newton.GeoType.MESH, np.ones(3), mesh)
+        self.assertTrue(np.all(weights > 0))
+        faces = mesh.vertices[mesh.indices.reshape(-1, 3)].astype(float)
+        normals = np.cross(faces[:, 1] - faces[:, 0], faces[:, 2] - faces[:, 0])
+        self.assertTrue(np.all(np.sum(normals * faces.mean(axis=1), axis=1) > 0))
+        self.assertEqual(len(faces), 3968)
 
 
-for _test in (test_grouped_candidates, test_grouped_fallback):
+for _test in (test_grouped_candidates, test_grouped_fallback, test_grouped_mesh):
     add_function_test(TestClothSphereQuery, _test.__name__, _test, devices=get_test_devices())
 
 

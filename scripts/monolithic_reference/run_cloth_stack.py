@@ -8,13 +8,27 @@ import json
 
 import numpy as np
 import warp as wp
-from newton.solvers.experimental.monolithic import SolverMonolithic
+from newton.solvers.experimental.monolithic import SolverMonolithic, build_smooth_sdf
 
 import newton
 
 from .cloth_contact_run import add_arguments, create_solver, execute, publication
 from .material_recipes import shell_coefficients
 from .run_cloth_contact import _grid
+
+
+def _sphere_mesh(radius, num_latitudes, num_longitudes):
+    """Build a sphere without collapsed polar faces rejected by material sampling."""
+    if any(type(n) is not int or n < 3 for n in (num_latitudes, num_longitudes)):
+        raise ValueError("Sphere mesh subdivisions must be integers of at least three")
+    mesh = newton.Mesh.create_sphere(
+        radius, num_latitudes=num_latitudes, num_longitudes=num_longitudes, compute_inertia=False
+    )
+    faces = mesh.indices.reshape(-1, 3)
+    points = mesh.vertices[faces].astype(float)
+    area2 = np.linalg.norm(np.cross(points[:, 1] - points[:, 0], points[:, 2] - points[:, 0]), axis=1)
+    keep = area2 > np.finfo(float).eps * radius**2
+    return newton.Mesh(mesh.vertices, faces[keep].ravel(), compute_inertia=False)
 
 
 class ClothStackScene:
@@ -38,6 +52,7 @@ class ClothStackScene:
             raise ValueError("Require exactly one fixed sphere or table")
         support = "sphere" if "sphere" in recipe else "table"
         shape = recipe[support]
+        mesh_spec = shape.get("mesh") if support == "sphere" else None
         layers, cells = cloth["layers"], cloth["cells_per_side"]
         if type(layers) is not int or layers < 1 or len(cloth["rotation_z_deg"]) != layers:
             raise ValueError("Require a positive layer count and one rotation per layer")
@@ -74,7 +89,21 @@ class ClothStackScene:
         np.add.at(mass, self.triangles.ravel(), np.repeat(areas * material["surface_density_kg_m2"] / 3, 3))
         lam, mu, alpha, beta = shell_coefficients(material)
         builder = newton.ModelBuilder(gravity=(0, 0, -9.81))
-        if support == "sphere":
+        if mesh_spec is not None:
+            if not wp.get_device(device).is_cuda:
+                raise ValueError("Sphere mesh contact requires CUDA SDF textures")
+            mesh = _sphere_mesh(top_offset, mesh_spec["num_latitudes"], mesh_spec["num_longitudes"])
+            sdf = mesh_spec["sdf"]
+            mesh.build_sdf(
+                device=device,
+                max_resolution=sdf["max_resolution"],
+                margin=sdf["margin_m"],
+                narrow_band_range=tuple(sdf["narrow_band_m"]),
+                texture_format="float32",
+                sign_method="winding",
+            )
+            builder.add_shape_mesh(-1, xform=wp.transform(center, wp.quat_identity()), mesh=mesh)
+        elif support == "sphere":
             builder.add_shape_sphere(-1, xform=wp.transform(center, wp.quat_identity()), radius=top_offset)
         else:
             builder.add_shape_box(
@@ -100,6 +129,8 @@ class ClothStackScene:
             pcg_mode=SolverMonolithic.PCGMode.PRODUCTION,
             use_cuda_graph=use_cuda_graph,
         )
+        if mesh_spec is not None:
+            options["smooth_sdf"] = build_smooth_sdf(self.model)
         self.solver = create_solver(self.model, inputs, options, method, method_config)
         self.state = self.solver.create_state(dt=self.dt)
         self.control = self.solver.create_control()
@@ -116,6 +147,10 @@ class ClothStackScene:
             support: f"fixed analytic collision {support}; no additional ground plane",
             "cloth_attachment": "none; all layers released simultaneously at rest",
         }
+        if mesh_spec is not None:
+            self.metadata["sphere"] = "fixed triangle mesh with C2 SDF collision; no additional ground plane"
+            self.metadata["support_mesh"] = {"vertices": len(mesh.vertices), "triangles": len(mesh.indices) // 3}
+            self.metadata["smooth_sdf"] = options["smooth_sdf"].build_metadata
 
     def step(self):
         """Advance the physical clock only after valid solver publication and feedback."""

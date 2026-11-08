@@ -259,7 +259,7 @@ def _transform_points(transform, points):
 
 
 @wp.kernel(enable_backward=False)
-def _mark_cloth_sphere(
+def _mark_cloth_target(
     lower: wp.array[wp.vec3],
     upper: wp.array[wp.vec3],
     target_lo: wp.array[wp.vec3],
@@ -280,7 +280,7 @@ def _mark_cloth_sphere(
 
 
 @wp.kernel(enable_backward=False)
-def _write_cloth_sphere(prefix: wp.array[int], keys: wp.array[wp.uint64], count: wp.array[int]):
+def _write_cloth_target(prefix: wp.array[int], keys: wp.array[wp.uint64], count: wp.array[int]):
     i = wp.tid()
     if i == 0:
         count[0] = prefix[prefix.shape[0] - 1]
@@ -486,13 +486,13 @@ class _ContactSpatial:
             initial_bounds=(self.face_lo, self.face_hi, self.target_lo, self.target_hi),
             _samples_per_patch=slots_per_patch,
         )
-        # Only complete cloth groups with one fixed sphere share all six boxes
+        # Only complete cloth groups with one fixed sphere/mesh share all six boxes
         # and permissions. Keep capacity clipping on the original admission path.
         grouped = (
             material
             and bool(unique_faces)
             and len(unique_targets) == 1
-            and types[unique_targets[0]] == GeoType.SPHERE
+            and types[unique_targets[0]] in (GeoType.SPHERE, GeoType.MESH)
             and bodies[unique_targets[0]] == -1
             and sample_stride == 6
             and len(unique_faces) % 6 == 0
@@ -502,7 +502,7 @@ class _ContactSpatial:
         if grouped:
             ordinals = np.asarray(unique_faces)[:, 1].reshape(-1, 6)
             grouped = bool(np.all(ordinals == (ordinals[:, :1] // 6) * 6 + np.arange(6)))
-        self._cloth_sphere_prefix = wp.zeros(
+        self._cloth_target_prefix = wp.zeros(
             len(unique_faces) // 6 + 1 if grouped else 0, dtype=int, device=self.device
         )
         self._ids, self._scratch_ids = (wp.empty(capacity, dtype=wp.uint64, device=self.device) for _ in range(2))
@@ -633,27 +633,27 @@ class _ContactSpatial:
                 raise ValueError("Spatial contact input aliases output")
         self._bounds(q, x, com)
         # Only the mapped contact identities need ordering; sorting query keys first is redundant.
-        if self._cloth_sphere_prefix.size:
+        if self._cloth_target_prefix.size:
             query = self.query
             query._prepare_bounds(self.face_lo, self.face_hi, self.target_lo, self.target_hi)
             wp.launch(
-                _mark_cloth_sphere,
-                self._cloth_sphere_prefix.size,
+                _mark_cloth_target,
+                self._cloth_target_prefix.size,
                 [
                     query.face_lo,
                     query.face_hi,
                     query.target_lo,
                     query.target_hi,
                     query.status,
-                    self._cloth_sphere_prefix,
+                    self._cloth_target_prefix,
                 ],
                 device=self.device,
             )
-            array_scan(self._cloth_sphere_prefix, self._cloth_sphere_prefix)
+            array_scan(self._cloth_target_prefix, self._cloth_target_prefix)
             wp.launch(
-                _write_cloth_sphere,
-                self._cloth_sphere_prefix.size,
-                [self._cloth_sphere_prefix, query.keys, query.count],
+                _write_cloth_target,
+                self._cloth_target_prefix.size,
+                [self._cloth_target_prefix, query.keys, query.count],
                 device=self.device,
             )
         else:
