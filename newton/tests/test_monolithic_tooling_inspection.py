@@ -3,11 +3,13 @@
 
 """Read-only state capture: schema, values, binding roles, non-perturbation and guards."""
 
+import dataclasses
 import json
 import math
 import tempfile
 import unittest
 from pathlib import Path
+from types import MappingProxyType
 from unittest.mock import patch
 
 import numpy as np
@@ -124,6 +126,16 @@ def test_schema_stable(test, device):
                     f"records.trials[{last}].slope": "-inf",
                 },
             )
+            stats = run.last_stats
+            run._last_stats = dataclasses.replace(
+                stats, variational=MappingProxyType({**stats.variational, "objective_total": float("nan")})
+            )
+            try:
+                nan_total = inspection.capture(run, state)["schema"]
+            finally:
+                run._last_stats = stats
+            test.assertIsNone(nan_total["scalars"]["objective_total"])
+            test.assertEqual(nan_total["nonfinite"].get("scalars.objective_total"), "nan")
             test.assertTrue(schema["host_synchronizing"])
             test.assertIsInstance(schema["reads"], list)
             test.assertEqual(schema["precision"], precision)
@@ -240,8 +252,10 @@ def test_solver_fields_match_stats(test, device):
             fields = schema["fields"]
             for name in ("contact_source", "contact_target", "pair_source", "pair_target"):
                 test.assertIn("shape index", fields[name]["meaning"], name)
-            test.assertIn("-1", fields["contact_source"]["meaning"])
-            test.assertIn("-3", fields["contact_source"]["meaning"])
+            for code, what in (("-1", "tet surface"), ("-2", "cloth"), ("-3", "cable")):
+                test.assertIn(f"{code}: {what}", fields["contact_source"]["meaning"])
+                test.assertIn(f"{code} {what}", fields["pair_source"]["meaning"])
+            test.assertIn("legacy", fields["pair_wrench"]["meaning"])
             for name in ("contact_wrench", "pair_wrench"):
                 test.assertIn("world origin", fields[name]["meaning"], name)
             test.assertIn("centre of mass", fields["contact_body_force"]["meaning"])
@@ -277,8 +291,14 @@ def test_solver_fields_match_stats(test, device):
 
 
 def test_binding_roles(test, device):
-    """The capture states which evaluation the solver-held fields describe."""
-    run, state, control = chain(device)
+    """Solver-held fields are exported only for the published step and absent, with a reason, otherwise."""
+    for precision in precisions():
+        with test.subTest(precision=precision):
+            check_binding_roles(test, device, precision)
+
+
+def check_binding_roles(test, device, precision):
+    run, state, control = chain(device, precision)
     result = inspection.capture(run, state)
     test.assertEqual(result["schema"]["role"], "none")
     test.assertTrue(STEP_BOUND <= set(result["schema"]["absent"]))
@@ -287,11 +307,11 @@ def test_binding_roles(test, device):
     old = run._states.copy(state)
     step_chain(run, state, control, 0)
     test.assertEqual(inspection.capture(run, state)["schema"]["role"], "published")
-    stale = inspection.capture(run, old)
-    test.assertNotEqual(stale["schema"]["role"], "published")
-    test.assertFalse(stale["schema"]["describes_state"])
+    check_unpublished(test, run, old)
 
-    _, stopped = scene(device=device, publish_policy="current_iterate", pcg_mode="production", tet=True)
+    _, stopped = scene(
+        device=device, publish_policy="current_iterate", pcg_mode="production", tet=True, precision=precision
+    )
     stopped_state, stopped_control = stopped.create_state(dt=0.001), stopped.create_control()
     iterate = stopped._iterate_articulation
 
@@ -305,7 +325,7 @@ def test_binding_roles(test, device):
     test.assertEqual(schema["role"], "published")
     test.assertEqual(schema["publication_status"], "STOPPED_ACCEPTED")
 
-    _, failed = scene(device=device, pcg_mode="production", tet=True)
+    _, failed = scene(device=device, pcg_mode="production", tet=True, precision=precision)
     failed_state, failed_control = failed.create_state(dt=0.001), failed.create_control()
     failed.step(failed_state, failed_state, failed_control, dt=0.001)
     finish = failed._finish_candidate
@@ -317,38 +337,34 @@ def test_binding_roles(test, device):
     with patch.object(failed, "_finish_candidate", side_effect=fail_after_finish):
         failed.step(failed_state, failed_state, failed_control, dt=0.001)
     test.assertTrue(failed.last_stats.rolled_back)
-    check_unpublished_roles(test, failed, failed_state)
+    check_unpublished(test, failed, failed_state)
+
+    calls = []
 
     def fail_trial(dt, evaluate=failed._problem.evaluate_trial, run=failed):
+        calls.append(dt)
         evaluate(dt)
         raise _StepFailure(run.Status.NONFINITE, "injected failure inside a trial evaluation")
 
     with patch.object(failed._problem, "evaluate_trial", side_effect=fail_trial):
         failed.step(failed_state, failed_state, failed_control, dt=0.001)
-    test.assertTrue(failed.last_stats.rolled_back)
-    check_unpublished_roles(test, failed, failed_state)
+    # An FP32 step of this scene can converge without any trial evaluation, so the injection may not
+    # fire there; in FP64 it must. The publication-failure case above covers rollback in both precisions.
+    test.assertTrue(calls or precision == "fp32", "the trial injection never fired in FP64")
+    if calls:
+        test.assertTrue(failed.last_stats.rolled_back)
+        check_unpublished(test, failed, failed_state)
 
 
-def check_unpublished_roles(test, run, state):
-    """Off the published path, each solver-held field names the evaluation it came from."""
-    result = inspection.capture(run, state)
-    schema, fields = result["schema"], result["schema"]["fields"]
+def check_unpublished(test, run, state):
+    """Off the published path no solver-held value is exported; each absence says why."""
+    schema = inspection.capture(run, state)["schema"]
     test.assertNotEqual(schema["role"], "published")
     test.assertFalse(schema["describes_state"])
-    expected = {
-        "residual": "last_recorded_iterate",
-        "energy_terms": "last_launched_evaluation",
-        "producer_energy": "last_launched_evaluation",
-        "contact_wrench": "last_launched_evaluation",
-        "contact_identity": "last_launched_evaluation",
-        "tet_min_det_f": "last_successful_evaluation",
-    }
-    for name, role in expected.items():
-        if name in fields:
-            test.assertEqual(fields[name]["role"], role, name)
-    for name in ("pair_source", "pair_target", "pair_wrench", "tet_det_f"):
-        test.assertIn(name, schema["absent"], name)
-    np.testing.assert_array_equal(result["arrays"]["residual"], run.last_stats.variational["residual"])
+    test.assertTrue(STEP_BOUND <= set(schema["absent"]), STEP_BOUND - set(schema["absent"]))
+    test.assertFalse(STEP_BOUND & set(schema["fields"]))
+    for name in STEP_BOUND & set(schema["absent"]):
+        test.assertIn("published", schema["absent"][name], name)
 
 
 def without_wall_clock(value):
@@ -411,9 +427,12 @@ def test_capture_does_not_perturb(test, device):
 
 def test_det_f_uses_solver_arithmetic(test, device):
     """Per-element det F compiles like the tet evaluation and its minimum is Stats.min_det_f at every step."""
-    test.assertEqual(
-        wp.get_module(inspection.__name__).options["fuse_fp"], wp.get_module(tet_precision.__name__).options["fuse_fp"]
-    )
+    for option in ("fuse_fp", "fast_math"):
+        test.assertEqual(
+            wp.get_module(inspection.__name__).options[option],
+            wp.get_module(tet_precision.__name__).options[option],
+            option,
+        )
     for precision in precisions():
         with test.subTest(precision=precision):
             run, state, control = chain(device, precision)
@@ -423,13 +442,48 @@ def test_det_f_uses_solver_arithmetic(test, device):
                 test.assertEqual(arrays["tet_det_f"].min(), run.last_stats.min_det_f, f"step {step}")
 
 
+def test_material_contact_codes(test, device):
+    """Cloth and cable samples carry the -2 and -3 source codes and their pairs, with real cloth contact records."""
+    for precision in precisions():
+        with test.subTest(precision=precision):
+            model, run = scene(
+                shape_radius=0.3, cloth=1, cables=1, pcg_mode="production", device=device, precision=precision
+            )
+            state, control = run.create_state(dt=0.001), run.create_control()
+            run.step(state, state, control, dt=0.001)
+            result = inspection.capture(run, state)
+            test.assertEqual(result["schema"]["role"], "published")
+            arrays, kinds = result["arrays"], run._contact.actor_samples.pair_kinds
+            shapes = run.model.shape_count
+            sources = run._contact._batch.all_samples.sources.numpy()
+            test.assertTrue({-2, -3} <= set(sources.tolist()))
+            test.assertTrue(set(sources.tolist()) <= {-1, -2, -3} | set(range(shapes)))
+            test.assertEqual({kinds[k] for k in kinds if k[0] == -2}, {"cloth-shape"})
+            test.assertEqual({kinds[k] for k in kinds if k[0] == -3}, {"cable-shape"})
+            # The cloth sheet touches the sphere, so real records with source -2 must exist.
+            test.assertIn(-2, set(arrays["contact_source"].tolist()))
+            test.assertTrue(set(arrays["contact_source"].tolist()) <= {-1, -2, -3} | set(range(shapes)))
+            targets = arrays["contact_target"]
+            test.assertTrue(((targets >= 0) & (targets < shapes)).all())
+            bodies = run.model.shape_body.numpy()
+            test.assertTrue(((bodies[targets] >= -1) & (bodies[targets] < run.model.body_count)).all())
+            for source, target in zip(arrays["pair_source"], arrays["pair_target"], strict=True):
+                test.assertIn((int(source), int(target)), kinds)
+
+
 def test_guards(test, device):
     """Reject foreign states, unknown fields, graph capture and existing output, and stay off the step path."""
-    run, state, control = chain(device)
+    for precision in precisions():
+        with test.subTest(precision=precision):
+            check_guards(test, device, precision)
+
+
+def check_guards(test, device, precision):
+    run, state, control = chain(device, precision)
     step_chain(run, state, control, 0)
     with test.assertRaisesRegex(ValueError, "no_such_field"):
         inspection.capture(run, state, fields=["no_such_field"])
-    _, other = scene(device=device, pcg_mode="production", tet=True)
+    _, other = scene(device=device, pcg_mode="production", tet=True, precision=precision)
     with test.assertRaises(ValueError):
         inspection.capture(run, other.create_state(dt=0.001))
     if device.is_cuda:
@@ -455,6 +509,7 @@ for function in (
     test_binding_roles,
     test_capture_does_not_perturb,
     test_det_f_uses_solver_arithmetic,
+    test_material_contact_codes,
     test_guards,
 ):
     add_function_test(TestToolingInspection, function.__name__, function, devices=get_test_devices())

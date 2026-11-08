@@ -14,14 +14,11 @@ Binding of each field:
 
 * ``state``: read from the state passed in.
 * ``static``: fixed by the solver layout.
-* ``last_evaluation``: held by the solver from an evaluation. It describes the
-  state passed in only when the schema's ``role`` is ``published``. Otherwise each
-  field's own ``role`` says which evaluation it comes from, because a failed or
-  rolled-back step leaves them from different evaluations:
-  ``last_recorded_iterate`` (the residual the iteration last recorded),
-  ``last_launched_evaluation`` (energy terms and contact records, written even
-  by an evaluation that then failed) and ``last_successful_evaluation``
-  (``Stats.min_det_f``).
+* ``last_evaluation``: held by the solver from its last evaluation. Exported only
+  when the schema's ``role`` is ``published``: then that evaluation is the final
+  one at the returned state. Off that path (a failed or rolled-back step, a state
+  other than the published one) these values can come from different
+  evaluations, so they are listed in ``absent`` instead.
 * ``derived``: computed here from solver storage; currently the per-element
   det F of the published step, by the tet evaluation's formula and compile
   options.
@@ -42,23 +39,13 @@ from . import tet_precision
 from .convergence import Unit
 from .numeric_parameters import scalar_value
 
-# det F must round like tet_precision._elements, so compile with that module's options.
-wp.set_module_options({"fuse_fp": wp.get_module(tet_precision.__name__).options["fuse_fp"]})
+# det F must round like tet_precision._elements, so compile with that module's arithmetic options.
+ARITHMETIC_OPTIONS = ("fuse_fp", "fast_math")
+wp.set_module_options({k: wp.get_module(tet_precision.__name__).options[k] for k in ARITHMETIC_OPTIONS})
 
 SCHEMA_VERSION = 1
 
 ROW_UNITS = tuple({Unit.FORCE: "N", Unit.TORQUE: "N m"}[unit] for unit in sorted(Unit))
-
-_UNPUBLISHED_ROLES = {
-    "residual": "last_recorded_iterate",
-    "energy_terms": "last_launched_evaluation",
-    "producer_energy": "last_launched_evaluation",
-    "contact_identity": "last_launched_evaluation",
-    "contact_source": "last_launched_evaluation",
-    "contact_target": "last_launched_evaluation",
-    "contact_wrench": "last_launched_evaluation",
-    "tet_min_det_f": "last_successful_evaluation",
-}
 
 # name: (binding, unit, frame, meaning, source, valid_when)
 _FIELDS = {
@@ -74,7 +61,7 @@ _FIELDS = {
         "state",
         "joint_rate",
         "joint",
-        "joint velocities; m/s or rad/s by DoF; a FREE joint is [linear 3, angular 3] in its parent frame (rigid.py _mirrors)",
+        "joint velocities; m/s or rad/s by DoF; a FREE joint is [child centre-of-mass velocity 3, angular velocity 3], both in its parent joint frame (rigid.py _mirrors)",
         "state.joint_qd",
         "always",
     ),
@@ -260,7 +247,7 @@ _FIELDS = {
         "last_evaluation",
         "1",
         "none",
-        "source Newton shape index of each contact record; -1: tet or cloth surface triangle sample, -3: cable edge sample (contact_sampling.py, contact_batch.py)",
+        "source Newton shape index of each contact record; -1: tet surface triangle sample, -2: cloth triangle sample, -3: cable edge sample (contact_sampling.py, contact_material_sampling.py, contact_batch.py)",
         "solver._contact._batch.all_samples.sources",
         "a step evaluated",
     ),
@@ -284,7 +271,7 @@ _FIELDS = {
         "last_evaluation",
         "1",
         "none",
-        "source of each contact pair: Newton shape index, -1 for tet or cloth surfaces; key of actor_samples.pair_kinds",
+        "source of each contact pair: Newton shape index, or -1 tet surface, -2 cloth, -3 cable; key of actor_samples.pair_kinds",
         "Stats.variational['actor_contact_pairs']",
         "role == published",
     ),
@@ -300,7 +287,7 @@ _FIELDS = {
         "last_evaluation",
         "N|N m",
         "world",
-        "contact-pair wrench, fixed-tree sum of its records with ends in sorted shape order, each [force 3, torque 3 about the world origin] (contact_pipeline.py pair_diagnostics)",
+        "contact-pair wrench, fixed-tree sum of its records with ends in sorted shape order, each [force 3, torque 3 about the world origin]; records with identity below the legacy sample count are not included (contact_pipeline.py pair_diagnostics)",
         "Stats.variational['actor_contact_pairs']",
         "role == published",
     ),
@@ -523,12 +510,16 @@ def capture(solver, state, fields=None):
     if want("energy_term_producer"):
         arrays["energy_term_producer"] = term_owner
 
-    evaluated = role != "none"
-    unevaluated = "no step has evaluated yet"
+    evaluated = role == "published"
+    unevaluated = (
+        "no step has evaluated yet"
+        if role == "none"
+        else "not the published step: off that path the solver-held values can come from different evaluations"
+    )
     residual = stats.variational.get("residual") if evaluated else None
     if want("residual"):
         if residual is None:
-            absent["residual"] = unevaluated if not evaluated else "the last step recorded no residual"
+            absent["residual"] = unevaluated if not evaluated else "the published step recorded no residual"
         else:
             arrays["residual"] = np.array(residual, copy=True)
     if want("energy_terms") or want("producer_energy"):
@@ -556,8 +547,8 @@ def capture(solver, state, fields=None):
     if want("tet_det_f"):
         if not solver._has_tet:
             absent["tet_det_f"] = "no tet actor"
-        elif role != "published":
-            absent["tet_det_f"] = "computed only for the published step"
+        elif not evaluated:
+            absent["tet_det_f"] = unevaluated
         else:
             physics = solver._tet.physics
             det = wp.empty(solver.model.tet_count, dtype=solver._dtype, device=solver.model.device)
@@ -611,7 +602,7 @@ def capture(solver, state, fields=None):
         if pairs is None:
             for name in pair_names:
                 if want(name):
-                    absent[name] = "actor-pair wrenches exist only for a published step"
+                    absent[name] = unevaluated
         else:
             values = {
                 "pair_source": np.array([p["source"] for p in pairs], dtype=np.int32),
@@ -634,10 +625,7 @@ def capture(solver, state, fields=None):
     field_specs = {}
     for name, value in arrays.items():
         binding, unit, frame, meaning, source, valid_when = _FIELDS[name]
-        if binding in ("last_evaluation", "derived"):
-            field_role = "published" if role == "published" else _UNPUBLISHED_ROLES[name]
-        else:
-            field_role = binding
+        field_role = "published" if binding in ("last_evaluation", "derived") else binding
         field_specs[name] = {
             "binding": binding,
             "role": field_role,
@@ -650,7 +638,7 @@ def capture(solver, state, fields=None):
             "shape": list(value.shape),
         }
     records, nonfinite = {}, {}
-    if evaluated:
+    if role != "none":
         for name in ("trials", "linear_postchecks"):
             if name in stats.variational:
                 records[name] = _jsonable(stats.variational[name], f"records.{name}", nonfinite)
@@ -660,9 +648,9 @@ def capture(solver, state, fields=None):
         "device": str(solver.model.device),
         "configuration": solver._kinematics.digest.hex(),
         "layout": solver._actors.identity,
-        "step_generation": int(stats.step_generation) if evaluated else None,
+        "step_generation": int(stats.step_generation) if role != "none" else None,
         "status": stats.status.value,
-        "publication_status": stats.variational.get("publication_status") if evaluated else None,
+        "publication_status": stats.variational.get("publication_status") if role != "none" else None,
         "role": role,
         "describes_state": describes,
         "producers": [p.name for p in producers],
@@ -676,7 +664,9 @@ def capture(solver, state, fields=None):
                 "rolled_back": stats.rolled_back,
                 "objective_total": stats.variational.get("objective_total") if evaluated else None,
                 "min_det_f": stats.min_det_f if evaluated and solver._has_tet else None,
-            }
+            },
+            "scalars",
+            nonfinite,
         ),
         "not_measured": ["matrix_nnz", "max_penetration", "timings", "contact_force_imbalance"],
         "nonfinite": nonfinite,
@@ -697,7 +687,13 @@ def save_capture(result, directory, *, metadata=None):
     directory = Path(directory)
     directory.mkdir(parents=True, exist_ok=False)
     np.savez(directory / "state.npz", **result["arrays"])
-    document = {**result["schema"], "records": result["records"], "metadata": _jsonable(metadata or {})}
+    nonfinite = dict(result["schema"]["nonfinite"])
+    document = {
+        **result["schema"],
+        "records": result["records"],
+        "metadata": _jsonable(metadata or {}, "metadata", nonfinite),
+    }
+    document["nonfinite"] = nonfinite
     (directory / "schema.json").write_text(json.dumps(document, indent=2, allow_nan=False) + "\n")
 
 
