@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 The Newton Developers
 # SPDX-License-Identifier: Apache-2.0
 
-"""Drop independent square cloth layers onto a fixed analytic sphere, in SI units."""
+"""Drop independent square cloth layers onto a fixed sphere or table, in SI units."""
 
 import argparse
 import json
@@ -33,19 +33,29 @@ class ClothStackScene:
             raise ValueError("Require an integral planned step count")
         self.total_steps = round(duration / self.dt)
         self.steps, self.phase = 0, "free-drop"
-        cloth, sphere, material = recipe["cloth"], recipe["sphere"], recipe["material"]
+        cloth, material = recipe["cloth"], recipe["material"]
+        if ("sphere" in recipe) == ("table" in recipe):
+            raise ValueError("Require exactly one fixed sphere or table")
+        support = "sphere" if "sphere" in recipe else "table"
+        shape = recipe[support]
         layers, cells = cloth["layers"], cloth["cells_per_side"]
         if type(layers) is not int or layers < 1 or len(cloth["rotation_z_deg"]) != layers:
             raise ValueError("Require a positive layer count and one rotation per layer")
-        center = np.asarray(sphere["center_m"], dtype=float)
-        radius = float(sphere["radius_m"])
-        gap, clearance = float(cloth["layer_gap_m"]), float(cloth["sphere_clearance_m"])
+        center = np.asarray(shape["center_m"], dtype=float)
+        if support == "sphere":
+            top_offset = float(shape["radius_m"])
+        else:
+            half = np.asarray(shape["half_extents_m"], dtype=float)
+            if half.shape != (3,) or not np.isfinite(half).all() or np.any(half <= 0):
+                raise ValueError("Require finite positive table half extents")
+            top_offset = half[2]
+        gap, clearance = float(cloth["layer_gap_m"]), float(cloth[f"{support}_clearance_m"])
         if center.shape != (3,) or not np.isfinite(center).all():
-            raise ValueError("Require a finite sphere center")
-        if not np.isfinite([radius, gap, clearance]).all() or min(radius, gap, clearance) <= 0:
-            raise ValueError("Require positive sphere radius and initially separated layers")
+            raise ValueError("Require a finite support center")
+        if not np.isfinite([top_offset, gap, clearance]).all() or min(top_offset, gap, clearance) <= 0:
+            raise ValueError("Require positive support size and initially separated layers")
         if gap <= material["thickness_m"] or clearance <= material["thickness_m"] / 2:
-            raise ValueError("Initial layers must not overlap one another or the sphere")
+            raise ValueError("Initial layers must not overlap one another or the support")
         sheet, faces = _grid(cells, cells, cloth["width_m"], cloth["width_m"])
         sheet[:, 0] -= cloth["width_m"] / 2
         positions = []
@@ -53,7 +63,7 @@ class ClothStackScene:
             if not np.isfinite(angle):
                 raise ValueError("Require finite layer rotations")
             rotation = np.array([[np.cos(angle), -np.sin(angle), 0], [np.sin(angle), np.cos(angle), 0], [0, 0, 1]])
-            positions.append(sheet @ rotation.T + center + [0, 0, radius + clearance + layer * gap])
+            positions.append(sheet @ rotation.T + center + [0, 0, top_offset + clearance + layer * gap])
         rest = np.vstack(positions).astype(np.float32).astype(float)
         self.triangles = np.vstack([faces + layer * len(sheet) for layer in range(layers)])
         self.owners = np.repeat(np.arange(layers), len(faces))
@@ -64,7 +74,12 @@ class ClothStackScene:
         np.add.at(mass, self.triangles.ravel(), np.repeat(areas * material["surface_density_kg_m2"] / 3, 3))
         lam, mu, alpha, beta = shell_coefficients(material)
         builder = newton.ModelBuilder(gravity=(0, 0, -9.81))
-        builder.add_shape_sphere(-1, xform=wp.transform(center, wp.quat_identity()), radius=radius)
+        if support == "sphere":
+            builder.add_shape_sphere(-1, xform=wp.transform(center, wp.quat_identity()), radius=top_offset)
+        else:
+            builder.add_shape_box(
+                -1, xform=wp.transform(center, wp.quat_identity()), hx=half[0], hy=half[1], hz=half[2]
+            )
         for point, value in zip(rest, mass, strict=True):
             builder.add_particle(wp.vec3(point), wp.vec3(0), float(value), radius=material["thickness_m"] / 2)
         for face in self.triangles:
@@ -89,7 +104,7 @@ class ClothStackScene:
         self.state = self.solver.create_state(dt=self.dt)
         self.control = self.solver.create_control()
         self.metadata = {
-            "kind": "cloth-stack-sphere",
+            "kind": f"cloth-stack-{support}",
             "recipe": recipe,
             "method": method,
             "method_config": method_config,
@@ -98,7 +113,7 @@ class ClothStackScene:
             "vertices_per_layer": len(sheet),
             "triangles_per_layer": len(faces),
             "gravity_m_s2": [0, 0, -9.81],
-            "sphere": "fixed analytic collision sphere; no ground plane",
+            support: f"fixed analytic collision {support}; no additional ground plane",
             "cloth_attachment": "none; all layers released simultaneously at rest",
         }
 
