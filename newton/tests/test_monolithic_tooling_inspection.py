@@ -287,6 +287,8 @@ def test_solver_fields_match_stats(test, device):
                     step *= 2
                 sums[label] = tree[0]
             test.assertEqual(len(sums), len(pairs))
+            # A shape-shape pair is labelled (smaller, larger) shape index; a surface pair keeps its negative code first.
+            test.assertTrue(((arrays["pair_source"] < 0) | (arrays["pair_source"] < arrays["pair_target"])).all())
             for index in range(len(pairs)):
                 label = (int(arrays["pair_source"][index]), int(arrays["pair_target"][index]))
                 np.testing.assert_array_equal(sums[label], arrays["pair_wrench"][index], err_msg=str(label))
@@ -455,6 +457,7 @@ def test_material_contact_codes(test, device):
             run.step(state, state, control, dt=0.001)
             result = inspection.capture(run, state)
             test.assertEqual(result["schema"]["role"], "published")
+            test.assertIn("force_valid == 1", result["schema"]["fields"]["contact_cable_torque"]["valid_when"])
             arrays, kinds = result["arrays"], run._contact.actor_samples.pair_kinds
             shapes = run.model.shape_count
             sources = run._contact._batch.all_samples.sources.numpy()
