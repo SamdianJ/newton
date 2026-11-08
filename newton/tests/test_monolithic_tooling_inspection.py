@@ -446,7 +446,7 @@ def test_material_contact_codes(test, device):
     """Cloth and cable samples carry the -2 and -3 source codes and their pairs, with real cloth contact records."""
     for precision in precisions():
         with test.subTest(precision=precision):
-            model, run = scene(
+            _, run = scene(
                 shape_radius=0.3, cloth=1, cables=1, pcg_mode="production", device=device, precision=precision
             )
             state, control = run.create_state(dt=0.001), run.create_control()
