@@ -428,6 +428,7 @@ class _PointCloudContact:
         self.evaluation_generation = 0
         self.assembled_generation = -1
         self.candidate_generation = 0
+        self._candidate_count = None
         self._last_assembly = None
         for rows in (self.pool._identity, self.pool.energy, self.pool.residual, self.pool.force):
             for buffer in rows.buffers():
@@ -463,6 +464,10 @@ class _PointCloudContact:
             self.pool.candidates.overflow,
         )
         self.graphs.run("point_cloud_query", (), (x, *metadata), lambda: self._refresh(x), warmup=False)
+        # Freeze a conservative work bound with the candidate set, once per
+        # Newton refresh. Trial evaluations need no additional count readback.
+        count = int(self.pool.candidates.count.numpy()[0])
+        self._candidate_count = max(0, min(self.pool.candidate_capacity, count))
         self.candidate_generation += 1
         self.assembled_generation = -1
 
@@ -537,7 +542,7 @@ class _PointCloudContact:
             *self.pool.buffers(),
         )
         self.graphs.run("point_cloud_response", (float(dt),), buffers, lambda: self._evaluate(steps, dt), warmup=False)
-        self.pool.evaluate()
+        self.pool.evaluate(candidate_count=self._candidate_count)
         self.evaluation_generation += 1
         self.assembled_generation = -1
 

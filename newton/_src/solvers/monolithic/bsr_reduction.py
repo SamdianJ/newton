@@ -456,6 +456,7 @@ class _FixedScalarBsrReduction:
         self.matrix.notify_nnz_changed(nnz=output_capacity, nnz_capacity=output_capacity)
         self.payload_bytes = byte_count
         self.graphs = _SegmentGraphCache(self.device, enabled=use_cuda_graph and self.device.is_cuda)
+        self._storage_bindings = None
 
     def buffers(self):
         return (
@@ -500,9 +501,12 @@ class _FixedScalarBsrReduction:
                 or not array.is_contiguous
             ):
                 raise ValueError("Invalid fixed scalar BSR storage")
-        intervals = sorted((a.ptr, a.ptr + a.size * wp.types.type_size_in_bytes(a.dtype)) for a in arrays if a.size)
-        if any(right[0] < left[1] for left, right in pairwise(intervals)):
-            raise ValueError("Fixed scalar BSR storage aliases")
+        bindings = tuple((a.ptr, a.size, a.dtype) for a in arrays if a.size)
+        if bindings != self._storage_bindings:
+            intervals = sorted((ptr, ptr + size * wp.types.type_size_in_bytes(dtype)) for ptr, size, dtype in bindings)
+            if any(right[0] < left[1] for left, right in pairwise(intervals)):
+                raise ValueError("Fixed scalar BSR storage aliases")
+            self._storage_bindings = bindings
         # The upper bound is fixed even if a caller read the last exact nnz.
         matrix.nnz = self.output_capacity
         self.graphs.run(
