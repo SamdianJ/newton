@@ -277,8 +277,8 @@ class _ContactQuery:
             device=self.device,
         )
 
-    def update(self, face_lo, face_hi, target_lo, target_hi, *, sort=True):
-        """Refit and enumerate on device, optionally sorting the fixed result storage."""
+    def _prepare_bounds(self, face_lo, face_hi, target_lo, target_hi):
+        """Validate and round envelopes outward before either query route."""
         self.validate_storage()
         for a, size in (
             (face_lo, len(self.faces)),
@@ -298,7 +298,6 @@ class _ContactQuery:
                 b.size and a.ptr < b.ptr + b.capacity and b.ptr < a.ptr + a.capacity for b in self.buffers()
             ):
                 raise ValueError("Contact query bounds alias owned storage")
-        output_keys = self._keys if sort else self._result_keys
         self.count.zero_()
         self.dropped.zero_()
         self.status.zero_()
@@ -314,6 +313,11 @@ class _ContactQuery:
             [target_lo, target_hi, self.target_lo, self.target_hi, self.status],
             device=self.device,
         )
+
+    def update(self, face_lo, face_hi, target_lo, target_hi, *, sort=True):
+        """Refit and enumerate on device, optionally sorting the fixed result storage."""
+        self._prepare_bounds(face_lo, face_hi, target_lo, target_hi)
+        output_keys = self._keys if sort else self._result_keys
         if self.bvh is not None:
             self._update_finite_bounds()
             self.bvh.refit()

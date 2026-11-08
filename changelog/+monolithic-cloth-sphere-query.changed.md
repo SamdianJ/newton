@@ -1,0 +1,1 @@
+Group cloth contact candidates by triangle for a single fixed sphere, avoiding repeated BVH queries and contended candidate reservations while retaining the original sample identities and generic capacity fallback.
