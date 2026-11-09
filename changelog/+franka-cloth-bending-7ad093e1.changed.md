@@ -1,0 +1,1 @@
+Allow the Franka cloth-fold recipe to scale shell bending independently of membrane stiffness and thickness, and provide a recipe with threefold bending stiffness and the existing gravity compensation.

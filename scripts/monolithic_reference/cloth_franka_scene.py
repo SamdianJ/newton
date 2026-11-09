@@ -45,6 +45,14 @@ def load_recipe(source):
         raise ValueError("Time intervals and material properties must be finite and positive")
     if not 0 <= material["poisson_ratio"] < 0.5:
         raise ValueError("Poisson ratio must be in [0, 0.5)")
+    bending_scale = material.get("bending_scale", 1.0)
+    if (
+        isinstance(bending_scale, bool)
+        or not isinstance(bending_scale, (int, float))
+        or not np.isfinite(bending_scale)
+        or bending_scale <= 0
+    ):
+        raise ValueError("Bending scale must be a finite positive number")
     nonnegative = [r["initial_hold_s"], r["final_hold_s"], r["asset"]["table_clearance_m"], robot["finger_closed_m"]]
     if not np.isfinite(nonnegative).all() or min(nonnegative) < 0:
         raise ValueError("Holds, clearance and finger targets must be finite and nonnegative")
@@ -246,6 +254,8 @@ def build_model(recipe, *, device, cache, prepare_sdf=True):
     mass = np.zeros(len(x))
     np.add.at(mass, triangles.ravel(), np.repeat(area * material["surface_density_kg_m2"] / 3, 3))
     lam, mu, alpha, beta = shell_coefficients(material)
+    bending_scale = material.get("bending_scale", 1.0)
+    alpha, beta = alpha * bending_scale, beta * bending_scale
     for point, value in zip(x, mass, strict=True):
         builder.add_particle(wp.vec3(point), wp.vec3(0), value, radius=material["thickness_m"] / 2)
     for face in triangles:
@@ -277,6 +287,12 @@ def build_model(recipe, *, device, cache, prepare_sdf=True):
         "rest_area_m2": float(area.sum()),
         "cloth_mass_kg": float(mass.sum()),
         "material": material,
+        "shell_coefficients": {
+            "lambda_N_per_m": lam,
+            "mu_N_per_m": mu,
+            "alpha_N_m": alpha,
+            "beta_N_m": beta,
+        },
         "removed_mimic": mimic,
         "collision_scope": "cloth-shape, method cloth-cloth and eight finger-box/table A-static pairs; no arm-table collision",
         "finger_table_pairs": [[i, table_id] for i in _finger_shapes(model)],
@@ -452,6 +468,10 @@ def plan_joint_targets(model, recipe):
 
 class FrankaClothScene:
     """Shared folding task; contact methods only change the solver adapter.
+
+    Optional ``material.bending_scale`` multiplies both shell bending
+    coefficients independently of membrane stiffness, mass and thickness.
+    It defaults to one; effective coefficients are recorded in scene metadata.
 
     The optional recipe rate ``initial_velocity_damping_per_s`` applies the
     lagged external force ``-rate * mass * velocity`` during the initial hold.

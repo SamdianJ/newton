@@ -279,6 +279,27 @@ class TestClothFoldControls(unittest.TestCase):
         with self.assertRaises(ValueError):
             load_recipe(recipe | {"initial_velocity_damping_per_s": 2, "initial_hold_s": 0})
 
+    def test_bending_scale_requires_a_finite_positive_number(self):
+        """Reject invalid bending multipliers before constructing assets or a solver."""
+        recipe = load_recipe(DEFAULT_RECIPE)
+        for value in (0, -1, float("nan"), float("inf"), True, None, "3"):
+            with self.subTest(scale=value), self.assertRaises(ValueError):
+                load_recipe(recipe | {"material": recipe["material"] | {"bending_scale": value}})
+
+    def test_bending_scale_preserves_membrane_mass_and_geometry(self):
+        """Scale only shell bending while retaining the built model's physical inputs."""
+        recipe = load_recipe(DEFAULT_RECIPE)
+        base, base_cloth, _ = build_model(recipe, device="cpu", cache="/tmp/cloth-fold-test", prepare_sdf=False)
+        scaled = recipe | {"material": recipe["material"] | {"bending_scale": 2.5}}
+        model, cloth, metadata = build_model(scaled, device="cpu", cache="/tmp/cloth-fold-test", prepare_sdf=False)
+        np.testing.assert_allclose(cloth[0].bending, np.asarray(base_cloth[0].bending) * 2.5, rtol=1e-15)
+        self.assertEqual(cloth[0].thickness, base_cloth[0].thickness)
+        self.assertEqual(cloth[0].surface_density, base_cloth[0].surface_density)
+        for name in ("particle_q", "particle_mass", "particle_radius", "tri_indices", "tri_poses", "tri_materials"):
+            np.testing.assert_array_equal(getattr(model, name).numpy(), getattr(base, name).numpy())
+        self.assertEqual(metadata["shell_coefficients"]["alpha_N_m"], cloth[0].bending[0])
+        self.assertEqual(metadata["shell_coefficients"]["beta_N_m"], cloth[0].bending[1])
+
     def test_gravity_compensation_requires_bool_and_positive_gains(self):
         """Reject ambiguous switches and unusable gravity feedforward gains before construction."""
         recipe = load_recipe(DEFAULT_RECIPE)
