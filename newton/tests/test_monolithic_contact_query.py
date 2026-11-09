@@ -9,6 +9,7 @@ from unittest.mock import patch
 import numpy as np
 import warp as wp
 
+from newton._src.solvers.monolithic import contact_query
 from newton._src.solvers.monolithic.contact_query import _ContactQuery
 from newton.tests.unittest_utils import add_function_test, get_test_devices
 
@@ -38,7 +39,10 @@ def enumerate_keys(query, bounds):
                 np.all(lo[face] <= target_hi[target]) and np.all(target_lo[target] <= hi[face])
             )
             if (source, shape) in allowed and overlap:
-                keys.extend((face * len(query.targets) + target) * 3 + slot for slot in range(3))
+                keys.extend(
+                    (face * len(query.targets) + target) * query.samples_per_patch + slot
+                    for slot in range(query.samples_per_patch)
+                )
     return np.asarray(keys, dtype=np.uint64)
 
 
@@ -166,6 +170,64 @@ def test_query_rounding(test, device):
     np.testing.assert_array_equal(selected(query), [0, 1, 2])
 
 
+def test_query_full_capacity(test, device):
+    """Preserve complete identities without global reservation, including stale tails and graph replay."""
+    original_launch = wp.launch
+
+    def no_reservation(kernel, *args, **kwargs):
+        test.assertNotIn(kernel, (contact_query._query_faces, contact_query._query_planes))
+        return original_launch(kernel, *args, **kwargs)
+
+    for slots, planes in ((1, ()), (3, ()), (1, (4,)), (3, (4,))):
+        template, bounds = fixture(device)
+        # Permissions permit ten face/target pairs, less than the Cartesian product of fifteen.
+        query = _ContactQuery(
+            template.faces,
+            template.targets,
+            template.allowed,
+            planes=planes,
+            capacity=10 * slots,
+            device=device,
+            _samples_per_patch=slots,
+        )
+        with patch.object(wp, "launch", side_effect=no_reservation):
+            query.update(*bounds)
+        query.check()
+        np.testing.assert_array_equal(selected(query), enumerate_keys(query, bounds))
+        pointers = [a.ptr for a in query.buffers()]
+        original = [a.numpy().copy() for a in bounds]
+        if device.is_cuda:
+            with wp.ScopedCapture(device=device) as capture:
+                query.update(*bounds, sort=False)
+        for shift in (0, 100, np.nan, 0):
+            query._candidate_keys.fill_(np.iinfo(np.uint64).max)
+            for array, values in zip(bounds[:2], original[:2], strict=True):
+                array.assign(values + shift)
+            if device.is_cuda:
+                wp.capture_launch(capture.graph)
+            else:
+                query.update(*bounds, sort=False)
+            if np.isnan(shift):
+                with test.assertRaises(ValueError):
+                    query.check()
+                test.assertEqual(int(query.count.numpy()[0]), 0)
+                continue
+            query.check()
+            expected = enumerate_keys(query, bounds)
+            np.testing.assert_array_equal(np.sort(selected(query)), expected)
+            test.assertEqual(int(query.dropped.numpy()[0]), 0)
+        test.assertEqual(pointers, [a.ptr for a in query.buffers()])
+        for name in ("_candidate_starts", "_candidate_keys", "_candidate_prefix"):
+            with patch.object(query, name, wp.clone(getattr(query, name))):
+                with test.assertRaisesRegex(ValueError, "storage changed"):
+                    query.validate_storage()
+                with test.assertRaisesRegex(ValueError, "storage changed"):
+                    query.update(*bounds)
+        query.update(*bounds)
+        query.check()
+        np.testing.assert_array_equal(selected(query), enumerate_keys(query, bounds))
+
+
 class TestContactQuery(unittest.TestCase):
     def test_static_metadata_and_empty(self):
         """Reject ambiguous face identities and malformed permissions, while supporting empty models."""
@@ -191,6 +253,7 @@ for _test in (
     test_query_bounds_and_storage,
     test_query_graph,
     test_query_rounding,
+    test_query_full_capacity,
 ):
     add_function_test(TestContactQuery, _test.__name__, _test, devices=get_test_devices())
 
