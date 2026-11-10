@@ -5,7 +5,6 @@
 
 import argparse
 import json
-import subprocess
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -18,8 +17,7 @@ from newton.examples.softbody.monolithic_paper_box import PaperBoxMetrics
 from scripts.monolithic_reference.graspit_hand import build_hand
 from scripts.monolithic_reference.hand_admittance import HandAdmittance
 from scripts.monolithic_reference.plastic_bottle import add_bottle
-from scripts.monolithic_reference.retained_assets import sha
-from scripts.monolithic_reference.run_graspit_hand import transform
+from scripts.monolithic_reference.run_graspit_hand import hand_identity, transform
 
 DT, STEPS = 0.005, 1400
 TABLE_Y = -0.080125
@@ -229,33 +227,19 @@ def run(args):
     """Retain trajectory and per-frame feedback; roll back command state on hard failure."""
     output = args.output
     output.mkdir(parents=True, exist_ok=False)
-    source = Path(__file__).resolve().parents[2]
-    identity = {
-        "source_head": subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=source, text=True).strip(),
-        "source_files": {
-            p.name: sha(p)
-            for p in [
-                Path(__file__),
-                *[
-                    Path(__file__).with_name(n)
-                    for n in (
-                        "plastic_bottle.py",
-                        "hand_admittance.py",
-                        "graspit_hand.py",
-                        "admittance_control.py",
-                    )
-                ],
-            ]
-        },
+    identity = hand_identity(args.asset_dir)
+    inputs = {
+        "precision": args.precision,
+        "device": args.device,
+        "target_force_N": args.force,
+        "dt_s": DT,
+        "requested_steps": args.max_steps,
     }
     (output / "input.json").write_text(
         json.dumps(
             identity
+            | inputs
             | {
-                "precision": args.precision,
-                "target_force_N": args.force,
-                "dt_s": DT,
-                "requested_steps": args.max_steps,
                 "servo_ke_Nm_rad": 2,
                 "servo_kd_Nms_rad": 0.05,
                 "servo_effort_cap_Nm": 0.2,
@@ -275,6 +259,22 @@ def run(args):
         )
         + "\n"
     )
+    if identity["identity_error"]:
+        summary = (
+            identity
+            | inputs
+            | {
+                "passed": False,
+                "identity_unchanged": False,
+                "physical_status": "NOT_RUN",
+                "gates": {},
+                "failure": None,
+                "counts": {"CONVERGED": 0, "STOPPED_ACCEPTED": 0, "HARD_FAILURE": 0},
+            }
+        )
+        (output / "summary.json").write_text(json.dumps(summary, indent=2) + "\n")
+        print(identity["identity_error"])
+        return False
     model, solver, state, control, controller, material, smooth = build_scene(
         args.asset_dir, device=args.device, precision=args.precision
     )
@@ -373,8 +373,10 @@ def run(args):
         output / "trajectory.npz", particle_q=xs, body_q=poses, joint_q=qs, triangles=model.tri_indices.numpy()
     )
     gates = evaluate(rows)
+    final_identity = hand_identity(args.asset_dir)
+    unchanged = identity == final_identity and final_identity["identity_error"] is None
     summary = {
-        "passed": all(gates.values()) and failure is None,
+        "passed": all(gates.values()) and failure is None and unchanged,
         "gates": gates,
         "failure": failure,
         "early_stop": early_stop,
@@ -390,9 +392,11 @@ def run(args):
         "hand_weight_target_bias_m": lift_bias,
         "max_deformation_m": max((r["deformation_max_m"] for r in rows), default=None),
         "max_penetration_m": max((r["sampled_penetration_m"] for r in rows), default=None),
-        "newton_import": str(Path(newton.__file__).resolve()),
         **identity,
-        "asset_manifest_sha256": sha(args.asset_dir / "manifest.json"),
+        "identity_unchanged": unchanged,
+        "identity_after": None if unchanged else final_identity,
+        "identity_error": final_identity["identity_error"]
+        or (None if unchanged else "Source, HEAD or asset identity changed during run"),
         "smooth_sdf": smooth.build_metadata,
         "scope": "virtual-tendon admittance with vertical hand slide; grasp/lift/deform free bottle from table, no all-fingers contact requirement; held thumb; no self-contact response or PET calibration",
         "penetration_scope": "all nodes and triangle centroids against original convex hull planes; conservative outside, exact inside; not continuous collision certification",
@@ -400,7 +404,12 @@ def run(args):
     (output / "summary.json").write_text(json.dumps(summary, indent=2) + "\n")
     print(
         json.dumps(
-            {k: v for k, v in summary.items() if k not in ("smooth_sdf", "stopped_steps", "source_files")}, indent=2
+            {
+                k: v
+                for k, v in summary.items()
+                if k not in ("smooth_sdf", "stopped_steps", "source_files", "asset_files", "identity_after")
+            },
+            indent=2,
         )
     )
     return summary["passed"]

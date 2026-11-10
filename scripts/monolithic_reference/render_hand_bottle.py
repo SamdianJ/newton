@@ -10,11 +10,15 @@ import numpy as np
 
 import newton
 from scripts.monolithic_reference.graspit_hand import build_hand
+from scripts.monolithic_reference.retained_assets import sha
 from scripts.monolithic_reference.run_graspit_hand import shape_vertices
 
 
 def render(asset, result, *, video=True):
     """Show actual states with an independently fitted deformation and contact trace."""
+    summary = json.loads((result / "summary.json").read_text())
+    if summary.get("asset_manifest_sha256") != sha(asset / "manifest.json"):
+        raise ValueError("Recording asset manifest does not match the playback asset")
     import matplotlib
 
     matplotlib.use("Agg")
@@ -24,7 +28,6 @@ def render(asset, result, *, video=True):
 
     recording = np.load(result / "trajectory.npz")
     rows = [json.loads(line) for line in (result / "steps.jsonl").read_text().splitlines()]
-    summary = json.loads((result / "summary.json").read_text())
     lifting = recording["joint_q"].shape[1] == 21
     builder, _ = build_hand(asset)
     model = builder.finalize(device="cpu")
