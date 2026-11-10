@@ -14,6 +14,7 @@ from unittest.mock import patch
 
 import numpy as np
 
+import newton
 from newton._src.solvers.monolithic.articulation import _configuration_digest
 from newton.tests import test_monolithic_tooling_recording_compatibility as compatibility
 from newton.tests.test_monolithic_solver_coupled import scene, snapshot, solver
@@ -22,6 +23,7 @@ from scripts.monolithic_reference.check_recording import compare
 from scripts.monolithic_reference.contact_routes import pooled_audit_route
 from scripts.monolithic_reference.robot_contact_acceptance import (
     FrozenRobotFactory,
+    _box_geometric_gap,
     certify_configuration,
     check_robot_reports,
 )
@@ -127,7 +129,52 @@ def test_robot_precision(test, device):
 
 
 class TestRobotContacts(unittest.TestCase):
-    pass
+    def test_smoothed_box_recorder_uses_original_geometry(self):
+        """Measure original BOX penetration after a coupled step while preserving the smoothed field diagnostic."""
+        from newton.solvers.experimental.monolithic import SolverMonolithic  # noqa: PLC0415
+
+        model = scene("cpu")
+        model.shape_type.assign([int(newton.GeoType.BOX)])
+        model.shape_scale.assign([[0.003, 0.003, 0.001]])
+        transforms = model.shape_transform.numpy()
+        # Place one bottom-face quadrature sample near three BOX planes.
+        transforms[0, :3] = [0.0094666667, 0.0078, 0.0]
+        model.shape_transform.assign(transforms)
+        factory = FrozenRobotFactory("franka-cube", dataflow="default")
+        factory.JointTerms = SolverMonolithic.JointTerms
+        with patch("newton.tests.test_monolithic_solver_coupled.SolverMonolithic", factory):
+            run = solver(model, box_smoothing=100e-6, alignment_policy="frozen", alignment_smoothing=0.1)
+        state = run.create_state(dt=1e-6)
+        run.step(state, state, model.control(), dt=1e-6)
+        self.assertFalse(run.last_stats.rolled_back)
+        before = snapshot(state)
+        fields = factory.measure(run, state)
+        batch = factory.recorder.audit.complete._contact._batch
+        count = int(batch.pool.candidates.count.numpy()[0])
+        self.assertEqual(count, run._contact.count)
+        points, gaps = batch.current.y.numpy()[:count], batch.samples.gaps.numpy()[:count]
+        half = model.shape_scale.numpy()[0]
+        expected = 0.0
+        for point, gap in zip(points, gaps, strict=True):
+            distance = np.linalg.norm(point - np.clip(point, -half, half))
+            if distance == 0:
+                distance = -np.min(half - np.abs(point))
+            expected = max(expected, gap - distance)
+        self.assertAlmostEqual(fields["penetration"], expected, places=12)
+        self.assertGreater(fields["penetration"] - fields["field_penetration"], 1e-7)
+        for name, value in snapshot(state).items():
+            np.testing.assert_array_equal(value, before[name], err_msg=name)
+
+    def test_original_box_gap_keeps_penetration_gate(self):
+        """Keep original face/corner geometry and sample gaps when smoothing could hide a gate violation."""
+        points = np.array([[0.022, 0, 0], [0.022, 0.023, 0], [0.019, 0, 0]])
+        expected = np.array([0.002, np.sqrt(13e-6), -0.001]) - 0.0003
+        np.testing.assert_allclose(_box_geometric_gap(points, np.full((3, 3), 0.02), np.full(3, 0.0003)), expected)
+        # Two equal closest planes give a beta*log(2) field offset at this inner edge.
+        original = -_box_geometric_gap(np.array([[0.019, 0.019, 0]]), np.full((1, 3), 0.02), np.array([0.00105]))[0]
+        field = original - 100e-6 * np.log(2)
+        self.assertGreater(original, 0.002)
+        self.assertLess(field, 0.002)
 
 
 def test_robot_diagnostics(test, device):

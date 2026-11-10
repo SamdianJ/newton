@@ -66,6 +66,7 @@ class ContactSystemAudit:
         complete._contact._batch.initialize_reference()
         self.state = complete.create_state(dt=0.001)
         self.residual = wp.zeros_like(run._complete_r)
+        self.shell_residual = wp.zeros_like(run._complete_r) if run._cloths else None
 
     def _contact(self, source, *, begin):
         audit, state = self.complete, self.state
@@ -108,11 +109,26 @@ class ContactSystemAudit:
         batch = self.complete._contact._batch
         if batch.flags.numpy()[0] or batch.start_flags.numpy()[0]:
             raise ValueError("Invalid complete native contact residual")
+        if self.shell_residual is not None:
+            # Published block.raw already includes contact. Reevaluate noncontact shell
+            # terms on the auditor's own buffers, using the run's exact step increments.
+            self.shell_residual.zero_()
+            for shell in self.complete._cloths:
+                shell.begin_step(run._original, run._frozen_force)
+                shell.evaluate(
+                    run._displacement(run._accepted),
+                    run._frozen_gravity,
+                    run._dt,
+                    self.shell_residual,
+                    build_tangent=False,
+                )
 
         owned = np.zeros(self.residual.size, dtype=run._numpy_dtype)
         owned[run._layout.articulation_indices()] = run._objective.residual.numpy()
         owned[run._layout.indices("tet")] = run._tet.residual.numpy().ravel()
         owned[run._rigid.rows_numpy] = run._rigid.residual.numpy()
+        if self.shell_residual is not None:
+            owned += self.shell_residual.numpy()
 
         def total(contact):
             # This offline oracle adds contact once to the native owned rows.

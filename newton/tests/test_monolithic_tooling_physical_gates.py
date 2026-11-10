@@ -46,10 +46,25 @@ def summary(**overrides):
 
 
 class TestPhysicalGates(unittest.TestCase):
+    def test_default_robot_gates_reject_all_stopped_steps(self):
+        """Keep generic robot acceptance strict when task runners accept STOPPED publications."""
+        counts = {"CONVERGED": 0, "STOPPED_ACCEPTED": 1000, "HARD_FAILURE": 0}
+        for name, gates in load_gates()["robot"].items():
+            with self.subTest(scene=name):
+                result = evaluate_robot(summary(counts=counts), gates)
+                self.assertEqual(result["status"], "FAIL")
+                self.assertIn("stopped_fraction", result["failures"])
+
     def test_complete_physical_run_passes(self):
         self.assertEqual(
             evaluate_robot(summary(), GATES),
-            {"status": "PASS", "failures": [], "steps": 1000, "grasp": "PASS", "grasp_required": True},
+            {
+                "status": "PASS",
+                "failures": [],
+                "steps": 1000,
+                "grasp": "PASS",
+                "grasp_required": True,
+            },
         )
 
     def test_each_violation_is_reported(self):

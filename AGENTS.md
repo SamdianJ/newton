@@ -19,6 +19,20 @@ uv run -m newton.examples basic_pendulum
 
 ### Monolithic test policy
 
+#### Admittance task publications
+
+Admittance task runners may continue from valid `STOPPED_ACCEPTED`
+publications under `current_iterate`. Count and report CONVERGED,
+STOPPED_ACCEPTED and HARD_FAILURE separately, including stopped step
+indices and reasons. Do not label STOPPED as converged. Apply physical
+and task gates to every published frame; rollbacks, invalid feedback and
+violated gates remain failures.
+
+This task-specific policy does not change generic robot acceptance.
+The default Franka/Sharpa physical recipe remains `physical_gates_v2.json`,
+including its frozen stopped-fraction limits. Numerical component tests
+still verify the mathematical properties they claim.
+
 For Monolithic work, apply the following scope rules to the general testing instructions above. The authoritative stage workflow, directory layout, component map and commands are in [project.md](../../dev/monolithic/project.md).
 
 - Give each development stage (including a substage such as P4j) its own worktree and branch from `SamiulJ/monolithic-refactor`. Define the goal and a stage PRD with at least one E2E test, then split it into PRs. Update stage documents and commit each completed PR. After stage-goal review, pass the PRD E2E and full-scene gates before merging into the integration branch.
