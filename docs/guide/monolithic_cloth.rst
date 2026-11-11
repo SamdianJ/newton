@@ -71,8 +71,13 @@ configuration dictionary enables cloth interactions, for example
 "candidate_capacity": 8192}``. Radius L [m] is a numerical support length;
 normal stiffness is a method coefficient [N/m³], not a calibrated physical value.
 Each ordered triangle P1Q3 point/node term has weight ``wA*wB/L**2`` and gap
-``distance - L - (hA+hB)/2``. Both directions are summed. Reference one-ring
-neighbors are excluded from self contact. Finite sampling can introduce
+``distance - L - (hA+hB)/2``. Both directions are summed. Self contact excludes
+material-reference distances strictly below
+``self_exclusion_ratio * L + (hA+hB)/2 + normal_smoothing``. The dimensionless
+ratio defaults to 1.5 and must exceed 1 when self contact is enabled. This rule
+also applies to nodes incident to the sampled triangle; there is no additional
+one-ring exclusion. Reference-near nonlocal sheets remain excluded after
+deformation. Finite sampling can introduce
 tangential bias and effective layer spacing larger than the material thickness.
 
 ``candidate_padding`` [m] extends the start/current query radius; its default is L.

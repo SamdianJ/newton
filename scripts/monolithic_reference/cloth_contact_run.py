@@ -88,7 +88,7 @@ def publication(stats, forces, *, previous_generation):
 def add_arguments(parser):
     """Add the common execution controls without changing the physical recipe."""
     parser.add_argument("--recipe", type=Path, required=True)
-    parser.add_argument("--method", choices=("off", "point-cloud", "vfee"), default="off")
+    parser.add_argument("--method", choices=("off", "point-cloud"), default="off")
     parser.add_argument("--method-config", type=Path)
     parser.add_argument("--device", default="cpu")
     parser.add_argument("--precision", choices=("fp64", "fp32"), default="fp64")
@@ -100,6 +100,8 @@ def add_arguments(parser):
 
 def create_solver(model, cloth_inputs, solver_kwargs, method, method_config):
     """Select only the explicit local method adapter; disabled means the old solver."""
+    if method not in ("off", "point-cloud"):
+        raise ValueError(f"Unsupported cloth contact method: {method}")
     if method == "off":
         if method_config:
             raise ValueError("Method-off runs must not silently consume an enabled configuration")

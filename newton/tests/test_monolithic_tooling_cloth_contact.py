@@ -22,7 +22,7 @@ from scripts.monolithic_reference.cloth_contact_geometry import (
     _triangle_pairs,
     inspect_geometry,
 )
-from scripts.monolithic_reference.cloth_contact_run import execute, publication, write_json
+from scripts.monolithic_reference.cloth_contact_run import create_solver, execute, publication, write_json
 
 
 class TestClothContactGeometry(unittest.TestCase):
@@ -112,6 +112,37 @@ class TestClothContactGeometry(unittest.TestCase):
 
 
 class TestClothPublication(unittest.TestCase):
+    def test_reject_unsupported_method(self):
+        """Reject matching labels that name a method unavailable in this branch."""
+        with patch("scripts.monolithic_reference.cloth_contact_method.SolverMonolithic") as factory:
+            for method in ("vfee", "unknown"):
+                with (
+                    self.subTest(method=method),
+                    self.assertRaisesRegex(ValueError, "Unsupported cloth contact method"),
+                ):
+                    create_solver(None, (), {}, method, {"method": method})
+            factory.assert_not_called()
+
+    def test_supported_method_selection(self):
+        """Keep explicit point-cloud configuration and the disabled solver path distinct."""
+        with patch("scripts.monolithic_reference.cloth_contact_method.SolverMonolithic") as factory:
+            create_solver(
+                None, (), {"friction_velocity_scale": 0.1}, "point-cloud", {"method": "point-cloud", "radius": 0.02}
+            )
+            factory.assert_called_once_with(
+                None, cloth_inputs=(), cloth_contact={"radius": 0.02}, friction_velocity_scale=0.1
+            )
+        with patch("scripts.monolithic_reference.cloth_contact_run.SolverMonolithic") as factory:
+            create_solver(None, (), {"friction_velocity_scale": 0.1}, "off", None)
+            factory.assert_called_once_with(None, cloth_inputs=(), friction_velocity_scale=0.1)
+        for method, config in (
+            ("point-cloud", None),
+            ("point-cloud", {"method": "vfee"}),
+            ("off", {"method": "point-cloud"}),
+        ):
+            with self.subTest(method=method, config=config), self.assertRaises(ValueError):
+                create_solver(None, (), {}, method, config)
+
     def test_frozen_stats_serialization(self):
         """Retain failure diagnostics containing immutable mapping snapshots."""
         with tempfile.TemporaryDirectory() as folder:

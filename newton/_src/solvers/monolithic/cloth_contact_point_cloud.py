@@ -147,8 +147,7 @@ def _query_points(
     self_enabled: bool,
     from_start: bool,
     pairs: wp.array[wp.vec2i],
-    count: wp.array[int],
-    overflow: wp.array[int],
+    count: wp.array[wp.uint64],
     flags: wp.array[int],
 ):
     if flags[0] != 0:
@@ -193,17 +192,18 @@ def _query_points(
                     # The second grid contributes only pairs absent from the current query.
                     duplicate = from_start and wp.length(point_current - x[particle]) <= cutoff
                     if same_cell and allowed and inside and not duplicate:
-                        index = wp.atomic_add(count, 0, 1)
-                        if index < pairs.shape[0]:
-                            pairs[index] = wp.vec2i(sample, node)
-                        else:
-                            wp.atomic_add(overflow, 0, 1)
+                        index = wp.atomic_add(count, 0, wp.uint64(1))
+                        if index < wp.uint64(pairs.shape[0]):
+                            pairs[int(index)] = wp.vec2i(sample, node)
                     node = links[node] + 0
 
 
 @wp.kernel
-def _finish_query(count: wp.array[int], capacity: int):
-    count[0] = wp.min(count[0], capacity)
+def _finish_query(total: wp.array[wp.uint64], count: wp.array[int], overflow: wp.array[int], capacity: int):
+    count[0] = int(wp.min(total[0], wp.uint64(capacity)))
+    overflow[0] = 0
+    if total[0] > wp.uint64(capacity):
+        overflow[0] = int(wp.min(total[0] - wp.uint64(capacity), wp.uint64(2147483647)))
 
 
 @wp.kernel
@@ -406,6 +406,9 @@ class _PointCloudContact:
         self.width = self.length + max(thickness) + self.smoothing + self.padding
         self.start = wp.zeros(self.model.particle_count, dtype=self.vector, device=self.device)
         self.pairs = wp.zeros(capacity, dtype=wp.vec2i, device=self.device)
+        # Each sample/node identity is admitted at most once across both grids.
+        # Match the pool's checked uint64 identity domain before narrowing counts.
+        self._query_count = wp.zeros(1, dtype=wp.uint64, device=self.device)
         buckets = 1 << max(1, (2 * self.node_count - 1).bit_length())
         self.heads = wp.zeros(buckets, dtype=int, device=self.device)
         self.links = wp.zeros(self.node_count, dtype=int, device=self.device)
@@ -459,6 +462,7 @@ class _PointCloudContact:
             self.heads,
             self.links,
             self.pairs,
+            self._query_count,
             self.query_flags,
             self.pool.candidates.count,
             self.pool.candidates.overflow,
@@ -473,8 +477,7 @@ class _PointCloudContact:
 
     def _refresh(self, x):
         c = self.pool.candidates
-        c.count.zero_()
-        c.overflow.zero_()
+        self._query_count.zero_()
         self.query_flags.zero_()
         for source in (x, self.start):
             wp.launch(
@@ -515,13 +518,12 @@ class _PointCloudContact:
                     self.self_enabled,
                     from_start,
                     self.pairs,
-                    c.count,
-                    c.overflow,
+                    self._query_count,
                     self.query_flags,
                 ],
                 device=self.device,
             )
-        wp.launch(_finish_query, 1, [c.count, self.pairs.size], device=self.device)
+        wp.launch(_finish_query, 1, [self._query_count, c.count, c.overflow, self.pairs.size], device=self.device)
 
     def evaluate(self, steps, dt):
         buffers = (
