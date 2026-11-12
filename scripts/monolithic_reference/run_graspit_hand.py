@@ -17,6 +17,40 @@ from scripts.monolithic_reference.graspit_hand import build_hand
 from scripts.monolithic_reference.retained_assets import sha
 
 DT, STEPS = 0.005, 600
+SOURCE = Path(__file__).resolve().parents[2]
+
+
+def hand_identity(asset):
+    """Bind task evidence to a clean checkout and the actual external asset bytes."""
+    identity = {"identity_error": None}
+    try:
+        imported = str(Path(newton.__file__).resolve())
+        identity["newton_import"] = imported
+        if Path(imported) != SOURCE / "newton/__init__.py":
+            raise ValueError("Newton import does not belong to the tested worktree")
+        identity["source_head"] = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=SOURCE, text=True).strip()
+        status = subprocess.check_output(
+            ["git", "status", "--porcelain", "--untracked-files=normal"], cwd=SOURCE, text=True
+        ).strip()
+        identity["source_dirty"] = bool(status)
+        identity["source_status"] = status
+        identity["source_files"] = {
+            str(p.relative_to(SOURCE)): sha(p)
+            for folder in ("newton", "scripts/monolithic_reference")
+            for p in sorted((SOURCE / folder).rglob("*.py"))
+        }
+        asset = Path(asset)
+        identity["asset_manifest_sha256"] = sha(asset / "manifest.json")
+        manifest = json.loads((asset / "manifest.json").read_text())
+        expected = manifest["source_sha256"] | manifest["derived_sha256"]
+        identity["asset_files"] = {name: sha(asset / name) for name in sorted(expected)}
+        if not expected or identity["asset_files"] != expected:
+            raise ValueError("Asset content does not match its manifest")
+        if status:
+            raise ValueError("Uncommitted checkout cannot qualify a hand task")
+    except (OSError, ValueError, KeyError, TypeError, subprocess.CalledProcessError) as exc:
+        identity["identity_error"] = f"{type(exc).__name__}: {exc}"
+    return identity
 
 
 def transform(points, pose):
@@ -50,6 +84,25 @@ def closed_pose(model, scenario):
 def run(asset, output, *, device, precision, scenario):
     """Record each publication and apply motion/contact gates to all frames."""
     output.mkdir(parents=True, exist_ok=True)
+    identity = hand_identity(asset)
+    inputs = {"scenario": scenario, "device": str(device), "precision": precision, "dt_s": DT, "requested_steps": STEPS}
+    (output / "input.json").write_text(json.dumps(identity | inputs, indent=2) + "\n")
+    if identity["identity_error"]:
+        summary = (
+            identity
+            | inputs
+            | {
+                "passed": False,
+                "identity_unchanged": False,
+                "physical_status": "NOT_RUN",
+                "gates": {},
+                "failure": None,
+                "counts": {"CONVERGED": 0, "STOPPED_ACCEPTED": 0, "HARD_FAILURE": 0},
+            }
+        )
+        (output / "summary.json").write_text(json.dumps(summary, indent=2) + "\n")
+        print(identity["identity_error"])
+        return False
     contact = wp.get_device(device).is_cuda
     if scenario == "contact" and not contact:
         raise ValueError("Contact smoke check requires CUDA")
@@ -167,9 +220,10 @@ def run(asset, output, *, device, precision, scenario):
     else:
         hold = rows[249:300]
         gates["closed_tracking"] = len(hold) == 51 and max(r["tracking_error_rad"] for r in hold) < 0.03
-    source = Path(__file__).resolve().parents[2]
+    final_identity = hand_identity(asset)
+    unchanged = identity == final_identity and final_identity["identity_error"] is None
     summary = {
-        "passed": all(gates.values()),
+        "passed": all(gates.values()) and unchanged,
         "scenario": scenario,
         "precision": precision,
         "device": str(device),
@@ -190,19 +244,27 @@ def run(asset, output, *, device, precision, scenario):
         "max_force_N": max((r["force_N"] for r in rows), default=None),
         "max_speed_rad_s": max((r["max_speed_rad_s"] for r in rows), default=None),
         "final_tracking_error_rad": rows[-1]["tracking_error_rad"] if rows else None,
-        "asset_manifest_sha256": sha(Path(asset) / "manifest.json"),
         "asset_mass_kg": manifest["total_mass_kg"],
-        "source_head": subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=source, text=True).strip(),
-        "source_files": {
-            str(p.relative_to(source)): sha(p) for p in (Path(__file__), Path(__file__).with_name("graspit_hand.py"))
-        },
-        "newton_import": str(Path(newton.__file__).resolve()),
+        **identity,
+        "identity_unchanged": unchanged,
+        "identity_after": None if unchanged else final_identity,
+        "identity_error": final_identity["identity_error"]
+        or (None if unchanged else "Source, HEAD or asset identity changed during run"),
         "smooth_sdf": smooth.build_metadata if smooth else None,
         "scope": "fixed-palm zero-gravity smoke check; no self-contact, grasp or admittance qualification",
     }
     np.savez_compressed(output / "trajectory.npz", joint_q=np.array(qs), body_q=np.array(poses), target=target)
     (output / "summary.json").write_text(json.dumps(summary, indent=2) + "\n")
-    print(json.dumps({k: v for k, v in summary.items() if k not in ("smooth_sdf", "stopped_steps")}, indent=2))
+    print(
+        json.dumps(
+            {
+                k: v
+                for k, v in summary.items()
+                if k not in ("smooth_sdf", "stopped_steps", "source_files", "asset_files", "identity_after")
+            },
+            indent=2,
+        )
+    )
     return summary["passed"]
 
 
