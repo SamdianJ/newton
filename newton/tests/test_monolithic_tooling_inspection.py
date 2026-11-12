@@ -20,6 +20,8 @@ from newton._src.solvers.monolithic import inspection, tet_precision
 from newton._src.solvers.monolithic.convergence import Unit
 from newton._src.solvers.monolithic.solver_types import _StepFailure
 from newton.examples.softbody.monolithic_recording import serial
+from newton.solvers.experimental.monolithic import SolverMonolithic
+from newton.tests.test_monolithic_contact_point_cloud import _scene as point_cloud_scene
 from newton.tests.test_monolithic_material_state import scene
 from newton.tests.test_monolithic_solver_actor_contacts import CASE, contact_scene, contact_solver, contact_state
 from newton.tests.test_monolithic_solver_coupled import snapshot
@@ -481,6 +483,26 @@ def test_material_contact_codes(test, device):
                 test.assertIn((int(source), int(target)), kinds)
 
 
+def test_point_cloud_contact_capture(test, device):
+    """Capture a point-cloud cloth scene: its forces are inside contact_particle_force, not in the contact records."""
+    for precision in precisions():
+        with test.subTest(precision=precision):
+            _, run = point_cloud_scene(precision=SolverMonolithic.Precision[precision.upper()], device=device)
+            state = run.create_state(dt=0.001)
+            run.step(state, state, run.create_control(), dt=0.001)
+            test.assertFalse(run.last_stats.rolled_back, run.last_stats)
+            result = inspection.capture(run, state)
+            test.assertEqual(result["schema"]["role"], "published")
+            test.assertIn("cloth_contact", result["schema"]["producers"])
+            cloth = state._monolithic_coupled.cloth_contact_particle_force.numpy()
+            test.assertGreater(np.linalg.norm(cloth), 0)
+            # No shape contact in this scene, so the published particle force is the cloth force alone.
+            np.testing.assert_array_equal(result["arrays"]["contact_particle_force"].reshape(-1), cloth.reshape(-1))
+            test.assertEqual(result["arrays"]["contact_identity"].size, 0)
+            meaning = result["schema"]["fields"]["contact_particle_force"]["meaning"]
+            test.assertIn("cloth_contact_particle_force", meaning)
+
+
 def test_guards(test, device):
     """Reject foreign states, unknown fields, graph capture and existing output, and stay off the step path."""
     for precision in precisions():
@@ -520,6 +542,7 @@ for function in (
     test_capture_does_not_perturb,
     test_det_f_uses_solver_arithmetic,
     test_material_contact_codes,
+    test_point_cloud_contact_capture,
     test_guards,
 ):
     add_function_test(TestToolingInspection, function.__name__, function, devices=get_test_devices())

@@ -416,6 +416,42 @@ class TestPointCloudSolver(unittest.TestCase):
                 self.assertGreater(summaries[0][5 if self_owner else 2], 0)
                 np.testing.assert_array_equal(summaries[1], summaries[0])
 
+    def test_failed_evaluation_leaves_an_empty_summary(self):
+        """Publish no counts or stale load slots from a failed evaluation, and no diagnostics error."""
+        _, solver = _scene()
+        state = solver.create_state(dt=0.001)
+        contact = solver._cloth_contact
+        contact.begin_step(state)
+        steps = wp.zeros_like(state.particle_q)
+        contact.evaluate(steps, 0.001)
+        self.assertGreater(contact.summary.numpy()[2], 0)
+        invalid = steps.numpy()
+        invalid[3] = np.nan
+        contact.evaluate(wp.array(invalid, dtype=contact.vector, device="cpu"), 0.001)
+        self.assertNotEqual(int(contact.flags.numpy()[0]), 0)
+        np.testing.assert_array_equal(contact.summary.numpy(), 0)
+        self.assertEqual(int(contact.summary_flags.numpy()[0]), 0)
+
+    def test_diagnostics_reduction_error_fails_the_step(self):
+        """Roll back a step whose diagnostic load reduction reports an error instead of publishing zeros."""
+        _, solver = _scene()
+        state = solver.create_state(dt=0.001)
+        contact = solver._cloth_contact
+        reduce = contact._load_sums._reduce
+
+        def failing_reduce(*args, **kwargs):
+            result = reduce(*args, **kwargs)
+            contact._load_sums.flags.fill_(4)
+            return result
+
+        contact._load_sums._reduce = failing_reduce
+        before = snapshot(state)
+        solver.step(state, state, solver.create_control(), dt=0.001)
+        self.assertTrue(solver.last_stats.rolled_back)
+        self.assertIn("Invalid cloth contact diagnostics", solver.last_stats.failure_reason)
+        for name, value in before.items():
+            np.testing.assert_array_equal(snapshot(state)[name], value, err_msg=name)
+
     def test_invalid_configuration_and_grid_domain(self):
         """Reject invalid native lengths and unrepresentable hash coordinates."""
         _, solver = _scene()

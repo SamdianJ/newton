@@ -309,11 +309,13 @@ def _summary_count(flags: wp.array[int], count: wp.array[int], load_count: wp.ar
 
 
 @wp.kernel
-def _finish_summary(counts: wp.array[int], loads: wp.array[Any], summary: wp.array[Any]):
+def _finish_summary(flags: wp.array[int], counts: wp.array[int], loads: wp.array[Any], summary: wp.array[Any]):
+    # A failed evaluation is never published; leave no partial counts behind.
+    valid = flags[0] == 0
     for channel in range(2):
-        summary[3 * channel] = summary.dtype(counts[2 * channel])
-        summary[3 * channel + 1] = summary.dtype(counts[2 * channel + 1])
-        summary[3 * channel + 2] = loads[channel]
+        summary[3 * channel] = wp.where(valid, summary.dtype(counts[2 * channel]), summary.dtype(0))
+        summary[3 * channel + 1] = wp.where(valid, summary.dtype(counts[2 * channel + 1]), summary.dtype(0))
+        summary[3 * channel + 2] = wp.where(valid, loads[channel], summary.dtype(0))
 
 
 class _PointCloudContact:
@@ -452,8 +454,10 @@ class _PointCloudContact:
         self._load_locals = wp.zeros(capacity, dtype=int, device=self.device)
         self._loads = wp.zeros(capacity, dtype=self.dtype, device=self.device)
         self._load_count = wp.zeros(1, dtype=int, device=self.device)
-        self._load_sums = _ContactRows(
-            2, capacity, identity_count, 1, self.dtype, self.device, use_cuda_graph=use_cuda_graph
+        # Reduced inside the response segment, like the contact pool's own rows.
+        self._load_sums = _ContactRows(2, capacity, identity_count, 1, self.dtype, self.device)
+        self._load_sums._validate_inputs(
+            self._load_rows, self.pool.candidates.identities, self._load_locals, self._loads, self._load_count
         )
         self.summary_flags = self._load_sums.flags
         self._append_base = wp.zeros(1, dtype=int, device=self.device)
@@ -574,18 +578,21 @@ class _PointCloudContact:
             self._load_rows,
             self._loads,
             self._load_count,
+            self.summary,
+            *self._load_sums.buffers(),
             *self.pool.buffers(),
         )
-        self.graphs.run("point_cloud_response", (float(dt),), buffers, lambda: self._evaluate(steps, dt), warmup=False)
-        self._load_sums.reduce(
-            self._load_rows, self.pool.candidates.identities, self._load_locals, self._loads, self._load_count
+        # Bound the diagnostic sort by the frozen candidate count, as the pool does.
+        count, capacity = self._candidate_count, self.pairs.size
+        span = capacity if count is None else min(capacity, 1 << (max(1, count) - 1).bit_length()) if count else 0
+        self.graphs.run(
+            "point_cloud_response", (float(dt), span), buffers, lambda: self._evaluate(steps, dt, span), warmup=False
         )
-        wp.launch(_finish_summary, 1, [self._summary_counts, self._load_sums.result, self.summary], device=self.device)
         self.pool.evaluate(candidate_count=self._candidate_count)
         self.evaluation_generation += 1
         self.assembled_generation = -1
 
-    def _evaluate(self, steps, dt):
+    def _evaluate(self, steps, dt, span):
         wp.copy(self.flags, self.query_flags)
         self._summary_counts.zero_()
         wp.launch(
@@ -617,6 +624,13 @@ class _PointCloudContact:
             device=self.device,
         )
         wp.launch(_summary_count, 1, [self.flags, self.pool.candidates.count, self._load_count], device=self.device)
+        loads = self._load_sums
+        loads._reduce(
+            self._load_rows, self.pool.candidates.identities, self._load_locals, self._loads, self._load_count, span
+        )
+        wp.launch(
+            _finish_summary, 1, [self.flags, self._summary_counts, loads.result, self.summary], device=self.device
+        )
 
     def assemble(self, assembly):
         if self._last_assembly == assembly.generation:

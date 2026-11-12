@@ -498,7 +498,7 @@ class FrankaClothScene:
         cache=None,
     ):
         self.recipe = r = load_recipe(recipe)
-        if method not in ("off", "point-cloud", "vfee"):
+        if method not in ("off", "point-cloud"):
             raise ValueError("Unknown cloth contact method")
         cache = Path(cache) if cache is not None else REPO.parent.parent / "dev/monolithic/test/cache/franka-cloth"
         cache.mkdir(parents=True, exist_ok=True)
