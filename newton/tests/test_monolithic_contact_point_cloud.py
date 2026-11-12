@@ -393,6 +393,29 @@ class TestPointCloudSolver(unittest.TestCase):
         self.assertEqual(float(contact.summary.numpy()[5]), 0.0)
         np.testing.assert_array_equal(contact.pool.force.result.numpy(), 0.0)
 
+    def test_diagnostic_summary_ignores_candidate_slot_order(self):
+        """Publish the same diagnostic counts and loads for any candidate slot order."""
+        for self_owner in (False, True):
+            summaries = []
+            for reverse in (False, True):
+                _, solver = _scene(self_owner=self_owner)
+                state = solver.create_state(dt=0.001)
+                contact = solver._cloth_contact
+                if self_owner:
+                    state.particle_q.assign(wp.array(_folded_strip(), dtype=contact.vector, device="cpu"))
+                contact.begin_step(state)
+                if reverse:
+                    # GPU queries reserve slots atomically, so slot order is not reproducible.
+                    count = int(contact.pool.candidates.count.numpy()[0])
+                    pairs = contact.pairs.numpy()
+                    pairs[:count] = pairs[:count][::-1].copy()
+                    contact.pairs.assign(pairs)
+                contact.evaluate(wp.zeros_like(state.particle_q), 0.001)
+                summaries.append(contact.summary.numpy())
+            with self.subTest(self_owner=self_owner):
+                self.assertGreater(summaries[0][5 if self_owner else 2], 0)
+                np.testing.assert_array_equal(summaries[1], summaries[0])
+
     def test_invalid_configuration_and_grid_domain(self):
         """Reject invalid native lengths and unrepresentable hash coordinates."""
         _, solver = _scene()

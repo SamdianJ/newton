@@ -11,7 +11,7 @@ import warp as wp
 
 from .contact import _penalty64
 from .contact_pipeline import _copy_pool_triplets, _reserve_pool_triplets
-from .contact_pool import _ContactPool
+from .contact_pool import _ContactPool, _ContactRows
 from .segment_graph import _SegmentGraphCache
 
 
@@ -226,7 +226,9 @@ def _point_candidates(
     falloff: Any,
     candidates: Any,
     flags: wp.array[int],
-    summary: wp.array[Any],
+    counts: wp.array[int],
+    load_rows: wp.array[int],
+    loads: wp.array[Any],
 ):
     i = wp.tid()
     if i >= candidates.count[0] or flags[0] != 0:
@@ -291,11 +293,27 @@ def _point_candidates(
                 support += 1
     candidates.support_counts[i] = support
     candidates.force_counts[i] = 12
-    channel = wp.where(owner == other, 3, 0)
-    wp.atomic_add(summary, channel, type(length)(1.0))
+    channel = wp.where(owner == other, 1, 0)
+    wp.atomic_add(counts, 2 * channel, 1)
     if load > type(length)(0.0) or friction_load > type(length)(0.0):
-        wp.atomic_add(summary, channel + 1, type(length)(1.0))
-    wp.atomic_add(summary, channel + 2, load)
+        wp.atomic_add(counts, 2 * channel + 1, 1)
+    # Slots are reserved atomically; loads are summed later in identity order.
+    load_rows[i] = channel
+    loads[i] = load
+
+
+@wp.kernel
+def _summary_count(flags: wp.array[int], count: wp.array[int], load_count: wp.array[int]):
+    # A failed evaluation leaves stale slots; reduce none of them.
+    load_count[0] = wp.where(flags[0] == 0, count[0], 0)
+
+
+@wp.kernel
+def _finish_summary(counts: wp.array[int], loads: wp.array[Any], summary: wp.array[Any]):
+    for channel in range(2):
+        summary[3 * channel] = summary.dtype(counts[2 * channel])
+        summary[3 * channel + 1] = summary.dtype(counts[2 * channel + 1])
+        summary[3 * channel + 2] = loads[channel]
 
 
 class _PointCloudContact:
@@ -412,13 +430,14 @@ class _PointCloudContact:
         buckets = 1 << max(1, (2 * self.node_count - 1).bit_length())
         self.heads = wp.zeros(buckets, dtype=int, device=self.device)
         self.links = wp.zeros(self.node_count, dtype=int, device=self.device)
+        identity_count = max(1, self.sample_count * self.node_count)
         self.pool = _ContactPool(
             solver._layout.scalar_dof_count,
             3 * self.model.particle_count,
             capacity,
             support_capacity,
             12,
-            max(1, self.sample_count * self.node_count),
+            identity_count,
             self.dtype,
             self.device,
             use_cuda_graph=use_cuda_graph,
@@ -426,6 +445,17 @@ class _PointCloudContact:
         self.flags = wp.zeros(1, dtype=int, device=self.device)
         self.query_flags = wp.zeros(1, dtype=int, device=self.device)
         self.summary = wp.zeros(6, dtype=self.dtype, device=self.device)
+        # Inter/self diagnostics: integer counts, and compressive loads reduced in
+        # candidate identity order so the sums do not depend on slot order.
+        self._summary_counts = wp.zeros(4, dtype=int, device=self.device)
+        self._load_rows = wp.zeros(capacity, dtype=int, device=self.device)
+        self._load_locals = wp.zeros(capacity, dtype=int, device=self.device)
+        self._loads = wp.zeros(capacity, dtype=self.dtype, device=self.device)
+        self._load_count = wp.zeros(1, dtype=int, device=self.device)
+        self._load_sums = _ContactRows(
+            2, capacity, identity_count, 1, self.dtype, self.device, use_cuda_graph=use_cuda_graph
+        )
+        self.summary_flags = self._load_sums.flags
         self._append_base = wp.zeros(1, dtype=int, device=self.device)
         self.graphs = _SegmentGraphCache(self.device, enabled=use_cuda_graph and self.device.is_cuda)
         self.evaluation_generation = 0
@@ -540,17 +570,24 @@ class _PointCloudContact:
             self.pairs,
             self.flags,
             self.query_flags,
-            self.summary,
+            self._summary_counts,
+            self._load_rows,
+            self._loads,
+            self._load_count,
             *self.pool.buffers(),
         )
         self.graphs.run("point_cloud_response", (float(dt),), buffers, lambda: self._evaluate(steps, dt), warmup=False)
+        self._load_sums.reduce(
+            self._load_rows, self.pool.candidates.identities, self._load_locals, self._loads, self._load_count
+        )
+        wp.launch(_finish_summary, 1, [self._summary_counts, self._load_sums.result, self.summary], device=self.device)
         self.pool.evaluate(candidate_count=self._candidate_count)
         self.evaluation_generation += 1
         self.assembled_generation = -1
 
     def _evaluate(self, steps, dt):
         wp.copy(self.flags, self.query_flags)
-        self.summary.zero_()
+        self._summary_counts.zero_()
         wp.launch(
             _point_candidates,
             self.pairs.size,
@@ -573,10 +610,13 @@ class _PointCloudContact:
                 self.dtype(self.velocity_scale * dt),
                 self.pool.candidates,
                 self.flags,
-                self.summary,
+                self._summary_counts,
+                self._load_rows,
+                self._loads,
             ],
             device=self.device,
         )
+        wp.launch(_summary_count, 1, [self.flags, self.pool.candidates.count, self._load_count], device=self.device)
 
     def assemble(self, assembly):
         if self._last_assembly == assembly.generation:

@@ -1023,7 +1023,10 @@ class _ClothContactProducer(_Producer):
         super().__init__("cloth_contact", np.empty(0, dtype=np.int32))
         self.contact = contact = solver._cloth_contact
         self.energies = ((contact, "energy", "absolute_energy"),)
-        self.checks = ((contact, "flags", {}, "Invalid cloth contact geometry"),)
+        self.checks = (
+            (contact, "flags", {}, "Invalid cloth contact geometry"),
+            (contact, "summary_flags", {}, "Invalid cloth contact diagnostics"),
+        )
         self.assembly_checks = ((contact.pool.records, "flags", {}, "Invalid cloth contact assembly"),)
         self._materials = tuple(solver._cloths)
         self._reactions = _DeviceRecords(

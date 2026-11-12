@@ -123,16 +123,8 @@ def test_self_contact_lifecycle(test, device, *, precision, graph):
     step(restored_solver, restored)
     actual = snapshot(restored)
     for key, expected in snapshot(state).items():
-        if key == "history.cloth_contact_summary":
-            np.testing.assert_array_equal(actual[key][[0, 1, 3, 4]], expected[[0, 1, 3, 4]])
-            # Only the two positive-load atomic sums may change reduction order.
-            n = max(1, int(max(expected[1], expected[4])))
-            epsilon = np.finfo(expected.dtype).eps
-            np.testing.assert_allclose(
-                actual[key][[2, 5]], expected[[2, 5]], rtol=2 * n * epsilon / (1 - n * epsilon), atol=0
-            )
-        else:
-            np.testing.assert_array_equal(actual[key], expected, err_msg=key)
+        # Diagnostic loads are summed in candidate identity order, so they match bit for bit too.
+        np.testing.assert_array_equal(actual[key], expected, err_msg=key)
     if graph:
         for name in ("point_cloud_query", "point_cloud_response"):
             segment = contact.graphs.summary()["segments"][name]
