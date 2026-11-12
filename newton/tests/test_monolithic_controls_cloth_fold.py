@@ -16,12 +16,20 @@ import newton
 from newton.solvers.experimental.monolithic import SolverMonolithic
 from scripts.monolithic_reference.cloth_franka_scene import (
     DEFAULT_RECIPE,
+    REPO,
     FrankaClothScene,
     build_model,
     fold_targets,
     load_recipe,
     plan_joint_targets,
     tcp_targets,
+)
+
+# The robot and garment are frozen inputs under asset/monolithic/data, which the cloud suite does not link.
+_FOLDING_RECIPE = load_recipe(DEFAULT_RECIPE)
+requires_folding_assets = unittest.skipUnless(
+    (REPO / _FOLDING_RECIPE["robot"]["urdf"]).is_file() and (REPO / _FOLDING_RECIPE["asset"]["path"]).is_file(),
+    "Franka cloth-fold assets unavailable",
 )
 
 
@@ -131,6 +139,7 @@ class TestClothFoldControls(unittest.TestCase):
         self.assertIsNone(scene.last_forces)
         self.assertTrue(scene.failed)
 
+    @requires_folding_assets
     def test_low_grasp_targets_clear_actual_finger_boxes(self):
         """Keep the real fingertip boxes above the table while preserving low grasp reach."""
         recipe = load_recipe(DEFAULT_RECIPE)
@@ -175,6 +184,7 @@ class TestClothFoldControls(unittest.TestCase):
         self.assertTrue(minima)
         self.assertLess(max(minima), 0.201)
 
+    @requires_folding_assets
     def test_only_finger_table_rigid_collision_is_enabled(self):
         """Preserve particle colliders and activate exactly the supported eight static pairs."""
         recipe = load_recipe(DEFAULT_RECIPE)
@@ -286,6 +296,7 @@ class TestClothFoldControls(unittest.TestCase):
             with self.subTest(scale=value), self.assertRaises(ValueError):
                 load_recipe(recipe | {"material": recipe["material"] | {"bending_scale": value}})
 
+    @requires_folding_assets
     def test_bending_scale_preserves_membrane_mass_and_geometry(self):
         """Scale only shell bending while retaining the built model's physical inputs."""
         recipe = load_recipe(DEFAULT_RECIPE)
