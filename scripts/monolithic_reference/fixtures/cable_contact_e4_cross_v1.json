@@ -1,0 +1,63 @@
+{
+  "schema_version": 1,
+  "units": "SI",
+  "dt_s": 0.002,
+  "gravity_m_s2": [
+    0.0,
+    0.0,
+    -9.81
+  ],
+  "material": {
+    "radius_m": 0.002,
+    "young_modulus_Pa": 2000000.0,
+    "poisson_ratio": 0.3,
+    "density_kg_m3": 1200.0
+  },
+  "scene": "E4",
+  "kind": "cross",
+  "duration_s": 1.5,
+  "ground": {
+    "type": "plane",
+    "height_m": 0.0
+  },
+  "cables": [
+    {
+      "vertices": 96,
+      "segment_length_m": 0.007
+    },
+    {
+      "vertices": 96,
+      "segment_length_m": 0.007
+    },
+    {
+      "vertices": 96,
+      "segment_length_m": 0.007
+    }
+  ],
+  "cross": {
+    "angles_deg": [
+      0.0,
+      60.0,
+      120.0
+    ],
+    "heights_m": [
+      0.02,
+      0.035,
+      0.05
+    ],
+    "wave_amplitude_m": 0.02,
+    "wavelength_m": 0.25
+  },
+  "solver": {
+    "contact_stiffness": 10000000.0,
+    "contact_factor_capacity": 65536,
+    "friction_coefficient": 0.5,
+    "friction_velocity_scale": 0.01,
+    "normal_smoothing": 0.0001,
+    "newton_max_iterations": 20,
+    "line_search_max_iterations": 8,
+    "linear_max_iterations": 300,
+    "mass_mode": "lumped",
+    "publish_policy": "current_iterate"
+  }
+}

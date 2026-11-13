@@ -1,0 +1,44 @@
+{
+  "schema_version": 1,
+  "status": "draft",
+  "description": "P9c E2E gates and offline criteria definitions (cable_contact_criteria). Draft until the user freezes it as cable_contact_gates_frozen_v1.json.",
+  "exclusion": {
+    "index_span": 3,
+    "arc_factor": 1.5707963267948966,
+    "rule": "same cable and (|i - j| <= index_span or rest-arc gap between the two segments < arc_factor * (rA + rB)); different cables are never excluded. Segment-pair form of the solver's sample-to-segment rule, slightly wider than it."
+  },
+  "penetration": {
+    "scenes": [
+      "E1",
+      "E2",
+      "E3",
+      "E4"
+    ],
+    "peak_max_radius_fraction": 0.2,
+    "definition": "p = rA + rB - d, d the exact FP64 segment-segment distance of a non-excluded pair; per pair divided by (rA + rB) / 2; the gate is the maximum over all pairs and all published frames. p99 is the 99th percentile over frames of the per-frame maximum (diagnostic)."
+  },
+  "hard_failure_max": 0,
+  "energy": {
+    "scenes": [
+      "E1"
+    ],
+    "max_rise_fraction_of_gravity_drop": 0.01,
+    "definition": "E = kinetic (lumped mass, published velocity) + elastic (FP64 DER, cable_oracle) + gravity + normal penalty energy of cable-ground ring64 samples (no orientation weight) + cable-cable normal penalty energy (PR1 oracle, frozen method parameters; zero when contact is off); friction excluded. W = work of the prescribed vertices and angles, from the FP64 elastic gradient, midpoint rule. Gate: max over t1 <= t2 of (E - W)(t2) - (E - W)(t1) <= fraction * (gravity energy(0) - gravity energy(T))."
+  },
+  "fp32_baseline": {
+    "definition": "Contact off: E1-E4 FP32 CUDA graph full length with HARD_FAILURE = 0 and the E1 energy gate passing. STOPPED_ACCEPTED is reported separately and compared with FP64; many FP32-only Stopped steps go to the user as R1 evidence."
+  },
+  "crossing": {
+    "min_sine": 0.17364817766693033,
+    "definition": "Diagnostic. Between consecutive frames, a non-excluded pair whose line-line signed distance changes sign while both unclamped closest points lie inside both segments in both frames, the segments are at least 10 degrees apart, and the pair is closer than rA + rB in either frame."
+  },
+  "link": {
+    "closure_m": 10.0,
+    "tolerance_turns": 0.5,
+    "definition": "Diagnostic for E3: |Tw + Wr - applied end rotation| in turns; Tw from material angles and reference twist, Wr the Gauss writhe of the cable closed by a planar rectangle closure_m beyond the clamps."
+  },
+  "rest": {
+    "window_s": 0.5,
+    "definition": "Diagnostic: maximum free-vertex speed over the final window."
+  }
+}

@@ -1,0 +1,63 @@
+{
+  "schema_version": 1,
+  "units": "SI",
+  "dt_s": 0.002,
+  "gravity_m_s2": [
+    0.0,
+    0.0,
+    -9.81
+  ],
+  "material": {
+    "radius_m": 0.002,
+    "young_modulus_Pa": 2000000.0,
+    "poisson_ratio": 0.3,
+    "density_kg_m3": 1200.0
+  },
+  "scene": "E2",
+  "kind": "wrap",
+  "duration_s": 3.45,
+  "ground": null,
+  "cables": [
+    {
+      "vertices": 128,
+      "segment_length_m": 0.007
+    }
+  ],
+  "cylinder": {
+    "center_m": [
+      0.0,
+      0.0,
+      1.0
+    ],
+    "radius_m": 0.02,
+    "half_length_m": 0.15,
+    "segments": 64,
+    "sdf": {
+      "max_resolution": 128,
+      "margin_m": 0.01,
+      "narrow_band_m": [
+        -0.02,
+        0.02
+      ]
+    }
+  },
+  "wrap": {
+    "orbit_radius_m": 0.028,
+    "pitch_m": 0.002,
+    "turns": 4,
+    "end_speed_m_s": 0.3,
+    "ramp_s": 0.1
+  },
+  "solver": {
+    "contact_stiffness": 10000000.0,
+    "contact_factor_capacity": 65536,
+    "friction_coefficient": 0.5,
+    "friction_velocity_scale": 0.01,
+    "normal_smoothing": 0.0001,
+    "newton_max_iterations": 20,
+    "line_search_max_iterations": 8,
+    "linear_max_iterations": 300,
+    "mass_mode": "lumped",
+    "publish_policy": "current_iterate"
+  }
+}
