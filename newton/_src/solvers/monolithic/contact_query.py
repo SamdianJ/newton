@@ -8,6 +8,7 @@ from typing import Any
 
 import numpy as np
 import warp as wp
+from warp.utils import array_scan
 
 from .contact_pool import _CONTACT_WORKERS, _merge_contact_keys
 
@@ -155,6 +156,74 @@ def _query_planes(
         _emit_candidates(face, target, targets, samples_per_patch, keys, indices, count, dropped)
 
 
+@wp.func
+def _store_candidates(
+    face: int, target: int, targets: int, samples_per_patch: int, slot: int, keys: wp.array[wp.uint64]
+):
+    for sample in range(samples_per_patch):
+        keys[slot + sample] = (wp.uint64(face) * wp.uint64(targets) + wp.uint64(target)) * wp.uint64(
+            samples_per_patch
+        ) + wp.uint64(sample)
+    return slot + samples_per_patch
+
+
+@wp.kernel(enable_backward=False)
+def _query_faces_reserved(
+    bvh: wp.uint64,
+    face_sources: wp.array[int],
+    lower: wp.array[wp.vec3],
+    upper: wp.array[wp.vec3],
+    finite_targets: wp.array[int],
+    planes: wp.array[int],
+    targets: int,
+    samples_per_patch: int,
+    offsets: wp.array[int],
+    sources: wp.array[int],
+    starts: wp.array[int],
+    keys: wp.array[wp.uint64],
+    prefix: wp.array[int],
+    status: wp.array[int],
+):
+    face = wp.tid()
+    if status[0] != 0:
+        return
+    slot = starts[face] + 0
+    if bvh != wp.uint64(0):
+        query = wp.bvh_query_aabb(bvh, lower[face], upper[face])
+        item = int(0)
+        while wp.bvh_query_next(query, item):
+            target = finite_targets[item]
+            if _allowed(face_sources[face], target, offsets, sources):
+                slot = _store_candidates(face, target, targets, samples_per_patch, slot, keys)
+    for plane in range(planes.shape[0]):
+        target = planes[plane]
+        if _allowed(face_sources[face], target, offsets, sources):
+            slot = _store_candidates(face, target, targets, samples_per_patch, slot, keys)
+    prefix[face + 1] = slot - starts[face]
+
+
+@wp.kernel(enable_backward=False)
+def _compact_candidates(
+    starts: wp.array[int],
+    staged: wp.array[wp.uint64],
+    prefix: wp.array[int],
+    keys: wp.array[wp.uint64],
+    indices: wp.array[int],
+    count: wp.array[int],
+    status: wp.array[int],
+):
+    face = wp.tid()
+    if status[0] != 0:
+        return
+    if face == starts.shape[0] - 1:
+        count[0] = prefix[face]
+    else:
+        for sample in range(prefix[face + 1] - prefix[face]):
+            slot = prefix[face] + sample
+            keys[slot] = staged[starts[face] + sample]
+            indices[slot] = slot
+
+
 class _ContactQuery:
     """Query supplied patch/target envelopes without asserting their physical coverage.
 
@@ -235,6 +304,20 @@ class _ContactQuery:
         self.count = wp.zeros(1, dtype=int, device=self.device)
         self.dropped = wp.zeros(1, dtype=wp.int64, device=self.device)
         self.status = wp.zeros(1, dtype=int, device=self.device)
+        # Static permissions bound every patch's output, including planes. Only
+        # complete capacity can change reservation order without changing clipping.
+        source_ids, target_counts = np.unique(self.allowed[:, 0], return_counts=True)
+        permissions = dict(zip(source_ids, target_counts, strict=True))
+        sizes = np.asarray(
+            [int(permissions.get(source, 0)) * self.samples_per_patch for source in self.faces[:, 0]], dtype=np.int64
+        )
+        starts = np.concatenate(([0], np.cumsum(sizes)))
+        self._full_capacity = int(starts[-1]) <= capacity
+        self._candidate_starts = wp.array(starts if self._full_capacity else [], dtype=int, device=self.device)
+        self._candidate_keys = wp.empty(
+            int(starts[-1]) if self._full_capacity else 0, dtype=wp.uint64, device=self.device
+        )
+        self._candidate_prefix = wp.zeros(len(starts) if self._full_capacity else 0, dtype=int, device=self.device)
         if initial_bounds is not None:
             for lo, hi, out_lo, out_hi in (
                 (*initial_bounds[:2], self.face_lo, self.face_hi),
@@ -277,8 +360,8 @@ class _ContactQuery:
             device=self.device,
         )
 
-    def update(self, face_lo, face_hi, target_lo, target_hi, *, sort=True):
-        """Refit and enumerate on device, optionally sorting the fixed result storage."""
+    def _prepare_bounds(self, face_lo, face_hi, target_lo, target_hi):
+        """Validate and round envelopes outward before either query route."""
         self.validate_storage()
         for a, size in (
             (face_lo, len(self.faces)),
@@ -298,7 +381,6 @@ class _ContactQuery:
                 b.size and a.ptr < b.ptr + b.capacity and b.ptr < a.ptr + a.capacity for b in self.buffers()
             ):
                 raise ValueError("Contact query bounds alias owned storage")
-        output_keys = self._keys if sort else self._result_keys
         self.count.zero_()
         self.dropped.zero_()
         self.status.zero_()
@@ -314,9 +396,53 @@ class _ContactQuery:
             [target_lo, target_hi, self.target_lo, self.target_hi, self.status],
             device=self.device,
         )
+
+    def update(self, face_lo, face_hi, target_lo, target_hi, *, sort=True):
+        """Refit and enumerate on device, optionally sorting the fixed result storage."""
+        self._prepare_bounds(face_lo, face_hi, target_lo, target_hi)
+        output_keys = self._keys if sort else self._result_keys
         if self.bvh is not None:
             self._update_finite_bounds()
             self.bvh.refit()
+        if self._full_capacity:
+            self._candidate_prefix.zero_()
+            wp.launch(
+                _query_faces_reserved,
+                len(self.faces),
+                [
+                    wp.uint64(self.bvh.id if self.bvh is not None else 0),
+                    self.face_sources,
+                    self.face_lo,
+                    self.face_hi,
+                    self.finite_targets,
+                    self.plane_targets,
+                    len(self.targets),
+                    self.samples_per_patch,
+                    self.offsets,
+                    self.sources,
+                    self._candidate_starts,
+                    self._candidate_keys,
+                    self._candidate_prefix,
+                    self.status,
+                ],
+                device=self.device,
+            )
+            array_scan(self._candidate_prefix, self._candidate_prefix)
+            wp.launch(
+                _compact_candidates,
+                self._candidate_starts.size,
+                [
+                    self._candidate_starts,
+                    self._candidate_keys,
+                    self._candidate_prefix,
+                    output_keys,
+                    self._indices,
+                    self.count,
+                    self.status,
+                ],
+                device=self.device,
+            )
+        elif self.bvh is not None:
             wp.launch(
                 _query_faces,
                 len(self.faces),
@@ -338,7 +464,7 @@ class _ContactQuery:
                 ],
                 device=self.device,
             )
-        if len(self.planes) and len(self.faces):
+        if not self._full_capacity and len(self.planes) and len(self.faces):
             wp.launch(
                 _query_planes,
                 (len(self.faces), len(self.planes)),

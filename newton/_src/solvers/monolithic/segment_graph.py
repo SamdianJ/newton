@@ -24,11 +24,12 @@ class _SegmentGraphCache:
             execute()
             return
         stream = wp.get_stream(self.device)
-        buffers = tuple(buffer for buffer in buffers if buffer is not None)
+        buffers = [buffer for buffer in buffers if buffer is not None]
+        bindings = [(buffer.ptr, buffer.shape, buffer.strides, buffer.dtype, buffer.device.alias) for buffer in buffers]
         key = (
             stream.cuda_stream,
             parameters,
-            tuple((buffer.ptr, buffer.shape, buffer.strides, buffer.dtype, str(buffer.device)) for buffer in buffers),
+            tuple(bindings),
         )
         entries = self.entries.setdefault(name, OrderedDict())
         entry = entries.get(key)

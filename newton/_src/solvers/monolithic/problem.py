@@ -520,7 +520,12 @@ class _MonolithicProblem:
             buffers.extend(getattr(history, name) for name in solver._states.schema)
         for owner, name, layout in self._owner_bindings:
             value = getattr(owner, name)
-            if not isinstance(value, wp.array) or self._storage_layout(value) != layout:
+            if (
+                not isinstance(value, wp.array)
+                or value.shape != layout[0]
+                or value.dtype != layout[1]
+                or value.device != layout[2]
+            ):
                 raise ValueError(f"Invalid graph buffer binding: {type(owner).__name__}.{name}")
             buffers.append(value)
         return buffers

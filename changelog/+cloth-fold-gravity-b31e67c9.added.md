@@ -1,0 +1,1 @@
+Add opt-in lagged gravity compensation to the cloth-folding PD controller, preserve total actuator effort limits, and record nominal targets and requested gravity forces in schema 3 with independent CPU state snapshots.

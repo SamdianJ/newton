@@ -20,8 +20,9 @@ class ClothInput:
 
     Triangle IDs select Model triangles. Bending is (alpha, beta) in N m;
     thickness is in m and surface density in kg/m^2. Native membrane
-    coefficients come from Model.tri_materials. Contact-free shells share the
-    global solve with other supported actors; material contact is unavailable.
+    coefficients come from Model.tri_materials. Shells share the global solve
+    with other supported actors. Shape contact and optional experimental
+    weighted point-cloud inter/self contact use the same solve.
     """
 
     triangle_ids: tuple[int, ...]

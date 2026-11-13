@@ -1,0 +1,1 @@
+Reduce experimental monolithic contact-pool reservation, clearing and row-reduction work, and reuse unchanged BSR storage validation while preserving contact capacity and numerical reduction order. Existing solver calls require no migration.

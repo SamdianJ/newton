@@ -424,7 +424,7 @@ def test_whole_contact_admission(test, device):
     """Commit E/r/factors/triplets/forces together at zero, exact and insufficient capacity."""
     for dtype, native in ((wp.float32, np.float32), (wp.float64, np.float64)):
         data = contact_payload(native)
-        for capacity in (0, 1, 2, 7, 8, 9):
+        for capacity in (0, 1, 2, 7, 8, 9, 15):
             pool = _ContactPool(4, 2, 5, capacity, 3, 64, dtype, device)
             assign_contacts(pool, data)
             for _ in range(5):
@@ -442,36 +442,37 @@ def test_whole_contact_admission(test, device):
 
 def test_admission_order(test, device):
     """Preserve complete record and reduced output bits when producer order changes without overflow."""
-    pool = _ContactPool(4, 2, 5, 8, 3, 64, wp.float64, device, use_cuda_graph=device.is_cuda)
-    data = contact_payload(np.float64)
-    baseline = None
-    rng = np.random.default_rng(923)
-    for _ in range(8):
-        order = rng.permutation(5)
-        assign_contacts(pool, data, order)
-        pool.evaluate()
-        outputs = [
-            pool.energy.result,
-            pool.residual.result,
-            pool.force.result,
-            pool.records.identities,
-            pool.records.pairs,
-            pool.records.triplet_rows,
-            pool.records.triplet_columns,
-            pool.records.triplet_values,
-        ]
-        bits = tuple(a.numpy().tobytes() for a in outputs)
-        if baseline is None:
-            baseline = bits
-        test.assertEqual(bits, baseline)
-        test.assertEqual(int(pool.records.flags.numpy()[0]), 0)
-    if device.is_cuda:
-        test.assertEqual(pool.graphs.captures["contact_pool"], 1)
+    for capacity in (8, 15):
+        pool = _ContactPool(4, 2, 5, capacity, 3, 64, wp.float64, device, use_cuda_graph=device.is_cuda)
+        data = contact_payload(np.float64)
+        baseline = None
+        rng = np.random.default_rng(923)
+        for _ in range(8):
+            order = rng.permutation(5)
+            assign_contacts(pool, data, order)
+            pool.evaluate()
+            outputs = [
+                pool.energy.result,
+                pool.residual.result,
+                pool.force.result,
+                pool.records.identities,
+                pool.records.pairs,
+                pool.records.triplet_rows,
+                pool.records.triplet_columns,
+                pool.records.triplet_values,
+            ]
+            bits = tuple(a.numpy().tobytes() for a in outputs)
+            if baseline is None:
+                baseline = bits
+            test.assertEqual(bits, baseline)
+            test.assertEqual(int(pool.records.flags.numpy()[0]), 0)
+        if device.is_cuda:
+            test.assertEqual(pool.graphs.captures["contact_pool"], 1)
 
 
 def test_invalid_contact_payload(test, device):
     """Reject detected illegal or nonfinite payloads before a full pool can hide them."""
-    for capacity in (0, 8):
+    for capacity in (0, 8, 15):
         pool = _ContactPool(4, 2, 5, capacity, 3, 64, wp.float64, device, use_cuda_graph=device.is_cuda)
         for name, index, value in (
             ("support_counts", (4,), -1),
@@ -687,6 +688,54 @@ def test_pool_reuse_and_failure(test, device):
     check_admitted(test, pool, contact_payload(np.float64))
 
 
+def test_pool_bounded_work(test, device):
+    """Preserve native results across changing work bounds and poisoned unused payloads."""
+    for dtype, native in ((wp.float32, np.float32), (wp.float64, np.float64)):
+        pool = _ContactPool(4, 2, 5, 15, 3, 64, dtype, device, use_cuda_graph=device.is_cuda)
+        reference = _ContactPool(4, 2, 5, 15, 3, 64, dtype, device)
+        for count in (5, 2, 0, 4, 5):
+            data = contact_payload(native)
+            data["count"] = [count]
+            for name in ("residual", "weights", "factors", "energy", "forces", "pairs"):
+                data[name][count:] = np.nan
+            for current in (reference, pool):
+                assign_contacts(current, data)
+            for _ in range(2):
+                pool.records.triplet_values.fill_(float("nan"))
+                reference.evaluate()
+                pool.evaluate(candidate_count=count)
+                check_admitted(test, pool, data)
+                for name in ("energy", "residual", "force"):
+                    test.assertEqual(
+                        getattr(pool, name).result.numpy().tobytes(),
+                        getattr(reference, name).result.numpy().tobytes(),
+                    )
+                np.testing.assert_array_equal(pool.magnitude.numpy(), reference.magnitude.numpy())
+                for name in ("accepted", "used", "requested", "dropped", "count", "support_count", "triplet_count"):
+                    np.testing.assert_array_equal(
+                        getattr(pool.records, name).numpy(), getattr(reference.records, name).numpy()
+                    )
+                triplets = int(pool.records.triplet_count.numpy()[0])
+                for name in ("triplet_rows", "triplet_columns", "triplet_values"):
+                    np.testing.assert_array_equal(
+                        getattr(pool.records, name).numpy()[:triplets],
+                        getattr(reference.records, name).numpy()[:triplets],
+                    )
+                test.assertTrue(np.isnan(pool.records.triplet_values.numpy()[triplets:]).all())
+        for bound in (-1, 6, True, 1.5):
+            with test.assertRaisesRegex(ValueError, "candidate bound"):
+                pool.evaluate(candidate_count=bound)
+        # A stale host bound must fail safely rather than silently omit contacts.
+        pool.evaluate(candidate_count=2)
+        test.assertNotEqual(int(pool.records.flags.numpy()[0]), 0)
+        np.testing.assert_array_equal(pool.records.accepted.numpy(), 0)
+        np.testing.assert_array_equal(pool.records.triplet_values.numpy(), 0)
+        for owner in (pool.energy, pool.residual, pool.force):
+            np.testing.assert_array_equal(owner.result.numpy(), 0)
+        pool.evaluate(candidate_count=5)
+        check_admitted(test, pool, data)
+
+
 def test_pool_graph_rebinding(test, device):
     """Recapture complete pooled chains when staging, records, scratch or stream storage changes."""
     pool = _ContactPool(4, 2, 5, 8, 3, 64, wp.float64, device, use_cuda_graph=True)
@@ -724,7 +773,7 @@ def test_many_contact_reservations(test, device):
     counts = rng.choice([0, 1, k], m).astype(np.int32)
     for dtype in (wp.float32, wp.float64):
         full = int(np.maximum(1, counts).sum())
-        for capacity in (0, 1, 127, full - 1, full):
+        for capacity in (0, 1, 127, full - 1, full, m * k):
             pool = _ContactPool(8, 2, m, capacity, k, m, dtype, device, use_cuda_graph=device.is_cuda)
             data = {name: getattr(pool.candidates, name).numpy() for name in pool._specs[0]}
             data["count"] = [m]
@@ -747,7 +796,7 @@ def test_many_contact_reservations(test, device):
                 test.assertEqual(int(pool.records.requested.numpy()[0]), full)
                 test.assertEqual(int(pool.records.dropped.numpy()[0]), m - int(mask.sum()))
                 test.assertEqual(int(pool.candidates.overflow.numpy()[0]), 3)
-                if capacity == full:
+                if capacity >= full:
                     test.assertTrue(mask.all())
 
 
@@ -866,6 +915,7 @@ for _device in get_test_devices():
         test_force_and_dense_operator,
         test_pool_capacity_contracts,
         test_pool_reuse_and_failure,
+        test_pool_bounded_work,
         test_many_contact_reservations,
         test_pool_native_energy_bits,
         test_pool_invalid_scratch,

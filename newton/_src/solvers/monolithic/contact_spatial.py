@@ -8,6 +8,7 @@ from typing import Any
 
 import numpy as np
 import warp as wp
+from warp.utils import array_scan
 
 from ...geometry import GeoType
 from .aabb import _CandidateBounds
@@ -257,6 +258,37 @@ def _transform_points(transform, points):
     return t + (2 * w * w - 1) * points + 2 * (points @ v)[:, None] * v + 2 * w * np.cross(v, points)
 
 
+@wp.kernel(enable_backward=False)
+def _mark_cloth_target(
+    lower: wp.array[wp.vec3],
+    upper: wp.array[wp.vec3],
+    target_lo: wp.array[wp.vec3],
+    target_hi: wp.array[wp.vec3],
+    status: wp.array[int],
+    prefix: wp.array[int],
+):
+    i = wp.tid()
+    prefix[i] = 0
+    if i > 0 and status[0] == 0:
+        face = 6 * (i - 1)
+        overlap = True
+        for axis in range(3):
+            overlap = overlap and lower[face][axis] <= target_hi[0][axis]
+            overlap = overlap and target_lo[0][axis] <= upper[face][axis]
+        if overlap:
+            prefix[i] = 6
+
+
+@wp.kernel(enable_backward=False)
+def _write_cloth_target(prefix: wp.array[int], keys: wp.array[wp.uint64], count: wp.array[int]):
+    i = wp.tid()
+    if i == 0:
+        count[0] = prefix[prefix.shape[0] - 1]
+    elif prefix[i] > prefix[i - 1]:
+        for slot in range(6):
+            keys[prefix[i - 1] + slot] = wp.uint64(6 * (i - 1) + slot)
+
+
 class _ContactSpatial:
     """Build swept candidates from the existing directed sampling owner.
 
@@ -454,6 +486,25 @@ class _ContactSpatial:
             initial_bounds=(self.face_lo, self.face_hi, self.target_lo, self.target_hi),
             _samples_per_patch=slots_per_patch,
         )
+        # Only complete cloth groups with one fixed sphere/mesh share all six boxes
+        # and permissions. Keep capacity clipping on the original admission path.
+        grouped = (
+            material
+            and bool(unique_faces)
+            and len(unique_targets) == 1
+            and types[unique_targets[0]] in (GeoType.SPHERE, GeoType.MESH)
+            and bodies[unique_targets[0]] == -1
+            and sample_stride == 6
+            and len(unique_faces) % 6 == 0
+            and capacity >= c.count
+            and all(source == -2 for source, _ in unique_faces)
+        )
+        if grouped:
+            ordinals = np.asarray(unique_faces)[:, 1].reshape(-1, 6)
+            grouped = bool(np.all(ordinals == (ordinals[:, :1] // 6) * 6 + np.arange(6)))
+        self._cloth_target_prefix = wp.zeros(
+            len(unique_faces) // 6 + 1 if grouped else 0, dtype=int, device=self.device
+        )
         self._ids, self._scratch_ids = (wp.empty(capacity, dtype=wp.uint64, device=self.device) for _ in range(2))
         self._indices, self._scratch_indices = (wp.empty(capacity, dtype=int, device=self.device) for _ in range(2))
         self.identities = self._scratch_ids if (max(1, capacity) - 1).bit_length() % 2 else self._ids
@@ -582,7 +633,31 @@ class _ContactSpatial:
                 raise ValueError("Spatial contact input aliases output")
         self._bounds(q, x, com)
         # Only the mapped contact identities need ordering; sorting query keys first is redundant.
-        self.query.update(self.face_lo, self.face_hi, self.target_lo, self.target_hi, sort=False)
+        if self._cloth_target_prefix.size:
+            query = self.query
+            query._prepare_bounds(self.face_lo, self.face_hi, self.target_lo, self.target_hi)
+            wp.launch(
+                _mark_cloth_target,
+                self._cloth_target_prefix.size,
+                [
+                    query.face_lo,
+                    query.face_hi,
+                    query.target_lo,
+                    query.target_hi,
+                    query.status,
+                    self._cloth_target_prefix,
+                ],
+                device=self.device,
+            )
+            array_scan(self._cloth_target_prefix, self._cloth_target_prefix)
+            wp.launch(
+                _write_cloth_target,
+                self._cloth_target_prefix.size,
+                [self._cloth_target_prefix, query.keys, query.count],
+                device=self.device,
+            )
+        else:
+            self.query.update(self.face_lo, self.face_hi, self.target_lo, self.target_hi, sort=False)
 
     def _order(self, span):
         wp.launch(

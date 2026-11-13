@@ -227,6 +227,7 @@ def test_fixed_topology_storage_guards(test, device):
     """Reject malformed or overlapping arrays on the host before kernels touch them."""
     owner = _FixedScalarBsrReduction(3, 8, device, use_cuda_graph=device.is_cuda)
     inputs = _inputs(8, device)
+    owner.build(inputs)
     for object_, name, wrong in (
         (inputs, "rows", wp.zeros(7, dtype=int, device=device)),
         (inputs, "values", wp.zeros(8, dtype=wp.float64, device=device)),
@@ -241,6 +242,7 @@ def test_fixed_topology_storage_guards(test, device):
             with test.assertRaises(ValueError):
                 owner.build(inputs)
         setattr(object_, name, original)
+        owner.build(inputs)
 
 
 def test_fixed_topology_random_groups(test, device):

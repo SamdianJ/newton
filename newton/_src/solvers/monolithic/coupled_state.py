@@ -9,7 +9,7 @@ import warp as wp
 from ...sim import Model
 from . import state_checks
 from .articulation_state import ArticulationState
-from .material_inputs import _cable_geometry, _rounding_tilt, _shell_adjacency
+from .material_inputs import _cable_geometry, _rounding_tilt, _shell_geometry
 
 
 class CoupledState(ArticulationState):
@@ -18,10 +18,25 @@ class CoupledState(ArticulationState):
     namespace = "_monolithic_coupled"
     version = 4
 
-    def __init__(self, kinematics, actors, rigid=None, materials=None):
+    def __init__(self, kinematics, actors, rigid=None, materials=None, *, cloth_contact=False):
         self.actors = actors
         self.rigid = rigid
         self.materials = materials
+        self._cloth_neighbors = []
+        if materials is not None:
+            for obj in materials.cloth:
+                faces = {tuple(sorted(face)): index for index, face in enumerate(obj["triangles"])}
+                pairs = []
+                for face, stencil in enumerate(obj["stencils"]):
+                    for edge, opposite in enumerate(stencil[3:]):
+                        if opposite >= 0:
+                            other = faces[tuple(sorted((stencil[(edge + 1) % 3], stencil[(edge + 2) % 3], opposite)))]
+                            if face < other:
+                                pairs.append((face, other))
+                # Derived topology is immutable and is not a new physics/checkpoint field.
+                pairs = np.asarray(pairs, dtype=np.int32).reshape(-1, 2)
+                self._cloth_neighbors.append(np.frombuffer(pairs.tobytes(), dtype=np.int32).reshape(-1, 2))
+        self._cloth_neighbors = tuple(self._cloth_neighbors)
         if materials is not None:
             self.version = 6
         if kinematics.tree_count > 1:
@@ -43,6 +58,13 @@ class CoupledState(ArticulationState):
             force_valid=((1,), wp.int32),
             precision=((1,), wp.int32),
         )
+        self.cloth_contact = cloth_contact
+        if cloth_contact:
+            self.version = 8
+            self.schema.update(
+                cloth_contact_particle_force=((n,), self.vector),
+                cloth_contact_summary=((6,), self.dtype),
+            )
         if materials is not None:
             edges = materials.theta_count
             twists = sum(len(obj["ref_twist"]) for obj in materials.cable)
@@ -219,8 +241,8 @@ class CoupledState(ArticulationState):
 
     def _validate_material_history(self, state, history, *, bound):
         positions = state.particle_q.numpy()
-        for obj in self.materials.cloth:
-            _, areas = _shell_adjacency(obj["triangles"], positions)
+        for obj, neighbors in zip(self.materials.cloth, self._cloth_neighbors, strict=True):
+            areas = _shell_geometry(obj["triangles"], positions, neighbors)
             if np.any(areas / obj["areas"] <= 1e-8):
                 raise ValueError("Cloth state has collapsed triangles")
         theta = history.cable_theta.numpy()
@@ -268,6 +290,9 @@ class CoupledState(ArticulationState):
         history = getattr(state, self.namespace)
         if self.materials is not None:
             history.contact_cable_torque.zero_()
+        if self.cloth_contact:
+            history.cloth_contact_particle_force.zero_()
+            history.cloth_contact_summary.zero_()
         for name in (
             "contact_particle_force",
             "contact_body_force",

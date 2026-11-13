@@ -281,7 +281,7 @@ class _ContactRows:
 
     def _reduce(self, rows, identities, local_ids, values, count, span=None):
         span = self.capacity if span is None else span
-        wp.launch(_reset_rows, 1, [count, self.capacity, self.flags], device=self.device)
+        wp.launch(_reset_rows, 1, [count, min(self.capacity, span), self.flags], device=self.device)
         keys, indices = self.keys, self.indices
         if span:
             wp.launch(
@@ -483,6 +483,7 @@ def _reserve_contacts(
     indices: wp.array[int],
     active: wp.array[int],
     capacity: int,
+    complete: bool,
     selected: wp.array[int],
     demands: wp.array[wp.vec4i],
 ):
@@ -496,23 +497,31 @@ def _reserve_contacts(
         return
     k = candidates.support_counts[i]
     units = wp.max(1, k)
-    wp.atomic_add(records.requested, 0, units)
-    before = wp.atomic_add(records.used, 0, 0)
-    while before <= capacity - units:
-        actual = wp.atomic_cas(records.used, 0, before, before + units)
-        if actual == before:
-            selected[index] = 1
-            components = int(0)
-            for axis in range(3):
-                if candidates.weights[i, axis] > candidates.weights.dtype(0):
-                    components += 1
-            # Retain zero products within positive factors, but preserve the
-            # original omission of entire zero-weight factors from B's tree.
-            demands[index] = wp.vec4i(1, k, components * k * k, candidates.force_counts[i])
+    if complete:
+        selected[index] = 1
+        # The scan already totals support units. Only zero-DoF contacts
+        # need the extra unit retained by the admission budget.
+        if k == 0:
+            wp.atomic_add(records.requested, 0, 1)
+    else:
+        wp.atomic_add(records.requested, 0, units)
+        before = wp.atomic_add(records.used, 0, 0)
+        while before <= capacity - units:
+            actual = wp.atomic_cas(records.used, 0, before, before + units)
+            if actual == before:
+                selected[index] = 1
+                break
+            before = actual
+        if selected[index] == 0:
+            # No resource counter or partial row is published on failure.
+            wp.atomic_add(records.dropped, 0, 1)
             return
-        before = actual
-    # Failure does not increment any resource counter or publish a partial row.
-    wp.atomic_add(records.dropped, 0, 1)
+    components = int(0)
+    for axis in range(3):
+        if candidates.weights[i, axis] > candidates.weights.dtype(0):
+            components += 1
+    # Keep zero products within positive factors, omitting zero-weight factors.
+    demands[index] = wp.vec4i(1, k, components * k * k, candidates.force_counts[i])
 
 
 @wp.kernel
@@ -531,8 +540,11 @@ def _scan_seed(demands: wp.array[wp.vec4i], prefix: wp.array[wp.vec4i], records:
 
 
 @wp.kernel
-def _scan_counts(prefix: wp.array[wp.vec4i], records: Any):
+def _scan_counts(prefix: wp.array[wp.vec4i], records: Any, complete: bool):
     total = prefix[prefix.shape[0] - 1]
+    if complete:
+        records.used[0] = total[1] + records.requested[0]
+        records.requested[0] = records.used[0]
     records.count[0] = total[0]
     records.support_count[0] = total[1]
     records.triplet_count[0] = total[2]
@@ -735,8 +747,8 @@ class _ContactPool:
     """Stage and commit complete local contact records within one bounded budget.
 
     All live inputs are validated before reservation, even at zero capacity.
-    One CAS reserves u=max(1,k); a fixed exclusive integer scan derives addresses
-    after all reservations. Publish accepted only after every local E/r/B/force
+    Admission reserves u=max(1,k); a fixed integer scan derives addresses.
+    Full-capacity nonstreaming pools admit without per-contact CAS. Publish accepted only after every local E/r/B/force
     write and native row reduction. No physical state/history is changed here.
     Staging overflow is supplied by the producer separately from written count.
     With batch_capacity set, reuse only batch x support candidate storage and
@@ -992,9 +1004,28 @@ class _ContactPool:
             self._storage_bindings = bindings
         return buffers
 
-    def evaluate(self):
+    def evaluate(self, *, candidate_count=None):
         if self._stream is not None:
             raise ValueError("Batched contact pools require begin/append/finish")
+        if candidate_count is not None and (
+            type(candidate_count) is not int or not 0 <= candidate_count <= self.candidate_capacity
+        ):
+            raise ValueError("Invalid contact candidate bound")
+        spans = None
+        if candidate_count is not None:
+            contacts = min(self.contact_capacity, candidate_count)
+            support = min(self.support_capacity, candidate_count * self.max_support)
+            bounds = (
+                (candidate_count, self.candidate_capacity),
+                (4 * contacts, self.energy.capacity),
+                (support, self.residual.capacity),
+                (self.FORCE_TERMS * contacts, self.force.capacity),
+                (contacts, self.contact_capacity),
+                (3 * self.max_support * support, self.triplet_capacity),
+            )
+            spans = tuple(
+                min(capacity, 1 << (max(1, count) - 1).bit_length()) if count else 0 for count, capacity in bounds
+            )
         buffers = self._validate_storage()
         self.graphs.run(
             "contact_pool",
@@ -1007,18 +1038,41 @@ class _ContactPool:
                 self.identity_count,
                 self.dtype,
                 self.energy.BLOCK_SIZE,
+                spans,
             ),
             buffers,
-            self._evaluate,
+            lambda: self._evaluate(spans),
         )
 
-    def _evaluate(self):
+    def _evaluate(self, spans=None):
         a, out = self.candidates, self.records
-        for name in self._specs[1]:
+        # Live payload prefixes are overwritten before use. Consumers use the
+        # published counts; failed evaluations still clear every output below.
+        for name in (
+            "flags",
+            "count",
+            "used",
+            "requested",
+            "dropped",
+            "accepted",
+            "support_count",
+            "energy_count",
+            "force_count",
+            "factor_count",
+            "triplet_count",
+        ):
             getattr(out, name).zero_()
-        _, indices = self._identity._reduce(self._zero_rows, a.identities, self._zero_rows, self._zero_values, a.count)
+        _, indices = self._identity._reduce(
+            self._zero_rows,
+            a.identities,
+            self._zero_rows,
+            self._zero_values,
+            a.count,
+            span=None if spans is None else spans[0],
+        )
         wp.launch(_begin_pool, 1, [a, out, self._identity.flags], device=self.device)
         m = self.candidate_capacity
+        complete = self.capacity >= m * self.max_support
         if m:
             wp.launch(
                 _validate_contacts, m, [a, out, self.row_count, self.force_row_count, self._active], device=self.device
@@ -1026,15 +1080,15 @@ class _ContactPool:
             wp.launch(
                 _reserve_contacts,
                 m,
-                [a, out, indices, self._active, self.capacity, self._selected, self._demands],
+                [a, out, indices, self._active, self.capacity, complete, self._selected, self._demands],
                 device=self.device,
             )
         wp.launch(_scan_seed, self._prefix.size, [self._demands, self._prefix, out, False], device=self.device)
         array_scan(self._prefix, self._prefix)
-        wp.launch(_scan_counts, 1, [self._prefix, out], device=self.device)
+        wp.launch(_scan_counts, 1, [self._prefix, out, complete], device=self.device)
         if m:
             wp.launch(_write_contacts, m, [a, out, indices, self._selected, self._prefix], device=self.device)
-        self._finish_records(indices)
+        self._finish_records(indices, spans)
 
     def _finish_records(self, indices=None, spans=None):
         out = self.records
@@ -1152,12 +1206,12 @@ class _ContactPool:
             wp.launch(
                 _reserve_contacts,
                 b,
-                [a, out, indices, self._active, self.capacity, self._selected, self._demands],
+                [a, out, indices, self._active, self.capacity, False, self._selected, self._demands],
                 device=self.device,
             )
         wp.launch(_scan_seed, self._prefix.size, [self._demands, self._prefix, out, True], device=self.device)
         array_scan(self._prefix, self._prefix)
-        wp.launch(_scan_counts, 1, [self._prefix, out], device=self.device)
+        wp.launch(_scan_counts, 1, [self._prefix, out, False], device=self.device)
         if b:
             wp.launch(_write_contacts, b, [a, out, indices, self._selected, self._prefix], device=self.device)
             wp.launch(_contact_batch_sources, b, [out, self._selected, self._prefix, base], device=self.device)

@@ -1,0 +1,1 @@
+Fix experimental Monolithic point-cloud self contact to use the SuperDex material-reference distance rule for all sample-node pairs, including incident nodes, so reference-far local folds can produce a response. The configurable ``self_exclusion_ratio`` defaults to 1.5; reference-near nonlocal sheets remain excluded after deformation.

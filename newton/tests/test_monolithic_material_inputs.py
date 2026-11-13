@@ -9,7 +9,7 @@ from types import SimpleNamespace
 
 import numpy as np
 
-from newton._src.solvers.monolithic.material_inputs import _MaterialInputs
+from newton._src.solvers.monolithic.material_inputs import _MaterialInputs, _shell_adjacency
 from newton._src.solvers.monolithic.solver_types import CableInput, ClothInput
 from scripts.monolithic_reference.cable_oracle import CableReference
 
@@ -169,6 +169,43 @@ class TestMaterialInputs(unittest.TestCase):
             model.tri_activations = HostArray([0] * len(triangles))
             with self.subTest(triangles=triangles), self.assertRaises(ValueError):
                 _MaterialInputs(model, (cloth_input(triangle_ids=tuple(range(len(triangles)))),), ())
+
+    def test_pinched_cloth_vertex_rejected(self):
+        """Reject a disconnected vertex fan even when faces connect along other edges."""
+        triangles = np.array([[0, 1, 2], [2, 1, 3], [2, 3, 4], [4, 3, 0]])
+        with self.assertRaisesRegex(ValueError, "nonmanifold vertex"):
+            _shell_adjacency(triangles, np.zeros((5, 3)))
+
+    def test_cloth_geometry_thresholds(self):
+        """Retain native corner and adjacent-normal decisions on both sides of their limits."""
+        for dtype in (np.float32, np.float64):
+            for height in (0, np.nan):
+                points = np.array([[0, 0, 0], [1, 0, 0], [0, height, 0]], dtype=dtype)
+                with (
+                    self.subTest(dtype=dtype, height=height),
+                    self.assertRaisesRegex(ValueError, "finite nondegenerate"),
+                ):
+                    _shell_adjacency(np.array([[0, 1, 2]]), points)
+            for factor in (0.99, 1.01):
+                points = np.array([[0, 0, 0], [1, 0, 0], [1, factor * 1e-8, 0]], dtype=dtype)
+                for corner in range(3):
+                    face = np.roll([[0, 1, 2]], corner, axis=1)
+                    with self.subTest(dtype=dtype, factor=factor, corner=corner):
+                        if factor < 1:
+                            with self.assertRaisesRegex(ValueError, "ill-conditioned"):
+                                _shell_adjacency(face, points)
+                        else:
+                            _, areas = _shell_adjacency(face, points)
+                            self.assertEqual(areas.dtype, dtype)
+                            np.testing.assert_array_equal(areas, [points[2, 1] / dtype(2)])
+                delta = factor * 1e-4
+                points = np.array([[0, 0, 0], [1, 0, 0], [0, 1, 0], [0, np.cos(delta), np.sin(delta)]], dtype=dtype)
+                with self.subTest(dtype=dtype, factor=factor, predicate="normals"):
+                    if factor < 1:
+                        with self.assertRaisesRegex(ValueError, "normals are antiparallel"):
+                            _shell_adjacency(np.array([[0, 1, 2], [1, 0, 3]]), points)
+                    else:
+                        _shell_adjacency(np.array([[0, 1, 2], [1, 0, 3]]), points)
 
     def test_reference_geometry_rejected(self):
         """Reject collapsed and antiparallel reference edges."""

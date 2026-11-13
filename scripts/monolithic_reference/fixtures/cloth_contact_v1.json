@@ -1,0 +1,40 @@
+{
+  "schema_version": 1,
+  "units": "SI",
+  "dt_s": 0.002,
+  "geometry_search_distance_m": 0.05,
+  "material": {
+    "young_modulus_Pa": 200000.0,
+    "poisson_ratio": 0.3,
+    "thickness_m": 0.0005,
+    "surface_density_kg_m2": 0.2
+  },
+  "fixture": {"omega_rad_s": 80.0, "damping_ratio": 1.0},
+  "solver": {
+    "friction_velocity_scale": 0.01,
+    "normal_smoothing": 0.0001,
+    "newton_max_iterations": 60,
+    "linear_max_iterations": 300,
+    "linear_tolerance": 0.0001,
+    "publish_policy": "current_iterate"
+  },
+  "pair": {
+    "width_m": 0.08,
+    "cells": 8,
+    "friction_coefficient": 0.0,
+    "times_s": [0, 0.1, 0.6, 0.8, 1.0, 1.2, 1.4, 1.6, 1.8, 2.0, 2.2, 2.7, 3.0],
+    "targets_gap_slide_scale": [[0.03,0,1],[0.03,0,1],[0,0,1],[0,0,1],[-0.001,0,1],[-0.001,0,1],[-0.003,0,1],[-0.003,0,1],[-0.001,0,1],[-0.001,0.01,1],[-0.001,0.01,1],[0.03,0.01,1],[0.03,0.01,1]],
+    "phases": ["initial-hold","approach","hold-1","compress-2","hold-2","compress-3","hold-3","unload-to-slide","slide","slide-hold","separate","final-hold"]
+  },
+  "self-fold": {
+    "length_m": 0.16,
+    "width_m": 0.04,
+    "length_cells": 32,
+    "width_cells": 4,
+    "fold_radius_m": 0.01,
+    "friction_coefficient": 0.3,
+    "times_s": [0, 0.2, 0.8, 1.0, 1.3, 1.5, 2.0, 2.2, 2.4, 2.6],
+    "targets_z_slide_scale": [[0,0,1],[0,0,1],[-0.01975,0,1],[-0.01975,0,1],[-0.01975,0.01,1],[-0.01975,0.01,1],[0,0,1],[0,0,1],[0,0,0],[0,0,0]],
+    "phases": ["initial-hold","compress","hold","slide","slide-hold","unload","unload-hold","release","recovery"]
+  }
+}

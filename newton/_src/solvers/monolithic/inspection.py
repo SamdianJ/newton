@@ -111,7 +111,9 @@ _FIELDS = {
         "state",
         "N",
         "world",
-        "published contact force on each particle",
+        "published contact force on each particle: shape and material contact, plus the point-cloud cloth contact force "
+        "when cloth_contact is enabled (state._monolithic_coupled.cloth_contact_particle_force, not exported); the "
+        "contact_* record fields cover only the shape and material contact pool",
         "state._monolithic_coupled.contact_particle_force",
         "force_valid == 1",
     ),

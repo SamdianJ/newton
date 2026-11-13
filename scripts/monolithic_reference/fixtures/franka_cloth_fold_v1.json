@@ -1,0 +1,646 @@
+{
+  "schema_version": 1,
+  "name": "franka-cloth-fold",
+  "units": "SI",
+  "status": "exploratory recipe; not a qualified folding result",
+  "dt": 0.002,
+  "initial_hold_s": 1.0,
+  "final_hold_s": 2.0,
+  "time_scale": 1.5,
+  "asset": {
+    "path": "newton/examples/assets/unisex_shirt_coarse.usd",
+    "prim": "/root/shirt",
+    "translation_xy_m": [
+      0.0,
+      0.7
+    ],
+    "rotation_z_rad": 3.141592653589793,
+    "table_clearance_m": 0.01
+  },
+  "robot": {
+    "urdf": "asset/monolithic/data/inputs/franka/franka_emika_panda/urdf/fr3_franka_hand.urdf",
+    "base_position_m": [
+      -0.5,
+      -0.5,
+      0.0
+    ],
+    "tcp_link": "fr3/fr3_link7",
+    "source_tcp_offset_m": [
+      0.0,
+      0.0,
+      0.22
+    ],
+    "tcp_offset_m": [
+      0.0,
+      0.0,
+      0.2104
+    ],
+    "tcp_rotation_xyzw": [
+      0.0,
+      0.0,
+      -0.3826834323650898,
+      0.9238795325112867
+    ],
+    "initial_tcp_position_m": [
+      0.0,
+      -0.5,
+      0.6
+    ],
+    "initial_q": [
+      0,
+      -0.5,
+      0,
+      -2.2,
+      0,
+      1.7,
+      0.7854,
+      0.032,
+      0.032
+    ],
+    "finger_open_m": 0.032,
+    "finger_closed_m": 0.0005,
+    "arm_kp": 20000.0,
+    "arm_kd": 200.0,
+    "finger_kp": 2000.0,
+    "finger_kd": 10.0,
+    "ik_iterations": 300,
+    "ik_position_tolerance_m": 0.002,
+    "ik_rotation_tolerance_rad": 0.02
+  },
+  "table": {
+    "center_m": [
+      0.0,
+      -0.5,
+      0.1
+    ],
+    "half_extents_m": [
+      0.4,
+      0.4,
+      0.1
+    ]
+  },
+  "material": {
+    "young_modulus_Pa": 100000.0,
+    "poisson_ratio": 0.3,
+    "thickness_m": 0.0005,
+    "surface_density_kg_m2": 0.18
+  },
+  "solver": {
+    "friction_velocity_scale": 0.01,
+    "contact_stiffness": 10000000.0,
+    "contact_factor_capacity": 600000,
+    "friction_coefficient": 0.5,
+    "normal_smoothing": 0.0001,
+    "newton_max_iterations": 10,
+    "linear_max_iterations": 200,
+    "line_search_max_iterations": 8,
+    "mass_mode": "lumped",
+    "pcg_mode": "production",
+    "publish_policy": "current_iterate"
+  },
+  "sdf": {
+    "max_resolution": 128,
+    "margin_m": 0.003,
+    "narrow_band_m": [
+      -0.003,
+      0.003
+    ]
+  },
+  "source_trajectory": {
+    "path": "newton/examples/cloth/example_cloth_franka.py",
+    "position_units": "cm converted to m",
+    "tcp_mapping": "map source link pose using source_tcp_offset_m -> tcp_offset_m and tcp_rotation_xyzw, then minimally lift actual finger boxes above table by half material thickness",
+    "control_path": "8 Cartesian IK nodes per moving phase with continuous seed; Hermite joint interpolation under the original phase quintic time law; discrete finger/table preflight only",
+    "timing": "source segment durations scaled; explicit initial and final holds; no task duration gate"
+  },
+  "keyframes": [
+    {
+      "phase": "approach",
+      "duration_s": 4,
+      "position_m": [
+        0.31,
+        -0.6,
+        0.4
+      ],
+      "quaternion_xyzw": [
+        0.8536,
+        -0.3536,
+        0.3536,
+        -0.1464
+      ],
+      "gripper": "open"
+    },
+    {
+      "phase": "left_sleeve_approach",
+      "duration_s": 2,
+      "position_m": [
+        0.31,
+        -0.6,
+        0.2
+      ],
+      "quaternion_xyzw": [
+        0.8536,
+        -0.3536,
+        0.3536,
+        -0.1464
+      ],
+      "gripper": "open"
+    },
+    {
+      "phase": "left_sleeve_close",
+      "duration_s": 2,
+      "position_m": [
+        0.31,
+        -0.6,
+        0.2
+      ],
+      "quaternion_xyzw": [
+        0.8536,
+        -0.3536,
+        0.3536,
+        -0.1464
+      ],
+      "gripper": "closed"
+    },
+    {
+      "phase": "left_sleeve_lift",
+      "duration_s": 2,
+      "position_m": [
+        0.26,
+        -0.6,
+        0.26
+      ],
+      "quaternion_xyzw": [
+        0.8536,
+        -0.3536,
+        0.3536,
+        -0.1464
+      ],
+      "gripper": "closed"
+    },
+    {
+      "phase": "left_sleeve_fold",
+      "duration_s": 2,
+      "position_m": [
+        0.12,
+        -0.6,
+        0.31
+      ],
+      "quaternion_xyzw": [
+        0.8536,
+        -0.3536,
+        0.3536,
+        -0.1464
+      ],
+      "gripper": "closed"
+    },
+    {
+      "phase": "left_sleeve_place",
+      "duration_s": 3,
+      "position_m": [
+        -0.06,
+        -0.6,
+        0.31
+      ],
+      "quaternion_xyzw": [
+        0.8536,
+        -0.3536,
+        0.3536,
+        -0.1464
+      ],
+      "gripper": "closed"
+    },
+    {
+      "phase": "left_sleeve_release",
+      "duration_s": 1,
+      "position_m": [
+        -0.06,
+        -0.6,
+        0.31
+      ],
+      "quaternion_xyzw": [
+        0.8536,
+        -0.3536,
+        0.3536,
+        -0.1464
+      ],
+      "gripper": "open"
+    },
+    {
+      "phase": "left_hem_approach",
+      "duration_s": 2,
+      "position_m": [
+        0.15,
+        -0.33,
+        0.31
+      ],
+      "quaternion_xyzw": [
+        0.8536,
+        -0.3536,
+        0.3536,
+        -0.1464
+      ],
+      "gripper": "open"
+    },
+    {
+      "phase": "left_hem_descend",
+      "duration_s": 3,
+      "position_m": [
+        0.15,
+        -0.33,
+        0.21
+      ],
+      "quaternion_xyzw": [
+        0.8536,
+        -0.3536,
+        0.3536,
+        -0.1464
+      ],
+      "gripper": "open"
+    },
+    {
+      "phase": "left_hem_close",
+      "duration_s": 3,
+      "position_m": [
+        0.15,
+        -0.33,
+        0.21
+      ],
+      "quaternion_xyzw": [
+        0.8536,
+        -0.3536,
+        0.3536,
+        -0.1464
+      ],
+      "gripper": "closed"
+    },
+    {
+      "phase": "left_hem_lift",
+      "duration_s": 2,
+      "position_m": [
+        0.15,
+        -0.33,
+        0.28
+      ],
+      "quaternion_xyzw": [
+        0.8536,
+        -0.3536,
+        0.3536,
+        -0.1464
+      ],
+      "gripper": "closed"
+    },
+    {
+      "phase": "left_hem_fold",
+      "duration_s": 3,
+      "position_m": [
+        -0.02,
+        -0.33,
+        0.28
+      ],
+      "quaternion_xyzw": [
+        0.8536,
+        -0.3536,
+        0.3536,
+        -0.1464
+      ],
+      "gripper": "closed"
+    },
+    {
+      "phase": "left_hem_release",
+      "duration_s": 1,
+      "position_m": [
+        -0.02,
+        -0.33,
+        0.28
+      ],
+      "quaternion_xyzw": [
+        0.8536,
+        -0.3536,
+        0.3536,
+        -0.1464
+      ],
+      "gripper": "open"
+    },
+    {
+      "phase": "right_sleeve_approach",
+      "duration_s": 2,
+      "position_m": [
+        -0.28,
+        -0.6,
+        0.28
+      ],
+      "quaternion_xyzw": [
+        0.9239,
+        -0.3827,
+        0.0,
+        0.0
+      ],
+      "gripper": "open"
+    },
+    {
+      "phase": "right_sleeve_descend",
+      "duration_s": 2,
+      "position_m": [
+        -0.28,
+        -0.6,
+        0.2
+      ],
+      "quaternion_xyzw": [
+        0.9239,
+        -0.3827,
+        0.0,
+        0.0
+      ],
+      "gripper": "open"
+    },
+    {
+      "phase": "right_sleeve_close",
+      "duration_s": 2,
+      "position_m": [
+        -0.28,
+        -0.6,
+        0.2
+      ],
+      "quaternion_xyzw": [
+        0.9239,
+        -0.3827,
+        0.0,
+        0.0
+      ],
+      "gripper": "closed"
+    },
+    {
+      "phase": "right_sleeve_lift",
+      "duration_s": 2,
+      "position_m": [
+        -0.18,
+        -0.6,
+        0.31
+      ],
+      "quaternion_xyzw": [
+        0.9239,
+        -0.3827,
+        0.0,
+        0.0
+      ],
+      "gripper": "closed"
+    },
+    {
+      "phase": "right_sleeve_fold",
+      "duration_s": 3,
+      "position_m": [
+        0.05,
+        -0.6,
+        0.31
+      ],
+      "quaternion_xyzw": [
+        0.9239,
+        -0.3827,
+        0.0,
+        0.0
+      ],
+      "gripper": "closed"
+    },
+    {
+      "phase": "right_sleeve_release",
+      "duration_s": 1,
+      "position_m": [
+        0.05,
+        -0.6,
+        0.31
+      ],
+      "quaternion_xyzw": [
+        0.9239,
+        -0.3827,
+        0.0,
+        0.0
+      ],
+      "gripper": "open"
+    },
+    {
+      "phase": "right_hem_approach",
+      "duration_s": 3,
+      "position_m": [
+        -0.18,
+        -0.3,
+        0.20500000000000002
+      ],
+      "quaternion_xyzw": [
+        0.9239,
+        -0.3827,
+        0.0,
+        0.0
+      ],
+      "gripper": "open"
+    },
+    {
+      "phase": "right_hem_close",
+      "duration_s": 3,
+      "position_m": [
+        -0.18,
+        -0.3,
+        0.20500000000000002
+      ],
+      "quaternion_xyzw": [
+        0.9239,
+        -0.3827,
+        0.0,
+        0.0
+      ],
+      "gripper": "closed"
+    },
+    {
+      "phase": "right_hem_lift",
+      "duration_s": 2,
+      "position_m": [
+        -0.03,
+        -0.3,
+        0.31
+      ],
+      "quaternion_xyzw": [
+        0.9239,
+        -0.3827,
+        0.0,
+        0.0
+      ],
+      "gripper": "closed"
+    },
+    {
+      "phase": "right_hem_fold",
+      "duration_s": 3,
+      "position_m": [
+        -0.03,
+        -0.3,
+        0.31
+      ],
+      "quaternion_xyzw": [
+        0.9239,
+        -0.3827,
+        0.0,
+        0.0
+      ],
+      "gripper": "closed"
+    },
+    {
+      "phase": "right_hem_release",
+      "duration_s": 2,
+      "position_m": [
+        -0.03,
+        -0.3,
+        0.31
+      ],
+      "quaternion_xyzw": [
+        0.9239,
+        -0.3827,
+        0.0,
+        0.0
+      ],
+      "gripper": "open"
+    },
+    {
+      "phase": "body_approach",
+      "duration_s": 2,
+      "position_m": [
+        0.0,
+        -0.2,
+        0.3
+      ],
+      "quaternion_xyzw": [
+        0.9239,
+        -0.3827,
+        0.0,
+        0.0
+      ],
+      "gripper": "open"
+    },
+    {
+      "phase": "body_descend",
+      "duration_s": 2,
+      "position_m": [
+        0.0,
+        -0.2,
+        0.195
+      ],
+      "quaternion_xyzw": [
+        0.9239,
+        -0.3827,
+        0.0,
+        0.0
+      ],
+      "gripper": "open"
+    },
+    {
+      "phase": "body_close",
+      "duration_s": 2,
+      "position_m": [
+        0.0,
+        -0.2,
+        0.195
+      ],
+      "quaternion_xyzw": [
+        0.9239,
+        -0.3827,
+        0.0,
+        0.0
+      ],
+      "gripper": "closed"
+    },
+    {
+      "phase": "body_lift",
+      "duration_s": 2,
+      "position_m": [
+        0.0,
+        -0.2,
+        0.35000000000000003
+      ],
+      "quaternion_xyzw": [
+        0.9239,
+        -0.3827,
+        0.0,
+        0.0
+      ],
+      "gripper": "closed"
+    },
+    {
+      "phase": "body_fold",
+      "duration_s": 1,
+      "position_m": [
+        0.0,
+        -0.3,
+        0.35000000000000003
+      ],
+      "quaternion_xyzw": [
+        0.9239,
+        -0.3827,
+        0.0,
+        0.0
+      ],
+      "gripper": "closed"
+    },
+    {
+      "phase": "body_hold",
+      "duration_s": 1.5,
+      "position_m": [
+        0.0,
+        -0.3,
+        0.35000000000000003
+      ],
+      "quaternion_xyzw": [
+        0.9239,
+        -0.3827,
+        0.0,
+        0.0
+      ],
+      "gripper": "closed"
+    },
+    {
+      "phase": "body_place",
+      "duration_s": 1.5,
+      "position_m": [
+        0.0,
+        -0.4,
+        0.35000000000000003
+      ],
+      "quaternion_xyzw": [
+        0.9239,
+        -0.3827,
+        0.0,
+        0.0
+      ],
+      "gripper": "closed"
+    },
+    {
+      "phase": "body_release",
+      "duration_s": 1.5,
+      "position_m": [
+        0.0,
+        -0.4,
+        0.35000000000000003
+      ],
+      "quaternion_xyzw": [
+        0.9239,
+        -0.3827,
+        0.0,
+        0.0
+      ],
+      "gripper": "open"
+    },
+    {
+      "phase": "retract",
+      "duration_s": 2,
+      "position_m": [
+        -0.28,
+        -0.6,
+        0.28
+      ],
+      "quaternion_xyzw": [
+        0.9239,
+        -0.3827,
+        0.0,
+        0.0
+      ],
+      "gripper": "open"
+    }
+  ]
+}
