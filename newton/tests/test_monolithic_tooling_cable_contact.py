@@ -31,6 +31,7 @@ from scripts.monolithic_reference.cable_contact_criteria import (
     evaluate,
     frame_penetration,
     ground_contact,
+    judge_files,
     load_run,
     max_rise,
     penalty,
@@ -40,7 +41,12 @@ from scripts.monolithic_reference.cable_contact_criteria import (
     writhe,
 )
 from scripts.monolithic_reference.cable_contact_criteria import main as criteria_main
-from scripts.monolithic_reference.cable_contact_scenes import CableContactScene, cable_section, trapezoid
+from scripts.monolithic_reference.cable_contact_scenes import (
+    CableContactScene,
+    cable_section,
+    edge_directors,
+    trapezoid,
+)
 from scripts.monolithic_reference.cable_oracle import CableFrame, CableReference, cable_derivatives
 from scripts.monolithic_reference.run_cable_contact import main as run_main
 
@@ -335,6 +341,24 @@ class TestCableContactVerdict(unittest.TestCase):
         failed = {"verdict": "FAIL", "evaluator": {"file_status": None}}
         self.assertEqual(bind_verdict(failed, FROZEN_GATES)["verdict"], "FAIL")
 
+    def test_judge_identity_covers_its_oracle_and_the_canonical_gates(self):
+        """An uncommitted edit to the gates or to the energy oracle must demote a PASS like an edit to the judge."""
+        names = [path.name for path in judge_files()]
+        self.assertEqual(
+            names,
+            [
+                "cable_contact_criteria.py",
+                "cable_oracle.py",
+                "cloth_contact_run.py",
+                "cable_contact_gates_frozen_v1.json",
+            ],
+        )
+        dirty = {
+            "verdict": "PASS",
+            "evaluator": {"file_status": " M scripts/monolithic_reference/fixtures/cable_contact_gates_frozen_v1.json"},
+        }
+        self.assertEqual(bind_verdict(dirty, FROZEN_GATES)["verdict"], "DIRTY_JUDGE")
+
     def test_evaluate_subtracts_the_work_of_a_driven_second_cable(self):
         """Two cables; the second is pulled quasi-statically by its kinematic end: E - W stays flat."""
         count, frames, length = 6, 31, 0.01
@@ -449,6 +473,26 @@ class TestCableContactScenes(unittest.TestCase):
             _, depth = frame_penetration(points, segments, i, j)
             with self.subTest(name=name):
                 self.assertAlmostEqual(-depth.max(), target, delta=1e-6)
+
+    def test_e2_helix_stack_geometry(self):
+        """The frozen E2: near-equal chords, lowest axis 5 mm above the table, turns about 0.5 mm apart."""
+        recipe = json.loads((FIXTURES / "cable_contact_e2_stack_v1.json").read_text())
+        scene = CableContactScene.__new__(CableContactScene)
+        scene.section, scene.ground_height = {"radius_m": 0.002}, 0.0
+        (points,), (fixed,), (clamped,), (hints,) = scene._build_helix_pile(recipe)
+        self.assertEqual((len(points), fixed, clamped), (128, [], []))
+        lengths = np.linalg.norm(np.diff(points, axis=0), axis=1)
+        self.assertLess(np.ptp(lengths), 1e-9)
+        self.assertAlmostEqual(lengths[0], 0.007, delta=5e-5)  # chord of a 7 mm arc step
+        self.assertAlmostEqual(points[:, 2].min(), 0.005, places=12)
+        topology = {"vertex_ranges": np.array([[0, 128]]), "rest_positions": points, "radius": np.array([0.002])}
+        segments = segment_table(topology)
+        i, j, _ = contact_pairs(segments, index_span=3, arc_factor=np.pi / 2)
+        _, depth = frame_penetration(points, segments, i, j)
+        self.assertAlmostEqual(-depth.max(), 0.0045 - 0.004, delta=5e-5)
+        directors = edge_directors(points, hints)
+        tangents = np.diff(points, axis=0) / lengths[:, None]
+        self.assertLess(np.max(np.abs(np.sum(directors * tangents, axis=1))), 1e-12)
 
     def test_contact_method_is_not_available_yet(self):
         with self.assertRaisesRegex(ValueError, "only method 'off'"):

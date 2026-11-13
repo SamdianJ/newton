@@ -5,21 +5,17 @@
 
 import numpy as np
 import warp as wp
-from newton.solvers.experimental.monolithic import SolverMonolithic, build_smooth_sdf
+from newton.solvers.experimental.monolithic import SolverMonolithic
 
 import newton
 
 from .cloth_contact_run import publication
 
-KINDS = ("coil", "wrap", "plectoneme", "cross", "helix-pile", "spiral-stack")
-DRIVEN_KINDS = ("coil", "wrap", "plectoneme")
+KINDS = ("coil", "plectoneme", "cross", "helix-pile", "spiral-stack")
+DRIVEN_KINDS = ("coil", "plectoneme")
 COMMON_FIELDS = ("scene", "kind", "dt_s", "duration_s", "gravity_m_s2", "material", "cables", "solver")
 KIND_FIELDS = {
     "coil": {"ground": None, "coil": ("bottom_clearance_m", "stop_height_m", "lower_speed_m_s", "ramp_s")},
-    "wrap": {
-        "cylinder": ("center_m", "radius_m", "half_length_m", "segments", "sdf"),
-        "wrap": ("orbit_radius_m", "pitch_m", "turns", "end_speed_m_s", "ramp_s"),
-    },
     "plectoneme": {"plectoneme": ("height_m", "approach_per_end_m", "approach_s", "twist_s", "turns")},
     "cross": {"ground": None, "cross": ("angles_deg", "heights_m", "wave_amplitude_m", "wavelength_m")},
     "helix-pile": {"ground": None, "helix": ("radius_m", "pitch_m", "bottom_clearance_m")},
@@ -151,9 +147,6 @@ class CableContactScene:
             )
         else:
             self.ground_height = None
-        mesh = None
-        if self.kind == "wrap":
-            mesh = self._add_cylinder(builder, recipe["cylinder"], cfg, device)
         build = getattr(self, f"_build_{self.kind.replace('-', '_')}")
         curves, fixed, fixed_theta, hints = build(recipe)
         self.vertex_ranges, cables, start = [], [], 0
@@ -207,8 +200,6 @@ class CableContactScene:
             pcg_mode=SolverMonolithic.PCGMode.PRODUCTION,
             use_cuda_graph=use_cuda_graph,
         )
-        if mesh is not None:
-            options["smooth_sdf"] = build_smooth_sdf(self.model)
         self.solver = SolverMonolithic(self.model, **options)
         self.state = self.solver.create_state(dt=self.dt)
         self.control = self.solver.create_control()
@@ -233,9 +224,6 @@ class CableContactScene:
             "gravity_m_s2": gravity.tolist(),
             "ground": "analytic plane" if ground is not None else "none",
         }
-        if mesh is not None:
-            self.metadata["support_mesh"] = {"vertices": len(mesh.vertices), "triangles": len(mesh.indices) // 3}
-            self.metadata["smooth_sdf"] = options["smooth_sdf"].build_metadata
 
     # ---- scene geometry -------------------------------------------------------------------
 
@@ -260,49 +248,6 @@ class CableContactScene:
         travel = self._top0[2] - self._stop
         self.drive_end_s = travel / self._speed + self._ramp
         return [points], [[0]], [[0]], [(1.0, 0.0, 0.0)]
-
-    def _build_wrap(self, recipe):
-        (spec,), wrap, cylinder = recipe["cables"], recipe["wrap"], recipe["cylinder"]
-        count, length = self._segments(spec)
-        self._center = np.asarray(cylinder["center_m"], dtype=float)
-        self._orbit = _positive(wrap["orbit_radius_m"], "wrap.orbit_radius_m")
-        if self._orbit <= cylinder["radius_m"] + self.section["radius_m"]:
-            raise ValueError("Recipe field wrap.orbit_radius_m must clear the cylinder surface")
-        self._pitch = float(wrap["pitch_m"])
-        self._turns = _positive(wrap["turns"], "wrap.turns")
-        self._speed = _positive(wrap["end_speed_m_s"], "wrap.end_speed_m_s")
-        self._ramp = _positive(wrap["ramp_s"], "wrap.ramp_s")
-        x = np.full(count, self._center[0] + self._orbit)
-        y = np.full(count, self._center[1])
-        z = self._center[2] - length * np.arange(count)
-        omega = self._speed / self._orbit
-        self.drive_end_s = 2 * np.pi * self._turns / omega + self._ramp
-        return [np.column_stack([x, y, z])], [[0]], [[0]], [(0.0, 1.0, 0.0)]
-
-    def _add_cylinder(self, builder, cylinder, cfg, device):
-        if not wp.get_device(device).is_cuda:
-            raise ValueError("Cylinder mesh contact requires CUDA SDF textures")
-        mesh = newton.Mesh.create_cylinder(
-            _positive(cylinder["radius_m"], "cylinder.radius_m"),
-            _positive(cylinder["half_length_m"], "cylinder.half_length_m"),
-            up_axis=newton.Axis.Y,
-            segments=int(cylinder["segments"]),
-            compute_normals=False,
-            compute_uvs=False,
-            compute_inertia=False,
-        )
-        sdf = cylinder["sdf"]
-        mesh.build_sdf(
-            device=device,
-            max_resolution=sdf["max_resolution"],
-            margin=sdf["margin_m"],
-            narrow_band_range=tuple(sdf["narrow_band_m"]),
-            texture_format="float32",
-            sign_method="winding",
-        )
-        center = wp.vec3(*cylinder["center_m"])
-        builder.add_shape_mesh(-1, xform=wp.transform(center, wp.quat_identity()), mesh=mesh, cfg=cfg)
-        return mesh
 
     def _build_plectoneme(self, recipe):
         (spec,), twist = recipe["cables"], recipe["plectoneme"]
@@ -428,11 +373,6 @@ class CableContactScene:
         target, theta = self.initial_q.copy(), self.target_theta.copy()
         if self.kind == "coil":
             target[0, 2] = self._top0[2] - trapezoid(t, self._top0[2] - self._stop, self._speed, self._ramp)
-        elif self.kind == "wrap":
-            angle = trapezoid(t, 2 * np.pi * self._turns, self._speed / self._orbit, self._ramp)
-            target[0] = self._center + np.array(
-                [self._orbit * np.cos(angle), self._pitch * angle / (2 * np.pi), self._orbit * np.sin(angle)]
-            )
         elif self.kind == "plectoneme":
             approach, twist = self._phases
             shift = self._approach * smoothstep(t / approach)

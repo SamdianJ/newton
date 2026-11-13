@@ -27,10 +27,16 @@ GAUSS = ((1 - 1 / np.sqrt(3)) / 2, (1 + 1 / np.sqrt(3)) / 2)
 RING = 64
 
 
+def judge_files():
+    """The judge, the modules whose numbers it uses, and the canonical frozen gates."""
+    here = Path(__file__).resolve().parent
+    return [Path(__file__).resolve(), here / "cable_oracle.py", here / "cloth_contact_run.py", FROZEN_GATES.resolve()]
+
+
 def evaluator_identity():
-    """Commit, tree status and file hash of this judge, so a changed definition shows on the verdict."""
-    source = Path(__file__).resolve()
-    root = source.parents[2]
+    """Commit, tree status and file hashes of the judge and its inputs, so a changed definition shows."""
+    files = judge_files()
+    root = files[0].parents[2]
 
     def git(*command):
         try:
@@ -39,10 +45,12 @@ def evaluator_identity():
             return None
 
     return {
-        "file": str(source),
-        "sha256": hashlib.sha256(source.read_bytes()).hexdigest(),
+        "file": str(files[0]),
+        "sha256": hashlib.sha256(files[0].read_bytes()).hexdigest(),
+        "inputs_sha256": {path.name: hashlib.sha256(path.read_bytes()).hexdigest() for path in files[1:]},
         "source_sha": git("rev-parse", "HEAD"),
-        "file_status": git("status", "--porcelain", "--", str(source)),
+        # Uncommitted changes to the judge, its oracle or the canonical gates all count.
+        "file_status": git("status", "--porcelain", "--", *(str(path) for path in files)),
     }
 
 
@@ -542,7 +550,6 @@ def evaluate(run, gates):
                 "kinetic + elastic + gravity"
                 + (" + ground-plane penalty" if np.isfinite(height) else "")
                 + " - driver work"
-                + ("; excludes the mesh-cylinder contact energy" if "cylinder" in recipe else "")
                 + "; cable-cable contact energy is zero for method-off runs"
             ),
             "gravity_drop_J": gravity_drop,
