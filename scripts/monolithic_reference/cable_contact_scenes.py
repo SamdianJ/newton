@@ -11,7 +11,7 @@ import newton
 
 from .cloth_contact_run import publication
 
-KINDS = ("coil", "wrap", "plectoneme", "cross", "helix-pile")
+KINDS = ("coil", "wrap", "plectoneme", "cross", "helix-pile", "spiral-stack")
 DRIVEN_KINDS = ("coil", "wrap", "plectoneme")
 COMMON_FIELDS = ("scene", "kind", "dt_s", "duration_s", "gravity_m_s2", "material", "cables", "solver")
 KIND_FIELDS = {
@@ -23,6 +23,10 @@ KIND_FIELDS = {
     "plectoneme": {"plectoneme": ("height_m", "approach_per_end_m", "approach_s", "twist_s", "turns")},
     "cross": {"ground": None, "cross": ("angles_deg", "heights_m", "wave_amplitude_m", "wavelength_m")},
     "helix-pile": {"ground": None, "helix": ("radius_m", "pitch_m", "bottom_clearance_m")},
+    "spiral-stack": {
+        "ground": None,
+        "spiral": ("layers", "inner_radius_m", "radial_gap_m", "vertical_gap_m", "transition_turns"),
+    },
 }
 
 
@@ -355,6 +359,54 @@ class CableContactScene:
         hints = np.column_stack([-np.cos(middle), -np.sin(middle), np.zeros(count - 1)])
         self.drive_end_s = 0.0
         return [points], [[]], [[]], [hints]
+
+    def _build_spiral_stack(self, recipe):
+        """Flat Archimedean spiral layers, alternately outward and inward, resting on the table.
+
+        Neighbouring turns and layers are ``radial_gap_m`` and ``vertical_gap_m`` apart at the
+        surface; the bottom layer touches the plane. The rest shape is the stack itself, so it
+        is stress free: a fixed state for timing one step with and without cable contact.
+        """
+        (spec,), spiral = recipe["cables"], recipe["spiral"]
+        count, length = self._segments(spec)
+        layers = int(spiral["layers"])
+        if layers < 1:
+            raise ValueError("Recipe field spiral.layers must be a positive integer")
+        radius = self.section["radius_m"]
+        inner = _positive(spiral["inner_radius_m"], "spiral.inner_radius_m")
+        # Chords of a turn of radius R bow inward by L^2 / (8 R); add the largest sagitta
+        # so that the polygonal turns, not only their vertices, keep the requested gap.
+        pitch = 2 * radius + float(spiral["radial_gap_m"]) + length**2 / (8 * inner)
+        rise = 2 * radius + float(spiral["vertical_gap_m"])
+        transition = _positive(spiral["transition_turns"], "spiral.transition_turns") * 2 * np.pi
+        if min(pitch, rise) < 2 * radius:
+            raise ValueError("Recipe spiral gaps must not be negative")
+        per_layer = length * (count - 1) / layers
+        pieces, start_angle, start_radius = [], 0.0, inner
+        for layer in range(layers):
+            sign = 1.0 if layer % 2 == 0 else -1.0
+            angle = np.linspace(0.0, 200 * np.pi, 200_000)
+            r = start_radius + sign * pitch * angle / (2 * np.pi)
+            arc = np.r_[0.0, np.cumsum(np.hypot(np.diff(r), r[1:] * np.diff(angle)))]
+            stop = int(np.searchsorted(arc, per_layer)) + 1
+            if stop >= len(angle) or np.any(r[:stop] <= 0):
+                raise ValueError("Recipe spiral does not fit its layers; enlarge spiral.inner_radius_m")
+            angle, r = angle[:stop], r[:stop]
+            z = np.full(stop, self.ground_height + radius + layer * rise)
+            if layer + 1 < layers:
+                ramp = angle >= angle[-1] - transition
+                z[ramp] += rise * (angle[ramp] - (angle[-1] - transition)) / transition
+            phi = start_angle + angle
+            pieces.append(np.column_stack([r * np.cos(phi), r * np.sin(phi), z]))
+            start_angle, start_radius = phi[-1], r[-1]
+        dense = np.vstack(pieces)
+        arc = np.r_[0.0, np.cumsum(np.linalg.norm(np.diff(dense, axis=0), axis=1))]
+        s = length * np.arange(count)
+        if s[-1] > arc[-1]:
+            raise ValueError("Recipe spiral is shorter than the cable")
+        points = np.column_stack([np.interp(s, arc, dense[:, k]) for k in range(3)])
+        self.drive_end_s = 0.0
+        return [points], [[]], [[]], [(0.0, 0.0, 1.0)]
 
     def _perturb(self, perturbation):
         """Add a small deterministic helical velocity field to break planar symmetry."""

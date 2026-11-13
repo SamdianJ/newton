@@ -230,6 +230,27 @@ class TestCableContactScenes(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "integral"):
             CableContactScene(recipe)
 
+    def test_spiral_stack_keeps_the_requested_gap(self):
+        """The fixed timing state: near-equal edges, bottom layer on the table, closest surfaces exactly g apart."""
+        for name, target in (("cable_contact_fixed1024_v1.json", 2e-4), ("cable_contact_fixed1024_g0_v1.json", 0.0)):
+            recipe = json.loads((FIXTURES / name).read_text())
+            scene = CableContactScene.__new__(CableContactScene)
+            scene.section, scene.ground_height = {"radius_m": 0.002}, 0.0
+            (points,), *_ = scene._build_spiral_stack(recipe)
+            lengths = np.linalg.norm(np.diff(points, axis=0), axis=1)
+            self.assertLess(np.ptp(lengths) / lengths.max(), 0.05)  # equal arc, chords shorten on the ramps
+            self.assertAlmostEqual(points[:, 2].min(), 0.002, places=12)
+            topology = {
+                "vertex_ranges": np.array([[0, len(points)]]),
+                "rest_positions": points,
+                "radius": np.array([0.002]),
+            }
+            segments = segment_table(topology)
+            i, j, _ = contact_pairs(segments, index_span=3, arc_factor=np.pi / 2)
+            _, depth = frame_penetration(points, segments, i, j)
+            with self.subTest(name=name):
+                self.assertAlmostEqual(-depth.max(), target, delta=1e-6)
+
     def test_contact_method_is_not_available_yet(self):
         with self.assertRaisesRegex(ValueError, "only method 'off'"):
             CableContactScene(self.recipe, method="cable-contact")

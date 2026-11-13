@@ -1,0 +1,48 @@
+{
+  "schema_version": 1,
+  "units": "SI",
+  "dt_s": 0.002,
+  "gravity_m_s2": [
+    0.0,
+    0.0,
+    -9.81
+  ],
+  "material": {
+    "radius_m": 0.002,
+    "young_modulus_Pa": 2000000.0,
+    "poisson_ratio": 0.3,
+    "density_kg_m3": 1200.0
+  },
+  "scene": "FIXED-1024",
+  "kind": "spiral-stack",
+  "duration_s": 0.01,
+  "ground": {
+    "type": "plane",
+    "height_m": 0.0
+  },
+  "cables": [
+    {
+      "vertices": 1024,
+      "segment_length_m": 0.007
+    }
+  ],
+  "solver": {
+    "contact_stiffness": 10000000.0,
+    "friction_coefficient": 0.5,
+    "friction_velocity_scale": 0.01,
+    "normal_smoothing": 0.0001,
+    "newton_max_iterations": 20,
+    "line_search_max_iterations": 8,
+    "linear_max_iterations": 300,
+    "mass_mode": "lumped",
+    "publish_policy": "current_iterate"
+  },
+  "spiral": {
+    "layers": 4,
+    "inner_radius_m": 0.02,
+    "radial_gap_m": 0.0002,
+    "vertical_gap_m": 0.0002,
+    "transition_turns": 0.05
+  },
+  "purpose": "performance only: stress-free 4-layer flat spiral on the table for timing one step with and without cable contact (P9c budget); gap 0.1 r"
+}

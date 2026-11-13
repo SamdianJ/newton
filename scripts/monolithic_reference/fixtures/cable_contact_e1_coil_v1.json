@@ -38,7 +38,6 @@
   },
   "solver": {
     "contact_stiffness": 10000000.0,
-    "contact_factor_capacity": 65536,
     "friction_coefficient": 0.5,
     "friction_velocity_scale": 0.01,
     "normal_smoothing": 0.0001,

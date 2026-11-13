@@ -243,34 +243,39 @@ def penalty(gap, stiffness, smoothing):
     return stiffness * p * p / 2
 
 
-def ground_energy(x, theta, director, radius, rest_lengths, height, stiffness, smoothing):
-    """Penalty energy of one cable's ring64 surface samples against the plane z = height [J].
-
-    Uses the solver's quadrature points and areas but no orientation weight; for a
-    ring resting on a plane only downward samples overlap, so this bounds the solver value.
-    """
+def surface_samples(x, theta, director, radius, rest_lengths):
+    """Heights [m] and areas [m^2] of one cable's ring64 surface and end-cap samples (solver quadrature)."""
     edges = np.diff(x, axis=0)
     t = edges / np.linalg.norm(edges, axis=1)[:, None]
     d = director - np.sum(director * t, axis=1)[:, None] * t
     d /= np.linalg.norm(d, axis=1)[:, None]
     perpendicular = np.cross(t, d)
     phi = 2 * np.pi * np.arange(RING) / RING
-    energy = 0.0
+    heights, areas = [], []
     for a in GAUSS:
         angle = phi[None, :] + theta[:, None]
         centre = (1 - a) * x[:-1] + a * x[1:]
-        points_z = centre[:, None, 2] + radius * (
-            np.cos(angle) * d[:, None, 2] + np.sin(angle) * perpendicular[:, None, 2]
-        )
-        area = 2 * np.pi * radius * rest_lengths / (2 * RING)
-        energy += float(np.sum(area[:, None] * penalty(points_z - height, stiffness, smoothing)))
+        z = centre[:, None, 2] + radius * (np.cos(angle) * d[:, None, 2] + np.sin(angle) * perpendicular[:, None, 2])
+        heights.append(z.ravel())
+        areas.append(np.repeat(2 * np.pi * radius * rest_lengths / (2 * RING), RING))
     for end, edge in ((0, 0), (1, len(edges) - 1)):
         for a in GAUSS:
             angle = phi + theta[edge]
             radial = radius * np.sqrt(a)
             z = x[edge + end, 2] + radial * (np.cos(angle) * d[edge, 2] + np.sin(angle) * perpendicular[edge, 2])
-            energy += float(np.sum(np.pi * radius**2 / (2 * RING) * penalty(z - height, stiffness, smoothing)))
-    return energy
+            heights.append(z)
+            areas.append(np.full(RING, np.pi * radius**2 / (2 * RING)))
+    return np.concatenate(heights), np.concatenate(areas)
+
+
+def ground_energy(x, theta, director, radius, rest_lengths, height, stiffness, smoothing):
+    """Penalty energy of one cable's surface samples against the plane z = height [J].
+
+    Uses the solver's quadrature points and areas but no orientation weight; for a
+    ring resting on a plane only downward samples overlap, so this bounds the solver value.
+    """
+    z, area = surface_samples(x, theta, director, radius, rest_lengths)
+    return float(np.sum(area * penalty(z - height, stiffness, smoothing)))
 
 
 # ---- evaluation -----------------------------------------------------------------------------
@@ -324,6 +329,7 @@ def evaluate(run, gates):
     kinetic = 0.5 * np.einsum("i,fij->f", mass, frames["v"] ** 2)
     potential = -np.einsum("i,fi->f", mass, frames["x"] @ gravity)
     elastic, ground = np.zeros(count), np.zeros(count)
+    ground_depth = np.full(count, -np.inf)
     work = np.zeros(count)
     link = {"twist_turns": [], "writhe_turns": [], "applied_turns": []}
     previous_forces = None
@@ -347,16 +353,10 @@ def evaluate(run, gates):
             frame = _frame(x, frames["director"][k, e0:e1], frames["twist"][k, w0:w1])
             elastic[k] += elastic_energy(rest, x, theta, frame)
             if np.isfinite(height):
-                ground[k] += ground_energy(
-                    x,
-                    theta,
-                    frames["director"][k, e0:e1],
-                    topo["radius"][cable],
-                    rest.lengths,
-                    height,
-                    solver["contact_stiffness"],
-                    solver["normal_smoothing"],
-                )
+                z, area = surface_samples(x, theta, frames["director"][k, e0:e1], topo["radius"][cable], rest.lengths)
+                gap = z - height
+                ground[k] += float(np.sum(area * penalty(gap, solver["contact_stiffness"], solver["normal_smoothing"])))
+                ground_depth[k] = max(ground_depth[k], float(-gap.min()))
             if local_fixed or clamped:
                 forces = elastic_gradient(rest, x, theta, frame, local_fixed, clamped)
                 if previous_forces is not None:
@@ -382,9 +382,7 @@ def evaluate(run, gates):
     window = frames["step"] * dt >= frames["step"][-1] * dt - gates["rest"]["window_s"]
     free = np.array([v not in fixed for v in range(frames["v"].shape[1])])
     rest_speed = float(np.max(np.linalg.norm(frames["v"][window][:, free], axis=2))) if count > 1 else None
-    ground_depth = None
-    if np.isfinite(height):
-        ground_depth = float(np.max(np.max(topo["radius"]) - (frames["x"][:, :, 2] - height)))
+    ground_depth = float(np.max(ground_depth)) if np.isfinite(height) else None
     curvature_radius = []
     for a, b in topo["vertex_ranges"]:
         e = np.diff(frames["x"][:, a:b], axis=1)
@@ -448,7 +446,7 @@ def evaluate(run, gates):
             "energy_max_rise_J": rise,
             "gravity_drop_J": gravity_drop,
             "driver_work_J": float(work[-1]),
-            "ground_penetration_max_m": ground_depth,
+            "ground_penetration_max_m": ground_depth,  # deepest surface sample below the plane
             "rest_window_max_speed_m_s": rest_speed,
             "min_curvature_radius_over_radius": [r / float(np.max(topo["radius"])) for r in curvature_radius],
             "contact_pairs_checked": len(i),
