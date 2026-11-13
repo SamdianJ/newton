@@ -5,7 +5,7 @@
   "gravity_m_s2": [
     0.0,
     0.0,
-    -9.81
+    0.0
   ],
   "material": {
     "radius_m": 0.002,
@@ -25,10 +25,10 @@
   ],
   "plectoneme": {
     "height_m": 1.0,
-    "approach_per_end_m": 0.2,
+    "approach_per_end_m": 0.29,
     "approach_s": 1.0,
     "twist_s": 2.0,
-    "turns": 4
+    "turns": 6
   },
   "perturbation": {
     "velocity_m_s": 0.002,
