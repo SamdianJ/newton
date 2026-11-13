@@ -12,6 +12,7 @@ import argparse
 import hashlib
 import itertools
 import json
+import subprocess
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -24,6 +25,25 @@ FIXTURES = Path(__file__).with_name("fixtures")
 FROZEN_GATES = FIXTURES / "cable_contact_gates_frozen_v1.json"
 GAUSS = ((1 - 1 / np.sqrt(3)) / 2, (1 + 1 / np.sqrt(3)) / 2)
 RING = 64
+
+
+def evaluator_identity():
+    """Commit, tree status and file hash of this judge, so a changed definition shows on the verdict."""
+    source = Path(__file__).resolve()
+    root = source.parents[2]
+
+    def git(*command):
+        try:
+            return subprocess.check_output(["git", *command], cwd=root, text=True, stderr=subprocess.DEVNULL).strip()
+        except (OSError, subprocess.CalledProcessError):
+            return None
+
+    return {
+        "file": str(source),
+        "sha256": hashlib.sha256(source.read_bytes()).hexdigest(),
+        "source_sha": git("rev-parse", "HEAD"),
+        "file_status": git("status", "--porcelain", "--", str(source)),
+    }
 
 
 # ---- run loading --------------------------------------------------------------------------
@@ -41,7 +61,8 @@ def load_run(directory):
     keys = ("x", "v", "theta", "director", "twist")
     frames = {key: [np.asarray(initial[key], dtype=float)[None]] for key in keys}
     frames["step"] = [np.zeros(1, dtype=np.int64)]
-    # Initial targets were recorded from 504b3aa6 on; older runs repeat the first step's target.
+    # initial.npz carries the initial targets from c4c1e330 on; for older runs the first step's
+    # target stands in, so an angle target that jumps at step 1 would not count as driven there.
     frames["target_theta"] = (
         [np.asarray(initial["target_theta"], dtype=float)[None]] if "target_theta" in initial else []
     )
@@ -286,7 +307,7 @@ def ground_contact(x, theta, director, radius, rest_lengths, height, stiffness, 
 
 
 def driver_work(rest, xs, thetas, directors, twists, vertices, edges):
-    """Per-frame work [J] done on one cable by its prescribed vertices and angles (midpoint rule).
+    """Per-frame work [J] done on one cable by its prescribed vertices and angles (trapezoid rule).
 
     The prescribed vertices are massless and kinematic, so the force they supply equals
     the elastic gradient at them; a prescribed angle supplies the elastic torque. Entry k is
@@ -308,7 +329,11 @@ def driver_work(rest, xs, thetas, directors, twists, vertices, edges):
 
 
 def closure_clearance(x, closure):
-    """Smallest distance [m] from interior cable vertices to the four writhe-closure segments."""
+    """Smallest distance [m] from interior cable vertices to the five writhe-closure segments.
+
+    Approximate: a segment can pass a closure line while both of its vertices stay up to half a
+    segment away, so a clearance below half the longest edge flags a possible spurious writhe jump.
+    """
     start, end = x[0], x[-1]
     axis = (end - start) / np.linalg.norm(end - start)
     up = np.array([0.0, 0.0, 1.0]) - axis[2] * axis
@@ -463,13 +488,17 @@ def evaluate(run, gates):
     draft = gates.get("status") != "frozen"
     frozen_recipes = set((gates.get("frozen") or {}).get("recipes_sha256", {}).values())
     recipe_frozen = run.manifest.get("recipe_sha256") in frozen_recipes
-    source_clean = not run.manifest.get("git_status") and not run.manifest.get("source_files_changed_during_run")
+    # Missing receipt fields count as unclean: a receipt must show a clean, unchanged tree.
+    source_clean = run.manifest.get("git_status") == "" and run.manifest.get("source_files_changed_during_run") == []
+    gated = scene in penetration_gate["scenes"]
     verdict = "PASS" if complete and all(g["pass"] for g in gate_results.values()) else "FAIL"
     if not complete:
         verdict = "PARTIAL" if status == "PARTIAL" else "FAIL"
     # A PASS binds a frozen recipe, frozen gates and committed source; anything else is not a PASS.
     if verdict == "PASS":
-        if draft:
+        if not gated:
+            verdict = "NOT_GATED"
+        elif draft:
             verdict = "PASS_ON_DRAFT_GATES"
         elif not recipe_frozen:
             verdict = "NOT_FROZEN_RECIPE"
@@ -484,6 +513,7 @@ def evaluate(run, gates):
         "device": run.manifest["arguments"]["device"],
         "method": run.manifest["arguments"].get("method", "off"),
         "gates_status": gates.get("status"),
+        "evaluator": evaluator_identity(),
         "recipe_sha256": run.manifest.get("recipe_sha256"),
         "recipe_frozen": recipe_frozen,
         "source_clean": source_clean,

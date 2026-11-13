@@ -19,6 +19,7 @@ import numpy as np
 from scripts.monolithic_reference.cable_contact_criteria import (
     _frame,
     closed_writhe,
+    closure_clearance,
     contact_pairs,
     crossing_events,
     driver_work,
@@ -35,6 +36,7 @@ from scripts.monolithic_reference.cable_contact_criteria import (
     total_twist,
     writhe,
 )
+from scripts.monolithic_reference.cable_contact_criteria import main as criteria_main
 from scripts.monolithic_reference.cable_contact_scenes import CableContactScene, cable_section, trapezoid
 from scripts.monolithic_reference.cable_oracle import CableFrame, CableReference, cable_derivatives
 from scripts.monolithic_reference.run_cable_contact import main as run_main
@@ -162,6 +164,38 @@ class TestCableContactGates(unittest.TestCase):
                 self.assertEqual(hashlib.sha256((FIXTURES / name).read_bytes()).hexdigest(), digest)
 
 
+class TestCableContactLoading(unittest.TestCase):
+    @staticmethod
+    def _write_run(directory, *, initial_target):
+        """A two-step synthetic record whose clamped angle target jumps to 1 rad at step 1."""
+        x = np.column_stack([0.01 * np.arange(4), np.zeros(4), np.zeros(4)])
+        state = {"x": x, "v": np.zeros_like(x), "theta": np.zeros(3), "director": np.tile([0.0, 0.0, 1.0], (3, 1))}
+        state["twist"] = np.zeros(2)
+        initial = dict(state, target_theta=np.zeros(3)) if initial_target else state
+        np.savez(directory / "initial.npz", **initial)
+        chunk = {key: np.stack([value, value]) for key, value in state.items()}
+        chunk.update(step=np.array([1, 2]), target_theta=np.array([[1.0, 0, 0], [1.0, 0, 0]]))
+        np.savez(directory / "states-0000.npz", **chunk)
+        np.savez(directory / "topology.npz", dt=np.array([0.002]))
+        (directory / "manifest.json").write_text("{}")
+        (directory / "summary.json").write_text(json.dumps({"chunks": ["states-0000.npz"]}))
+
+    def test_initial_target_marks_a_step_one_jump_as_driven(self):
+        with tempfile.TemporaryDirectory() as name:
+            directory = Path(name)
+            self._write_run(directory, initial_target=True)
+            targets = load_run(directory).frames["target_theta"]
+            np.testing.assert_array_equal(targets[:, 0], [0.0, 1.0, 1.0])
+            self.assertGreater(np.ptp(targets[:, 0]), 0)
+
+    def test_records_without_initial_target_repeat_the_first_step(self):
+        """Documented fallback for runs before c4c1e330: the step-1 target stands in for the initial one."""
+        with tempfile.TemporaryDirectory() as name:
+            directory = Path(name)
+            self._write_run(directory, initial_target=False)
+            np.testing.assert_array_equal(load_run(directory).frames["target_theta"][:, 0], [1.0, 1.0, 1.0])
+
+
 class TestCableContactLink(unittest.TestCase):
     def test_planar_closed_curve_has_zero_writhe(self):
         u = np.linspace(0, 2 * np.pi, 80, endpoint=False)
@@ -190,6 +224,11 @@ class TestCableContactLink(unittest.TestCase):
         self.assertAlmostEqual(closed_writhe(helix, 10.0), expected, delta=0.01)
         helix[:, 1] *= -1
         self.assertAlmostEqual(closed_writhe(helix, 10.0), -expected, delta=0.01)
+
+    def test_closure_clearance_of_a_straight_cable(self):
+        """Interior vertices x[2:-2] of a straight cable are two edges from the closure lines at its ends."""
+        x = np.column_stack([np.linspace(0.0, 1.0, 11), np.zeros(11), np.zeros(11)])
+        self.assertAlmostEqual(closure_clearance(x, 10.0), 0.2, places=12)
 
     def test_straight_clamped_cable_link(self):
         """A straight cable twisted by N turns has Tw = N and closed writhe 0."""
@@ -366,6 +405,20 @@ class TestCableContactReceipt(unittest.TestCase):
             self.assertEqual(evaluate(run, frozen)[0]["verdict"], "PASS")
             run.manifest["git_status"] = " M scripts/monolithic_reference/cable_contact_scenes.py"
             self.assertEqual(evaluate(run, frozen)[0]["verdict"], "DIRTY_SOURCE")
+            del run.manifest["git_status"]  # a receipt without the field is not clean either
+            self.assertEqual(evaluate(run, frozen)[0]["verdict"], "DIRTY_SOURCE")
+            run.manifest["git_status"] = ""
+            run.manifest["scene"]["recipe"]["scene"] = "E1-1024"  # performance scenes have no E2E gates
+            self.assertEqual(evaluate(run, frozen)[0]["verdict"], "NOT_GATED")
+            # The CLI records the gates file and the judge's own identity.
+            with contextlib.redirect_stdout(io.StringIO()):
+                criteria_main([str(output / "complete"), "--output", str(output / "criteria.json")])
+            written = json.loads((output / "criteria.json").read_text())
+            gates_file = FIXTURES / "cable_contact_gates_frozen_v1.json"
+            self.assertEqual(written["gates_sha256"], hashlib.sha256(gates_file.read_bytes()).hexdigest())
+            judge = Path(__file__).resolve().parents[2] / "scripts/monolithic_reference/cable_contact_criteria.py"
+            self.assertEqual(written["evaluator"]["sha256"], hashlib.sha256(judge.read_bytes()).hexdigest())
+            self.assertEqual(written["evaluator"]["source_sha"], head)
             with self.assertRaisesRegex(ValueError, "differs from the recipe scene"):
                 run_main(["E1", "--recipe", str(path), "--max-steps", "1", "--output", str(output / "again")])
 

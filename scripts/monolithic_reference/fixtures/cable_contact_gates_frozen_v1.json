@@ -23,7 +23,7 @@
       "E1"
     ],
     "max_rise_fraction_of_gravity_drop": 0.01,
-    "definition": "E = kinetic (lumped mass, published velocity) + elastic (FP64 DER, cable_oracle) + gravity + normal penalty energy of cable-ground ring64 samples (no orientation weight) + cable-cable normal penalty energy (PR1 oracle, frozen method parameters; zero when contact is off); friction excluded. W = work of the prescribed vertices and angles, from the FP64 elastic gradient, midpoint rule. Gate: max over t1 <= t2 of (E - W)(t2) - (E - W)(t1) <= fraction * (gravity energy(0) - gravity energy(T))."
+    "definition": "E = kinetic (lumped mass, published velocity) + elastic (FP64 DER, cable_oracle) + gravity + normal penalty energy of cable-ground ring64 samples (no orientation weight) + cable-cable normal penalty energy (PR1 oracle, frozen method parameters; zero when contact is off); friction excluded. W = work of the prescribed vertices and angles, from the FP64 elastic gradient, trapezoid rule over each step. Gate: max over t1 <= t2 of (E - W)(t2) - (E - W)(t1) <= fraction * (gravity energy(0) - gravity energy(T))."
   },
   "fp32_baseline": {
     "definition": "Contact off: E1-E4 FP32 CUDA graph full length with HARD_FAILURE = 0 and the E1 energy gate passing. STOPPED_ACCEPTED is reported separately and compared with FP64; many FP32-only Stopped steps go to the user as R1 evidence."
@@ -43,7 +43,7 @@
   },
   "frozen": {
     "date": "2026-11-13",
-    "source_commit": "504b3aa6",
+    "source_commit": "504b3aa6 (E1, E3, E4 and the performance recipes); c4c1e330 (E2 re-frozen with the 34 mm orbit)",
     "recipes_sha256": {
       "cable_contact_e1_coil_v1.json": "c2f396dcef832582ab61fe7e7265f546f173ad8eed237f0da474f9d0b41cedee",
       "cable_contact_e2_wrap_v1.json": "c68d6a528103ed14c4d10daba4aa2a76dd03a64aa0da25de084e1c4a81f01127",
