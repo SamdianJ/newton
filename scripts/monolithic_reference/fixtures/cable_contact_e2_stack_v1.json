@@ -13,40 +13,9 @@
     "poisson_ratio": 0.3,
     "density_kg_m3": 1200.0
   },
-  "scene": "E2",
-  "kind": "wrap",
-  "duration_s": 3.95,
-  "ground": null,
-  "cables": [
-    {
-      "vertices": 128,
-      "segment_length_m": 0.007
-    }
-  ],
-  "cylinder": {
-    "center_m": [
-      0.0,
-      0.0,
-      1.0
-    ],
-    "radius_m": 0.02,
-    "half_length_m": 0.15,
-    "segments": 64,
-    "sdf": {
-      "max_resolution": 128,
-      "margin_m": 0.01,
-      "narrow_band_m": [
-        -0.02,
-        0.02
-      ]
-    }
-  },
-  "wrap": {
-    "orbit_radius_m": 0.034,
-    "pitch_m": 0.002,
-    "turns": 4,
-    "end_speed_m_s": 0.3,
-    "ramp_s": 0.1
+  "ground": {
+    "type": "plane",
+    "height_m": 0.0
   },
   "solver": {
     "contact_stiffness": 10000000.0,
@@ -58,5 +27,19 @@
     "linear_max_iterations": 300,
     "mass_mode": "lumped",
     "publish_policy": "current_iterate"
+  },
+  "scene": "E2",
+  "kind": "helix-pile",
+  "duration_s": 1.5,
+  "cables": [
+    {
+      "vertices": 128,
+      "segment_length_m": 0.007
+    }
+  ],
+  "helix": {
+    "radius_m": 0.02,
+    "pitch_m": 0.0045,
+    "bottom_clearance_m": 0.005
   }
 }

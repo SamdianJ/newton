@@ -43,10 +43,10 @@
   },
   "frozen": {
     "date": "2026-11-13",
-    "source_commit": "504b3aa6 (E1, E3, E4 and the performance recipes); c4c1e330 (E2 re-frozen with the 34 mm orbit)",
+    "source_commit": "504b3aa6 (E1, E3, E4 and the performance recipes); E2 replaced by the natural-helix stack, user 2026-11-14 (cylinder winding stopped 79-83% of steps even with contact off)",
     "recipes_sha256": {
       "cable_contact_e1_coil_v1.json": "c2f396dcef832582ab61fe7e7265f546f173ad8eed237f0da474f9d0b41cedee",
-      "cable_contact_e2_wrap_v1.json": "c68d6a528103ed14c4d10daba4aa2a76dd03a64aa0da25de084e1c4a81f01127",
+      "cable_contact_e2_stack_v1.json": "d7bee19f7eb63ba32139b65adae7978ad769ee57c53a24f6f1034de258912b3e",
       "cable_contact_e3_plectoneme_v1.json": "8524c344d42f585e703d0594aca98b1769a7ab9cbc0c295d2d492b8f76eae030",
       "cable_contact_e4_cross_v1.json": "cb14ed5c3bac27e487aaf46ca1783d91468629609f4f6de54bd6caddfeda22e7",
       "cable_contact_e1_coil1024_v1.json": "5967d334885ab70eeb1710e4d1559efd3d0d8cc4cabd896b61b99b5ebb1112b1",
