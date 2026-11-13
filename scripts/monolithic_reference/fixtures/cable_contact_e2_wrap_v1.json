@@ -15,7 +15,7 @@
   },
   "scene": "E2",
   "kind": "wrap",
-  "duration_s": 3.45,
+  "duration_s": 3.95,
   "ground": null,
   "cables": [
     {
@@ -42,7 +42,7 @@
     }
   },
   "wrap": {
-    "orbit_radius_m": 0.028,
+    "orbit_radius_m": 0.034,
     "pitch_m": 0.002,
     "turns": 4,
     "end_speed_m_s": 0.3,

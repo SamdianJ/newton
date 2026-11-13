@@ -17,12 +17,16 @@ from pathlib import Path
 import numpy as np
 
 from scripts.monolithic_reference.cable_contact_criteria import (
+    _frame,
     closed_writhe,
     contact_pairs,
     crossing_events,
+    driver_work,
+    elastic_energy,
+    elastic_gradient,
     evaluate,
     frame_penetration,
-    ground_energy,
+    ground_contact,
     load_run,
     max_rise,
     penalty,
@@ -32,6 +36,7 @@ from scripts.monolithic_reference.cable_contact_criteria import (
     writhe,
 )
 from scripts.monolithic_reference.cable_contact_scenes import CableContactScene, cable_section, trapezoid
+from scripts.monolithic_reference.cable_oracle import CableFrame, CableReference, cable_derivatives
 from scripts.monolithic_reference.run_cable_contact import main as run_main
 
 FIXTURES = Path(__file__).resolve().parents[2] / "scripts/monolithic_reference/fixtures"
@@ -175,6 +180,17 @@ class TestCableContactLink(unittest.TestCase):
         jump = writhe(curve(0.02)) - writhe(curve(-0.02))
         self.assertAlmostEqual(abs(jump), 2.0, delta=0.1)
 
+    def test_helix_writhe_follows_fuller(self):
+        """A right-handed helix closed far away has Wr = N (1 - cos psi) > 0; its mirror image the opposite."""
+        turns, radius, psi = 3, 0.05, np.radians(60.0)
+        pitch = 2 * np.pi * radius / np.tan(psi)
+        phi = np.linspace(0, 2 * np.pi * turns, 1201)
+        helix = np.column_stack([pitch * phi / (2 * np.pi), radius * np.cos(phi), radius * np.sin(phi)])
+        expected = turns * (1 - np.cos(psi))
+        self.assertAlmostEqual(closed_writhe(helix, 10.0), expected, delta=0.01)
+        helix[:, 1] *= -1
+        self.assertAlmostEqual(closed_writhe(helix, 10.0), -expected, delta=0.01)
+
     def test_straight_clamped_cable_link(self):
         """A straight cable twisted by N turns has Tw = N and closed writhe 0."""
         x = np.column_stack([np.linspace(-0.4, 0.4, 50), np.zeros(50), np.ones(50)])
@@ -192,13 +208,61 @@ class TestCableContactEnergy(unittest.TestCase):
         self.assertEqual(float(penalty(2 * s, k, s)), 0.0)
         self.assertAlmostEqual(float(penalty(-3 * s, k, s)), k * (3 * s) ** 2 / 2, places=6)
 
-    def test_ground_energy_only_below_the_surface(self):
+    def test_ground_contact_only_below_the_surface(self):
         x = np.column_stack([0.007 * np.arange(5), np.zeros(5), np.full(5, 0.005)])
         director = np.tile([0.0, 0.0, 1.0], (4, 1))
         lengths = np.full(4, 0.007)
-        self.assertEqual(ground_energy(x, np.zeros(4), director, 0.002, lengths, 0.0, 1e7, 1e-4), 0.0)
-        sunk = x - np.array([0, 0, 0.0035])
-        self.assertGreater(ground_energy(sunk, np.zeros(4), director, 0.002, lengths, 0.0, 1e7, 1e-4), 0.0)
+        energy, depth = ground_contact(x, np.zeros(4), director, 0.002, lengths, 0.0, 1e7, 1e-4)
+        self.assertEqual(energy, 0.0)
+        self.assertAlmostEqual(depth, -0.003, places=12)
+        energy, depth = ground_contact(
+            x - np.array([0, 0, 0.0035]), np.zeros(4), director, 0.002, lengths, 0.0, 1e7, 1e-4
+        )
+        self.assertGreater(energy, 0.0)
+        self.assertAlmostEqual(depth, 0.0005, places=12)
+
+    @staticmethod
+    def _straight(count=6, length=0.01):
+        x = np.column_stack([length * np.arange(count), np.zeros(count), np.zeros(count)])
+        directors = np.tile([0.0, 0.0, 1.0], (count - 1, 1))
+        rest = CableReference(x, np.zeros(count - 1), directors, (10.0, 1e-3, 2e-3))
+        return rest, x, directors
+
+    def test_driver_work_of_a_quasi_static_pull_equals_the_stretch_energy(self):
+        """Pulling one kinematic end with the cable in uniform equilibrium stores exactly the work done."""
+        rest, x0, directors = self._straight()
+        frames = 51
+        stretch = np.linspace(0.0, 1e-3, frames)
+        xs = np.stack([x0 * (1 + s / x0[-1, 0]) for s in stretch])
+        thetas, twists = np.zeros((frames, 5)), np.zeros((frames, 4))
+        ds = np.repeat(directors[None], frames, axis=0)
+        work = driver_work(rest, xs, thetas, ds, twists, [0, 5], [])
+        energy = [elastic_energy(rest, xs[k], thetas[k], _frame(xs[k], ds[k], twists[k])) for k in (0, -1)]
+        self.assertAlmostEqual(work.sum(), energy[1] - energy[0], delta=1e-12)
+        self.assertAlmostEqual(work.sum(), 0.5 * 10.0 / 0.05 * 1e-6, delta=1e-12)
+        self.assertGreater(work.sum(), 0.0)
+
+    def test_driver_work_of_a_clamped_twist_equals_the_twist_energy(self):
+        """Rotating a clamped end angle with linear interior angles stores GJ Theta^2 / (2 L_dual)."""
+        rest, x0, directors = self._straight()
+        frames = 41
+        total = np.linspace(0.0, 1.5, frames)
+        thetas = np.stack([np.linspace(0.0, angle, 5) for angle in total])
+        xs = np.repeat(x0[None], frames, axis=0)
+        ds = np.repeat(directors[None], frames, axis=0)
+        work = driver_work(rest, xs, thetas, ds, np.zeros((frames, 4)), [], [0, 4])
+        self.assertAlmostEqual(work.sum(), 0.5 * 2e-3 * 1.5**2 / (4 * 0.01), delta=1e-12)
+
+    def test_elastic_gradient_matches_the_oracle_derivatives(self):
+        rest, x0, directors = self._straight()
+        rng = np.random.default_rng(3)
+        x = x0 + rng.normal(scale=5e-4, size=x0.shape)
+        theta = rng.normal(scale=0.2, size=5)
+        frame = CableFrame(x0, directors)
+        residual, _ = cable_derivatives(rest, x, theta, frame)
+        gx, gt = elastic_gradient(rest, x, theta, frame, [0, 3], [1, 4])
+        np.testing.assert_allclose(gx, residual[:18].reshape(6, 3)[[0, 3]], rtol=1e-12, atol=1e-15)
+        np.testing.assert_allclose(gt, residual[18:][[1, 4]], rtol=1e-12, atol=1e-15)
 
     def test_max_rise(self):
         self.assertEqual(max_rise([3.0, 2.0, 1.0]), 0.0)
@@ -289,6 +353,19 @@ class TestCableContactReceipt(unittest.TestCase):
             criteria, _ = evaluate(run, GATES)
             self.assertEqual(criteria["verdict"], "PARTIAL")
             self.assertEqual(criteria["gates_status"], "frozen")
+            # A complete run of a recipe the frozen gates do not name must not be PASS.
+            recipe["duration_s"] = 0.004
+            path.write_text(json.dumps(recipe))
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(run_main(["E4", "--recipe", str(path), "--output", str(output / "complete")]), 0)
+            run = load_run(output / "complete")
+            run.manifest["git_status"], run.manifest["source_files_changed_during_run"] = "", []
+            self.assertEqual(evaluate(run, GATES)[0]["verdict"], "NOT_FROZEN_RECIPE")
+            frozen = copy.deepcopy(GATES)
+            frozen["frozen"]["recipes_sha256"]["test.json"] = run.manifest["recipe_sha256"]
+            self.assertEqual(evaluate(run, frozen)[0]["verdict"], "PASS")
+            run.manifest["git_status"] = " M scripts/monolithic_reference/cable_contact_scenes.py"
+            self.assertEqual(evaluate(run, frozen)[0]["verdict"], "DIRTY_SOURCE")
             with self.assertRaisesRegex(ValueError, "differs from the recipe scene"):
                 run_main(["E1", "--recipe", str(path), "--max-steps", "1", "--output", str(output / "again")])
 

@@ -9,6 +9,8 @@ values come from a gates file; a run judged against a draft file is never PASS.
 """
 
 import argparse
+import hashlib
+import itertools
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -39,14 +41,18 @@ def load_run(directory):
     keys = ("x", "v", "theta", "director", "twist")
     frames = {key: [np.asarray(initial[key], dtype=float)[None]] for key in keys}
     frames["step"] = [np.zeros(1, dtype=np.int64)]
-    for key in ("target_theta",):
-        frames[key] = []
+    # Initial targets were recorded from 504b3aa6 on; older runs repeat the first step's target.
+    frames["target_theta"] = (
+        [np.asarray(initial["target_theta"], dtype=float)[None]] if "target_theta" in initial else []
+    )
     for name in summary.get("chunks", []):
         with np.load(directory / name) as data:
             for key in (*keys, "step"):
                 frames[key].append(np.asarray(data[key], dtype=float if key != "step" else np.int64))
             frames["target_theta"].append(np.asarray(data["target_theta"], dtype=float))
     series = {key: np.concatenate(value) for key, value in frames.items() if value}
+    if len(series["target_theta"]) == len(series["step"]) - 1:
+        series["target_theta"] = np.concatenate([series["target_theta"][:1], series["target_theta"]])
     steps = series["step"]
     if np.any(np.diff(steps) != 1) or steps[0] != 0:
         raise ValueError("Recorded frames are not a contiguous step sequence from the initial state")
@@ -268,14 +274,54 @@ def surface_samples(x, theta, director, radius, rest_lengths):
     return np.concatenate(heights), np.concatenate(areas)
 
 
-def ground_energy(x, theta, director, radius, rest_lengths, height, stiffness, smoothing):
-    """Penalty energy of one cable's surface samples against the plane z = height [J].
+def ground_contact(x, theta, director, radius, rest_lengths, height, stiffness, smoothing):
+    """Penalty energy [J] and deepest overlap [m] of one cable's surface samples against the plane z = height.
 
     Uses the solver's quadrature points and areas but no orientation weight; for a
     ring resting on a plane only downward samples overlap, so this bounds the solver value.
     """
     z, area = surface_samples(x, theta, director, radius, rest_lengths)
-    return float(np.sum(area * penalty(z - height, stiffness, smoothing)))
+    gap = z - height
+    return float(np.sum(area * penalty(gap, stiffness, smoothing))), float(-gap.min())
+
+
+def driver_work(rest, xs, thetas, directors, twists, vertices, edges):
+    """Per-frame work [J] done on one cable by its prescribed vertices and angles (midpoint rule).
+
+    The prescribed vertices are massless and kinematic, so the force they supply equals
+    the elastic gradient at them; a prescribed angle supplies the elastic torque. Entry k is
+    the work of the step from frame k - 1 to frame k (entry 0 is zero).
+    """
+    work = np.zeros(len(xs))
+    if not vertices and not edges:
+        return work
+    previous = None
+    for k in range(len(xs)):
+        frame = _frame(xs[k], directors[k], twists[k])
+        forces = elastic_gradient(rest, xs[k], thetas[k], frame, vertices, edges)
+        if previous is not None:
+            dx = xs[k][vertices] - xs[k - 1][vertices]
+            dtheta = thetas[k][edges] - thetas[k - 1][edges]
+            work[k] = 0.5 * np.sum((previous[0] + forces[0]) * dx) + 0.5 * np.sum((previous[1] + forces[1]) * dtheta)
+        previous = forces
+    return work
+
+
+def closure_clearance(x, closure):
+    """Smallest distance [m] from interior cable vertices to the four writhe-closure segments."""
+    start, end = x[0], x[-1]
+    axis = (end - start) / np.linalg.norm(end - start)
+    up = np.array([0.0, 0.0, 1.0]) - axis[2] * axis
+    up /= np.linalg.norm(up)
+    corners = [end, end + closure * axis, end + closure * axis + closure * up, start - closure * axis + closure * up]
+    corners += [start - closure * axis, start]
+    points = x[2:-2]
+    best = np.inf
+    for a, b in itertools.pairwise(corners):
+        u = b - a
+        s = np.clip((points - a) @ u / (u @ u), 0.0, 1.0)
+        best = min(best, float(np.min(np.linalg.norm(points - (a + s[:, None] * u), axis=1))))
+    return best
 
 
 # ---- evaluation -----------------------------------------------------------------------------
@@ -332,7 +378,7 @@ def evaluate(run, gates):
     ground_depth = np.full(count, -np.inf)
     work = np.zeros(count)
     link = {"twist_turns": [], "writhe_turns": [], "applied_turns": []}
-    previous_forces = None
+    closure = []
     for cable, (a, b) in enumerate(topo["vertex_ranges"]):
         e0 = int(topo["theta_offsets"][cable])
         e1 = e0 + (b - a - 1)
@@ -344,34 +390,33 @@ def evaluate(run, gates):
             topo["rest_directors"][e0:e1],
             (topo["EA"][cable], float(topo["EI"][cable]), topo["GJ"][cable]),
         )
+        xs, thetas = frames["x"][:, a:b], frames["theta"][:, e0:e1]
+        directors, twists = frames["director"][:, e0:e1], frames["twist"][:, w0:w1]
         local_fixed = [v - a for v in range(a, b) if v in fixed]
-        clamped = [k for k in range(b - a - 1) if np.ptp(frames["target_theta"][:, e0 + k]) > 0] if count > 1 else []
-        previous_forces = None
+        clamped = [k for k in range(b - a - 1) if np.ptp(frames["target_theta"][:, e0 + k]) > 0]
+        work += driver_work(rest, xs, thetas, directors, twists, local_fixed, clamped)
         for k in range(count):
-            x = frames["x"][k, a:b]
-            theta = frames["theta"][k, e0:e1]
-            frame = _frame(x, frames["director"][k, e0:e1], frames["twist"][k, w0:w1])
-            elastic[k] += elastic_energy(rest, x, theta, frame)
+            frame = _frame(xs[k], directors[k], twists[k])
+            elastic[k] += elastic_energy(rest, xs[k], thetas[k], frame)
             if np.isfinite(height):
-                z, area = surface_samples(x, theta, frames["director"][k, e0:e1], topo["radius"][cable], rest.lengths)
-                gap = z - height
-                ground[k] += float(np.sum(area * penalty(gap, solver["contact_stiffness"], solver["normal_smoothing"])))
-                ground_depth[k] = max(ground_depth[k], float(-gap.min()))
-            if local_fixed or clamped:
-                forces = elastic_gradient(rest, x, theta, frame, local_fixed, clamped)
-                if previous_forces is not None:
-                    dx = x[local_fixed] - frames["x"][k - 1, a:b][local_fixed]
-                    dtheta = theta[clamped] - frames["theta"][k - 1, e0:e1][clamped]
-                    work[k] += 0.5 * np.sum((previous_forces[0] + forces[0]) * dx)
-                    work[k] += 0.5 * np.sum((previous_forces[1] + forces[1]) * dtheta)
-                previous_forces = forces
+                energy, depth = ground_contact(
+                    xs[k],
+                    thetas[k],
+                    directors[k],
+                    topo["radius"][cable],
+                    rest.lengths,
+                    height,
+                    solver["contact_stiffness"],
+                    solver["normal_smoothing"],
+                )
+                ground[k] += energy
+                ground_depth[k] = max(ground_depth[k], depth)
             if kind == "plectoneme":
-                twist = total_twist(theta, frames["twist"][k, w0:w1])
-                link["twist_turns"].append(twist)
-                link["writhe_turns"].append(closed_writhe(x, gates["link"]["closure_m"]))
-                target = frames["target_theta"][k - 1] if k else np.zeros(e1)
-                applied = (target[e1 - 1] - target[e0]) / (2 * np.pi) if k else 0.0
-                link["applied_turns"].append(applied)
+                link["twist_turns"].append(total_twist(thetas[k], twists[k]))
+                link["writhe_turns"].append(closed_writhe(xs[k], gates["link"]["closure_m"]))
+                target = frames["target_theta"][k]
+                link["applied_turns"].append((target[e1 - 1] - target[e0]) / (2 * np.pi))
+                closure.append(closure_clearance(xs[k], gates["link"]["closure_m"]))
     work = np.cumsum(work)
     total = kinetic + potential + elastic + ground
     adjusted = total - work
@@ -416,11 +461,20 @@ def evaluate(run, gates):
         }
     complete = status == "COMPLETE"
     draft = gates.get("status") != "frozen"
+    frozen_recipes = set((gates.get("frozen") or {}).get("recipes_sha256", {}).values())
+    recipe_frozen = run.manifest.get("recipe_sha256") in frozen_recipes
+    source_clean = not run.manifest.get("git_status") and not run.manifest.get("source_files_changed_during_run")
     verdict = "PASS" if complete and all(g["pass"] for g in gate_results.values()) else "FAIL"
     if not complete:
         verdict = "PARTIAL" if status == "PARTIAL" else "FAIL"
-    if draft and verdict == "PASS":
-        verdict = "PASS_ON_DRAFT_GATES"
+    # A PASS binds a frozen recipe, frozen gates and committed source; anything else is not a PASS.
+    if verdict == "PASS":
+        if draft:
+            verdict = "PASS_ON_DRAFT_GATES"
+        elif not recipe_frozen:
+            verdict = "NOT_FROZEN_RECIPE"
+        elif not source_clean:
+            verdict = "DIRTY_SOURCE"
     stopped = counts["STOPPED_ACCEPTED"]
     criteria = {
         "scene": scene,
@@ -430,6 +484,9 @@ def evaluate(run, gates):
         "device": run.manifest["arguments"]["device"],
         "method": run.manifest["arguments"].get("method", "off"),
         "gates_status": gates.get("status"),
+        "recipe_sha256": run.manifest.get("recipe_sha256"),
+        "recipe_frozen": recipe_frozen,
+        "source_clean": source_clean,
         "verdict": verdict,
         "gates": gate_results,
         "diagnostics": {
@@ -442,8 +499,18 @@ def evaluate(run, gates):
             "penetration_peak_step": int(frames["step"][int(np.argmax(peak))]),
             "overlapping_pairs_max": int(overlapping.max()),
             "crossing_events": len(crossings),
+            "crossing_limits": (
+                "lower bound: misses passages at less than the min_sine angle (stacked near-parallel turns), "
+                "tunnelling with neither frame closer than rA + rB, and a crossing point that moves to the "
+                "adjacent segment between frames"
+            ),
             "crossing_first": crossings[:20],
             "energy_max_rise_J": rise,
+            "energy_scope": (
+                "kinetic + elastic + gravity + ground-plane penalty - driver work"
+                + ("; excludes the mesh-cylinder contact energy" if "cylinder" in recipe else "")
+                + "; cable-cable contact energy is zero for method-off runs"
+            ),
             "gravity_drop_J": gravity_drop,
             "driver_work_J": float(work[-1]),
             "ground_penetration_max_m": ground_depth,  # deepest surface sample below the plane
@@ -460,6 +527,10 @@ def evaluate(run, gates):
         criteria["diagnostics"]["link_max_deviation_turns"] = float(np.max(np.abs(deviation)))
         criteria["diagnostics"]["link_within_tolerance"] = bool(
             np.max(np.abs(deviation)) < gates["link"]["tolerance_turns"]
+        )
+        criteria["diagnostics"]["link_closure_min_clearance_m"] = float(min(closure))
+        criteria["diagnostics"]["link_closure_note"] = (
+            "a cable within rA + rB of the closure lines can fake a writhe jump"
         )
     series = {
         "step": frames["step"],
@@ -487,6 +558,7 @@ def main(argv=None):
     gates = json.loads(args.gates.read_text())
     criteria, series = evaluate(load_run(args.run), gates)
     criteria["gates_file"] = str(args.gates)
+    criteria["gates_sha256"] = hashlib.sha256(args.gates.read_bytes()).hexdigest()
     output = args.output or args.run / "criteria.json"
     write_json(output, criteria)
     np.savez_compressed(output.with_name(output.stem + "-series.npz"), **series)

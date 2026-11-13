@@ -160,6 +160,8 @@ def execute(args):
             theta=initial.cable_theta.numpy(),
             director=initial.cable_ref_director.numpy(),
             twist=initial.cable_ref_twist.numpy(),
+            target=scene.control._monolithic_cable.target_position.numpy(),
+            target_theta=scene.control._monolithic_cable.target_theta.numpy(),
         )
         stop = min(args.max_steps or scene.total_steps, scene.total_steps)
         wp.synchronize_device(scene.model.device)

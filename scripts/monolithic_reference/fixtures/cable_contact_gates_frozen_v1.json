@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "status": "frozen",
-  "description": "P9c E2E gates and offline criteria definitions (cable_contact_criteria). Frozen by the user on 2026-11-13 after the contact-off PR0 baselines (results dev/monolithic/test/results/P9c/PR-00/baseline-504b3aa6-20261113 and baseline-35e79030-20261113/E4); never loosened to obtain PASS.",
+  "description": "P9c E2E gates and offline criteria definitions (cable_contact_criteria). Frozen by the user on 2026-11-13 after the contact-off PR0 baselines (results dev/monolithic/test/results/P9c/PR-00/baseline-504b3aa6-20261113 and baseline-35e79030-20261113/E4); never loosened to obtain PASS. E2 re-frozen the same day with the driven orbit at 34 mm (was 28 mm, which forced the kinematic end through a second-layer turn); its baseline is rerun on the commit that carries this change.",
   "exclusion": {
     "index_span": 3,
     "arc_factor": 1.5707963267948966,
@@ -46,7 +46,7 @@
     "source_commit": "504b3aa6",
     "recipes_sha256": {
       "cable_contact_e1_coil_v1.json": "c2f396dcef832582ab61fe7e7265f546f173ad8eed237f0da474f9d0b41cedee",
-      "cable_contact_e2_wrap_v1.json": "c7a7e98828a047b7819ea5a14391049b2091441463a6bf4921e4502a163bb823",
+      "cable_contact_e2_wrap_v1.json": "c68d6a528103ed14c4d10daba4aa2a76dd03a64aa0da25de084e1c4a81f01127",
       "cable_contact_e3_plectoneme_v1.json": "8524c344d42f585e703d0594aca98b1769a7ab9cbc0c295d2d492b8f76eae030",
       "cable_contact_e4_cross_v1.json": "cb14ed5c3bac27e487aaf46ca1783d91468629609f4f6de54bd6caddfeda22e7",
       "cable_contact_e1_coil1024_v1.json": "5967d334885ab70eeb1710e4d1559efd3d0d8cc4cabd896b61b99b5ebb1112b1",
