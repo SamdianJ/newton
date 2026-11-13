@@ -349,6 +349,7 @@ class TestCableContactVerdict(unittest.TestCase):
             [
                 "cable_contact_criteria.py",
                 "cable_oracle.py",
+                "cable_contact_oracle.py",
                 "cloth_contact_run.py",
                 "cable_contact_gates_frozen_v1.json",
             ],

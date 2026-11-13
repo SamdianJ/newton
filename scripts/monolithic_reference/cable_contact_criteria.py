@@ -30,7 +30,13 @@ RING = 64
 def judge_files():
     """The judge, the modules whose numbers it uses, and the canonical frozen gates."""
     here = Path(__file__).resolve().parent
-    return [Path(__file__).resolve(), here / "cable_oracle.py", here / "cloth_contact_run.py", FROZEN_GATES.resolve()]
+    return [
+        Path(__file__).resolve(),
+        here / "cable_oracle.py",
+        here / "cable_contact_oracle.py",
+        here / "cloth_contact_run.py",
+        FROZEN_GATES.resolve(),
+    ]
 
 
 def evaluator_identity():

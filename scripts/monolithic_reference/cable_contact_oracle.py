@@ -3,24 +3,29 @@
 
 """Independent FP64 NumPy reference for cable-cable contact (P9c method A').
 
-Gauss sample points on each edge are tested against the *segments* of another
-cable part. A sample-segment pair has the energy
+Sample points of one cable part are tested against the *segments* of another.
+A sample-segment pair has the energy
 
-    E = w * psi(sigma, L) * phi(d - (rA + rB)),
+    E = w * psi * phi(d - (rA + rB)),
 
-with w the Gauss weight times the rest edge length [m], d the distance from the
-sample point to the closest point of the segment's line, clamped only at a free
-end (so collinear neighbours agree across their shared vertex), phi the C-IE penalty
-k_l * P^2 / 2 with line stiffness k_l [N/m^2] and the C2-smoothed overlap P,
-and psi a C1 partition of unity over the target polyline: at each interior
-vertex the windows of the two adjacent segments overlap over +-eps and sum to
-one on a straight line; free ends do not decay (a spherical end cap).
-sigma = (p - y0) . e_hat is the projected arc length along the target segment
-and L its current length. Counting is one way: within a cable only the lower
-edge index samples, between cables only the lower cable index samples.
+with w the sample weight [m], d the distance from the sample point to the
+segment's line (clamped only at a free end, a spherical cap), phi the C-IE
+penalty k_l P^2 / 2 with line stiffness k_l [N/m^2] and the C2-smoothed overlap
+P, and psi a C1 partition of unity over the target polyline. At an interior
+vertex v both adjacent segments use the same window coordinate
+s = (p - v) . tau_v, with tau_v a vertex tangent frozen for the step (the
+bisector of the adjacent edges), so their windows sum to one for every sample
+position, on or off the axis; the window half width is a quarter of the shorter
+adjacent rest edge. A free end does not decay.
 
-The gradient is exact (including the window derivative); the tangent is the
-Gauss-Newton term w psi phi'' (c n)(c n)^T, with c = (1 - xi, xi, -(1 - t), -t).
+Samples: three Gauss-Legendre points per edge with weight Gauss weight x rest
+length, plus one point at each free end of a cable with weight equal to the
+cable radius (the hemispherical tip), so a tip pushed into another strand loads
+from zero overlap. Counting is one way: inside a cable only a lower edge index
+samples a higher segment index, between cables only the lower cable index samples.
+
+The gradient is exact (window derivative included, tau held fixed); the tangent
+is the Gauss-Newton term w psi phi'' (c n)(c n)^T with c = (1 - xi, xi, -(1 - t), -t).
 This module never imports the solver; tests compare the Warp kernels with it.
 """
 
@@ -58,49 +63,52 @@ def penalty(gap, stiffness, smoothing):
     return stiffness * p * p / 2.0, stiffness * p * dp, stiffness * (dp * dp + p * ddp)
 
 
-def window(sigma, length, eps_start, eps_end):
-    """psi(sigma, L) and its partial derivatives; eps = 0 marks a free end that does not decay."""
-    sigma, length = np.asarray(sigma, dtype=float), np.asarray(length, dtype=float)
-    s0, d0 = np.ones_like(sigma), np.zeros_like(sigma)
-    s1, d1 = np.ones_like(sigma), np.zeros_like(sigma)
-    start = eps_start > 0
-    if np.any(start):
-        es = np.where(start, eps_start, 1.0)
-        value, slope = smoothstep((sigma + es) / (2.0 * es))
-        s0, d0 = np.where(start, value, 1.0), np.where(start, slope / (2.0 * es), 0.0)
-    end = eps_end > 0
-    if np.any(end):
-        ee = np.where(end, eps_end, 1.0)
-        value, slope = smoothstep((length - sigma + ee) / (2.0 * ee))
-        s1, d1 = np.where(end, value, 1.0), np.where(end, slope / (2.0 * ee), 0.0)
-    # d/dsigma: start ramp rises, end ramp falls; d/dL only through the end ramp.
-    return s0 * s1, d0 * s1 - s0 * d1, s0 * d1
+def window(s_start, s_end, eps_start, eps_end):
+    """psi and its derivatives with respect to the two vertex coordinates; eps = 0 marks a free end.
+
+    ``s_start = (p - y0) . tau0`` rises through the start ramp, ``s_end = (p - y1) . tau1`` falls
+    through the end ramp. The neighbour across a vertex sees the same coordinate, so the two windows
+    sum to one there for every p.
+    """
+    s_start, s_end = np.asarray(s_start, dtype=float), np.asarray(s_end, dtype=float)
+    eps_start, eps_end = np.asarray(eps_start, dtype=float), np.asarray(eps_end, dtype=float)
+    start, end = eps_start > 0, eps_end > 0
+    es, ee = np.where(start, eps_start, 1.0), np.where(end, eps_end, 1.0)
+    a, da = smoothstep((s_start + es) / (2.0 * es))
+    b, db = smoothstep((ee - s_end) / (2.0 * ee))
+    a, da = np.where(start, a, 1.0), np.where(start, da / (2.0 * es), 0.0)
+    b, db = np.where(end, b, 1.0), np.where(end, -db / (2.0 * ee), 0.0)
+    return a * b, da * b, a * db
 
 
-def pair_response(xa, xb, y0, y1, xi, weight, radius_sum, stiffness, smoothing, eps_start, eps_end, *, split=False):
+def pair_response(
+    xa, xb, y0, y1, tau0, tau1, xi, weight, radius_sum, stiffness, smoothing, eps_start, eps_end, *, split=False
+):
     """Energy [J], gradient (..., 4, 3) [N], Gauss-Newton coefficient [N/m] and direction (..., 4, 3).
 
-    All position arrays have shape (..., 3): sample edge (xa, xb), target segment (y0, y1).
-    The tangent of one pair is coefficient * outer(direction, direction) over the 12 coordinates.
-    With ``split`` the gradient is returned as its normal part and its window-derivative part.
+    Positions have shape (..., 3): sample edge (xa, xb), target segment (y0, y1); ``tau0``/``tau1`` are
+    the frozen unit tangents of the target's vertices (ignored at a free end). The pair tangent is
+    coefficient * outer(direction, direction) over the 12 coordinates. With ``split`` the gradient is
+    returned as its normal part and its window-derivative part.
     """
-    xa, xb, y0, y1 = (np.asarray(v, dtype=float) for v in (xa, xb, y0, y1))
+    xa, xb, y0, y1, tau0, tau1 = (np.asarray(v, dtype=float) for v in (xa, xb, y0, y1, tau0, tau1))
     xi = np.asarray(xi, dtype=float)
+    eps_start, eps_end = np.asarray(eps_start, dtype=float), np.asarray(eps_end, dtype=float)
     p = (1.0 - xi)[..., None] * xa + xi[..., None] * xb
     e = y1 - y0
     length = np.linalg.norm(e, axis=-1)
     if np.any(length <= 0):
         raise ValueError("Degenerate target segment")
-    e_hat = e / length[..., None]
-    sigma = np.sum((p - y0) * e_hat, axis=-1)
     # Inside a window the closest point runs on the segment's line, so two collinear segments give the
     # same distance across their shared vertex; only a free end clamps (a spherical cap).
-    t = sigma / length
-    t = np.where(np.asarray(eps_start) > 0, t, np.maximum(t, 0.0))
-    t = np.where(np.asarray(eps_end) > 0, t, np.minimum(t, 1.0))
-    y = p - (y0 + t[..., None] * e)
+    t = np.sum((p - y0) * e, axis=-1) / (length * length)
+    t = np.where(eps_start > 0, t, np.maximum(t, 0.0))
+    t = np.where(eps_end > 0, t, np.minimum(t, 1.0))
+    y = (p - y0) - t[..., None] * e
     distance = np.linalg.norm(y, axis=-1)
-    psi, dpsi_dsigma, dpsi_dlength = window(sigma, length, eps_start, eps_end)
+    psi, dpsi_start, dpsi_end = window(
+        np.sum((p - y0) * tau0, axis=-1), np.sum((p - y1) * tau1, axis=-1), eps_start, eps_end
+    )
     # A pair outside the target's window contributes nothing, even when the sample is collinear with it.
     active = psi > 0
     if np.any(active & ~(distance > 0)):
@@ -110,18 +118,16 @@ def pair_response(xa, xb, y0, y1, xi, weight, radius_sum, stiffness, smoothing, 
     phi, dphi, ddphi = (np.where(active, v, 0.0) for v in penalty(safe - radius_sum, stiffness, smoothing))
     c = np.stack([1.0 - xi, xi, -(1.0 - t), -t], axis=-1)
     direction = c[..., None] * n[..., None, :]  # d(distance)/dx, shape (..., 4, 3)
-    h = (p - y0) - sigma[..., None] * e_hat
-    dsigma = np.stack(
+    dpsi_dp = dpsi_start[..., None] * tau0 + dpsi_end[..., None] * tau1
+    dpsi = np.stack(
         [
-            (1.0 - xi)[..., None] * e_hat,
-            xi[..., None] * e_hat,
-            -e_hat - h / length[..., None],
-            h / length[..., None],
+            (1.0 - xi)[..., None] * dpsi_dp,
+            xi[..., None] * dpsi_dp,
+            -dpsi_start[..., None] * tau0,
+            -dpsi_end[..., None] * tau1,
         ],
         axis=-2,
     )
-    dlength = np.stack([np.zeros_like(e_hat), np.zeros_like(e_hat), -e_hat, e_hat], axis=-2)
-    dpsi = dpsi_dsigma[..., None, None] * dsigma + dpsi_dlength[..., None, None] * dlength
     w = np.asarray(weight, dtype=float)
     energy = w * psi * phi
     normal = w[..., None, None] * (-(psi * dphi)[..., None, None] * direction)
@@ -162,13 +168,39 @@ def segment_table(rest_positions, vertex_ranges, radii, *, window_fraction=WINDO
 
 
 def sample_table(segments, samples_per_edge):
-    """Gauss sample points: owning segment, xi, weight w = Gauss weight x rest length [m], rest arc position."""
+    """Gauss samples (edge-major), then one tip sample at each free end of each cable (weight = radius)."""
     nodes, weights = GAUSS[samples_per_edge]
-    edge = np.repeat(np.arange(len(segments["first"])), len(nodes))
-    xi = np.tile(nodes, len(segments["first"]))
-    weight = np.tile(weights, len(segments["first"])) * segments["rest_length"][edge]
+    count = len(segments["first"])
+    edge = np.repeat(np.arange(count), len(nodes))
+    xi = np.tile(nodes, count)
+    weight = np.tile(weights, count) * segments["rest_length"][edge]
+    tips = []
+    for cable in np.unique(segments["cable"]):
+        own = np.flatnonzero(segments["cable"] == cable)
+        tips += [(own[0], 0.0), (own[-1], 1.0)]
+    tip_edge = np.asarray([k for k, _ in tips], dtype=np.int64)
+    edge = np.r_[edge, tip_edge]
+    xi = np.r_[xi, [x for _, x in tips]]
+    weight = np.r_[weight, segments["radius"][tip_edge]]
     arc = segments["arc0"][edge] + xi * segments["rest_length"][edge]
-    return {"edge": edge, "xi": xi, "weight": weight, "arc": arc}
+    tip = np.r_[np.zeros(count * len(nodes), dtype=bool), np.ones(len(tips), dtype=bool)]
+    return {"edge": edge, "xi": xi, "weight": weight, "arc": arc, "tip": tip}
+
+
+def vertex_tangents(positions, segments):
+    """Unit tangent at the start vertex of each segment: bisector of the adjacent edges, the edge at a free end."""
+    positions = np.asarray(positions, dtype=float)
+    first = segments["first"]
+    e = positions[first + 1] - positions[first]
+    e /= np.linalg.norm(e, axis=1)[:, None]
+    tau = e.copy()
+    k = np.flatnonzero(segments["eps_start"] > 0)
+    bisector = e[k - 1] + e[k]
+    size = np.linalg.norm(bisector, axis=1)
+    # A fully folded vertex has no bisector; any tangent shared by both sides keeps the partition.
+    ok = size > 1e-9
+    tau[k] = np.where(ok[:, None], bisector / np.where(ok, size, 1.0)[:, None], e[k])
+    return tau
 
 
 def allowed(samples, segments, sample, target, *, index_span, arc_factor):
@@ -197,21 +229,28 @@ def all_pairs(samples, segments, *, index_span, arc_factor):
     return sample[keep], target[keep]
 
 
-def evaluate(positions, segments, samples, sample, target, *, stiffness, smoothing):
-    """Total energy [J], per-vertex gradient (n, 3) [N] and per-pair results for the given pairs."""
+def evaluate(positions, segments, samples, sample, target, *, stiffness, smoothing, tangents=None):
+    """Total energy [J], per-vertex gradient (n, 3) [N] and per-pair results for the given pairs.
+
+    ``tangents`` are the frozen vertex tangents (``vertex_tangents`` of the step-start positions);
+    by default they are taken from ``positions`` themselves.
+    """
     positions = np.asarray(positions, dtype=float)
+    tau = vertex_tangents(positions, segments) if tangents is None else np.asarray(tangents, dtype=float)
     edge = samples["edge"][sample]
     a, b = segments["first"][edge], segments["first"][target]
-    radius_sum = segments["radius"][edge] + segments["radius"][target]
-    # Window widths of the target segment; the window only acts on the projected position.
+    # The end tangent of segment j is the start tangent of segment j + 1 (only read when j has a successor).
+    tau1 = tau[np.minimum(target + 1, len(segments["first"]) - 1)]
     energy, gradient, coefficient, direction = pair_response(
         positions[a],
         positions[a + 1],
         positions[b],
         positions[b + 1],
+        tau[target],
+        tau1,
         samples["xi"][sample],
         samples["weight"][sample],
-        radius_sum,
+        segments["radius"][edge] + segments["radius"][target],
         stiffness,
         smoothing,
         segments["eps_start"][target],
@@ -248,6 +287,7 @@ def contact_energy(
     arc_factor,
     window_fraction=WINDOW_FRACTION,
     pairs=None,
+    tangents=None,
 ):
     """Total cable-cable penalty energy [J] of one configuration, for the offline energy criterion.
 
@@ -272,6 +312,13 @@ def contact_energy(
     if not np.any(near):
         return 0.0, pairs
     energy, _, _ = evaluate(
-        positions, segments, samples, sample[near], target[near], stiffness=stiffness, smoothing=smoothing
+        positions,
+        segments,
+        samples,
+        sample[near],
+        target[near],
+        stiffness=stiffness,
+        smoothing=smoothing,
+        tangents=tangents,
     )
     return energy, pairs
