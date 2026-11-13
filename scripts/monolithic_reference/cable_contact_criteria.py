@@ -72,6 +72,8 @@ def load_run(directory):
                 frames[key].append(np.asarray(data[key], dtype=float if key != "step" else np.int64))
             frames["target_theta"].append(np.asarray(data["target_theta"], dtype=float))
     series = {key: np.concatenate(value) for key, value in frames.items() if value}
+    if "target_theta" not in series:
+        raise ValueError(f"Record {directory} has neither initial nor per-step angle targets")
     if len(series["target_theta"]) == len(series["step"]) - 1:
         series["target_theta"] = np.concatenate([series["target_theta"][:1], series["target_theta"]])
     steps = series["step"]
@@ -537,7 +539,9 @@ def evaluate(run, gates):
             "crossing_first": crossings[:20],
             "energy_max_rise_J": rise,
             "energy_scope": (
-                "kinetic + elastic + gravity + ground-plane penalty - driver work"
+                "kinetic + elastic + gravity"
+                + (" + ground-plane penalty" if np.isfinite(height) else "")
+                + " - driver work"
                 + ("; excludes the mesh-cylinder contact energy" if "cylinder" in recipe else "")
                 + "; cable-cable contact energy is zero for method-off runs"
             ),
@@ -558,9 +562,12 @@ def evaluate(run, gates):
         criteria["diagnostics"]["link_within_tolerance"] = bool(
             np.max(np.abs(deviation)) < gates["link"]["tolerance_turns"]
         )
+        longest = float(np.max(np.linalg.norm(np.diff(frames["x"], axis=1), axis=2)))
         criteria["diagnostics"]["link_closure_min_clearance_m"] = float(min(closure))
+        criteria["diagnostics"]["link_closure_suspect"] = bool(min(closure) < 0.5 * longest)
         criteria["diagnostics"]["link_closure_note"] = (
-            "a cable within rA + rB of the closure lines can fake a writhe jump"
+            "vertex clearance to the zero-thickness closure lines; below half the longest edge "
+            f"({0.5 * longest:.4g} m) a segment may cross a closure line and fake a writhe jump"
         )
     series = {
         "step": frames["step"],
@@ -577,6 +584,24 @@ def evaluate(run, gates):
     return criteria, series
 
 
+def bind_verdict(criteria, gates_path):
+    """Record the gates file and demote a PASS judged by other gates or by a modified judge.
+
+    ``evaluate`` sees only the gates content; a PASS also needs the canonical frozen file
+    of this commit and an unmodified evaluator, which only the caller can establish.
+    """
+    gates_path = Path(gates_path)
+    criteria["gates_file"] = str(gates_path)
+    criteria["gates_sha256"] = hashlib.sha256(gates_path.read_bytes()).hexdigest()
+    criteria["gates_canonical"] = gates_path.resolve() == FROZEN_GATES.resolve()
+    if criteria["verdict"] == "PASS":
+        if not criteria["gates_canonical"]:
+            criteria["verdict"] = "NON_CANONICAL_GATES"
+        elif criteria["evaluator"].get("file_status") != "":
+            criteria["verdict"] = "DIRTY_JUDGE"
+    return criteria
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("run", type=Path)
@@ -587,8 +612,7 @@ def main(argv=None):
         raise SystemExit(f"Gates file {args.gates} does not exist; pass --gates explicitly")
     gates = json.loads(args.gates.read_text())
     criteria, series = evaluate(load_run(args.run), gates)
-    criteria["gates_file"] = str(args.gates)
-    criteria["gates_sha256"] = hashlib.sha256(args.gates.read_bytes()).hexdigest()
+    bind_verdict(criteria, args.gates)
     output = args.output or args.run / "criteria.json"
     write_json(output, criteria)
     np.savez_compressed(output.with_name(output.stem + "-series.npz"), **series)

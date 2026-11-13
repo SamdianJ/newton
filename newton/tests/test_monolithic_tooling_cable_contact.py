@@ -13,11 +13,14 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 
 from scripts.monolithic_reference.cable_contact_criteria import (
+    FROZEN_GATES,
     _frame,
+    bind_verdict,
     closed_writhe,
     closure_clearance,
     contact_pairs,
@@ -195,6 +198,15 @@ class TestCableContactLoading(unittest.TestCase):
             self._write_run(directory, initial_target=False)
             np.testing.assert_array_equal(load_run(directory).frames["target_theta"][:, 0], [1.0, 1.0, 1.0])
 
+    def test_record_without_any_angle_target_names_the_record(self):
+        """An old-format record that failed before its first frame has no targets at all."""
+        with tempfile.TemporaryDirectory() as name:
+            directory = Path(name)
+            self._write_run(directory, initial_target=False)
+            (directory / "summary.json").write_text(json.dumps({"chunks": []}))
+            with self.assertRaisesRegex(ValueError, "neither initial nor per-step angle targets"):
+                load_run(directory)
+
 
 class TestCableContactLink(unittest.TestCase):
     def test_planar_closed_curve_has_zero_writhe(self):
@@ -306,6 +318,80 @@ class TestCableContactEnergy(unittest.TestCase):
     def test_max_rise(self):
         self.assertEqual(max_rise([3.0, 2.0, 1.0]), 0.0)
         self.assertAlmostEqual(max_rise([3.0, 1.0, 1.5, 0.5, 1.25]), 0.75)
+
+
+class TestCableContactVerdict(unittest.TestCase):
+    def test_pass_needs_the_canonical_gates_and_a_clean_judge(self):
+        clean = {"verdict": "PASS", "evaluator": {"file_status": ""}}
+        self.assertEqual(bind_verdict(dict(clean), FROZEN_GATES)["verdict"], "PASS")
+        with tempfile.TemporaryDirectory() as name:
+            copy_path = Path(name) / "cable_contact_gates_frozen_v1.json"
+            copy_path.write_bytes(FROZEN_GATES.read_bytes())
+            judged = bind_verdict(dict(clean), copy_path)
+            self.assertEqual(judged["verdict"], "NON_CANONICAL_GATES")
+            self.assertFalse(judged["gates_canonical"])
+        dirty = {"verdict": "PASS", "evaluator": {"file_status": " M cable_contact_criteria.py"}}
+        self.assertEqual(bind_verdict(dirty, FROZEN_GATES)["verdict"], "DIRTY_JUDGE")
+        failed = {"verdict": "FAIL", "evaluator": {"file_status": None}}
+        self.assertEqual(bind_verdict(failed, FROZEN_GATES)["verdict"], "FAIL")
+
+    def test_evaluate_subtracts_the_work_of_a_driven_second_cable(self):
+        """Two cables; the second is pulled quasi-statically by its kinematic end: E - W stays flat."""
+        count, frames, length = 6, 31, 0.01
+        base = np.column_stack([length * np.arange(count), np.zeros(count), np.zeros(count)])
+        rest_positions = np.vstack([base, base + np.array([0.0, 0.1, 0.0])])
+        directors = np.tile([0.0, 0.0, 1.0], (2 * (count - 1), 1))
+        stretch = np.linspace(0.0, 1e-3, frames)
+        xs = np.stack([np.vstack([base, base * (1 + s / base[-1, 0]) + np.array([0.0, 0.1, 0.0])]) for s in stretch])
+        mass = np.full(2 * count, 1e-3)
+        mass[[count, 2 * count - 1]] = 0.0
+        topology = {
+            "vertex_ranges": np.array([[0, count], [count, 2 * count]]),
+            "rest_positions": rest_positions,
+            "rest_directors": directors,
+            "theta_offsets": np.array([0, count - 1]),
+            "radius": np.full(2, 0.002),
+            "EA": np.full(2, 10.0),
+            "EI": np.full(2, 1e-3),
+            "GJ": np.full(2, 2e-3),
+            "particle_mass": mass,
+            "fixed_vertices": np.array([count, 2 * count - 1]),
+            "gravity": np.zeros(3),
+            "ground_height": np.array([np.nan]),
+            "dt": np.array([0.002]),
+        }
+        series = {
+            "step": np.arange(frames),
+            "x": xs,
+            "v": np.zeros_like(xs),
+            "theta": np.zeros((frames, 2 * (count - 1))),
+            "director": np.repeat(directors[None], frames, axis=0),
+            "twist": np.zeros((frames, 2 * (count - 2))),
+            "target_theta": np.zeros((frames, 2 * (count - 1))),
+        }
+        recipe = {"scene": "E1", "kind": "coil", "solver": {"contact_stiffness": 1e7, "normal_smoothing": 1e-4}}
+        run = SimpleNamespace(
+            manifest={
+                "scene": {"recipe": recipe},
+                "arguments": {"method": "off", "precision": "fp64", "device": "cpu"},
+                "source_sha": "synthetic",
+                "recipe_sha256": "synthetic",
+                "git_status": "",
+                "source_files_changed_during_run": [],
+            },
+            summary={
+                "status": "COMPLETE",
+                "publication_counts": {"CONVERGED": frames - 1, "STOPPED_ACCEPTED": 0, "HARD_FAILURE": 0},
+            },
+            topology=topology,
+            frames=series,
+        )
+        criteria, result = evaluate(run, GATES)
+        stored = result["elastic"][-1] - result["elastic"][0]
+        self.assertAlmostEqual(criteria["diagnostics"]["driver_work_J"], stored, delta=1e-12)
+        self.assertAlmostEqual(stored, 0.5 * 10.0 / 0.05 * 1e-6, delta=1e-12)
+        self.assertLess(criteria["diagnostics"]["energy_max_rise_J"], 1e-12)
+        self.assertNotIn("ground-plane", criteria["diagnostics"]["energy_scope"])
 
 
 class TestCableContactScenes(unittest.TestCase):
