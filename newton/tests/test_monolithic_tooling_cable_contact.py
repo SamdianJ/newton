@@ -5,6 +5,7 @@
 
 import contextlib
 import copy
+import hashlib
 import io
 import json
 import math
@@ -34,7 +35,7 @@ from scripts.monolithic_reference.cable_contact_scenes import CableContactScene,
 from scripts.monolithic_reference.run_cable_contact import main as run_main
 
 FIXTURES = Path(__file__).resolve().parents[2] / "scripts/monolithic_reference/fixtures"
-DRAFT_GATES = json.loads((FIXTURES / "cable_contact_gates_draft_v1.json").read_text())
+GATES = json.loads((FIXTURES / "cable_contact_gates_frozen_v1.json").read_text())
 
 
 def _topology(curves, radius=0.002):
@@ -126,7 +127,7 @@ class TestCableContactGeometry(unittest.TestCase):
         b0 = np.column_stack([np.zeros(6), np.linspace(-0.03, 0.03, 6), np.full(6, 0.002)])
         segments = segment_table(_topology([a, b0]))
         i, j, _ = contact_pairs(segments, index_span=3, arc_factor=np.pi / 2)
-        threshold = DRAFT_GATES["crossing"]["min_sine"]
+        threshold = GATES["crossing"]["min_sine"]
         through = crossing_events(
             np.vstack([a, b0]), np.vstack([a, b0 - np.array([0, 0, 0.004])]), segments, i, j, min_sine=threshold
         )
@@ -145,6 +146,15 @@ class TestCableContactGeometry(unittest.TestCase):
             np.vstack([a, flat]), np.vstack([a, flat + np.array([0.005, 0, 0])]), segments, i, j, min_sine=threshold
         )
         self.assertEqual(len(slide[0]), 0)
+
+
+class TestCableContactGates(unittest.TestCase):
+    def test_frozen_recipes_are_unchanged(self):
+        """The frozen gates name the exact recipes they judge; a recipe edit must not pass silently."""
+        self.assertEqual(GATES["status"], "frozen")
+        for name, digest in GATES["frozen"]["recipes_sha256"].items():
+            with self.subTest(recipe=name):
+                self.assertEqual(hashlib.sha256((FIXTURES / name).read_bytes()).hexdigest(), digest)
 
 
 class TestCableContactLink(unittest.TestCase):
@@ -276,8 +286,9 @@ class TestCableContactReceipt(unittest.TestCase):
             run = load_run(output)
             np.testing.assert_array_equal(run.frames["step"], [0, 1, 2])
             self.assertEqual(run.summary["status"], "PARTIAL")
-            criteria, _ = evaluate(run, DRAFT_GATES)
+            criteria, _ = evaluate(run, GATES)
             self.assertEqual(criteria["verdict"], "PARTIAL")
+            self.assertEqual(criteria["gates_status"], "frozen")
             with self.assertRaisesRegex(ValueError, "differs from the recipe scene"):
                 run_main(["E1", "--recipe", str(path), "--max-steps", "1", "--output", str(output / "again")])
 

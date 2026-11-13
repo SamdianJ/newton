@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
-  "status": "draft",
-  "description": "P9c E2E gates and offline criteria definitions (cable_contact_criteria). Draft until the user freezes it as cable_contact_gates_frozen_v1.json.",
+  "status": "frozen",
+  "description": "P9c E2E gates and offline criteria definitions (cable_contact_criteria). Frozen by the user on 2026-11-13 after the contact-off PR0 baselines (results dev/monolithic/test/results/P9c/PR-00/baseline-504b3aa6-20261113 and baseline-35e79030-20261113/E4); never loosened to obtain PASS.",
   "exclusion": {
     "index_span": 3,
     "arc_factor": 1.5707963267948966,
@@ -40,5 +40,19 @@
   "rest": {
     "window_s": 0.5,
     "definition": "Diagnostic: maximum free-vertex speed over the final window."
+  },
+  "frozen": {
+    "date": "2026-11-13",
+    "source_commit": "504b3aa6",
+    "recipes_sha256": {
+      "cable_contact_e1_coil_v1.json": "c2f396dcef832582ab61fe7e7265f546f173ad8eed237f0da474f9d0b41cedee",
+      "cable_contact_e2_wrap_v1.json": "c7a7e98828a047b7819ea5a14391049b2091441463a6bf4921e4502a163bb823",
+      "cable_contact_e3_plectoneme_v1.json": "8524c344d42f585e703d0594aca98b1769a7ab9cbc0c295d2d492b8f76eae030",
+      "cable_contact_e4_cross_v1.json": "cb14ed5c3bac27e487aaf46ca1783d91468629609f4f6de54bd6caddfeda22e7",
+      "cable_contact_e1_coil1024_v1.json": "5967d334885ab70eeb1710e4d1559efd3d0d8cc4cabd896b61b99b5ebb1112b1",
+      "cable_contact_fixed1024_v1.json": "08ae5e578954e9c0dc55938f948b8290aa23d33bea0f8a42a617c0c5b4e92f1d",
+      "cable_contact_fixed1024_g0_v1.json": "4b0d73d92f04f7c4ad68b11f1bd5bc91dd08f838fb73e92060bcee3665143ca6"
+    },
+    "performance_budget": "fixed state cable_contact_fixed1024_g0_v1.json, FP32 CUDA graph: per-Newton wall time with cable contact <= 1.25 x the contact-off baseline 63.8 ms (35e79030), PCG count changes included"
   }
 }
