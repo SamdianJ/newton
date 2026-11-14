@@ -486,6 +486,7 @@ class _CableContact:
             "support_capacity": support_capacity,
             "candidate_padding": self.padding,
             "rules": dict(RULES),
+            "exclusion": "same cable: index gap > index_exclusion and rest arc gap >= arc_exclusion_factor * 2r",
             "max_edge_over_radius": MAX_EDGE_OVER_RADIUS,
             "max_stretch": MAX_STRETCH,
             "coverage": "newton-frozen-start-and-current-DCD",

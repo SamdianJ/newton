@@ -274,8 +274,11 @@ class TestMonolithicCableContact(unittest.TestCase):
     def test_disabled_contact_builds_nothing(self):
         """Without cable_contact nothing new is built: no contact, producer, identity field or triplet capacity."""
         points, chains = strands()
-        disabled, _ = cable_contact_solver(points, chains, config=None)
-        enabled, _ = cable_contact_solver(points, chains, config={})
+        disabled, disabled_state = cable_contact_solver(points, chains, config=None)
+        enabled, enabled_state = cable_contact_solver(points, chains, config={})
+        # No new state fields: the checkpoint schema version stays that of the trunk material layout.
+        versions = [s._monolithic_coupled.schema_version.numpy().tolist() for s in (enabled_state, disabled_state)]
+        self.assertEqual(versions, [[6], [6]])
         self.assertIsNone(disabled._cable_contact)
         self.assertNotIn("cable_contact", [p.name for p in disabled._problem.producers])
         self.assertIn("cable_contact", [p.name for p in enabled._problem.producers])
