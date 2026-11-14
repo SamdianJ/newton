@@ -776,7 +776,7 @@ class TestCableContactGeometry(unittest.TestCase):
             build_tables(flat, [(0, 5)], [R])
 
     def test_degenerate_and_nonfinite_inputs_are_reported(self):
-        """A sample on the target or a zero-length target is status 2; a NaN or infinite input is status 1."""
+        """A sample on the target or a zero-length target is status 2; a NaN or infinite position or radius sum is 1."""
         on_target = {
             "xa": [[0.0, 0.0, 0.0]],
             "xb": [[L, 0.0, 0.0]],
@@ -794,14 +794,17 @@ class TestCableContactGeometry(unittest.TestCase):
         self.assertEqual(int(evaluate_vertices("cpu", wp.float64, on_target)["status"][0]), 2)
         flat = {**on_target, "y1": on_target["y0"]}
         self.assertEqual(int(evaluate_segments("cpu", wp.float64, flat)["status"][0]), 2)
+        # Off the target, the sample projects before y0 with a counted start vertex, so ``previous`` is read.
+        before = {**on_target, "xa": [[-0.0035, -0.008, 0.003]], "xb": [[0.0105, -0.008, 0.003]]}
+        self.assertEqual(int(evaluate_segments("cpu", wp.float64, before)["status"][0]), 0)
         for value in (np.nan, np.inf):
-            for key in ("xa", "y0", "y1", "vertex"):
-                broken = {**on_target, key: [[value, 0.0, 0.0]]}
+            for key in ("xa", "previous", "y0", "y1", "vertex", "radius_sum"):
+                broken = {**before, key: [value] if key == "radius_sum" else [[value, 0.0, 0.0]]}
                 with self.subTest(value=value, key=key):
                     for dtype in (wp.float32, wp.float64):
                         if key != "vertex":
                             self.assertEqual(int(evaluate_segments("cpu", dtype, broken)["status"][0]), 1)
-                        if key not in ("y0", "y1"):
+                        if key not in ("previous", "y0", "y1"):
                             self.assertEqual(int(evaluate_vertices("cpu", dtype, broken)["status"][0]), 1)
 
     def test_culled_contact_energy_equals_the_full_sum(self):

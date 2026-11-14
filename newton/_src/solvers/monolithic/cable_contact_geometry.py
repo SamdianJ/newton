@@ -70,7 +70,8 @@ def cable_projection(p: Any, y0: Any, y1: Any):
     """Projection of ``p`` on the segment ``y0 -> y1``: ``(dot(p - y0, e), dot(e, e))`` with ``e = y1 - y0``.
 
     The segment clamps to ``y0`` when the first value is ``<= 0`` and to ``y1`` when it is ``>=`` the second.
-    Every clamp decision goes through this function so the pairs that share a vertex decide alike.
+    Every clamp decision goes through this function, so pairs that share a vertex decide alike when they
+    see bitwise-identical inputs (the same anchor-relative positions).
     """
     e = y1 - y0
     return wp.dot(p - y0, e), wp.dot(e, e)
@@ -124,12 +125,17 @@ def cable_segment_response(
         return int(1), zero, vzero, vzero, vzero, vzero, zero, vzero, t
     if not (distance > zero):
         return int(2), zero, vzero, vzero, vzero, vzero, zero, vzero, t
-    n = y / distance
-    phi, dphi, ddphi = _penalty64(distance - radius_sum, stiffness, smoothing)
+    gap = distance - radius_sum
+    finite = wp.isfinite(gap)
     drop = at_end and end_vertex != 0
     if at_start and start_vertex != 0:
         incoming_along, incoming_length2 = cable_projection(p, previous, y0)
+        finite = finite and wp.isfinite(incoming_along) and wp.isfinite(incoming_length2)
         drop = not (incoming_along >= incoming_length2)
+    if not finite:
+        return int(1), zero, vzero, vzero, vzero, vzero, zero, vzero, t
+    n = y / distance
+    phi, dphi, ddphi = _penalty64(gap, stiffness, smoothing)
     # d(distance)/dx = c n, and the overlap u = R - distance decreases with distance.
     load = -weight * dphi
     energy = weight * phi
@@ -162,8 +168,11 @@ def cable_vertex_response(
         return int(1), zero, vzero, vzero, vzero, vzero
     if not (distance > zero):
         return int(2), zero, vzero, vzero, vzero, vzero
+    gap = distance - radius_sum
+    if not wp.isfinite(gap):
+        return int(1), zero, vzero, vzero, vzero, vzero
     n = y / distance
-    phi, dphi, _ddphi = _penalty64(distance - radius_sum, stiffness, smoothing)
+    phi, dphi, _ddphi = _penalty64(gap, stiffness, smoothing)
     load = weight * dphi
     energy = -weight * phi
     ga = load * (one - xi) * n
