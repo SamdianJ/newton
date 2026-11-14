@@ -487,6 +487,8 @@ class SolverMonolithic(SolverBase):
             material_operator=CableOperator(self._cables, layout.scalar_dof_count, dtype=self._dtype, device=device)
             if self._cables
             else None,
+            # Preconditioner (c): with cable contact the band factor keeps only template slots.
+            cable_contact=self._cable_contact is not None,
             dtype=self._dtype,
         )
         self._linear._set_fixed_triplet_pattern(

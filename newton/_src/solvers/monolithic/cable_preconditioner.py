@@ -43,6 +43,8 @@ def _factor(
     gauge_rows: wp.array[int],
     band: wp.array[Any],
     shifts: wp.array[Any],
+    template_slots: wp.array[int],
+    masked: int,
     regularization: Any,
     tolerance: Any,
     factor: wp.array2d[Any],
@@ -66,7 +68,13 @@ def _factor(
                     column = columns[slot]
                     j = inverse[column]
                     if j >= start and j <= i:
-                        if i - j <= 10:
+                        if masked != 0:
+                            # Cable contact: keep only template slots, i.e. whole principal blocks of
+                            # each contact side; far couplings within one cable are left out.
+                            if i - j <= 10:
+                                if template_slots[11 * i + i - j] != 0:
+                                    factor[i, i - j] = factor[i, i - j] + values[slot] * scale[row] * scale[column]
+                        elif i - j <= 10:
                             factor[i, i - j] = factor[i, i - j] + values[slot] * scale[row] * scale[column]
                         elif values[slot] != values.dtype(0.0):
                             wp.atomic_max(status, 0, 1)
@@ -130,7 +138,7 @@ class CablePreconditioner:
     #: Preconditioner-only diagonal shifts, tried in order until the band factors.
     SHIFTS = (0.0, 1e-6, 1e-5, 1e-4, 1e-3, 1e-2)
 
-    def __init__(self, layout, order, *, device, dtype=wp.float32, operator=None):
+    def __init__(self, layout, order, *, device, dtype=wp.float32, operator=None, contact_template=False):
         expected, spans = [], []
         count = 0
         for kind, _, start, xyz, theta in layout.material_ranges:
@@ -160,6 +168,14 @@ class CablePreconditioner:
         self.band = wp.zeros(11 * count, dtype=dtype, device=device)
         self._operator = operator
         self._band_table = None if operator is None else self._build_band_table(operator, inverse, count, device)
+        if contact_template and operator is None:
+            raise ValueError("A cable contact preconditioner template requires the cable element operator")
+        self.masked = int(bool(contact_template))
+        self.template = (
+            self._build_template(operator, inverse, count, device)
+            if contact_template
+            else wp.zeros(1, dtype=int, device=device)
+        )
         self._records = (
             None
             if operator is None
@@ -198,6 +214,21 @@ class CablePreconditioner:
             tables.append([wp.array(np.asarray(a, dtype=np.int32), dtype=int, device=device) for a in arrays])
         return tables
 
+    @staticmethod
+    def _build_template(operator, inverse, count, device):
+        """Band slots a contact-enabled factor reads: the diagonal, element slots and each edge's x/theta stencil."""
+        template = np.zeros(11 * count, dtype=np.int32)
+        template[11 * np.arange(count)] = 1
+        for cable in operator.cables:
+            for rows in (cable.edge_rows_host, cable.bend_rows_host):
+                for element_rows in rows:
+                    slots = inverse[element_rows[element_rows >= 0]]
+                    for i in slots:
+                        for j in slots:
+                            if j <= i and i - j <= 10:
+                                template[11 * i + i - j] = 1
+        return wp.array(template, dtype=int, device=device)
+
     def buffers(self):
         """Return every owned array for generation and graph binding."""
         arrays = (
@@ -210,6 +241,7 @@ class CablePreconditioner:
             self.shifts,
             self.used_shift,
             self.band,
+            self.template,
         )
         if self._records is not None:
             self._records.bind(self._views())
@@ -221,7 +253,11 @@ class CablePreconditioner:
         return tuple((a.ptr, a.shape, a.strides, a.dtype, a.device) for a in self.buffers())
 
     def factor(self, workspace, tolerance):
-        """Factor each cable principal block without dropping its xyz/theta entries."""
+        """Factor each cable principal block.
+
+        Without cable contact every nonzero entry of the block must lie in the band. With cable contact
+        only template slots are read, so each contact keeps the principal blocks of its two sides.
+        """
         matrix = workspace.k_global_scalar_bsr
         self.band.zero_()
         if self._records is not None:
@@ -246,6 +282,8 @@ class CablePreconditioner:
                 self.gauge_rows,
                 self.band,
                 self.shifts,
+                self.template,
+                self.masked,
                 self.dtype(workspace._lambda),
                 self.dtype(tolerance),
                 self.factor_values,
