@@ -23,14 +23,15 @@ vertex pair only exists when both adjacent segment pairs do.
 Samples are three Gauss-Legendre points per edge (weight: Gauss weight times the
 rest edge length) plus one point at each free end of a cable (weight: the cable
 radius, the hemispherical tip). A rest edge is at least its cable's radius and at
-most four times the smallest radius of the cables in contact. The gradient is exact. The tangent is the Gauss-Newton term ``w phi'' (c n)(c n)^T``
-of each segment pair with ``c = (1 - xi, xi, -(1 - t), -t)``, and every
-coefficient is non-negative. A vertex pair carries energy and gradient only;
-the cancellation it would need is done by the segments: a segment that clamps to
-a vertex whose vertex pair is counted drops its term, the outgoing segment only
-when the incoming one does not also clamp there. Where a segment clamps, its term
-equals the vertex term, so on a straight line and on the convex side the tangent
-is exactly that of the distance to the polyline; on the concave side, where no
+most four times the smallest radius of the cables it can touch. The gradient is
+exact. The tangent is the Gauss-Newton term ``w phi'' (c n)(c n)^T`` of each
+segment pair with ``c = (1 - xi, xi, -(1 - t), -t)``, and every coefficient is
+non-negative. A vertex pair carries energy and gradient only; the cancellation
+it would need is done by the segments: a segment that clamps to a vertex whose
+vertex pair is counted drops its term, the outgoing segment only when the
+incoming one does not also clamp there. Where a segment clamps, its term equals
+the vertex term, so on a straight line and on the convex side the tangent is
+exactly that of the distance to the polyline; on the concave side, where no
 segment clamps, the subtracted vertex term is left out of the tangent. A clamp
 tie decided differently by two pairs only adds or drops one non-negative term.
 Callers pass positions relative to an anchor shared by all pairs of a sample
@@ -211,13 +212,14 @@ def cable_pair_allowed(
     return wp.max(gap, type(gap)(0.0)) >= reach
 
 
-def build_tables(rest_positions, vertex_ranges, radii, *, samples_per_edge=3):
+def build_tables(rest_positions, vertex_ranges, radii, *, samples_per_edge=3, inter=True):
     """Static host tables over a set of cables (NumPy, FP64): segments, interior vertices and samples.
 
     ``vertex_ranges`` lists (first, end) particle indices of each cable in input order; edges are
     consecutive particles. Samples are the Gauss points of every edge (edge-major) followed by one
     tip sample at each free end of each cable, weighted by the cable radius. Every rest edge must be
-    at most ``MAX_EDGE_OVER_RADIUS`` times the smallest radius of the given cables.
+    at most ``MAX_EDGE_OVER_RADIUS`` times the smallest radius of the cables it can touch: all given
+    cables when ``inter`` is true, its own cable otherwise.
     """
     if samples_per_edge not in GAUSS_RULES:
         raise ValueError(f"Cable contact supports {sorted(GAUSS_RULES)} samples per edge, got {samples_per_edge}")
@@ -244,13 +246,26 @@ def build_tables(rest_positions, vertex_ranges, radii, *, samples_per_edge=3):
             arc1.append(arc[k + 1])
             rest.append(lengths[k])
             radius.append(r)
-    thinnest = int(np.argmin([float(radii[owner]) for owner in range(len(vertex_ranges))]))
-    smallest = float(radii[thinnest])
-    for owner, edge, length in longest:
-        if length > MAX_EDGE_OVER_RADIUS * smallest:
+    own = [float(radii[owner]) for owner in range(len(vertex_ranges))]
+    if inter:
+        thinnest, thickest = int(np.argmin(own)), int(np.argmax(own))
+        # An edge is at least its own radius and at most 4 x the thinnest radius: no edge length fits both.
+        if own[thickest] > MAX_EDGE_OVER_RADIUS * own[thinnest]:
             raise ValueError(
-                f"Cable {owner} rest edge {edge} is {length:.6g} m, longer than {MAX_EDGE_OVER_RADIUS:g} x the "
-                f"smallest contact radius {smallest:.6g} m (cable {thinnest}); refine the cable"
+                f"Cable contact between cable {thickest} (radius {own[thickest]:.6g} m) and cable {thinnest} "
+                f"(radius {own[thinnest]:.6g} m) needs radii within a factor {MAX_EDGE_OVER_RADIUS:g}"
+            )
+    for owner, edge, length in longest:
+        bound = own[thinnest] if inter else own[owner]
+        if length > MAX_EDGE_OVER_RADIUS * bound:
+            which = (
+                f"the smallest contact radius {bound:.6g} m (cable {thinnest})"
+                if inter
+                else f"its radius {bound:.6g} m"
+            )
+            raise ValueError(
+                f"Cable {owner} rest edge {edge} is {length:.6g} m, longer than {MAX_EDGE_OVER_RADIUS:g} x {which}; "
+                "refine the cable"
             )
     segments = {
         "first": np.asarray(first, dtype=np.int32),

@@ -106,6 +106,8 @@ def segment_response(
     start = at_start & np.asarray(start_vertex, dtype=bool)
     if np.any(start):
         incoming_along, incoming_length2 = _projection(p, np.asarray(previous, dtype=float), y0)
+        if not np.all(np.where(start, np.isfinite(incoming_along) & np.isfinite(incoming_length2), True)):
+            raise ValueError("Nonfinite previous vertex read by a start clamp")
         drop = np.where(start, ~(incoming_along >= incoming_length2), drop)
     return w * phi, gradient, np.where(drop, 0.0, w * ddphi), direction, t
 

@@ -803,6 +803,14 @@ class TestCableContactGeometry(unittest.TestCase):
         build_tables(np.vstack([rest, rest + np.array([0.0, 0.05, 0.0])]), [(0, 5), (5, 10)], [R, R])
         with self.assertRaisesRegex(ValueError, r"Cable 0 rest edge \d is 0.007 m, .* 0.0015 m \(cable 1\)"):
             build_tables(np.vstack([rest, fine]), [(0, 5), (5, 10)], [R, 0.0015])
+        # Self-contact only: each cable is bounded by its own radius.
+        build_tables(np.vstack([rest, fine]), [(0, 5), (5, 10)], [R, 0.0015], inter=False)
+        with self.assertRaisesRegex(ValueError, r"Cable 1 rest edge \d is 0.007 m, longer than 4 x its radius"):
+            build_tables(np.vstack([fine, rest]), [(0, 5), (5, 10)], [0.0015, 0.0015], inter=False)
+        # No edge length fits radii more than a factor 4 apart; say so instead of asking for refinement.
+        wide = np.column_stack([0.012 * np.arange(5), np.full(5, 0.1), np.zeros(5)])
+        with self.assertRaisesRegex(ValueError, r"cable 1 \(radius 0.01 m\) and cable 0 .* within a factor 4"):
+            build_tables(np.vstack([rest, wide]), [(0, 5), (5, 10)], [R, 0.01])
 
     def test_degenerate_and_nonfinite_inputs_are_reported(self):
         """A sample on the target or a zero-length target is status 2; a NaN or infinite position or radius sum is 1."""
@@ -826,6 +834,8 @@ class TestCableContactGeometry(unittest.TestCase):
         # Off the target, the sample projects before y0 with a counted start vertex, so ``previous`` is read.
         before = {**on_target, "xa": [[-0.0035, -0.008, 0.003]], "xb": [[0.0105, -0.008, 0.003]]}
         self.assertEqual(int(evaluate_segments("cpu", wp.float64, before)["status"][0]), 0)
+        with self.assertRaisesRegex(ValueError, "previous vertex"):
+            segment_reference({**before, "previous": [[np.nan, 0.0, 0.0]]})
         for value in (np.nan, np.inf):
             for key in ("xa", "previous", "y0", "y1", "vertex", "radius_sum"):
                 broken = {**before, key: [value] if key == "radius_sum" else [[value, 0.0, 0.0]]}
