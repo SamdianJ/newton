@@ -202,11 +202,16 @@ def allowed(samples, segments, sample, target, *, index_span, arc_factor):
     return np.where(same, keep_same, cable_a < cable_b)
 
 
-def all_pairs(samples, segments, *, index_span, arc_factor):
-    """Every allowed (sample, segment) pair and every (sample, interior vertex) pair whose two segments are allowed."""
+def all_pairs(samples, segments, *, index_span, arc_factor, self_enabled=True, inter_enabled=True):
+    """Every allowed (sample, segment) pair and every (sample, interior vertex) pair whose two segments are allowed.
+
+    ``self_enabled`` / ``inter_enabled`` drop the pairs inside one cable / between cables.
+    """
     count = len(segments["first"])
     sample, target = np.meshgrid(np.arange(len(samples["edge"])), np.arange(count), indexing="ij")
     keep = allowed(samples, segments, sample.ravel(), target.ravel(), index_span=index_span, arc_factor=arc_factor)
+    same = segments["cable"][samples["edge"][sample.ravel()]] == segments["cable"][target.ravel()]
+    keep &= np.where(same, self_enabled, inter_enabled)
     keep = keep.reshape(sample.shape)
     vertices = vertex_table(segments)
     both = keep[:, vertices["incoming"]] & keep[:, vertices["incoming"] + 1]
@@ -308,6 +313,8 @@ def contact_energy(
     index_span,
     arc_factor,
     tables=None,
+    self_enabled=True,
+    inter_enabled=True,
 ):
     """Total cable-cable penalty energy [J] of one configuration, for the offline energy criterion.
 
@@ -317,7 +324,15 @@ def contact_energy(
     if tables is None:
         segments = segment_table(rest_positions, vertex_ranges, radii)
         samples = sample_table(segments, samples_per_edge)
-        tables = (segments, samples, all_pairs(samples, segments, index_span=index_span, arc_factor=arc_factor))
+        pairs = all_pairs(
+            samples,
+            segments,
+            index_span=index_span,
+            arc_factor=arc_factor,
+            self_enabled=self_enabled,
+            inter_enabled=inter_enabled,
+        )
+        tables = (segments, samples, pairs)
     segments, samples, pairs = tables
     positions = np.asarray(positions, dtype=float)
 

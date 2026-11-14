@@ -117,10 +117,12 @@ class CableContactScene:
             raise ValueError("Require an SI cable-contact recipe with schema_version 1")
         validate_recipe(recipe)
         self.kind = recipe["kind"]
-        if method != "off":
-            raise ValueError("Cable contact is not available before PR2b; only method 'off' runs")
-        if method_config:
+        if method not in ("off", "cable-contact"):
+            raise ValueError(f"Unknown cable contact method {method!r}; use 'off' or 'cable-contact'")
+        if method == "off" and method_config:
             raise ValueError("Method-off runs must not silently consume an enabled configuration")
+        if method == "cable-contact" and not isinstance(method_config, dict):
+            raise ValueError("Method 'cable-contact' needs an explicit method configuration dict")
         self.recipe = recipe
         self.dt = _positive(recipe["dt_s"], "dt_s")
         duration = _positive(recipe["duration_s"], "duration_s")
@@ -199,6 +201,7 @@ class CableContactScene:
             precision=SolverMonolithic.Precision(precision),
             pcg_mode=SolverMonolithic.PCGMode.PRODUCTION,
             use_cuda_graph=use_cuda_graph,
+            cable_contact=method_config if method == "cable-contact" else None,
         )
         self.solver = SolverMonolithic(self.model, **options)
         self.state = self.solver.create_state(dt=self.dt)

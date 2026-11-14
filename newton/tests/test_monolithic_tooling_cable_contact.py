@@ -17,6 +17,7 @@ from types import SimpleNamespace
 
 import numpy as np
 
+from scripts.monolithic_reference import cable_contact_oracle
 from scripts.monolithic_reference.cable_contact_criteria import (
     FROZEN_GATES,
     _frame,
@@ -418,6 +419,82 @@ class TestCableContactVerdict(unittest.TestCase):
         self.assertLess(criteria["diagnostics"]["energy_max_rise_J"], 1e-12)
         self.assertNotIn("ground-plane", criteria["diagnostics"]["energy_scope"])
 
+    def test_evaluate_adds_the_contact_energy_of_a_cable_contact_run(self):
+        """A cable-contact run counts the reference contact energy of every frame; missing parameters are named."""
+        count, frames, length, radius = 8, 5, 0.007, 0.002
+        base = np.column_stack([length * np.arange(count), np.zeros(count), np.zeros(count)])
+        rest_positions = np.vstack([base, base + np.array([0.0, 0.0, 2 * radius])])
+        overlap = np.linspace(-3e-4, 4e-4, frames)  # the first frame is apart by more than the smoothing
+        xs = np.stack([np.vstack([base, base + np.array([0.0, 0.0, 2 * radius - o])]) for o in overlap])
+        directors = np.tile([0.0, 1.0, 0.0], (2 * (count - 1), 1))
+        topology = {
+            "vertex_ranges": np.array([[0, count], [count, 2 * count]]),
+            "rest_positions": rest_positions,
+            "rest_directors": directors,
+            "theta_offsets": np.array([0, count - 1]),
+            "radius": np.full(2, radius),
+            "EA": np.full(2, 10.0),
+            "EI": np.full(2, 1e-3),
+            "GJ": np.full(2, 2e-3),
+            "particle_mass": np.full(2 * count, 1e-3),
+            "fixed_vertices": np.array([], dtype=int),
+            "gravity": np.zeros(3),
+            "ground_height": np.array([np.nan]),
+            "dt": np.array([0.002]),
+        }
+        series = {
+            "step": np.arange(frames),
+            "x": xs,
+            "v": np.zeros_like(xs),
+            "theta": np.zeros((frames, 2 * (count - 1))),
+            "director": np.repeat(directors[None], frames, axis=0),
+            "twist": np.zeros((frames, 2 * (count - 2))),
+            "target_theta": np.zeros((frames, 2 * (count - 1))),
+        }
+        config = {"normal_stiffness": 1e5, "samples_per_edge": 3, "index_exclusion": 3, "arc_exclusion_factor": 1.5}
+        recipe = {"scene": "E4", "kind": "cross", "solver": {"contact_stiffness": 1e7, "normal_smoothing": 1e-4}}
+        run = SimpleNamespace(
+            manifest={
+                "scene": {"recipe": recipe, "method_config": config},
+                "arguments": {"method": "cable-contact", "precision": "fp64", "device": "cpu"},
+                "source_sha": "synthetic",
+                "recipe_sha256": "synthetic",
+                "git_status": "",
+                "source_files_changed_during_run": [],
+            },
+            summary={
+                "status": "COMPLETE",
+                "publication_counts": {"CONVERGED": frames - 1, "STOPPED_ACCEPTED": 0, "HARD_FAILURE": 0},
+            },
+            topology=topology,
+            frames=series,
+        )
+        criteria, result = evaluate(run, GATES)
+        expected = [
+            cable_contact_oracle.contact_energy(
+                x,
+                rest_positions,
+                topology["vertex_ranges"],
+                topology["radius"],
+                stiffness=1e5,
+                smoothing=1e-4,
+                samples_per_edge=3,
+                index_span=3,
+                arc_factor=1.5,
+            )[0]
+            for x in xs
+        ]
+        np.testing.assert_allclose(result["cable_contact"], expected, rtol=1e-12)
+        self.assertEqual(result["cable_contact"][0], 0.0)
+        self.assertGreater(result["cable_contact"][-1], 0.0)
+        self.assertIn("+ cable-cable contact", criteria["diagnostics"]["energy_scope"])
+        # With inter-cable contact switched off, the two strands carry no contact energy.
+        run.manifest["scene"]["method_config"] = dict(config, inter=False)
+        np.testing.assert_array_equal(evaluate(run, GATES)[1]["cable_contact"], 0.0)
+        run.manifest["scene"]["method_config"] = {"normal_stiffness": 1e5}
+        with self.assertRaisesRegex(ValueError, "samples_per_edge"):
+            evaluate(run, GATES)
+
 
 class TestCableContactScenes(unittest.TestCase):
     def setUp(self):
@@ -495,9 +572,18 @@ class TestCableContactScenes(unittest.TestCase):
         tangents = np.diff(points, axis=0) / lengths[:, None]
         self.assertLess(np.max(np.abs(np.sum(directors * tangents, axis=1))), 1e-12)
 
-    def test_contact_method_is_not_available_yet(self):
-        with self.assertRaisesRegex(ValueError, "only method 'off'"):
-            CableContactScene(self.recipe, method="cable-contact")
+    def test_contact_method_needs_an_explicit_configuration(self):
+        """Method 'cable-contact' builds the solver with the given configuration; other combinations are rejected."""
+        scene = CableContactScene(self.recipe, method="cable-contact", method_config={"normal_stiffness": 2e5})
+        self.assertEqual(scene.solver._cable_contact.config["normal_stiffness"], 2e5)
+        self.assertIsNone(CableContactScene(self.recipe).solver._cable_contact)
+        for method, config, pattern in (
+            ("cable-contact", None, "explicit method configuration"),
+            ("off", {"normal_stiffness": 2e5}, "silently consume"),
+            ("vertex-edge", None, "Unknown cable contact method"),
+        ):
+            with self.subTest(method=method), self.assertRaisesRegex(ValueError, pattern):
+                CableContactScene(self.recipe, method=method, method_config=config)
 
 
 class TestCableContactReceipt(unittest.TestCase):

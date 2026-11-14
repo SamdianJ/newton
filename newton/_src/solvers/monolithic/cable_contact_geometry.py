@@ -56,7 +56,7 @@ GAUSS_RULES = {
 #: Longest supported rest edge over the smallest contact radius of the cables in contact; there the 3-point
 #: worst-phase crossing onset is at most 0.156 of that radius (equal radii are the worst case).
 MAX_EDGE_OVER_RADIUS = 4.0
-#: Identity strings of the discrete rule; they enter the checkpoint identity once the method is wired.
+#: Identity strings of the discrete rule; ``cable_contact._CableContact`` puts them into the checkpoint identity.
 RULES = {
     "sampling": "gauss-legendre-per-edge, length weighted; free-end tip sample weighted by the radius",
     "edge_length": "own radius <= rest edge <= 4 x smallest radius of the cables in contact",

@@ -18,6 +18,7 @@ from types import SimpleNamespace
 
 import numpy as np
 
+from . import cable_contact_oracle
 from .cable_oracle import CableReference, _reference_twist, _weighted_strains
 from .cloth_contact_run import write_json
 
@@ -368,6 +369,35 @@ def closure_clearance(x, closure):
 # ---- evaluation -----------------------------------------------------------------------------
 
 
+#: Method-configuration keys the offline contact energy needs; a cable-contact run must state them.
+METHOD_KEYS = ("normal_stiffness", "samples_per_edge", "index_exclusion", "arc_exclusion_factor")
+
+
+def cable_contact_energy(run, topology, positions, smoothing):
+    """Per-frame cable-cable contact energy [J] of a cable-contact run, from its recorded method configuration."""
+    config = run.manifest["scene"].get("method_config") or {}
+    missing = [key for key in METHOD_KEYS if key not in config]
+    if missing:
+        raise ValueError(f"Judging a cable-contact run needs explicit method configuration keys {missing}")
+    energy, tables = np.zeros(len(positions)), None
+    for k, x in enumerate(positions):
+        energy[k], tables = cable_contact_oracle.contact_energy(
+            x,
+            topology["rest_positions"],
+            topology["vertex_ranges"],
+            topology["radius"],
+            stiffness=float(config["normal_stiffness"]),
+            smoothing=smoothing,
+            samples_per_edge=int(config["samples_per_edge"]),
+            index_span=int(config["index_exclusion"]),
+            arc_factor=float(config["arc_exclusion_factor"]),
+            tables=tables,
+            self_enabled=config.get("self", True),
+            inter_enabled=config.get("inter", True),
+        )
+    return energy
+
+
 def max_rise(values):
     """Largest increase max_{t1 <= t2} values[t2] - values[t1] of a time series (0 if never rising)."""
     values = np.asarray(values, dtype=float)
@@ -379,8 +409,9 @@ def evaluate(run, gates):
     topo, frames = run.topology, run.frames
     recipe = run.manifest["scene"]["recipe"]
     scene, kind = recipe["scene"], recipe["kind"]
-    if run.manifest["arguments"].get("method", "off") != "off":
-        raise NotImplementedError("Cable-cable contact energy needs the PR1 contact oracle; method-off runs only")
+    method = run.manifest["arguments"].get("method", "off")
+    if method not in ("off", "cable-contact"):
+        raise ValueError(f"Unknown cable contact method {method!r} in the run arguments")
     exclusion = gates["exclusion"]
     segments = segment_table(topo)
     i, j, same = contact_pairs(segments, index_span=exclusion["index_span"], arc_factor=exclusion["arc_factor"])
@@ -459,7 +490,12 @@ def evaluate(run, gates):
                 link["applied_turns"].append((target[e1 - 1] - target[e0]) / (2 * np.pi))
                 closure.append(closure_clearance(xs[k], gates["link"]["closure_m"]))
     work = np.cumsum(work)
-    total = kinetic + potential + elastic + ground
+    contact = (
+        cable_contact_energy(run, topo, frames["x"], solver["normal_smoothing"])
+        if method == "cable-contact"
+        else np.zeros(count)
+    )
+    total = kinetic + potential + elastic + ground + contact
     adjusted = total - work
     rise = max_rise(adjusted)
     gravity_drop = float(potential[0] - potential[-1])
@@ -555,8 +591,9 @@ def evaluate(run, gates):
             "energy_scope": (
                 "kinetic + elastic + gravity"
                 + (" + ground-plane penalty" if np.isfinite(height) else "")
+                + (" + cable-cable contact" if method == "cable-contact" else "")
                 + " - driver work"
-                + "; cable-cable contact energy is zero for method-off runs"
+                + ("" if method == "cable-contact" else "; cable-cable contact energy is zero for method-off runs")
             ),
             "gravity_drop_J": gravity_drop,
             "driver_work_J": float(work[-1]),
@@ -591,6 +628,7 @@ def evaluate(run, gates):
         "potential": potential,
         "elastic": elastic,
         "ground": ground,
+        "cable_contact": contact,
         "driver_work": work,
         **{key: np.asarray(value) for key, value in link.items() if value},
     }
