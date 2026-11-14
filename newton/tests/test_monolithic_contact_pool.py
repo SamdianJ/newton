@@ -915,12 +915,11 @@ def test_pool_packed_status(test, device):
         pool.evaluate()
         status = tuple(int(v) for v in pool.status.numpy())
         with test.subTest(capacity=capacity, run="admitted"):
+            mask = check_admitted(test, pool, data)
             test.assertEqual(status, packed_status(pool))
-            test.assertEqual(status[0], 2)
-            test.assertEqual(status[1], {15: 0, 0: 4}.get(capacity, status[1]))
-            test.assertEqual(status[2], 0)
-            if capacity == 1:
-                test.assertGreater(status[1], 0)
+            # Contact 3 is all zero and never requests budget.
+            test.assertEqual(status, (2, 4 - int(mask.sum()), 0))
+            test.assertEqual(status[1], {15: 0, 1: 3, 0: 4}[capacity])
         # A failed evaluation clears its dropped count and reports its flags.
         data["residual"][4, 0] = np.nan
         assign_contacts(pool, data)

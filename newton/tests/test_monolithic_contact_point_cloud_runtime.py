@@ -186,13 +186,14 @@ def test_problem_graphs_recapture_after_pool_reallocation(test, device, *, preci
         solver.step(state, state, solver.create_control(), dt=dt)
         pool = solver._cloth_contact.pool
         captured = dict(solver._graphs.captures)
-        stale = (pool.magnitude, pool.records.rounding)
+        # Keep the old arrays alive so a stale replay reads them rather than freed memory.
+        stale = (pool.magnitude, *(getattr(pool.records, name) for name in _POOL_RECORDS))
         pool.magnitude = wp.clone(pool.magnitude)
         for name in _POOL_RECORDS:
             setattr(pool.records, name, wp.clone(getattr(pool.records, name)))
-        # A replay that still read the old storage would see NaN and fail the step.
-        for array in stale:
-            array.fill_(float("nan"))
+        # NaN in the old magnitude fails a stale problem_summary replay; a stale problem_coordinates
+        # replay is caught by the capture count below and by the graph-key test.
+        stale[0].fill_(float("nan"))
         solver.step(state, state, solver.create_control(), dt=dt)
         test.assertFalse(solver.last_stats.rolled_back, solver.last_stats)
         if graph:
@@ -236,12 +237,18 @@ def test_point_cloud_status_selects_the_failure(test, device):
         ((1, 0, 0), solver.Status.CONTACT_OVERFLOW),
         ((0, 1, 0), solver.Status.CONTACT_OVERFLOW),
         ((0, 0, 1), solver.Status.NONFINITE),
+        # Overflow takes precedence over record flags.
+        ((1, 0, 1), solver.Status.CONTACT_OVERFLOW),
+        ((0, 0, 0), None),
     ):
 
         def evaluate(steps, dt, status=status):
             contact.pool.status.assign(np.asarray(status, dtype=np.int32))
 
         with test.subTest(status=status), mock.patch.object(contact, "evaluate", evaluate):
+            if expected is None:
+                producer.evaluate(solver, state, dt, solver._complete_r, build_tangent=True)
+                continue
             with test.assertRaises(_StepFailure) as raised:
                 producer.evaluate(solver, state, dt, solver._complete_r, build_tangent=True)
             test.assertEqual(raised.exception.status, expected)
@@ -255,7 +262,9 @@ def test_dropped_contacts_roll_back(test, device):
     solver.step(state, state, solver.create_control(), dt=0.001)
     test.assertEqual(solver.last_stats.status, solver.Status.CONTACT_OVERFLOW)
     test.assertTrue(solver.last_stats.rolled_back)
-    test.assertGreater(int(solver._cloth_contact.pool.status.numpy()[1]), 0)
+    overflow, dropped, flags = (int(v) for v in solver._cloth_contact.pool.status.numpy())
+    test.assertEqual((overflow, flags), (0, 0))
+    test.assertGreater(dropped, 0)
     for key, value in before.items():
         np.testing.assert_array_equal(snapshot(state)[key], value, err_msg=key)
 

@@ -247,14 +247,13 @@ def build_tables(rest_positions, vertex_ranges, radii, *, samples_per_edge=3, in
             rest.append(lengths[k])
             radius.append(r)
     own = [float(radii[owner]) for owner in range(len(vertex_ranges))]
-    if inter:
-        thinnest, thickest = int(np.argmin(own)), int(np.argmax(own))
-        # An edge is at least its own radius and at most 4 x the thinnest radius: no edge length fits both.
-        if own[thickest] > MAX_EDGE_OVER_RADIUS * own[thinnest]:
-            raise ValueError(
-                f"Cable contact between cable {thickest} (radius {own[thickest]:.6g} m) and cable {thinnest} "
-                f"(radius {own[thinnest]:.6g} m) needs radii within a factor {MAX_EDGE_OVER_RADIUS:g}"
-            )
+    thinnest, thickest = int(np.argmin(own)), int(np.argmax(own))
+    # An edge is at least its own radius and at most 4 x the thinnest radius: no edge length fits both.
+    if inter and own[thickest] > MAX_EDGE_OVER_RADIUS * own[thinnest]:
+        raise ValueError(
+            f"Cable contact between cable {thickest} (radius {own[thickest]:.6g} m) and cable {thinnest} "
+            f"(radius {own[thinnest]:.6g} m) needs radii within a factor {MAX_EDGE_OVER_RADIUS:g}"
+        )
     for owner, edge, length in longest:
         bound = own[thinnest] if inter else own[owner]
         if length > MAX_EDGE_OVER_RADIUS * bound:
@@ -282,8 +281,8 @@ def build_tables(rest_positions, vertex_ranges, radii, *, samples_per_edge=3, in
     count = len(first)
     tip_edge, tip_xi = [], []
     for owner in range(len(vertex_ranges)):
-        own = np.flatnonzero(segments["cable"] == owner)
-        tip_edge += [own[0], own[-1]]
+        edges = np.flatnonzero(segments["cable"] == owner)
+        tip_edge += [edges[0], edges[-1]]
         tip_xi += [0.0, 1.0]
     edge = np.r_[np.repeat(np.arange(count), len(nodes)), tip_edge].astype(np.int32)
     xi = np.r_[np.tile(nodes, count), tip_xi]

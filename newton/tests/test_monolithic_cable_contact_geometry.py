@@ -805,8 +805,9 @@ class TestCableContactGeometry(unittest.TestCase):
             build_tables(np.vstack([rest, fine]), [(0, 5), (5, 10)], [R, 0.0015])
         # Self-contact only: each cable is bounded by its own radius.
         build_tables(np.vstack([rest, fine]), [(0, 5), (5, 10)], [R, 0.0015], inter=False)
-        with self.assertRaisesRegex(ValueError, r"Cable 1 rest edge \d is 0.007 m, longer than 4 x its radius"):
-            build_tables(np.vstack([fine, rest]), [(0, 5), (5, 10)], [0.0015, 0.0015], inter=False)
+        # Only the thin cable's edges are too long for its own radius; the thick radius would allow them.
+        with self.assertRaisesRegex(ValueError, r"Cable 1 rest edge \d is 0.007 m, longer than 4 x its radius 0.0015"):
+            build_tables(np.vstack([fine, rest]), [(0, 5), (5, 10)], [R, 0.0015], inter=False)
         # No edge length fits radii more than a factor 4 apart; say so instead of asking for refinement.
         wide = np.column_stack([0.012 * np.arange(5), np.full(5, 0.1), np.zeros(5)])
         with self.assertRaisesRegex(ValueError, r"cable 1 \(radius 0.01 m\) and cable 0 .* within a factor 4"):
