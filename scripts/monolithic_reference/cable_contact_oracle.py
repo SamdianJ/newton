@@ -26,10 +26,13 @@ edge index samples a higher segment index, between cables only the lower cable
 index samples.
 
 The gradient is exact. The tangent is the Gauss-Newton term w phi'' (c n)(c n)^T
-for each segment pair with c = (1 - xi, xi, -(1 - t), -t); a vertex pair adds its
-negative term -w phi'' (c n)(c n)^T, c = (1 - xi, xi, -1), only when an adjacent
-segment clamps to that vertex for this sample, where it cancels that segment's
-identical term exactly, so the total stays positive semidefinite.
+of each segment pair with c = (1 - xi, xi, -(1 - t), -t); every coefficient is
+non-negative. A vertex pair has no tangent term: a segment that clamps to a
+vertex whose pair is counted drops its own term instead (the outgoing segment
+only when the incoming one does not clamp there too). A clamped segment's term
+equals the vertex term, so on a straight line and on the convex side the tangent
+is that of the distance to the polyline; on the concave side the subtracted
+vertex term is left out.
 This module never imports the solver; tests compare the Warp kernels with it.
 """
 
@@ -65,17 +68,31 @@ def _sample_point(xa, xb, xi):
     return (1.0 - xi)[..., None] * np.asarray(xa, dtype=float) + xi[..., None] * np.asarray(xb, dtype=float)
 
 
-def segment_response(xa, xb, y0, y1, xi, weight, radius_sum, stiffness, smoothing):
-    """Segment pair: energy [J], gradient (..., 4, 3) [N] on (xa, xb, y0, y1), GN coefficient [N/m], direction, t."""
+def _projection(p, y0, y1):
+    e = y1 - y0
+    return np.sum((p - y0) * e, axis=-1), np.sum(e * e, axis=-1)
+
+
+def segment_response(
+    xa, xb, y0, y1, xi, weight, radius_sum, stiffness, smoothing, *, previous=None, start_vertex=False, end_vertex=False
+):
+    """Segment pair: energy [J], gradient (..., 4, 3) [N] on (xa, xb, y0, y1), GN coefficient [N/m], direction, t.
+
+    ``start_vertex`` / ``end_vertex`` say whether the vertex pair of this sample at y0 / y1 is counted;
+    the coefficient is then zero where the segment clamps to that vertex (at y0 only if the incoming
+    segment ``previous -> y0`` does not clamp to it as well).
+    """
     xi = np.asarray(xi, dtype=float)
     y0, y1 = np.asarray(y0, dtype=float), np.asarray(y1, dtype=float)
     p = _sample_point(xa, xb, xi)
-    e = y1 - y0
-    length2 = np.sum(e * e, axis=-1)
+    if not (np.all(np.isfinite(p)) and np.all(np.isfinite(y0)) and np.all(np.isfinite(y1))):
+        raise ValueError("Nonfinite sample or target position")
+    along, length2 = _projection(p, y0, y1)
     if np.any(length2 <= 0):
         raise ValueError("Degenerate target segment")
-    t = np.clip(np.sum((p - y0) * e, axis=-1) / length2, 0.0, 1.0)
-    y = (p - y0) - t[..., None] * e
+    at_start, at_end = along <= 0.0, along >= length2
+    t = np.where(at_start, 0.0, np.where(at_end, 1.0, along / length2))
+    y = np.where(at_start[..., None], p - y0, np.where(at_end[..., None], p - y1, (p - y0) - t[..., None] * (y1 - y0)))
     distance = np.linalg.norm(y, axis=-1)
     if np.any(~(distance > 0)):
         raise ValueError("Sample point lies on the target segment")
@@ -85,34 +102,33 @@ def segment_response(xa, xb, y0, y1, xi, weight, radius_sum, stiffness, smoothin
     direction = c[..., None] * n[..., None, :]
     w = np.asarray(weight, dtype=float)
     gradient = -(w * dphi)[..., None, None] * direction
-    return w * phi, gradient, w * ddphi, direction, t
+    drop = at_end & np.asarray(end_vertex, dtype=bool)
+    start = at_start & np.asarray(start_vertex, dtype=bool)
+    if np.any(start):
+        incoming_along, incoming_length2 = _projection(p, np.asarray(previous, dtype=float), y0)
+        drop = np.where(start, ~(incoming_along >= incoming_length2), drop)
+    return w * phi, gradient, np.where(drop, 0.0, w * ddphi), direction, t
 
 
-def vertex_response(xa, xb, previous, vertex, following, xi, weight, radius_sum, stiffness, smoothing):
+def vertex_response(xa, xb, vertex, xi, weight, radius_sum, stiffness, smoothing):
     """Vertex pair (the subtracted double count): energy [J] <= 0, gradient (..., 3, 3) on (xa, xb, vertex),
-    the GN coefficient (negative, or zero when no adjacent segment clamps to the vertex) and direction."""
+    direction. It has no tangent term; the clamped segments drop theirs instead."""
     xi = np.asarray(xi, dtype=float)
-    previous, vertex, following = (np.asarray(v, dtype=float) for v in (previous, vertex, following))
+    vertex = np.asarray(vertex, dtype=float)
     p = _sample_point(xa, xb, xi)
+    if not (np.all(np.isfinite(p)) and np.all(np.isfinite(vertex))):
+        raise ValueError("Nonfinite sample or vertex position")
     y = p - vertex
     distance = np.linalg.norm(y, axis=-1)
     if np.any(~(distance > 0)):
         raise ValueError("Sample point lies on the target vertex")
     n = y / distance[..., None]
-    phi, dphi, ddphi = penalty(distance - radius_sum, stiffness, smoothing)
+    phi, dphi, _ = penalty(distance - radius_sum, stiffness, smoothing)
     c = np.stack([1.0 - xi, xi, -np.ones_like(xi)], axis=-1)
     direction = c[..., None] * n[..., None, :]
     w = np.asarray(weight, dtype=float)
     gradient = (w * dphi)[..., None, None] * direction
-    # The incoming segment clamps to the vertex when the sample projects past its end, the outgoing one
-    # when it projects before its start; then that segment's Gauss-Newton term equals this one.
-    incoming = vertex - previous
-    outgoing = following - vertex
-    clamps = (np.sum((p - previous) * incoming, axis=-1) >= np.sum(incoming * incoming, axis=-1)) | (
-        np.sum(y * outgoing, axis=-1) <= 0.0
-    )
-    coefficient = np.where(clamps, -w * ddphi, 0.0)
-    return -w * phi, gradient, coefficient, direction
+    return -w * phi, gradient, direction
 
 
 # ---- static tables over a set of cables ------------------------------------------------------
@@ -199,14 +215,33 @@ def all_pairs(samples, segments, *, index_span, arc_factor):
     }
 
 
+def vertex_flags(segments, pairs):
+    """For each segment pair: whether the vertex pair of its sample at the segment start / end is in ``pairs``."""
+    sample, target = pairs["segment"]
+    vertices = vertex_table(segments)
+    rows = len(vertices["vertex"])
+    row_of = np.full(len(segments["first"]) + 1, -1)
+    row_of[vertices["incoming"]] = np.arange(rows)
+    counted = np.asarray(pairs["vertex"][0]) * rows + np.asarray(pairs["vertex"][1])
+    end_row = row_of[target]
+    start_row = np.where(target > 0, row_of[target - 1], -1)
+    end = (end_row >= 0) & np.isin(sample * rows + end_row, counted)
+    start = (start_row >= 0) & np.isin(sample * rows + start_row, counted)
+    return start, end
+
+
 def evaluate(positions, segments, samples, pairs, *, stiffness, smoothing):
-    """Total energy [J], per-vertex gradient (n, 3) [N] and per-pair results for the given pairs."""
+    """Total energy [J], per-vertex gradient (n, 3) [N] and per-pair results for the given pairs.
+
+    The segment results carry the Gauss-Newton coefficient under the counted vertex pairs of ``pairs``.
+    """
     positions = np.asarray(positions, dtype=float)
     total = np.zeros_like(positions)
     energy = 0.0
     sample, target = pairs["segment"]
     edge = samples["edge"][sample]
     a, b = segments["first"][edge], segments["first"][target]
+    start, end = vertex_flags(segments, pairs)
     seg = segment_response(
         positions[a],
         positions[a + 1],
@@ -217,6 +252,9 @@ def evaluate(positions, segments, samples, pairs, *, stiffness, smoothing):
         segments["radius"][edge] + segments["radius"][target],
         stiffness,
         smoothing,
+        previous=positions[np.where(start, b - 1, b)],
+        start_vertex=start,
+        end_vertex=end,
     )
     energy += float(np.sum(seg[0]))
     for slot, index in enumerate((a, a + 1, b, b + 1)):
@@ -229,9 +267,7 @@ def evaluate(positions, segments, samples, pairs, *, stiffness, smoothing):
     ver = vertex_response(
         positions[a],
         positions[a + 1],
-        positions[v - 1],
         positions[v],
-        positions[v + 1],
         samples["xi"][sample],
         samples["weight"][sample],
         segments["radius"][edge] + segments["radius"][incoming],

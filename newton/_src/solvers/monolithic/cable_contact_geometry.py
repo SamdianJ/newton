@@ -22,15 +22,22 @@ vertex pair only exists when both adjacent segment pairs do.
 
 Samples are three Gauss-Legendre points per edge (weight: Gauss weight times the
 rest edge length) plus one point at each free end of a cable (weight: the cable
-radius, the hemispherical tip). The gradient is exact. The tangent is the
-Gauss-Newton term ``w phi'' (c n)(c n)^T`` of each segment pair with
-``c = (1 - xi, xi, -(1 - t), -t)``; a vertex pair contributes its negative term,
-``c = (1 - xi, xi, -1)``, only when an adjacent segment clamps to that vertex for
-the same sample, where it cancels that segment's identical term, so the assembled
-tangent stays positive semidefinite. Callers pass positions relative to a nearby
-anchor (start-of-step relative position plus the exact increment) so FP32 keeps
-sub-millimetre gaps. Counting is one way: inside a cable only the lower edge
-index samples, between cables only the lower cable index samples.
+radius, the hemispherical tip); rest edges lie between one and four radii. The
+gradient is exact. The tangent is the Gauss-Newton term ``w phi'' (c n)(c n)^T``
+of each segment pair with ``c = (1 - xi, xi, -(1 - t), -t)``, and every
+coefficient is non-negative. A vertex pair carries energy and gradient only;
+the cancellation it would need is done by the segments: a segment that clamps to
+a vertex whose vertex pair is counted drops its term, the outgoing segment only
+when the incoming one does not also clamp there. Where a segment clamps, its term
+equals the vertex term, so on a straight line and on the convex side the tangent
+is exactly that of the distance to the polyline; on the concave side, where no
+segment clamps, the subtracted vertex term is left out of the tangent. A clamp
+tie decided differently by two pairs only adds or drops one non-negative term.
+Callers pass positions relative to an anchor shared by all pairs of a sample
+(start-of-step relative position plus the exact increment) so FP32 keeps
+sub-millimetre gaps and the clamp decisions see the same inputs. Counting is one
+way: inside a cable only the lower edge index samples, between cables only the
+lower cable index samples.
 """
 
 from typing import Any
@@ -45,94 +52,127 @@ GAUSS_RULES = {
     2: ((0.5 - 0.5 / np.sqrt(3.0), 0.5 + 0.5 / np.sqrt(3.0)), (0.5, 0.5)),
     3: ((0.5 - 0.5 * np.sqrt(0.6), 0.5, 0.5 + 0.5 * np.sqrt(0.6)), (5.0 / 18.0, 8.0 / 18.0, 5.0 / 18.0)),
 }
+#: Longest supported rest edge over the contact radius: the 3-point worst-phase crossing onset is 0.156 r there.
+MAX_EDGE_OVER_RADIUS = 4.0
 #: Identity strings of the discrete rule; they enter the checkpoint identity once the method is wired.
 RULES = {
     "sampling": "gauss-legendre-per-edge, length weighted; free-end tip sample weighted by the radius",
+    "edge_length": "radius <= rest edge <= 4 x radius",
     "target": "clamped segments minus interior vertices (no double count at shared vertices)",
-    "tangent": "Gauss-Newton; vertex term only where an adjacent segment clamps to it",
+    "tangent": "Gauss-Newton per segment, non-negative; a segment clamped to a counted vertex drops its term "
+    "(outgoing only if incoming does not clamp); vertex pairs carry no tangent",
     "counting": "one way: lower edge index within a cable, lower cable index between cables",
 }
 
 
 @wp.func
+def cable_projection(p: Any, y0: Any, y1: Any):
+    """Projection of ``p`` on the segment ``y0 -> y1``: ``(dot(p - y0, e), dot(e, e))`` with ``e = y1 - y0``.
+
+    The segment clamps to ``y0`` when the first value is ``<= 0`` and to ``y1`` when it is ``>=`` the second.
+    Every clamp decision goes through this function so the pairs that share a vertex decide alike.
+    """
+    e = y1 - y0
+    return wp.dot(p - y0, e), wp.dot(e, e)
+
+
+@wp.func
 def cable_segment_response(
-    xa: Any, xb: Any, y0: Any, y1: Any, xi: Any, weight: Any, radius_sum: Any, stiffness: Any, smoothing: Any
+    xa: Any,
+    xb: Any,
+    previous: Any,
+    y0: Any,
+    y1: Any,
+    xi: Any,
+    weight: Any,
+    radius_sum: Any,
+    stiffness: Any,
+    smoothing: Any,
+    start_vertex: int,
+    end_vertex: int,
 ):
     """Segment pair: energy, the gradient on (xa, xb, y0, y1), Gauss-Newton coefficient, normal n and parameter t.
 
     The pair tangent is ``coefficient * outer(J, J)`` with ``J = (c0 n, c1 n, c2 n, c3 n)`` and
-    ``c = (1 - xi, xi, -(1 - t), -t)``. Status 0 is valid, 1 nonfinite, 2 a degenerate segment or a
-    sample on the segment.
+    ``c = (1 - xi, xi, -(1 - t), -t)``. ``start_vertex`` and ``end_vertex`` are nonzero when the
+    vertex pair of this sample at ``y0`` or ``y1`` is counted; the coefficient is then zero if the
+    segment clamps to that vertex (at ``y0`` only if the incoming segment ``previous -> y0`` does not
+    clamp to it as well). ``previous`` is read only for that decision. Status 0 is valid, 1 nonfinite,
+    2 a degenerate segment or a sample on the segment.
     """
     zero, one = type(xi)(0.0), type(xi)(1.0)
     vzero = type(xa)(zero)
     p = (one - xi) * xa + xi * xb
-    e = y1 - y0
-    length2 = wp.dot(e, e)
+    along, length2 = cable_projection(p, y0, y1)
+    if not (wp.isfinite(along) and wp.isfinite(length2)):
+        return int(1), zero, vzero, vzero, vzero, vzero, zero, vzero, zero
     if not (length2 > zero):
         return int(2), zero, vzero, vzero, vzero, vzero, zero, vzero, zero
-    t = wp.clamp(wp.dot(p - y0, e) / length2, zero, one)
-    y = (p - y0) - t * e
+    at_start = along <= zero
+    at_end = along >= length2
+    # A clamped sample measures from the end point itself, bit for bit as the vertex pair does.
+    t = along / length2
+    y = (p - y0) - t * (y1 - y0)
+    if at_start:
+        t = zero
+        y = p - y0
+    if at_end:
+        t = one
+        y = p - y1
     distance = wp.length(y)
+    if not wp.isfinite(distance):
+        return int(1), zero, vzero, vzero, vzero, vzero, zero, vzero, t
     if not (distance > zero):
         return int(2), zero, vzero, vzero, vzero, vzero, zero, vzero, t
     n = y / distance
     phi, dphi, ddphi = _penalty64(distance - radius_sum, stiffness, smoothing)
+    drop = at_end and end_vertex != 0
+    if at_start and start_vertex != 0:
+        incoming_along, incoming_length2 = cable_projection(p, previous, y0)
+        drop = not (incoming_along >= incoming_length2)
     # d(distance)/dx = c n, and the overlap u = R - distance decreases with distance.
     load = -weight * dphi
     energy = weight * phi
-    coefficient = weight * ddphi
+    coefficient = wp.where(drop, zero, weight * ddphi)
     ga = load * (one - xi) * n
     gb = load * xi * n
     g0 = -load * (one - t) * n
     g1 = -load * t * n
     status = int(0)
-    if not wp.isfinite(energy) or not wp.isfinite(coefficient) or not wp.isfinite(load):
+    if not wp.isfinite(energy) or not wp.isfinite(ddphi) or not wp.isfinite(load):
         status = int(1)
     return status, energy, ga, gb, g0, g1, coefficient, n, t
 
 
 @wp.func
 def cable_vertex_response(
-    xa: Any,
-    xb: Any,
-    previous: Any,
-    vertex: Any,
-    following: Any,
-    xi: Any,
-    weight: Any,
-    radius_sum: Any,
-    stiffness: Any,
-    smoothing: Any,
+    xa: Any, xb: Any, vertex: Any, xi: Any, weight: Any, radius_sum: Any, stiffness: Any, smoothing: Any
 ):
-    """Vertex pair (the subtracted double count): energy <= 0, the gradient on (xa, xb, vertex), GN coefficient, n.
+    """Vertex pair (the subtracted double count): energy <= 0, the gradient on (xa, xb, vertex) and n.
 
-    The coefficient is the negative Gauss-Newton weight with ``c = (1 - xi, xi, -1)`` when the incoming
-    (previous -> vertex) or outgoing (vertex -> following) segment clamps to the vertex for this sample,
-    and zero otherwise; ``previous`` and ``following`` only decide that. Status as for a segment pair.
+    It has no tangent term; the segments that clamp to the vertex drop theirs instead (see
+    ``cable_segment_response``). Status as for a segment pair.
     """
     zero, one = type(xi)(0.0), type(xi)(1.0)
     vzero = type(xa)(zero)
     p = (one - xi) * xa + xi * xb
     y = p - vertex
     distance = wp.length(y)
+    if not wp.isfinite(distance):
+        return int(1), zero, vzero, vzero, vzero, vzero
     if not (distance > zero):
-        return int(2), zero, vzero, vzero, vzero, zero, vzero
+        return int(2), zero, vzero, vzero, vzero, vzero
     n = y / distance
-    phi, dphi, ddphi = _penalty64(distance - radius_sum, stiffness, smoothing)
+    phi, dphi, _ddphi = _penalty64(distance - radius_sum, stiffness, smoothing)
     load = weight * dphi
-    incoming = vertex - previous
-    outgoing = following - vertex
-    clamps = wp.dot(p - previous, incoming) >= wp.dot(incoming, incoming) or wp.dot(y, outgoing) <= zero
-    coefficient = wp.where(clamps, -weight * ddphi, zero)
     energy = -weight * phi
     ga = load * (one - xi) * n
     gb = load * xi * n
     gv = -load * n
     status = int(0)
-    if not wp.isfinite(energy) or not wp.isfinite(ddphi) or not wp.isfinite(load):
+    if not wp.isfinite(energy) or not wp.isfinite(load):
         status = int(1)
-    return status, energy, ga, gb, gv, coefficient, n
+    return status, energy, ga, gb, gv, n
 
 
 @wp.func
@@ -183,6 +223,12 @@ def build_tables(rest_positions, vertex_ranges, radii, *, samples_per_edge=3):
             raise ValueError(f"Cable {owner} has a zero-length rest edge")
         if r > lengths.min():
             raise ValueError(f"Cable {owner} radius exceeds its shortest rest edge, which contact does not support")
+        longest = int(np.argmax(lengths))
+        if lengths[longest] > MAX_EDGE_OVER_RADIUS * r:
+            raise ValueError(
+                f"Cable {owner} rest edge {longest} is {lengths[longest]:.6g} m, longer than "
+                f"{MAX_EDGE_OVER_RADIUS:g} x its contact radius {r:.6g} m; refine the cable"
+            )
         arc = np.r_[0.0, np.cumsum(lengths)]
         for k in range(len(lengths)):
             first.append(a + k)

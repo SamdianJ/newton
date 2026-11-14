@@ -31,6 +31,7 @@ L = 0.007  # edge length [m]
 def _segments(
     xa: wp.array[Any],
     xb: wp.array[Any],
+    previous: wp.array[Any],
     y0: wp.array[Any],
     y1: wp.array[Any],
     xi: wp.array[Any],
@@ -38,6 +39,8 @@ def _segments(
     radius_sum: wp.array[Any],
     stiffness: Any,
     smoothing: Any,
+    start: wp.array[int],
+    end: wp.array[int],
     status: wp.array[int],
     energy: wp.array[Any],
     ga: wp.array[Any],
@@ -50,7 +53,7 @@ def _segments(
 ):
     i = wp.tid()
     s, e, a, b, c, d, k, n, u = cable_segment_response(
-        xa[i], xb[i], y0[i], y1[i], xi[i], weight[i], radius_sum[i], stiffness, smoothing
+        xa[i], xb[i], previous[i], y0[i], y1[i], xi[i], weight[i], radius_sum[i], stiffness, smoothing, start[i], end[i]
     )
     status[i] = s
     energy[i] = e
@@ -67,9 +70,7 @@ def _segments(
 def _vertices(
     xa: wp.array[Any],
     xb: wp.array[Any],
-    previous: wp.array[Any],
     vertex: wp.array[Any],
-    following: wp.array[Any],
     xi: wp.array[Any],
     weight: wp.array[Any],
     radius_sum: wp.array[Any],
@@ -80,19 +81,17 @@ def _vertices(
     ga: wp.array[Any],
     gb: wp.array[Any],
     gv: wp.array[Any],
-    coefficient: wp.array[Any],
     normal: wp.array[Any],
 ):
     i = wp.tid()
-    s, e, a, b, c, k, n = cable_vertex_response(
-        xa[i], xb[i], previous[i], vertex[i], following[i], xi[i], weight[i], radius_sum[i], stiffness, smoothing
+    s, e, a, b, c, n = cable_vertex_response(
+        xa[i], xb[i], vertex[i], xi[i], weight[i], radius_sum[i], stiffness, smoothing
     )
     status[i] = s
     energy[i] = e
     ga[i] = a
     gb[i] = b
     gv[i] = c
-    coefficient[i] = k
     normal[i] = n
 
 
@@ -127,7 +126,7 @@ def _allowed(
     )
 
 
-def _launch(kernel, device, dtype, vector_keys, scalar_keys, pairs, outputs):
+def _launch(kernel, device, dtype, vector_keys, scalar_keys, int_keys, pairs, outputs):
     vec = wp.vec3d if dtype == wp.float64 else wp.vec3
     count = len(pairs["xi"])
     vectors = [wp.array(np.asarray(pairs[k]), dtype=vec, device=device) for k in vector_keys]
@@ -135,15 +134,23 @@ def _launch(kernel, device, dtype, vector_keys, scalar_keys, pairs, outputs):
         wp.array(np.broadcast_to(np.asarray(pairs[k], dtype=float), (count,)).copy(), dtype=dtype, device=device)
         for k in scalar_keys
     ]
+    ints = [wp.array(np.asarray(pairs[k], dtype=np.int32), dtype=int, device=device) for k in int_keys]
     status = wp.zeros(count, dtype=int, device=device)
     arrays = [wp.zeros(count, dtype=vec if kind == "v" else dtype, device=device) for kind in outputs]
-    wp.launch(kernel, count, [*vectors, *scalars, dtype(K), dtype(S), status, *arrays], device=device)
+    wp.launch(kernel, count, [*vectors, *scalars, dtype(K), dtype(S), *ints, status, *arrays], device=device)
     return status.numpy(), [a.numpy().astype(float) for a in arrays]
 
 
 def evaluate_segments(device, dtype, pairs):
     status, (energy, ga, gb, g0, g1, coefficient, normal, t) = _launch(
-        _segments, device, dtype, ("xa", "xb", "y0", "y1"), ("xi", "weight", "radius_sum"), pairs, "svvvvsvs"
+        _segments,
+        device,
+        dtype,
+        ("xa", "xb", "previous", "y0", "y1"),
+        ("xi", "weight", "radius_sum"),
+        ("start", "end"),
+        pairs,
+        "svvvvsvs",
     )
     gradient = np.stack([ga, gb, g0, g1], axis=1)
     return {
@@ -157,21 +164,15 @@ def evaluate_segments(device, dtype, pairs):
 
 
 def evaluate_vertices(device, dtype, pairs):
-    status, (energy, ga, gb, gv, coefficient, normal) = _launch(
-        _vertices,
-        device,
-        dtype,
-        ("xa", "xb", "previous", "vertex", "following"),
-        ("xi", "weight", "radius_sum"),
-        pairs,
-        "svvvsv",
+    status, (energy, ga, gb, gv, normal) = _launch(
+        _vertices, device, dtype, ("xa", "xb", "vertex"), ("xi", "weight", "radius_sum"), (), pairs, "svvvv"
     )
     gradient = np.stack([ga, gb, gv], axis=1)
-    return {"status": status, "energy": energy, "gradient": gradient, "coefficient": coefficient, "normal": normal}
+    return {"status": status, "energy": energy, "gradient": gradient, "normal": normal}
 
 
 def random_pairs(count, seed, *, offset=0.0):
-    """Near-touching sample edges and a target polyline piece (previous, y0, y1 / vertex, following)."""
+    """Near-touching sample edges, a target polyline piece (previous, y0, y1; vertex y0) and random vertex flags."""
     rng = np.random.default_rng(seed)
     xa = rng.normal(scale=0.002, size=(count, 3))
     xb = xa + np.array([L, 0.0, 0.0]) + rng.normal(scale=0.002, size=(count, 3))
@@ -186,23 +187,31 @@ def random_pairs(count, seed, *, offset=0.0):
         "y1": y1,
         "previous": previous,
         "vertex": y0,
-        "following": y1,
         "xi": rng.choice(np.asarray(GAUSS_RULES[3][0]), size=count),
         "weight": rng.uniform(0.001, 0.003, size=count),
         "radius_sum": np.full(count, 2 * R),
+        "start": rng.integers(0, 2, size=count),
+        "end": rng.integers(0, 2, size=count),
     }
-    for key in ("xa", "xb", "y0", "y1", "previous", "vertex", "following"):
+    for key in ("xa", "xb", "y0", "y1", "previous", "vertex"):
         pairs[key] = pairs[key] + shift
     return pairs
 
 
 def segment_reference(pairs):
     keys = ("xa", "xb", "y0", "y1", "xi", "weight", "radius_sum")
-    return oracle.segment_response(*(pairs[k] for k in keys), K, S)
+    return oracle.segment_response(
+        *(pairs[k] for k in keys),
+        K,
+        S,
+        previous=pairs["previous"],
+        start_vertex=pairs["start"],
+        end_vertex=pairs["end"],
+    )
 
 
 def vertex_reference(pairs):
-    keys = ("xa", "xb", "previous", "vertex", "following", "xi", "weight", "radius_sum")
+    keys = ("xa", "xb", "vertex", "xi", "weight", "radius_sum")
     return oracle.vertex_response(*(pairs[k] for k in keys), K, S)
 
 
@@ -210,14 +219,26 @@ def polyline_response(point, polyline, weight=0.002):
     """Energy, force on a point sample and assembled 3x3 point tangent against an open polyline."""
     xa, xb = point, point
     energy, force, tangent = 0.0, np.zeros(3), np.zeros((3, 3))
-    for k in range(len(polyline) - 1):
-        e, g, c, d, _ = oracle.segment_response(xa, xb, polyline[k], polyline[k + 1], 0.0, weight, 2 * R, K, S)
-        energy, force, tangent = energy + e, force - g[0], tangent + c * np.outer(d[0], d[0])
-    for k in range(1, len(polyline) - 1):
-        e, g, c, d = oracle.vertex_response(
-            xa, xb, polyline[k - 1], polyline[k], polyline[k + 1], 0.0, weight, 2 * R, K, S
+    last = len(polyline) - 2
+    for k in range(last + 1):
+        e, g, c, d, _ = oracle.segment_response(
+            xa,
+            xb,
+            polyline[k],
+            polyline[k + 1],
+            0.0,
+            weight,
+            2 * R,
+            K,
+            S,
+            previous=polyline[max(k - 1, 0)],
+            start_vertex=k > 0,
+            end_vertex=k < last,
         )
         energy, force, tangent = energy + e, force - g[0], tangent + c * np.outer(d[0], d[0])
+    for k in range(1, len(polyline) - 1):
+        e, g, _ = oracle.vertex_response(xa, xb, polyline[k], 0.0, weight, 2 * R, K, S)
+        energy, force = energy + e, force - g[0]
     return energy, force, tangent
 
 
@@ -226,13 +247,24 @@ def bent_polyline(degrees):
     return [np.array([-L, 0.0, 0.0]), np.zeros(3), L * np.array([np.cos(bend), 0.0, -np.sin(bend)])], bend
 
 
-def true_distance(point, polyline):
-    best = np.inf
+def nearest_offset(point, polyline):
+    best = None
     for k in range(len(polyline) - 1):
         a, b = polyline[k], polyline[k + 1]
         t = np.clip(np.dot(point - a, b - a) / np.dot(b - a, b - a), 0.0, 1.0)
-        best = min(best, np.linalg.norm(point - a - t * (b - a)))
+        offset = point - a - t * (b - a)
+        if best is None or np.linalg.norm(offset) < np.linalg.norm(best):
+            best = offset
     return best
+
+
+def true_distance(point, polyline):
+    return np.linalg.norm(nearest_offset(point, polyline))
+
+
+def nearest_normal(point, polyline):
+    offset = nearest_offset(point, polyline)
+    return offset / np.linalg.norm(offset)
 
 
 def bent_points(degrees, offset, overlap):
@@ -290,28 +322,131 @@ def hairpin_and_helix():
 
 
 def test_matches_fp64_reference(test, device):
-    """Warp FP64 segment and vertex responses equal the NumPy reference."""
+    """Warp FP64 segment and vertex responses equal the NumPy reference, including the dropped tangent terms."""
     pairs = random_pairs(800, 11)
     warp = evaluate_segments(device, wp.float64, pairs)
     energy, gradient, coefficient, direction, t = segment_reference(pairs)
     test.assertTrue(np.all(warp["status"] == 0))
     test.assertGreater(np.count_nonzero(energy > 0), 100)
+    clamped = (energy > 0) & ((t == 0.0) | (t == 1.0))
+    test.assertGreater(np.count_nonzero(clamped & (coefficient == 0)), 10)
+    test.assertGreater(np.count_nonzero(clamped & (coefficient > 0)), 10)
+    test.assertTrue(np.all(coefficient >= 0))
     np.testing.assert_allclose(warp["energy"], energy, rtol=1e-12, atol=1e-18)
     np.testing.assert_allclose(warp["gradient"], gradient, rtol=0, atol=1e-11 * np.max(np.abs(gradient)))
+    np.testing.assert_array_equal(warp["coefficient"] == 0, coefficient == 0)
     np.testing.assert_allclose(warp["coefficient"], coefficient, rtol=1e-12, atol=1e-12 * np.max(coefficient))
     np.testing.assert_allclose(warp["t"], t, atol=1e-13)
-    engaged = coefficient > 0
+    engaged = energy > 0
     c = np.stack([1 - pairs["xi"], pairs["xi"], -(1 - warp["t"]), -warp["t"]], axis=-1)
     np.testing.assert_allclose((c[..., None] * warp["normal"][:, None, :])[engaged], direction[engaged], atol=1e-12)
     vwarp = evaluate_vertices(device, wp.float64, pairs)
-    venergy, vgradient, vcoefficient, _ = vertex_reference(pairs)
+    venergy, vgradient, vdirection = vertex_reference(pairs)
     test.assertTrue(np.all(vwarp["status"] == 0))
     test.assertGreater(np.count_nonzero(venergy < 0), 50)
-    test.assertGreater(np.count_nonzero(vcoefficient < 0), 10)
-    test.assertGreater(np.count_nonzero((vcoefficient == 0) & (venergy < 0)), 10)
     np.testing.assert_allclose(vwarp["energy"], venergy, rtol=1e-12, atol=1e-18)
     np.testing.assert_allclose(vwarp["gradient"], vgradient, rtol=0, atol=1e-11 * np.max(np.abs(vgradient)))
-    np.testing.assert_allclose(vwarp["coefficient"], vcoefficient, rtol=1e-12, atol=1e-12 * np.max(-vcoefficient))
+    np.testing.assert_allclose(vwarp["normal"][venergy < 0], -vdirection[venergy < 0, 2], atol=1e-12)
+
+
+def test_clamp_ties_keep_one_tangent_term(test, device):
+    """Around a shared vertex of a straight or convex polyline exactly one segment keeps its term, ties included."""
+    overlap = 0.0004  # deeper than the smoothing: every kept coefficient is w k
+    height = 2 * R - overlap
+    for dtype in (wp.float32, wp.float64):
+        for degrees in (0.0, 30.0):
+            bend = np.radians(degrees)
+            previous, vertex = np.array([-L, 0.0, 0.0]), np.zeros(3)
+            following = L * np.array([np.cos(bend), 0.0, -np.sin(bend)])
+            # The incoming end plane (x = 0, an exact tie), just either side of it, and the convex wedge.
+            points = [np.array([x, 0.0, height]) for x in (-1e-4 * L, 0.0, 1e-4 * L)]
+            points += [height * np.array([np.sin(a), 0.0, np.cos(a)]) for a in np.linspace(0.0, bend, 5)[1:]]
+            count = len(points)
+            rows = {
+                "xa": points,
+                "xb": points,
+                "xi": np.full(count, 0.5),
+                "weight": np.full(count, 0.002),
+                "radius_sum": np.full(count, 2 * R),
+            }
+            incoming = {**rows, "previous": [previous] * count, "y0": [previous] * count, "y1": [vertex] * count}
+            outgoing = {**rows, "previous": [previous] * count, "y0": [vertex] * count, "y1": [following] * count}
+            incoming.update(start=np.zeros(count), end=np.ones(count))
+            outgoing.update(start=np.ones(count), end=np.zeros(count))
+            first = evaluate_segments(device, dtype, incoming)
+            second = evaluate_segments(device, dtype, outgoing)
+            corner = evaluate_vertices(device, dtype, {**rows, "vertex": [vertex] * count})
+            kept = (first["coefficient"] > 0).astype(int) + (second["coefficient"] > 0).astype(int)
+            total = first["coefficient"] + second["coefficient"]
+            energy = first["energy"] + second["energy"] + corner["energy"]
+            gaps = [true_distance(p, [previous, vertex, following]) - 2 * R for p in points]
+            expected, _, _ = oracle.penalty(np.asarray(gaps), K, S)
+            tolerance = 1e-5 if dtype == wp.float32 else 1e-12
+            with test.subTest(dtype=dtype.__name__, degrees=degrees):
+                test.assertTrue(np.all(first["status"] == 0) and np.all(second["status"] == 0))
+                np.testing.assert_array_equal(kept, 1)
+                np.testing.assert_allclose(total, 0.002 * K, rtol=tolerance)
+                np.testing.assert_allclose(energy, 0.002 * expected, rtol=100 * tolerance)
+                # At the exact tie the clamped incoming segment and the vertex measure the same distance.
+                test.assertEqual(first["t"][1], 1.0)
+                test.assertEqual(first["energy"][1] + corner["energy"][1], 0.0)
+
+
+def configuration_pairs(positions, rest, ranges):
+    """Every allowed segment pair of a configuration as response inputs, with its four vertex indices."""
+    segments = oracle.segment_table(rest, ranges, [R] * len(ranges))
+    samples = oracle.sample_table(segments, 3)
+    pairs = oracle.all_pairs(samples, segments, index_span=3, arc_factor=np.pi / 2)
+    start, end = oracle.vertex_flags(segments, pairs)
+    sample, target = pairs["segment"]
+    edge = samples["edge"][sample]
+    a, b = segments["first"][edge], segments["first"][target]
+    inputs = {
+        "xa": positions[a],
+        "xb": positions[a + 1],
+        "previous": positions[np.where(start, b - 1, b)],
+        "y0": positions[b],
+        "y1": positions[b + 1],
+        "xi": samples["xi"][sample],
+        "weight": samples["weight"][sample],
+        "radius_sum": segments["radius"][edge] + segments["radius"][target],
+        "start": start,
+        "end": end,
+    }
+    return inputs, np.stack([a, a + 1, b, b + 1], axis=1), (segments, samples, pairs)
+
+
+def assemble(size, indices, coefficient, direction):
+    """Dense tangent sum_k coefficient_k J_k^T J_k over ``size`` vertices; J_k places direction rows at indices."""
+    active = coefficient != 0
+    jacobian = np.zeros((np.count_nonzero(active), 3 * size))
+    rows = np.arange(len(jacobian))
+    for slot in range(indices.shape[1]):
+        for axis in range(3):
+            np.add.at(jacobian, (rows, 3 * indices[active, slot] + axis), direction[active, slot, axis])
+    return jacobian.T @ (coefficient[active, None] * jacobian)
+
+
+def pressed_configuration():
+    rest, ranges = hairpin_and_helix()
+    return rest + np.random.default_rng(16).normal(scale=0.0005, size=rest.shape), rest, ranges
+
+
+def test_assembled_tangent_matches_reference(test, device):
+    """Over a pressed hairpin and helix, the tangent assembled from Warp equals the reference one."""
+    positions, rest, ranges = pressed_configuration()
+    inputs, indices, tables = configuration_pairs(positions, rest, ranges)
+    _, _, results = oracle.evaluate(positions, *tables, stiffness=K, smoothing=S)
+    _, _, coefficient, direction, _ = results["segment"]
+    expected = assemble(len(positions), indices, coefficient, direction)
+    test.assertGreater(np.count_nonzero(coefficient), 50)
+    for dtype, tolerance in ((wp.float64, 1e-10), (wp.float32, 1e-3)):
+        warp = evaluate_segments(device, dtype, inputs)
+        c = np.stack([1 - inputs["xi"], inputs["xi"], -(1 - warp["t"]), -warp["t"]], axis=-1)
+        tangent = assemble(len(positions), indices, warp["coefficient"], c[..., None] * warp["normal"][:, None, :])
+        with test.subTest(dtype=dtype.__name__):
+            test.assertTrue(np.all(warp["status"] == 0))
+            np.testing.assert_allclose(tangent, expected, rtol=0, atol=tolerance * np.max(np.abs(expected)))
 
 
 def test_fp32_needs_anchor_relative_inputs(test, device):
@@ -444,15 +579,27 @@ class TestCableContactGeometry(unittest.TestCase):
             np.testing.assert_allclose(-gradient[interior, 2], -load[0] * L, rtol=1e-10)
             np.testing.assert_allclose(gradient[interior, :2], 0.0, atol=1e-12 * load[0] * L)
 
-    def test_tip_sample_adds_one_radius_of_side_load(self):
-        """Side by side, the sampling strand's free end adds load over one radius (its tip weight) beyond its end."""
+    def test_free_ends_add_at_most_one_radius_of_side_load(self):
+        """Side by side, each free end of the short strand adds load over one radius if it samples, less if it is hit."""
         count, overlap = 25, 0.0004
         line = np.column_stack([L * np.arange(count), np.zeros(count), np.zeros(count)])
-        upper = line[:12] + np.array([5 * L, 0.0, 2 * R - overlap])  # ends at x = 16 L, over the lower strand
-        _, gradient, _ = strand_energy(np.vstack([upper, line]), [(0, 12), (12, 12 + count)])
         _, load, _ = oracle.penalty(np.array([-overlap]), K, S)
-        # Total load on the lower strand = load x (sampled length + both tip weights).
-        self.assertAlmostEqual(gradient[12:, 2].sum() / (load[0] * (11 * L + 2 * R)), 1.0, delta=1e-10)
+        for phase in (0.0, 0.5 * L, 0.21 * L):
+            upper = line[:12] + np.array([5 * L + phase, 0.0, 2 * R - overlap])  # 11 L long, over the lower strand
+            for upper_samples in (True, False):
+                rest = np.vstack([upper, line] if upper_samples else [line, upper])
+                ranges = [(0, 12), (12, 12 + count)] if upper_samples else [(0, count), (count, count + 12)]
+                lower = slice(12, 12 + count) if upper_samples else slice(0, count)
+                _, gradient, _ = strand_energy(rest, ranges)
+                extra = gradient[lower, 2].sum() / load[0] - 11 * L
+                with self.subTest(phase=phase, upper_samples=upper_samples):
+                    if upper_samples:
+                        # Its two tip samples, weighted by the radius each.
+                        self.assertAlmostEqual(extra / (2 * R), 1.0, delta=1e-10)
+                    else:
+                        # The lower strand's Gauss samples meet the upper strand's end caps (PR-01.md: 0.80-1.56 r).
+                        self.assertGreater(extra, 0.0)
+                        self.assertLess(extra, 2 * R)
 
     def test_shared_vertices_are_counted_once(self):
         """Straight and convex: exactly the load of the distance to the polyline; concave: about one to two."""
@@ -464,15 +611,17 @@ class TestCableContactGeometry(unittest.TestCase):
                     np.testing.assert_allclose(convex, 1.0, atol=1e-6)
                     self.assertGreater(side.min(), 1.0 - 1e-6)
                     self.assertLess(side.max(), 2.0)
-                    if degrees <= 45.0:
-                        # The energy is never below that of the nearest segment; the force magnitude can dip
-                        # slightly where the second segment's pull is not parallel to the first (PR-01.md).
-                        concave = load_ratios(degrees, "concave", overlap)
-                        self.assertGreater(concave.min(), 0.98)
-                        self.assertLess(concave.max(), 2.0)
+                    # The energy is never below that of the nearest segment; the force magnitude dips where the
+                    # second segment pushes at an angle, more for sharper bends and deeper overlap (PR-01.md).
+                    concave = load_ratios(degrees, "concave", overlap)
+                    self.assertGreater(concave.min(), 0.98 if degrees <= 45.0 else 0.9)
+                    self.assertLess(concave.max(), 2.0)
 
-    def test_assembled_tangent_is_psd_and_exact_where_segments_clamp(self):
-        """Vertex terms cancel a clamped neighbour exactly: a straight polyline has the tangent of one long segment."""
+    def test_point_tangent_is_exact_where_segments_clamp(self):
+        """A straight polyline has the tangent of one long segment; on the convex side, that of the nearest point.
+
+        Up to 120 degrees: past that, convex-side points of one leg come within reach of the other leg's interior.
+        """
         straight = [np.array([-L, 0.0, 0.0]), np.zeros(3), np.array([L, 0.0, 0.0])]
         long = [straight[0], straight[2]]
         for s in np.linspace(-0.8, 0.8, 33) * L:
@@ -481,13 +630,52 @@ class TestCableContactGeometry(unittest.TestCase):
                 np.testing.assert_allclose(
                     polyline_response(point, straight)[2], polyline_response(point, long)[2], atol=1e-9 * K
                 )
-        rng = np.random.default_rng(19)
-        for degrees in (20.0, 45.0, 90.0, 150.0):
-            polyline, _ = bent_polyline(degrees)
-            for point in rng.normal(scale=0.003, size=(300, 3)):
-                eigen = np.linalg.eigvalsh(polyline_response(point, polyline)[2])
-                with self.subTest(degrees=degrees):
-                    self.assertGreater(eigen.min(), -1e-9 * K)
+        for degrees in (20.0, 45.0, 90.0, 120.0):
+            for overlap in (0.00005, 0.0005):  # inside the smoothing band and deeper
+                polyline, points = bent_points(degrees, "convex", overlap)
+                for point in points:
+                    distance = true_distance(point, polyline)
+                    _, _, stiffness = oracle.penalty(np.array([distance - 2 * R]), K, S)
+                    normal = nearest_normal(point, polyline)
+                    with self.subTest(degrees=degrees, overlap=overlap):
+                        np.testing.assert_allclose(
+                            polyline_response(point, polyline)[2],
+                            0.002 * stiffness[0] * np.outer(normal, normal),
+                            atol=1e-9 * K,
+                        )
+
+    def test_full_tangent_is_psd_and_equals_the_vertex_cancellation(self):
+        """Over a pressed hairpin and helix all coefficients are non-negative, the full tangent is PSD and equals
+        segment terms minus the vertex terms where an adjacent segment clamps."""
+        positions, rest, ranges = pressed_configuration()
+        inputs, indices, tables = configuration_pairs(positions, rest, ranges)
+        segments, samples, pairs = tables
+        _, _, results = oracle.evaluate(positions, *tables, stiffness=K, smoothing=S)
+        energy, _, coefficient, direction, _ = results["segment"]
+        self.assertTrue(np.all(coefficient >= 0))
+        self.assertGreater(np.count_nonzero((coefficient == 0) & (energy > 0)), 10)
+        tangent = assemble(len(positions), indices, coefficient, direction)
+        # Cancellation form: keep every segment term and subtract the vertex term where a neighbour clamps.
+        _, _, full, _, _ = oracle.segment_response(
+            *(inputs[k] for k in ("xa", "xb", "y0", "y1", "xi", "weight", "radius_sum")), K, S
+        )
+        cancelled = assemble(len(positions), indices, full, direction)
+        vertices = oracle.vertex_table(segments)
+        sample, row = pairs["vertex"]
+        edge = samples["edge"][sample]
+        a, v = segments["first"][edge], vertices["vertex"][row]
+        p = (1 - samples["xi"][sample])[:, None] * positions[a] + samples["xi"][sample][:, None] * positions[a + 1]
+        incoming, outgoing = positions[v] - positions[v - 1], positions[v + 1] - positions[v]
+        clamps = (np.sum((p - positions[v - 1]) * incoming, axis=1) >= np.sum(incoming * incoming, axis=1)) | (
+            np.sum((p - positions[v]) * outgoing, axis=1) <= 0
+        )
+        _, _, ddphi = oracle.penalty(np.linalg.norm(p - positions[v], axis=1) - 2 * R, K, S)
+        _, _, vdirection = results["vertex"]
+        weight = np.where(clamps, -samples["weight"][sample] * ddphi, 0.0)
+        cancelled += assemble(len(positions), np.stack([a, a + 1, v], axis=1), weight, vdirection)
+        scale = np.max(np.abs(tangent))
+        np.testing.assert_allclose(tangent, cancelled, rtol=0, atol=1e-10 * scale)
+        self.assertGreater(np.linalg.eigvalsh(tangent).min(), -1e-10 * scale)
 
     def test_worst_phase_crossing_onset_matches_the_sampling_table(self):
         """A perpendicular crossing at the worst phase first loads at 2r - sqrt(4r^2 - delta^2)."""
@@ -574,6 +762,7 @@ class TestCableContactGeometry(unittest.TestCase):
         rest = np.column_stack([L * np.arange(5), np.zeros(5), np.zeros(5)])
         for radius, pattern in (
             (0.008, "radius exceeds its shortest rest edge"),
+            (0.0017, r"Cable 0 rest edge \d is 0.007 m, longer than 4 x its contact radius 0.0017 m"),
             (float("nan"), "finite and positive"),
             (0.0, "finite and positive"),
         ):
@@ -586,21 +775,34 @@ class TestCableContactGeometry(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "zero-length rest edge"):
             build_tables(flat, [(0, 5)], [R])
 
-    def test_sample_on_the_target_is_reported(self):
-        pairs = {
+    def test_degenerate_and_nonfinite_inputs_are_reported(self):
+        """A sample on the target or a zero-length target is status 2; a NaN or infinite input is status 1."""
+        on_target = {
             "xa": [[0.0, 0.0, 0.0]],
             "xb": [[L, 0.0, 0.0]],
+            "previous": [[0.0035, -0.0105, 0.0]],
             "y0": [[0.0035, -0.0035, 0.0]],
             "y1": [[0.0035, 0.0035, 0.0]],
-            "previous": [[0.0035, -0.0035, 0.0]],
             "vertex": [[0.0035, 0.0, 0.0]],
-            "following": [[0.0035, 0.0035, 0.0]],
             "xi": [0.5],
             "weight": [0.002],
             "radius_sum": [2 * R],
+            "start": [1],
+            "end": [1],
         }
-        self.assertEqual(int(evaluate_segments("cpu", wp.float64, pairs)["status"][0]), 2)
-        self.assertEqual(int(evaluate_vertices("cpu", wp.float64, pairs)["status"][0]), 2)
+        self.assertEqual(int(evaluate_segments("cpu", wp.float64, on_target)["status"][0]), 2)
+        self.assertEqual(int(evaluate_vertices("cpu", wp.float64, on_target)["status"][0]), 2)
+        flat = {**on_target, "y1": on_target["y0"]}
+        self.assertEqual(int(evaluate_segments("cpu", wp.float64, flat)["status"][0]), 2)
+        for value in (np.nan, np.inf):
+            for key in ("xa", "y0", "y1", "vertex"):
+                broken = {**on_target, key: [[value, 0.0, 0.0]]}
+                with self.subTest(value=value, key=key):
+                    for dtype in (wp.float32, wp.float64):
+                        if key != "vertex":
+                            self.assertEqual(int(evaluate_segments("cpu", dtype, broken)["status"][0]), 1)
+                        if key not in ("y0", "y1"):
+                            self.assertEqual(int(evaluate_vertices("cpu", dtype, broken)["status"][0]), 1)
 
     def test_culled_contact_energy_equals_the_full_sum(self):
         """The offline energy term culls far pairs without changing the total, which stays non-negative."""
@@ -614,7 +816,13 @@ class TestCableContactGeometry(unittest.TestCase):
 
 
 devices = get_test_devices()
-for _test in (test_matches_fp64_reference, test_fp32_needs_anchor_relative_inputs, test_exclusion_matches_reference):
+for _test in (
+    test_matches_fp64_reference,
+    test_clamp_ties_keep_one_tangent_term,
+    test_assembled_tangent_matches_reference,
+    test_fp32_needs_anchor_relative_inputs,
+    test_exclusion_matches_reference,
+):
     add_function_test(TestCableContactGeometry, _test.__name__, _test, devices=devices)
 
 
