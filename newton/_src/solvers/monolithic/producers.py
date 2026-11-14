@@ -45,6 +45,8 @@ class Producer(Protocol):
 
     def coordinates(self, solver: Any, state: Any, out: Any) -> None: ...
 
+    def graph_buffers(self, solver: Any) -> tuple: ...
+
     def assemble(self, solver: Any, assembly: Any, dt: float) -> None: ...
 
     def scale(self, solver: Any, diagonal: Any, coordinate: np.ndarray) -> None: ...
@@ -299,6 +301,10 @@ class _Producer:
 
     def scale(self, solver, diagonal, coordinate):
         """Write coordinate-policy unit scales for this producer's rows."""
+
+    def graph_buffers(self, solver):
+        """Interaction storage read by ``magnitude`` and ``coordinates``; it joins the problem graph keys."""
+        return ()
 
 
 class ArticulationProducer(_Producer):
@@ -1005,6 +1011,9 @@ class ContactProducer(_Producer):
             device=solver.model.device,
         )
 
+    def graph_buffers(self, solver):
+        return solver._contact.buffers()
+
     def assemble(self, solver, assembly, dt):
         solver._contact.assemble_tangent(assembly)
 
@@ -1045,9 +1054,10 @@ class _ClothContactProducer(_Producer):
     def evaluate(self, solver, state, dt, residual, *, build_tangent):
         contact = self.contact
         contact.evaluate(solver._displacement(state), dt)
-        if int(contact.pool.candidates.overflow.numpy()[0]) or int(contact.pool.records.dropped.numpy()[0]):
+        overflow, dropped, flags = (int(value) for value in contact.pool.status.numpy())
+        if overflow or dropped:
             raise _StepFailure(solver.Status.CONTACT_OVERFLOW, "Incomplete cloth contact evaluation")
-        if int(contact.pool.records.flags.numpy()[0]):
+        if flags:
             raise _StepFailure(solver.Status.NONFINITE, "Invalid cloth contact records")
         wp.launch(_add_values, residual.size, [contact.pool.residual.result, residual], device=solver.model.device)
         reactions = self._reactions.bind(self._reaction_views())
@@ -1079,6 +1089,9 @@ class _ClothContactProducer(_Producer):
             [records.count, records.support_offsets, records.factor_columns, records.rounding, out],
             device=solver.model.device,
         )
+
+    def graph_buffers(self, solver):
+        return self.contact.pool.buffers()
 
     def assemble(self, solver, assembly, dt):
         self.contact.assemble(assembly)

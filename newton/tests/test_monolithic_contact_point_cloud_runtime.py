@@ -6,6 +6,7 @@
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import numpy as np
 import warp as wp
@@ -146,12 +147,94 @@ def test_candidate_overflow_rollback(test, device, *, precision, graph):
                 np.testing.assert_array_equal(snapshot(state)[key], value, err_msg=key)
 
 
+# Point-cloud pool records read by problem_coordinates; problem_summary reads pool.magnitude.
+_POOL_RECORDS = ("count", "support_offsets", "factor_columns", "rounding")
+
+
+def test_problem_graph_keys_bind_point_cloud_storage(test, device):
+    """problem_summary and problem_coordinates pass the point-cloud pool storage they read to the graph key."""
+    _, solver = _scene(device=device)
+    dt = 0.001
+    state = solver.create_state(dt=dt)
+    seen = {}
+    run = solver._graphs.run
+
+    def record(name, parameters, buffers, execute, **kwargs):
+        seen.setdefault(name, set()).update(buffer.ptr for buffer in buffers if buffer is not None)
+        return run(name, parameters, buffers, execute, **kwargs)
+
+    with mock.patch.object(solver._graphs, "run", record):
+        solver.step(state, state, solver.create_control(), dt=dt)
+    test.assertFalse(solver.last_stats.rolled_back, solver.last_stats)
+    pool = solver._cloth_contact.pool
+    named = {"magnitude": pool.magnitude, **{name: getattr(pool.records, name) for name in _POOL_RECORDS}}
+    test.assertTrue(all(array.size for array in named.values()))
+    for segment in ("problem_summary", "problem_coordinates"):
+        with test.subTest(segment=segment):
+            missing = sorted(name for name, array in named.items() if array.ptr not in seen[segment])
+            test.assertEqual(missing, [])
+
+
+def test_problem_graphs_recapture_after_pool_reallocation(test, device, *, precision):
+    """Same-layout replacements of the pool storage recapture the problem graphs; graph and eager stay equal."""
+    dt = 0.001
+    results = {}
+    for graph in (False, True):
+        _, solver = _scene(precision=precision, device=device, graph=graph)
+        state = solver.create_state(dt=dt)
+        solver.step(state, state, solver.create_control(), dt=dt)
+        pool = solver._cloth_contact.pool
+        captured = dict(solver._graphs.captures)
+        pool.magnitude = wp.clone(pool.magnitude)
+        for name in _POOL_RECORDS:
+            setattr(pool.records, name, wp.clone(getattr(pool.records, name)))
+        solver.step(state, state, solver.create_control(), dt=dt)
+        test.assertFalse(solver.last_stats.rolled_back, solver.last_stats)
+        if graph:
+            for name in ("problem_summary", "problem_coordinates"):
+                with test.subTest(segment=name):
+                    test.assertGreater(solver._graphs.captures[name], captured.get(name, 0))
+        results[graph] = snapshot(state)
+    for key, value in results[False].items():
+        np.testing.assert_array_equal(results[True][key], value, err_msg=key)
+
+
+def test_point_cloud_evaluation_reads_back_once(test, device):
+    """One point-cloud evaluation reads one packed status array back to the host."""
+    _, solver = _scene(device=device)
+    dt = 0.001
+    state = solver.create_state(dt=dt)
+    solver.step(state, state, solver.create_control(), dt=dt)
+    producer = next(p for p in solver._problem.producers if p.name == "cloth_contact")
+    array_type = type(state.particle_q)
+    original = array_type.numpy
+    reads = []
+
+    def counted(array):
+        reads.append(array.shape)
+        return original(array)
+
+    with mock.patch.object(array_type, "numpy", counted):
+        producer.evaluate(solver, state, dt, solver._complete_r, build_tangent=True)
+    test.assertEqual(len(reads), 1, reads)
+
+
 class TestPointCloudRuntime(unittest.TestCase):
     pass
 
 
 devices = get_test_devices()
 add_function_test(TestPointCloudRuntime, "test_query_counter_limits", test_query_counter_limits, devices=devices)
+for _test in (test_problem_graph_keys_bind_point_cloud_storage, test_point_cloud_evaluation_reads_back_once):
+    add_function_test(TestPointCloudRuntime, _test.__name__, _test, devices=devices)
+for _precision in SolverMonolithic.Precision:
+    add_function_test(
+        TestPointCloudRuntime,
+        f"test_problem_graphs_recapture_after_pool_reallocation_{_precision.value}",
+        test_problem_graphs_recapture_after_pool_reallocation,
+        devices=[device for device in devices if device.is_cuda],
+        precision=_precision,
+    )
 for _precision in SolverMonolithic.Precision:
     for _graph in (False, True):
         for _test in (test_self_contact_lifecycle, test_candidate_overflow_rollback):
