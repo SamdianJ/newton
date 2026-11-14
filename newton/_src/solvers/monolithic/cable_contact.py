@@ -182,27 +182,26 @@ def _query_samples(
         return
     sample = wp.tid()
     cell = _cell(_sample_point(tables, x, start, from_start, sample), width)
-    for dx in range(-1, 2):
-        for dy in range(-1, 2):
-            for dz in range(-1, 2):
-                neighbor = cell + wp.vec3i(dx, dy, dz)
-                segment = heads[_bucket(neighbor, heads.shape[0] - 1)] + 0
-                while segment >= 0:
-                    middle = _middle(tables, x, start, from_start, segment)
-                    if _cell(middle, width) == neighbor and _allowed(tables, sample, segment, inter):
-                        near = _near(tables, x, start, from_start, sample, segment, margin)
-                        # The step-start grid contributes only pairs the current grid misses.
-                        if near and not (from_start and _near(tables, x, start, False, sample, segment, margin)):
-                            previous, following = tables.seg_prev[segment] + 0, tables.seg_next[segment] + 0
-                            start_vertex = _candidate(tables, x, start, sample, previous, inter, margin)
-                            end_vertex = _candidate(tables, x, start, sample, following, inter, margin)
-                            bits = wp.where(start_vertex, 1, 0) + wp.where(end_vertex, 2, 0)
-                            _emit(pairs, count, wp.vec4i(sample, segment, 0, bits))
-                            # A vertex pair exists where both of its segments are candidates; the
-                            # incoming segment emits it, so it is emitted once.
-                            if end_vertex:
-                                _emit(pairs, count, wp.vec4i(sample, segment, 1, 0))
-                    segment = links[segment] + 0
+    # One dynamic loop over the 27 neighbour cells: unrolled nested loops made the CUDA kernel too large to compile.
+    for neighbor_index in range(27):
+        neighbor = cell + wp.vec3i(neighbor_index // 9 - 1, (neighbor_index // 3) % 3 - 1, neighbor_index % 3 - 1)
+        segment = heads[_bucket(neighbor, heads.shape[0] - 1)] + 0
+        while segment >= 0:
+            middle = _middle(tables, x, start, from_start, segment)
+            if _cell(middle, width) == neighbor and _allowed(tables, sample, segment, inter):
+                near = _near(tables, x, start, from_start, sample, segment, margin)
+                # The step-start grid contributes only pairs the current grid misses.
+                if near and not (from_start and _near(tables, x, start, False, sample, segment, margin)):
+                    previous, following = tables.seg_prev[segment] + 0, tables.seg_next[segment] + 0
+                    start_vertex = _candidate(tables, x, start, sample, previous, inter, margin)
+                    end_vertex = _candidate(tables, x, start, sample, following, inter, margin)
+                    bits = wp.where(start_vertex, 1, 0) + wp.where(end_vertex, 2, 0)
+                    _emit(pairs, count, wp.vec4i(sample, segment, 0, bits))
+                    # A vertex pair exists where both of its segments are candidates; the
+                    # incoming segment emits it, so it is emitted once.
+                    if end_vertex:
+                        _emit(pairs, count, wp.vec4i(sample, segment, 1, 0))
+            segment = links[segment] + 0
 
 
 @wp.func
