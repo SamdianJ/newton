@@ -22,8 +22,8 @@ vertex pair only exists when both adjacent segment pairs do.
 
 Samples are three Gauss-Legendre points per edge (weight: Gauss weight times the
 rest edge length) plus one point at each free end of a cable (weight: the cable
-radius, the hemispherical tip); rest edges lie between one and four radii. The
-gradient is exact. The tangent is the Gauss-Newton term ``w phi'' (c n)(c n)^T``
+radius, the hemispherical tip). A rest edge is at least its cable's radius and at
+most four times the smallest radius of the cables in contact. The gradient is exact. The tangent is the Gauss-Newton term ``w phi'' (c n)(c n)^T``
 of each segment pair with ``c = (1 - xi, xi, -(1 - t), -t)``, and every
 coefficient is non-negative. A vertex pair carries energy and gradient only;
 the cancellation it would need is done by the segments: a segment that clamps to
@@ -52,12 +52,13 @@ GAUSS_RULES = {
     2: ((0.5 - 0.5 / np.sqrt(3.0), 0.5 + 0.5 / np.sqrt(3.0)), (0.5, 0.5)),
     3: ((0.5 - 0.5 * np.sqrt(0.6), 0.5, 0.5 + 0.5 * np.sqrt(0.6)), (5.0 / 18.0, 8.0 / 18.0, 5.0 / 18.0)),
 }
-#: Longest supported rest edge over the contact radius: the 3-point worst-phase crossing onset is 0.156 r there.
+#: Longest supported rest edge over the smallest contact radius of the cables in contact; there the 3-point
+#: worst-phase crossing onset is at most 0.156 of that radius (equal radii are the worst case).
 MAX_EDGE_OVER_RADIUS = 4.0
 #: Identity strings of the discrete rule; they enter the checkpoint identity once the method is wired.
 RULES = {
     "sampling": "gauss-legendre-per-edge, length weighted; free-end tip sample weighted by the radius",
-    "edge_length": "radius <= rest edge <= 4 x radius",
+    "edge_length": "own radius <= rest edge <= 4 x smallest radius of the cables in contact",
     "target": "clamped segments minus interior vertices (no double count at shared vertices)",
     "tangent": "Gauss-Newton per segment, non-negative; a segment clamped to a counted vertex drops its term "
     "(outgoing only if incoming does not clamp); vertex pairs carry no tangent",
@@ -215,12 +216,13 @@ def build_tables(rest_positions, vertex_ranges, radii, *, samples_per_edge=3):
 
     ``vertex_ranges`` lists (first, end) particle indices of each cable in input order; edges are
     consecutive particles. Samples are the Gauss points of every edge (edge-major) followed by one
-    tip sample at each free end of each cable, weighted by the cable radius.
+    tip sample at each free end of each cable, weighted by the cable radius. Every rest edge must be
+    at most ``MAX_EDGE_OVER_RADIUS`` times the smallest radius of the given cables.
     """
     if samples_per_edge not in GAUSS_RULES:
         raise ValueError(f"Cable contact supports {sorted(GAUSS_RULES)} samples per edge, got {samples_per_edge}")
     rest_positions = np.asarray(rest_positions, dtype=np.float64)
-    first, cable, index, arc0, arc1, rest, radius = ([] for _ in range(7))
+    first, cable, index, arc0, arc1, rest, radius, longest = ([] for _ in range(8))
     for owner, (a, b) in enumerate(vertex_ranges):
         if b - a < 2:
             raise ValueError(f"Cable {owner} needs at least two vertices")
@@ -232,12 +234,7 @@ def build_tables(rest_positions, vertex_ranges, radii, *, samples_per_edge=3):
             raise ValueError(f"Cable {owner} has a zero-length rest edge")
         if r > lengths.min():
             raise ValueError(f"Cable {owner} radius exceeds its shortest rest edge, which contact does not support")
-        longest = int(np.argmax(lengths))
-        if lengths[longest] > MAX_EDGE_OVER_RADIUS * r:
-            raise ValueError(
-                f"Cable {owner} rest edge {longest} is {lengths[longest]:.6g} m, longer than "
-                f"{MAX_EDGE_OVER_RADIUS:g} x its contact radius {r:.6g} m; refine the cable"
-            )
+        longest.append((owner, int(np.argmax(lengths)), float(lengths.max())))
         arc = np.r_[0.0, np.cumsum(lengths)]
         for k in range(len(lengths)):
             first.append(a + k)
@@ -247,6 +244,14 @@ def build_tables(rest_positions, vertex_ranges, radii, *, samples_per_edge=3):
             arc1.append(arc[k + 1])
             rest.append(lengths[k])
             radius.append(r)
+    thinnest = int(np.argmin([float(radii[owner]) for owner in range(len(vertex_ranges))]))
+    smallest = float(radii[thinnest])
+    for owner, edge, length in longest:
+        if length > MAX_EDGE_OVER_RADIUS * smallest:
+            raise ValueError(
+                f"Cable {owner} rest edge {edge} is {length:.6g} m, longer than {MAX_EDGE_OVER_RADIUS:g} x the "
+                f"smallest contact radius {smallest:.6g} m (cable {thinnest}); refine the cable"
+            )
     segments = {
         "first": np.asarray(first, dtype=np.int32),
         "cable": np.asarray(cable, dtype=np.int32),

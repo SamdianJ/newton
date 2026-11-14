@@ -701,6 +701,30 @@ class TestCableContactGeometry(unittest.TestCase):
                     self.assertAlmostEqual(measured, oracle.onset_overlap(samples_per_edge, ratio), delta=1e-9)
         self.assertAlmostEqual(oracle.onset_overlap(3, 3.5), 0.1183, delta=1e-4)
 
+    def test_crossing_onset_with_unequal_radii_stays_within_the_bound(self):
+        """A thick strand sampling a thin one at the edge bound (4 x the thin radius) loads within 0.156 r_thin."""
+        nodes = np.asarray(GAUSS_RULES[3][0])
+        gaps = np.r_[np.diff(nodes), 1.0 - nodes[-1] + nodes[0]]
+        k = int(np.argmax(gaps))
+        for thin in (R / 2, R / 4):
+            length = 4.0 * thin
+            radius_sum = R + thin
+            crossing = (nodes[k] + gaps[k] / 2) * length
+            edges = [(np.array([i * length, 0.0, 0.0]), np.array([(i + 1) * length, 0.0, 0.0])) for i in (-1, 0, 1)]
+
+            def loaded(height, crossing=crossing, edges=edges, radius_sum=radius_sum):
+                y0, y1 = np.array([crossing, -0.02, height]), np.array([crossing, 0.02, height])
+                total = 0.0
+                for xa, xb in edges:
+                    for xi in nodes:
+                        total += oracle.segment_response(xa, xb, y0, y1, xi, 1.0, radius_sum, K, 0.0)[0]
+                return total > 0
+
+            measured = (radius_sum - bisect(loaded, high=radius_sum)) / thin
+            with self.subTest(thin=thin):
+                self.assertAlmostEqual(measured, oracle.onset_overlap(3, 4.0, radius_sum / thin), delta=1e-9)
+                self.assertLess(measured, oracle.onset_overlap(3, 4.0))
+
     def test_tip_pushed_into_a_side_loads_early_in_either_order(self):
         """A free tip pressed end-on into another strand loads within the K1 onset whichever cable samples."""
         count = 9
@@ -762,7 +786,7 @@ class TestCableContactGeometry(unittest.TestCase):
         rest = np.column_stack([L * np.arange(5), np.zeros(5), np.zeros(5)])
         for radius, pattern in (
             (0.008, "radius exceeds its shortest rest edge"),
-            (0.0017, r"Cable 0 rest edge \d is 0.007 m, longer than 4 x its contact radius 0.0017 m"),
+            (0.0017, r"Cable 0 rest edge \d is 0.007 m, longer than 4 x the smallest contact radius 0.0017 m"),
             (float("nan"), "finite and positive"),
             (0.0, "finite and positive"),
         ):
@@ -774,6 +798,11 @@ class TestCableContactGeometry(unittest.TestCase):
         flat[2] = flat[1]
         with self.assertRaisesRegex(ValueError, "zero-length rest edge"):
             build_tables(flat, [(0, 5)], [R])
+        # The bound uses the thinnest cable in contact: 7 mm edges are fine for r = 2 mm alone, not next to 1.5 mm.
+        fine = np.column_stack([0.004 * np.arange(5), np.full(5, 0.05), np.zeros(5)])
+        build_tables(np.vstack([rest, rest + np.array([0.0, 0.05, 0.0])]), [(0, 5), (5, 10)], [R, R])
+        with self.assertRaisesRegex(ValueError, r"Cable 0 rest edge \d is 0.007 m, .* 0.0015 m \(cable 1\)"):
+            build_tables(np.vstack([rest, fine]), [(0, 5), (5, 10)], [R, 0.0015])
 
     def test_degenerate_and_nonfinite_inputs_are_reported(self):
         """A sample on the target or a zero-length target is status 2; a NaN or infinite position or radius sum is 1."""

@@ -280,16 +280,18 @@ def evaluate(positions, segments, samples, pairs, *, stiffness, smoothing):
     return energy, total, {"segment": seg, "vertex": ver}
 
 
-def onset_overlap(samples_per_edge, length_over_radius):
-    """Worst-phase overlap / r at which a perpendicular crossing first loads (two equal radii r).
+def onset_overlap(samples_per_edge, length_over_radius, radius_sum_over_radius=2.0):
+    """Worst-phase overlap / r at which a perpendicular crossing first loads, all lengths in units of r.
 
     The crossing point sits midway in the largest along-cable gap between consecutive sample
-    points (within an edge or across a vertex); force starts when the sample is within 2r.
+    points (within an edge or across a vertex); force starts when the sample is within the radius
+    sum (2 r for two equal radii r).
     """
     nodes, _ = GAUSS[samples_per_edge]
     gaps = np.r_[np.diff(nodes), 1.0 - nodes[-1] + nodes[0]] * length_over_radius
     half = np.max(gaps) / 2.0
-    return 2.0 - np.sqrt(max(4.0 - half * half, 0.0))
+    reach = radius_sum_over_radius
+    return reach - np.sqrt(max(reach * reach - half * half, 0.0))
 
 
 def contact_energy(
