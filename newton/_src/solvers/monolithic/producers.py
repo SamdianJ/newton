@@ -303,7 +303,7 @@ class _Producer:
         """Write coordinate-policy unit scales for this producer's rows."""
 
     def graph_buffers(self, solver):
-        """Interaction storage read by ``magnitude`` and ``coordinates``; it joins the problem graph keys."""
+        """Every array ``magnitude`` and ``coordinates`` read beyond the problem's own; it joins the problem graph keys."""
         return ()
 
 
@@ -1091,7 +1091,9 @@ class _ClothContactProducer(_Producer):
         )
 
     def graph_buffers(self, solver):
-        return self.contact.pool.buffers()
+        pool = self.contact.pool
+        records = pool.records
+        return (pool.magnitude, records.count, records.support_offsets, records.factor_columns, records.rounding)
 
     def assemble(self, solver, assembly, dt):
         self.contact.assemble(assembly)

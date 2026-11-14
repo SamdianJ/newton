@@ -933,7 +933,9 @@ class _ContactPool:
         self.residual = _ContactRows(row_count, r, identity_count, k, dtype, self.device)
         self.magnitude = wp.zeros(row_count, dtype=dtype, device=self.device)
         # Candidate overflow, dropped contacts and record flags of the last evaluation, as written
-        # after a failed evaluation clears its outputs; callers read this one array.
+        # after a failed evaluation clears its outputs; callers read this one array. A batched
+        # evaluation reports the overflow staged with its last batch: producers that stage
+        # overflow per batch must carry earlier batches' overflow into it.
         self.status = wp.zeros(3, dtype=wp.int32, device=self.device)
         self.force = _ContactRows(force_row_count, f * n, identity_count, f, dtype, self.device)
         self.graphs = _SegmentGraphCache(self.device, enabled=use_cuda_graph and self.device.is_cuda)

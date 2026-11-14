@@ -77,6 +77,7 @@ class _MonolithicProblem:
                 "evaluate",
                 "magnitude",
                 "coordinates",
+                "graph_buffers",
                 "assemble",
                 "domain",
                 "publish",
