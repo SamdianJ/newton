@@ -32,7 +32,7 @@ def _record_type(dtype):
 
 
 @wp.kernel
-def _factor(
+def _assemble_rows(
     offsets: wp.array[int],
     columns: wp.array[int],
     values: wp.array[Any],
@@ -40,11 +40,52 @@ def _factor(
     rows: wp.array[int],
     inverse: wp.array[int],
     spans: wp.array2d[int],
-    gauge_rows: wp.array[int],
+    row_actor: wp.array[int],
     band: wp.array[Any],
-    shifts: wp.array[Any],
     template_slots: wp.array[int],
     masked: int,
+    assembled: wp.array2d[Any],
+    invalid: wp.array[int],
+    status: wp.array[int],
+):
+    # One band row per thread: the element part, then the assembled matrix entries of this
+    # row in CSR slot order, the same additions the serial factor made row by row.
+    i = wp.tid()
+    actor = row_actor[i]
+    start = spans[actor, 0]
+    row = rows[i]
+    for distance in range(11):
+        assembled[i, distance] = band[11 * i + distance]
+    for slot in range(offsets[row], offsets[row + 1]):
+        column = columns[slot]
+        j = inverse[column]
+        if j >= start and j <= i:
+            if masked != 0:
+                # Cable contact: keep only template slots, i.e. whole principal blocks of
+                # each contact side; far couplings within one cable are left out. The
+                # template covers the cable elements (through ``band``), shape contact on
+                # an edge ({x_a, x_{a+1}, theta_e}) and each side of a cable contact; an
+                # in-band entry of any other producer would be dropped silently.
+                if i - j <= 10:
+                    if template_slots[11 * i + i - j] != 0:
+                        assembled[i, i - j] = assembled[i, i - j] + values[slot] * scale[row] * scale[column]
+            elif i - j <= 10:
+                assembled[i, i - j] = assembled[i, i - j] + values[slot] * scale[row] * scale[column]
+            elif values[slot] != values.dtype(0.0):
+                # Every row is checked, so a failed pivot elsewhere cannot hide an invalid entry.
+                invalid[actor] = 1
+                wp.atomic_max(status, 0, 1)
+                return
+
+
+@wp.kernel
+def _factor(
+    spans: wp.array2d[int],
+    rows: wp.array[int],
+    gauge_rows: wp.array[int],
+    assembled: wp.array2d[Any],
+    invalid: wp.array[int],
+    shifts: wp.array[Any],
     regularization: Any,
     tolerance: Any,
     factor: wp.array2d[Any],
@@ -52,6 +93,8 @@ def _factor(
     status: wp.array[int],
 ):
     actor = wp.tid()
+    if invalid[actor] != 0:
+        return
     start, end = spans[actor, 0], spans[actor, 1]
     # FP32 sums of stiff stretch entries can leave the band indefinite in a general
     # orientation. Only the PRECONDITIONER is then shifted by a growing multiple of
@@ -61,32 +104,13 @@ def _factor(
         failed = int(0)
         for i in range(start, end):
             if failed == 0:
-                row = rows[i]
                 for distance in range(11):
-                    factor[i, distance] = band[11 * i + distance]
-                for slot in range(offsets[row], offsets[row + 1]):
-                    column = columns[slot]
-                    j = inverse[column]
-                    if j >= start and j <= i:
-                        if masked != 0:
-                            # Cable contact: keep only template slots, i.e. whole principal blocks of
-                            # each contact side; far couplings within one cable are left out. The
-                            # template covers the cable elements (through ``band``), shape contact on
-                            # an edge ({x_a, x_{a+1}, theta_e}) and each side of a cable contact; an
-                            # in-band entry of any other producer would be dropped silently.
-                            if i - j <= 10:
-                                if template_slots[11 * i + i - j] != 0:
-                                    factor[i, i - j] = factor[i, i - j] + values[slot] * scale[row] * scale[column]
-                        elif i - j <= 10:
-                            factor[i, i - j] = factor[i, i - j] + values[slot] * scale[row] * scale[column]
-                        elif values[slot] != values.dtype(0.0):
-                            wp.atomic_max(status, 0, 1)
-                            return
+                    factor[i, distance] = assembled[i, distance]
                 factor[i, 0] = factor[i, 0] + regularization + shift * wp.abs(factor[i, 0])
                 # Lift only a verified instantaneous null direction in the PRECONDITIONER.
                 # The physical matrix/residual are unchanged; the delivered theta increment
                 # is projected to zero mean by the common-angle constraint.
-                if row == gauge_rows[actor]:
+                if rows[i] == gauge_rows[actor]:
                     factor[i, 0] = factor[i, 0] + factor.dtype(1.0)
                 for j in range(wp.max(start, i - 10), i + 1):
                     if failed == 0:
@@ -165,6 +189,16 @@ class CablePreconditioner:
         self.gauge_rows = wp.full(len(spans), -1, dtype=int, device=device)
         self.dtype = dtype
         self.factor_values = wp.zeros((count, 11), dtype=dtype, device=device)
+        # Each band row's element part plus its assembled matrix entries (``band`` keeps the element part).
+        self.assembled = wp.zeros((count, 11), dtype=dtype, device=device)
+        self.row_actor = wp.array(
+            np.concatenate([np.full(end - start, actor, dtype=np.int32) for actor, (start, end) in enumerate(spans)])
+            if spans
+            else np.empty(0, dtype=np.int32),
+            dtype=int,
+            device=device,
+        )
+        self.invalid = wp.zeros(max(len(spans), 1), dtype=int, device=device)
         self.active = wp.ones(1, dtype=int, device=device)
         self.shifts = wp.array(self.SHIFTS, dtype=dtype, device=device)
         self.used_shift = wp.zeros(len(spans), dtype=dtype, device=device)
@@ -245,6 +279,9 @@ class CablePreconditioner:
             self.used_shift,
             self.band,
             self.template,
+            self.assembled,
+            self.row_actor,
+            self.invalid,
         )
         if self._records is not None:
             self._records.bind(self._views())
@@ -271,22 +308,39 @@ class CablePreconditioner:
                 [records, self._records.jobs, workspace.scale, self.band],
                 device=self.device,
             )
+        self.invalid.zero_()
+        if self.rows.size:
+            wp.launch(
+                _assemble_rows,
+                self.rows.size,
+                [
+                    matrix.offsets,
+                    matrix.columns,
+                    matrix.values,
+                    workspace.scale,
+                    self.rows,
+                    self.inverse,
+                    self.spans,
+                    self.row_actor,
+                    self.band,
+                    self.template,
+                    self.masked,
+                    self.assembled,
+                    self.invalid,
+                    workspace._status,
+                ],
+                device=self.device,
+            )
         wp.launch(
             _factor,
             self.spans.shape[0],
             [
-                matrix.offsets,
-                matrix.columns,
-                matrix.values,
-                workspace.scale,
-                self.rows,
-                self.inverse,
                 self.spans,
+                self.rows,
                 self.gauge_rows,
-                self.band,
+                self.assembled,
+                self.invalid,
                 self.shifts,
-                self.template,
-                self.masked,
                 self.dtype(workspace._lambda),
                 self.dtype(tolerance),
                 self.factor_values,
