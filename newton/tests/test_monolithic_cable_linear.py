@@ -101,7 +101,7 @@ class TestMonolithicCableLinear(unittest.TestCase):
                 self.assertLess(np.linalg.norm(matrix @ delta.numpy() - rhs), 1e-5)
                 if mode == "production":
                     cable = workspace._cable_preconditioner
-                    cable.factor_values = wp.zeros_like(cable.factor_values)
+                    cable.block_factor = wp.zeros_like(cable.block_factor)
                     with self.assertRaises(ValueError):
                         workspace._masked_pcg_plan._validate_storage()
 
@@ -209,14 +209,17 @@ class TestMonolithicCableLinear(unittest.TestCase):
                 self.assertGreaterEqual(theta, 0)
                 self.assertGreater(max(coupling, default=0.0), 0.0)
             self.assertGreater(np.abs(solver.get_contact_forces(state).particle_force).max(), 0.0)
-            results[config is None] = (snapshot(state), solver._linear._cable_preconditioner.factor_values.numpy())
+            cable = solver._linear._cable_preconditioner
+            factors = [a.numpy() for a in (cable.block_factor, cable.block_left, cable.block_right)]
+            results[config is None] = (snapshot(state), factors)
         enabled, disabled = results[False], results[True]
         # The configuration digest differs by design: cable contact enters the checkpoint identity.
         self.assertFalse(np.array_equal(enabled[0]["history.config_digest"], disabled[0]["history.config_digest"]))
         for name, value in disabled[0].items():
             if name != "history.config_digest":
                 np.testing.assert_array_equal(enabled[0][name], value, err_msg=name)
-        np.testing.assert_array_equal(enabled[1], disabled[1])
+        for a, b in zip(enabled[1], disabled[1], strict=True):
+            np.testing.assert_array_equal(a, b)
 
     def test_far_self_contact_still_factors(self):
         """A hairpin pressed onto itself couples rows far apart in one cable; the band preconditioner still factors."""
