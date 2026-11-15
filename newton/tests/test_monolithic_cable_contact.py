@@ -115,11 +115,11 @@ def strands(count=12, overlap=0.0004, shift=0.0):
     return np.vstack([line, upper]), [range(count), range(count, 2 * count)]
 
 
-def hairpin_and_helix():
-    """The hairpin of ``hairpin`` followed by a second cable wound as a loose helix (turns 0.5 mm apart)."""
+def hairpin_and_helix(pitch=0.0045):
+    """The hairpin of ``hairpin`` followed by a second cable wound as a helix (default: turns 0.5 mm apart)."""
     points, _ = hairpin()
     u = np.linspace(0, 6 * np.pi, 120)
-    helix = np.column_stack([0.02 * np.cos(u), 0.02 * np.sin(u), 0.0045 * u / (2 * np.pi)]) + np.array([0, 0.2, 0])
+    helix = np.column_stack([0.02 * np.cos(u), 0.02 * np.sin(u), pitch * u / (2 * np.pi)]) + np.array([0, 0.2, 0])
     return np.vstack([points, helix]), [range(len(points)), range(len(points), len(points) + len(helix))]
 
 
@@ -164,13 +164,14 @@ class TestMonolithicCableContact(unittest.TestCase):
                     np.testing.assert_allclose(np.cross(positions, force).sum(axis=0), 0.0, atol=tolerance * scale)
 
     def test_published_self_force_matches_the_reference(self):
-        """Self contact (hairpin, hairpin and helix): the published force is minus the reference gradient.
+        """Self contact (hairpin; hairpin and a helix with pressed turns): the force is minus the reference gradient.
 
-        The reference counts every allowed self and inter-cable pair, so a device predicate stricter than the
-        self-exclusion rule would show as a missing force here.
+        The reference counts every allowed self pair of both cables, so a device predicate stricter than the
+        self-exclusion rule would show as a missing force here; forces balance with no net torque.
         """
+        pressed = hairpin_and_helix(pitch=2 * R - 0.0002)
         for precision in self.precisions:
-            for name, (points, chains) in (("hairpin", hairpin()), ("hairpin_and_helix", hairpin_and_helix())):
+            for name, (points, chains) in (("hairpin", hairpin()), ("hairpin_and_pressed_helix", pressed)):
                 solver, state = cable_contact_solver(points, chains, config={}, precision=precision)
                 solver.step(state, state, solver.create_control(), dt=0.001)
                 stats = solver.last_stats
@@ -183,6 +184,11 @@ class TestMonolithicCableContact(unittest.TestCase):
                     self.assertGreater(scale, 0.0)
                     tolerance = 1e-11 if precision == SolverMonolithic.Precision.FP64 else 2e-3
                     np.testing.assert_allclose(force, -gradient, rtol=0, atol=tolerance * scale)
+                    np.testing.assert_allclose(force.sum(axis=0), 0.0, atol=tolerance * scale)
+                    np.testing.assert_allclose(np.cross(positions, force).sum(axis=0), 0.0, atol=tolerance * scale)
+                    for chain in chains:
+                        # Every cable carries contact force (the helix through its pressed turns).
+                        self.assertGreater(np.abs(force[list(chain)]).max(), 0.1 * scale)
 
     def test_gauge_decision_is_unchanged_by_contact(self):
         """At the step's first evaluation the twist residual and the gauge decision equal those without contact."""

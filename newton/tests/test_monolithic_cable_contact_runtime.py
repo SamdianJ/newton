@@ -78,20 +78,28 @@ def test_anchor_makes_the_response_translation_exact(test, device, *, precision)
     line = np.column_stack([edge * np.arange(12), np.zeros(12), np.zeros(12)])
     points = np.vstack([line, line + np.array([0.0, 0.0, 2 * radius - 2.0**-12])])
     chains = [range(12), range(12, 24)]
-    results = []
+    # Dyadic step increments, so the anchor-relative sums stay exact in FP32 too.
+    increments = (np.arange(24)[:, None] % 5 - 2) * np.array([[2.0**-14, -(2.0**-15), 2.0**-16]])
+    results = {}
     for offset in (np.zeros(3), np.array([8.0, 4.0, 2.0])):
         solver, state = _solver(
             points + offset, chains, device, precision, False, config={"self": False}, radii=[radius, radius]
         )
         contact = solver._cable_contact
         contact.begin_step(state)
-        contact.evaluate(wp.zeros_like(state.particle_q), DT)
-        test.assertEqual(tuple(int(v) for v in contact.pool.status.numpy()), (0, 0, 0))
-        results.append([a.numpy().copy() for a in (contact.pool.residual.result, contact.pool.force.result)])
-        results[-1].append(contact.pool.energy.result.numpy().copy())
-    test.assertGreater(np.abs(results[0][0]).max(), 0.0)
-    for expected, actual in zip(results[0], results[1], strict=True):
-        np.testing.assert_array_equal(actual, expected)
+        for moved in (False, True):
+            steps = wp.zeros_like(state.particle_q)
+            if moved:
+                steps.assign(increments.astype(state.particle_q.numpy().dtype))
+            contact.evaluate(steps, DT)
+            test.assertEqual(tuple(int(v) for v in contact.pool.status.numpy()), (0, 0, 0))
+            arrays = (contact.pool.residual.result, contact.pool.force.result, contact.pool.energy.result)
+            results.setdefault(moved, []).append([a.numpy().copy() for a in arrays])
+    for moved, (near, far) in results.items():
+        with test.subTest(moved=moved):
+            test.assertGreater(np.abs(near[0]).max(), 0.0)
+            for expected, actual in zip(near, far, strict=True):
+                np.testing.assert_array_equal(actual, expected)
 
 
 def test_slot_order_does_not_change_results(test, device, *, precision):
@@ -145,7 +153,14 @@ def test_candidates_stay_frozen_within_trials(test, device, *, precision, graph)
     solver, state = _solver(*hairpin(), device, precision, graph, config={})
     contact = solver._cable_contact
     calls = {"trials": 0, "refreshes": 0, "refreshes_in_trial": 0, "in_trial": False}
-    trial, refresh = solver._problem.evaluate_trial, contact.refresh
+    trial, refresh, evaluate = solver._problem.evaluate_trial, contact.refresh, contact.evaluate
+    seen = {}
+
+    def recording(steps, dt):
+        # Every evaluation of one candidate generation sees the same pair list.
+        pairs = contact.pairs.numpy()[: contact._candidate_count].copy()
+        seen.setdefault(contact.candidate_generation, []).append(pairs)
+        evaluate(steps, dt)
 
     def trial_evaluation(*args, **kwargs):
         calls["trials"] += 1
@@ -163,12 +178,17 @@ def test_candidates_stay_frozen_within_trials(test, device, *, precision, graph)
     with (
         mock.patch.object(solver._problem, "evaluate_trial", trial_evaluation),
         mock.patch.object(contact, "refresh", counted_refresh),
+        mock.patch.object(contact, "evaluate", recording),
     ):
         solver.step(state, state, solver.create_control(), dt=DT)
     test.assertFalse(solver.last_stats.rolled_back, solver.last_stats)
     test.assertGreater(calls["trials"], 0)
     test.assertGreater(calls["refreshes"], 1)
     test.assertEqual(calls["refreshes_in_trial"], 0)
+    test.assertGreater(max(len(lists) for lists in seen.values()), 1)
+    for generation, lists in seen.items():
+        for pairs in lists[1:]:
+            np.testing.assert_array_equal(pairs, lists[0], err_msg=str(generation))
 
 
 def test_shared_vertex_keeps_one_term(test, device, *, precision, graph):
@@ -249,6 +269,7 @@ def test_overstretched_segment_fails_the_step(test, device):
     test.assertEqual(solver.last_stats.status, solver.Status.NONFINITE)
     test.assertTrue(solver.last_stats.rolled_back)
     test.assertIn("cable contact", solver.last_stats.failure_reason)
+    test.assertIn("[4]", solver.last_stats.failure_reason)  # the stretch flag
     for name, value in before.items():
         np.testing.assert_array_equal(snapshot(state)[name], value, err_msg=name)
 
