@@ -163,6 +163,54 @@ class TestMonolithicCableContact(unittest.TestCase):
                     np.testing.assert_allclose(force.sum(axis=0), 0.0, atol=tolerance * scale)
                     np.testing.assert_allclose(np.cross(positions, force).sum(axis=0), 0.0, atol=tolerance * scale)
 
+    def test_published_self_force_matches_the_reference(self):
+        """Self contact (hairpin, hairpin and helix): the published force is minus the reference gradient.
+
+        The reference counts every allowed self and inter-cable pair, so a device predicate stricter than the
+        self-exclusion rule would show as a missing force here.
+        """
+        for precision in self.precisions:
+            for name, (points, chains) in (("hairpin", hairpin()), ("hairpin_and_helix", hairpin_and_helix())):
+                solver, state = cable_contact_solver(points, chains, config={}, precision=precision)
+                solver.step(state, state, solver.create_control(), dt=0.001)
+                stats = solver.last_stats
+                force = solver.get_contact_forces(state).particle_force.astype(float)
+                positions = state.particle_q.numpy().astype(float)
+                _, gradient, _ = reference_gradient(solver, points, chains, positions)
+                with self.subTest(precision=precision.value, scene=name):
+                    self.assertFalse(stats.rolled_back, stats)
+                    scale = np.abs(gradient).max()
+                    self.assertGreater(scale, 0.0)
+                    tolerance = 1e-11 if precision == SolverMonolithic.Precision.FP64 else 2e-3
+                    np.testing.assert_allclose(force, -gradient, rtol=0, atol=tolerance * scale)
+
+    def test_gauge_decision_is_unchanged_by_contact(self):
+        """At the step's first evaluation the twist residual and the gauge decision equal those without contact."""
+        points, chains = strands()
+        seen = {}
+        for config in (None, {}):
+            solver, state = cable_contact_solver(points, chains, config=config)
+            gauges = solver._gauges
+            original = gauges.qualify
+
+            def qualify(owner, gauges=gauges, original=original, key=config is None):
+                if key not in seen:
+                    raw = [block.raw.numpy()[3 * len(block.ids) :].copy() for block in owner._cables]
+                    original(owner)
+                    seen[key] = (raw, gauges.blocked.numpy().copy(), gauges.pins.numpy().copy())
+                    return None
+                return original(owner)
+
+            gauges.qualify = qualify
+            solver.step(state, state, solver.create_control(), dt=0.001)
+            self.assertFalse(solver.last_stats.rolled_back, solver.last_stats)
+            self.assertTrue(gauges.eligible.numpy().any())
+        (raw_on, blocked_on, pins_on), (raw_off, blocked_off, pins_off) = seen[False], seen[True]
+        for on, off in zip(raw_on, raw_off, strict=True):
+            np.testing.assert_array_equal(on, off)
+        np.testing.assert_array_equal(blocked_on, blocked_off)
+        np.testing.assert_array_equal(pins_on, pins_off)
+
     def test_candidates_obey_both_exclusions(self):
         """Self bounds equal the reference rule; every candidate is allowed; adjacent helix turns are candidates."""
         points, chains = hairpin_and_helix()
@@ -244,6 +292,16 @@ class TestMonolithicCableContact(unittest.TestCase):
                 cable_contact_solver(points, chains, config=config, **options)
         with self.assertRaisesRegex(ValueError, "longer than 4 x"):
             cable_contact_solver(points, chains, config={}, radii=[R, 0.0015])
+        # 7 mm edges at r = 2 mm next to 5 mm edges at r = 1.5 mm: only self contact (own radii) allows it.
+        mixed = np.vstack(
+            [
+                np.column_stack([L * np.arange(6), np.zeros(6), np.zeros(6)]),
+                np.column_stack([0.005 * np.arange(6), np.full(6, 0.05), np.zeros(6)]),
+            ]
+        )
+        cable_contact_solver(mixed, [range(6), range(6, 12)], config={"inter": False}, radii=[R, 0.0015])
+        with self.assertRaisesRegex(ValueError, "smallest contact radius 0.0015 m"):
+            cable_contact_solver(mixed, [range(6), range(6, 12)], config={}, radii=[R, 0.0015])
         builder = newton.ModelBuilder(gravity=(0, 0, 0))
         for x, y in ((0.0, 0.0), (0.03, 0.0), (0.0, 0.03)):
             builder.add_particle(wp.vec3(x, y, 0.0), wp.vec3(0.0), 0.00015)

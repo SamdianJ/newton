@@ -134,9 +134,12 @@ class SolverMonolithic(SolverBase):
     3, default 3), bounded ``candidate_capacity`` and ``support_capacity``, and
     ``candidate_padding`` [m] (default the largest cable radius). Every rest edge
     must be at most four times the smallest radius of the cables it can touch.
-    Detection is discrete at each Newton refresh; fast crossings are not
-    prevented. This configuration is fixed for the solver lifetime and checkpoint
-    identity.
+    The penalty smoothing width is the shared ``normal_smoothing``. Detection is
+    discrete at each Newton refresh; fast crossings are not prevented, and a
+    segment stretched beyond 1.5 times its rest length fails the step as invalid
+    geometry. Zero padding and zero capacities are accepted (zero capacity
+    reports any contact as overflow). This configuration is fixed for the solver
+    lifetime and checkpoint identity.
 
     Experimental ``alignment_policy="frozen"`` retains each sample's physical
     step-start orientation weight through Newton and candidate refreshes.

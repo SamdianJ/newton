@@ -70,7 +70,10 @@ def _factor(
                     if j >= start and j <= i:
                         if masked != 0:
                             # Cable contact: keep only template slots, i.e. whole principal blocks of
-                            # each contact side; far couplings within one cable are left out.
+                            # each contact side; far couplings within one cable are left out. The
+                            # template covers the cable elements (through ``band``), shape contact on
+                            # an edge ({x_a, x_{a+1}, theta_e}) and each side of a cable contact; an
+                            # in-band entry of any other producer would be dropped silently.
                             if i - j <= 10:
                                 if template_slots[11 * i + i - j] != 0:
                                     factor[i, i - j] = factor[i, i - j] + values[slot] * scale[row] * scale[column]

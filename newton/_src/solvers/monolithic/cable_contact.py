@@ -48,9 +48,10 @@ _ALLOWED = {
     "support_capacity",
     "candidate_padding",
 }
-# Query and evaluation flags; the problem's checks report any of them as invalid cable contact geometry.
-_FLAG_COORDINATE = 2
-_FLAG_STRETCH = 3
+# Query flags; evaluation adds the response statuses 1 (nonfinite) and 2 (degenerate segment or sample on
+# the target). The problem's checks report any of them as invalid cable contact geometry.
+_FLAG_COORDINATE = 3
+_FLAG_STRETCH = 4
 
 
 @cache

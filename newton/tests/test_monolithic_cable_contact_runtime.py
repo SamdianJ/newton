@@ -72,6 +72,28 @@ def test_graph_matches_eager(test, device, *, precision):
             np.testing.assert_array_equal(results[True][name], value, err_msg=name)
 
 
+def test_anchor_makes_the_response_translation_exact(test, device, *, precision):
+    """Dyadic strands moved 8 m away give bit-identical residual, force and energy: inputs are anchor-relative."""
+    edge, radius = 2.0**-7, 2.0**-9
+    line = np.column_stack([edge * np.arange(12), np.zeros(12), np.zeros(12)])
+    points = np.vstack([line, line + np.array([0.0, 0.0, 2 * radius - 2.0**-12])])
+    chains = [range(12), range(12, 24)]
+    results = []
+    for offset in (np.zeros(3), np.array([8.0, 4.0, 2.0])):
+        solver, state = _solver(
+            points + offset, chains, device, precision, False, config={"self": False}, radii=[radius, radius]
+        )
+        contact = solver._cable_contact
+        contact.begin_step(state)
+        contact.evaluate(wp.zeros_like(state.particle_q), DT)
+        test.assertEqual(tuple(int(v) for v in contact.pool.status.numpy()), (0, 0, 0))
+        results.append([a.numpy().copy() for a in (contact.pool.residual.result, contact.pool.force.result)])
+        results[-1].append(contact.pool.energy.result.numpy().copy())
+    test.assertGreater(np.abs(results[0][0]).max(), 0.0)
+    for expected, actual in zip(results[0], results[1], strict=True):
+        np.testing.assert_array_equal(actual, expected)
+
+
 def test_slot_order_does_not_change_results(test, device, *, precision):
     """Shuffling the candidate slots leaves residual, force and energy unchanged bit for bit."""
     solver, state = _solver(*hairpin(), device, precision, False, config={})
@@ -119,24 +141,34 @@ def test_one_readback_per_evaluation(test, device):
 
 
 def test_candidates_stay_frozen_within_trials(test, device, *, precision, graph):
-    """Every evaluation between two refreshes uses the same candidate list."""
+    """Candidates refresh only at Newton iterates, never during a line-search trial."""
     solver, state = _solver(*hairpin(), device, precision, graph, config={})
     contact = solver._cable_contact
-    seen = {}
-    original = contact.evaluate
+    calls = {"trials": 0, "refreshes": 0, "refreshes_in_trial": 0, "in_trial": False}
+    trial, refresh = solver._problem.evaluate_trial, contact.refresh
 
-    def recording(steps, dt):
-        pairs = contact.pairs.numpy()[: contact._candidate_count].copy()
-        seen.setdefault(contact.candidate_generation, []).append(pairs)
-        original(steps, dt)
+    def trial_evaluation(*args, **kwargs):
+        calls["trials"] += 1
+        calls["in_trial"] = True
+        try:
+            return trial(*args, **kwargs)
+        finally:
+            calls["in_trial"] = False
 
-    with mock.patch.object(contact, "evaluate", recording):
+    def counted_refresh(x):
+        calls["refreshes"] += 1
+        calls["refreshes_in_trial"] += int(calls["in_trial"])
+        return refresh(x)
+
+    with (
+        mock.patch.object(solver._problem, "evaluate_trial", trial_evaluation),
+        mock.patch.object(contact, "refresh", counted_refresh),
+    ):
         solver.step(state, state, solver.create_control(), dt=DT)
     test.assertFalse(solver.last_stats.rolled_back, solver.last_stats)
-    test.assertGreater(max(len(v) for v in seen.values()), 1)
-    for generation, lists in seen.items():
-        for pairs in lists[1:]:
-            np.testing.assert_array_equal(pairs, lists[0], err_msg=str(generation))
+    test.assertGreater(calls["trials"], 0)
+    test.assertGreater(calls["refreshes"], 1)
+    test.assertEqual(calls["refreshes_in_trial"], 0)
 
 
 def test_shared_vertex_keeps_one_term(test, device, *, precision, graph):
@@ -234,13 +266,14 @@ for _test in (
 ):
     add_function_test(TestCableContactRuntime, _test.__name__, _test, devices=devices)
 for _precision in SolverMonolithic.Precision:
-    add_function_test(
-        TestCableContactRuntime,
-        f"test_slot_order_does_not_change_results_{_precision.value}",
-        test_slot_order_does_not_change_results,
-        devices=devices,
-        precision=_precision,
-    )
+    for _test in (test_slot_order_does_not_change_results, test_anchor_makes_the_response_translation_exact):
+        add_function_test(
+            TestCableContactRuntime,
+            f"{_test.__name__}_{_precision.value}",
+            _test,
+            devices=devices,
+            precision=_precision,
+        )
     add_function_test(
         TestCableContactRuntime,
         f"test_graph_matches_eager_{_precision.value}",

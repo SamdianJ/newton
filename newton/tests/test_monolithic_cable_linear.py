@@ -198,6 +198,16 @@ class TestMonolithicCableLinear(unittest.TestCase):
             if config is not None:
                 self.assertEqual(solver._cable_contact._candidate_count, 0)
                 self.assertEqual(solver._linear._cable_preconditioner.masked, 1)
+                # Shape contact couples the single-edge cable's twist to its positions; only the edge stencil
+                # of the template covers these entries (a single edge has no bend element).
+                matrix = solver._linear.k_global_scalar_bsr
+                offsets, columns, values = (a.numpy() for a in (matrix.offsets, matrix.columns, matrix.values))
+                theta = int(solver._actors.maps["theta_to_global"][solver._cables[0].theta_offset])
+                rows = solver._actors.maps["particle_to_global"]
+                xs = {int(rows[p]) + axis for p in (0, 1) for axis in range(3)}
+                coupling = [abs(values[k]) for k in range(offsets[theta], offsets[theta + 1]) if columns[k] in xs]
+                self.assertGreaterEqual(theta, 0)
+                self.assertGreater(max(coupling, default=0.0), 0.0)
             self.assertGreater(np.abs(solver.get_contact_forces(state).particle_force).max(), 0.0)
             results[config is None] = (snapshot(state), solver._linear._cable_preconditioner.factor_values.numpy())
         enabled, disabled = results[False], results[True]
