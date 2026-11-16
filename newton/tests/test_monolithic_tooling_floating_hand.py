@@ -119,3 +119,77 @@ class TestFeatureInventory(unittest.TestCase):
         result = inventory(builder.finalize(device="cpu"))
         self.assertEqual([hit["link_shape"] for hit in result["f1"]], ["link_capsule"])
         self.assertEqual(sorted(s["shape"] for s in result["capsule_convex"]), ["free_capsule", "link_capsule"])
+
+
+class TestFloatingHandRecipes(unittest.TestCase):
+    def test_wrist_palm_pose_matches_newton_fk(self):
+        """The palm target formula used for the floating root equals Newton FK of the wrist mount."""
+        import warp as wp  # noqa: PLC0415
+
+        import newton  # noqa: PLC0415
+        from scripts.monolithic_reference import floating_hand_scenes as fhs  # noqa: PLC0415
+
+        if not fhs.ALLEGRO.is_dir():
+            self.skipTest("Allegro asset not present")
+        rng = np.random.default_rng(5)
+        mount = np.eye(4)
+        mount[:3, :3], mount[:3, 3] = _rotation(rng.normal(size=3), 1.1), (0.1, -0.2, 0.3)
+        attach = np.eye(4)
+        attach[:3, :3], attach[:3, 3] = _rotation(rng.normal(size=3), 0.4), (0.02, 0.0, 0.05)
+        builder = newton.ModelBuilder()
+        layout = fhs.add_allegro(builder, mount="wrist", palm_pose=fhs._transform(mount), attach=fhs._transform(attach))
+        model = builder.finalize(device="cpu")
+        q = model.joint_q.numpy()
+        wrist = np.r_[rng.uniform(-0.2, 0.2, 3), rng.uniform(-1.0, 1.0, 3)]
+        q[:6] = wrist
+        state = model.state()
+        state.joint_q.assign(q)
+        newton.eval_fk(model, state.joint_q, state.joint_qd, state)
+        palm = state.body_q.numpy()[layout["bodies"]["palm_link"]].astype(np.float64)
+        expected = fhs.wrist_palm_matrix(mount, attach, wrist)
+        np.testing.assert_allclose(palm[:3], expected[:3, 3], atol=2e-6)
+        np.testing.assert_allclose(fc.quaternion_matrix(palm[3:]), expected[:3, :3], atol=2e-6)
+        del wp
+
+    def test_recipe_errors_name_the_field(self):
+        import json  # noqa: PLC0415
+        import tempfile  # noqa: PLC0415
+        from pathlib import Path  # noqa: PLC0415
+
+        from scripts.monolithic_reference.floating_hand_scenes import load_recipe  # noqa: PLC0415
+
+        base = {
+            "schema": "p9d-floating-hand/v1",
+            "scene": "E3",
+            "mount": "floating",
+            "dt_s": 0.001,
+            "phases_s": {"close": 1.0, "hold": 1.0},
+            "solver": {},
+            "joint_terms": {},
+        }
+        cases = {
+            "phases_s.close": {"phases_s": {"close": 0.0015, "hold": 1.0}},
+            "phases_s must list": {"phases_s": {"hold": 1.0, "close": 1.0}},
+            "scene must be": {"scene": "E9"},
+            "mount must be": {"mount": "mocap"},
+            "dt_s must be": {"dt_s": -1},
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            for message, change in cases.items():
+                path = Path(tmp) / "r.json"
+                path.write_text(json.dumps({**base, **change}))
+                with self.subTest(message=message), self.assertRaisesRegex(ValueError, message):
+                    load_recipe(path)
+            path.write_text(json.dumps(base))
+            self.assertEqual(load_recipe(path)["scene"], "E3")
+
+    def test_frozen_recipes_load(self):
+        from pathlib import Path  # noqa: PLC0415
+
+        from scripts.monolithic_reference.floating_hand_scenes import load_recipe  # noqa: PLC0415
+
+        fixtures = Path(__file__).resolve().parents[2] / "scripts/monolithic_reference/fixtures"
+        names = sorted(p.name for p in fixtures.glob("floating_*_v1.json"))
+        self.assertEqual(len(names), 5)
+        for name in names:
+            load_recipe(fixtures / name)

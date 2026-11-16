@@ -51,10 +51,10 @@ class TestAllegroAsset(unittest.TestCase):
         self.assertTrue(np.all(model.shape_type.numpy()[~collide] == newton.GeoType.MESH))
 
     def test_mounts(self):
-        """The wrist mount is one world-rooted tree of 22 DoFs; the floating mount has a FREE root."""
+        """The wrist mount is one world-rooted tree of 22 DoFs starting at Px; the floating mount has a FREE root."""
         _require_asset(self)
         for mount, joint_type, coords in (
-            ("wrist", newton.JointType.FIXED, 22),
+            ("wrist", newton.JointType.PRISMATIC, 22),
             ("floating", newton.JointType.FREE, 23),
         ):
             with self.subTest(mount=mount):
@@ -70,6 +70,21 @@ class TestAllegroAsset(unittest.TestCase):
                 self.assertEqual(len(hand), HAND_BODIES)
                 modes = model.joint_target_mode.numpy()
                 self.assertTrue(np.all(modes == int(newton.JointTargetMode.POSITION_VELOCITY)))
+
+    def test_fp32_initial_sweep(self):
+        """Both mounts stay within the FP32 swept-FK roundoff bound at their initial pose."""
+        _require_asset(self)
+        from newton._src.solvers.monolithic.articulation import _TreeKinematics  # noqa: PLC0415
+        from newton._src.solvers.monolithic.contact_sweep import _ArticulationSweep  # noqa: PLC0415
+
+        builder = newton.ModelBuilder()
+        add_allegro(builder, mount="wrist", palm_pose=wp.transform((0.0, 0.0, 0.3), wp.quat_identity()))
+        model = builder.finalize(device="cpu")
+        k = _TreeKinematics(model, dtype=wp.float32)
+        sweep = _ArticulationSweep(k, np.full(model.body_count, 0.05))
+        q = wp.array(model.joint_q.numpy(), dtype=wp.float32, device="cpu")
+        sweep.update(q, q)
+        self.assertEqual(int(sweep.status.numpy()[0]), 0)
 
     def test_bad_mount(self):
         with self.assertRaisesRegex(ValueError, "mount must be one of"):

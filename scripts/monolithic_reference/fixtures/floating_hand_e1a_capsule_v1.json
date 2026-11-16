@@ -1,0 +1,223 @@
+{
+  "schema": "p9d-floating-hand/v1",
+  "status": "PROPOSED",
+  "approval": null,
+  "stage": "P9d PR0",
+  "scene": "E1a",
+  "dt_s": 0.001,
+  "phases_s": {
+    "approach": 0.5,
+    "close": 1.0,
+    "lift": 1.0,
+    "hold": 1.0
+  },
+  "gravity": [
+    0.0,
+    0.0,
+    -9.81
+  ],
+  "lift_m": 0.1,
+  "squeeze_rad": 0.15,
+  "table": {
+    "kind": "plane",
+    "z": 0.0
+  },
+  "solver": {
+    "friction_velocity_scale": 0.01,
+    "contact_stiffness": 10000000.0,
+    "friction_coefficient": 0.8,
+    "normal_smoothing": 0.0001,
+    "publish_policy": "current_iterate",
+    "alignment_policy": "mask",
+    "newton_max_iterations": 10,
+    "linear_max_iterations": 200
+  },
+  "joint_terms": {
+    "implicit_pd": true,
+    "limits": true,
+    "limit_width": 0.01
+  },
+  "root_pd": {
+    "linear_ke": 20000.0,
+    "linear_kd": 200.0,
+    "angular_ke": 200.0,
+    "angular_kd": 5.0,
+    "force_limit_N": 100.0,
+    "torque_limit_Nm": 10.0
+  },
+  "mount": "floating",
+  "grasp": {
+    "source": "dev/monolithic/test/results/P9d/PR-00/grasp/e1a_capsule/grasp_result.json",
+    "source_sha256": "8c3bf9eddd6acd8a5d25f85f1e8427589cb2a8c4a696f6b960adda6986821400",
+    "intent_sha256": "ac70808f7611a91fa9190b63ddc338c4ee1092c5b1da83ac9954360851d10e7e",
+    "tool": "monolithic-tasks python -m manip grasp",
+    "tool_commit": "50d159d9b6424f82357ae090eef87627c588f702",
+    "tool_solver_commit": "d50ead9b627ca511da98370a1771c26f3aa0edb6",
+    "candidate": 1,
+    "rank": 0,
+    "mujoco_screen": {
+      "lift_m": 0.04771960899233818,
+      "slip_m": 0.001123416312971719,
+      "note": "diagnostic only"
+    },
+    "mount_world": [
+      [
+        1.0,
+        0.0,
+        -2.220446049250313e-16,
+        -0.07098893042854516
+      ],
+      [
+        0.0,
+        -1.0000000000000002,
+        0.0,
+        0.05872317758804905
+      ],
+      [
+        -2.2204460492503126e-16,
+        -0.0,
+        -1.0000000000000002,
+        0.11252683369339438
+      ],
+      [
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ]
+    ],
+    "attach_in_wrist": [
+      [
+        0.14589202270185925,
+        0.0,
+        0.9893005194135704,
+        0.048348569898602936
+      ],
+      [
+        0.0,
+        -1.0,
+        0.0,
+        0.0
+      ],
+      [
+        0.9893005194135703,
+        0.0,
+        -0.14589202270185928,
+        0.002270623873072281
+      ],
+      [
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ]
+    ],
+    "pregrasp": {
+      "wrist_px": -0.021841587498784065,
+      "wrist_py": 0.07783657312393188,
+      "wrist_pz": -0.1006617247313261,
+      "wrist_rz": -1.405452847480774,
+      "wrist_ry": -0.13201233744621277,
+      "wrist_rx": -0.09181708097457886,
+      "joint_8.0": -7.266338798217475e-05,
+      "joint_9.0": 0.08049999922513962,
+      "joint_10.0": 0.08545000106096268,
+      "joint_11.0": 0.08090000599622726,
+      "joint_4.0": -0.4699999988079071,
+      "joint_5.0": 0.08049999922513962,
+      "joint_6.0": 0.07513952255249023,
+      "joint_7.0": -0.22699999809265137,
+      "joint_0.0": -0.45545220375061035,
+      "joint_1.0": 0.08049999922513962,
+      "joint_2.0": -0.11750150471925735,
+      "joint_3.0": -0.22699999809265137,
+      "joint_12.0": 0.9701882600784302,
+      "joint_13.0": 0.3517557978630066,
+      "joint_14.0": 0.08220000565052032,
+      "joint_15.0": -0.16200000047683716
+    },
+    "open_at_grasp": {
+      "wrist_px": -0.021841587498784065,
+      "wrist_py": 0.07783657312393188,
+      "wrist_pz": -0.020661724731326103,
+      "wrist_rz": -1.405452847480774,
+      "wrist_ry": -0.13201233744621277,
+      "wrist_rx": -0.09181708097457886,
+      "joint_8.0": -7.266338798217475e-05,
+      "joint_9.0": 0.08049999922513962,
+      "joint_10.0": 0.08545000106096268,
+      "joint_11.0": 0.08090000599622726,
+      "joint_4.0": -0.4699999988079071,
+      "joint_5.0": 0.08049999922513962,
+      "joint_6.0": 0.07513952255249023,
+      "joint_7.0": -0.22699999809265137,
+      "joint_0.0": -0.45545220375061035,
+      "joint_1.0": 0.08049999922513962,
+      "joint_2.0": -0.11750150471925735,
+      "joint_3.0": -0.22699999809265137,
+      "joint_12.0": 0.9701882600784302,
+      "joint_13.0": 0.3517557978630066,
+      "joint_14.0": 0.08220000565052032,
+      "joint_15.0": -0.16200000047683716
+    },
+    "grasp": {
+      "wrist_px": -0.021841587498784065,
+      "wrist_py": 0.07783657312393188,
+      "wrist_pz": -0.020661724731326103,
+      "wrist_rz": -1.405452847480774,
+      "wrist_ry": -0.13201233744621277,
+      "wrist_rx": -0.09181708097457886,
+      "joint_8.0": -7.266338798217475e-05,
+      "joint_9.0": 0.24153496325016022,
+      "joint_10.0": 0.2561897337436676,
+      "joint_11.0": 0.2426668107509613,
+      "joint_4.0": -0.4699999988079071,
+      "joint_5.0": 1.6100000143051147,
+      "joint_6.0": 0.07513952255249023,
+      "joint_7.0": -0.22699999809265137,
+      "joint_0.0": -0.45545220375061035,
+      "joint_1.0": 1.6100000143051147,
+      "joint_2.0": -0.11750150471925735,
+      "joint_3.0": -0.22699999809265137,
+      "joint_12.0": 0.9701882600784302,
+      "joint_13.0": 0.3517557978630066,
+      "joint_14.0": 0.43974411487579346,
+      "joint_15.0": -0.16200000047683716
+    }
+  },
+  "object": {
+    "kind": "capsule",
+    "radius": 0.02,
+    "half_height": 0.04,
+    "mass_kg": 0.1,
+    "position": [
+      0.0,
+      0.0,
+      0.0205
+    ],
+    "quaternion_xyzw": [
+      0.0,
+      0.7071067811865476,
+      0.0,
+      0.7071067811865476
+    ]
+  },
+  "self_collision": {
+    "exclude": [
+      [
+        "palm_link",
+        "link_13.0"
+      ]
+    ]
+  },
+  "hand_import": {
+    "collapse_fixed_joints": false,
+    "enable_self_collisions": true,
+    "finger_gains": {
+      "target_ke": 150.0,
+      "target_kd": 5.0,
+      "armature": 0.01
+    },
+    "urdf_dynamics": "zeroed: URDF damping 3-10 N m s/rad and friction 5-12 N m (effort limit 15 N m) are not physical for the finger joints; the task profile zeroes damping"
+  }
+}

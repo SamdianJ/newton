@@ -1,0 +1,68 @@
+{
+  "schema": "p9d-floating-hand/v1",
+  "status": "PROPOSED",
+  "approval": null,
+  "stage": "P9d PR0",
+  "scene": "E3",
+  "mount": "floating",
+  "dt_s": 0.001,
+  "phases_s": {
+    "close": 1.0,
+    "hold": 1.0
+  },
+  "gravity": [
+    0.0,
+    0.0,
+    -9.81
+  ],
+  "palm_pose": [
+    0.0,
+    0.0,
+    0.3,
+    0.0,
+    0.0,
+    0.0,
+    1.0
+  ],
+  "solver": {
+    "friction_velocity_scale": 0.01,
+    "contact_stiffness": 10000000.0,
+    "friction_coefficient": 0.8,
+    "normal_smoothing": 0.0001,
+    "publish_policy": "current_iterate",
+    "alignment_policy": "mask",
+    "newton_max_iterations": 10,
+    "linear_max_iterations": 200
+  },
+  "joint_terms": {
+    "implicit_pd": true,
+    "limits": true,
+    "limit_width": 0.01
+  },
+  "root_pd": {
+    "linear_ke": 20000.0,
+    "linear_kd": 200.0,
+    "angular_ke": 200.0,
+    "angular_kd": 5.0,
+    "force_limit_N": 100.0,
+    "torque_limit_Nm": 10.0
+  },
+  "self_collision": {
+    "exclude": [
+      [
+        "palm_link",
+        "link_13.0"
+      ]
+    ]
+  },
+  "hand_import": {
+    "collapse_fixed_joints": false,
+    "enable_self_collisions": true,
+    "finger_gains": {
+      "target_ke": 150.0,
+      "target_kd": 5.0,
+      "armature": 0.01
+    },
+    "urdf_dynamics": "zeroed: URDF damping 3-10 N m s/rad and friction 5-12 N m (effort limit 15 N m) are not physical for the finger joints; the task profile zeroes damping"
+  }
+}

@@ -208,3 +208,174 @@ def world_core(core, body_pose):
     """Place a body-local core with a body pose ``(px, py, pz, qx, qy, qz, qw)``."""
     pose = np.asarray(body_pose, dtype=np.float64)
     return core.placed(quaternion_matrix(pose[3:]), pose[:3])
+
+
+# ---------------------------------------------------------------------------
+# Run evaluation
+# ---------------------------------------------------------------------------
+
+
+def _core_from_record(shape):
+    geo = shape["type"]
+    scale = np.asarray(shape["scale"], dtype=np.float64)
+    if geo == "SPHERE":
+        core = point(scale[0])
+    elif geo == "CAPSULE":
+        core = segment(scale[1], scale[0])
+    elif geo == "BOX":
+        core = box(scale)
+    elif geo in ("CONVEX_MESH", "MESH"):
+        core = hull(np.asarray(shape["hull_points"], dtype=np.float64))
+    elif geo == "PLANE":
+        return None
+    else:
+        raise ValueError(f"Shape {shape['label']}: no convex core for {geo}")
+    x = np.asarray(shape["transform"], dtype=np.float64)
+    return core.placed(quaternion_matrix(x[3:]), x[:3])
+
+
+def load_run(run_dir):
+    import json  # noqa: PLC0415
+    from pathlib import Path  # noqa: PLC0415
+
+    run_dir = Path(run_dir)
+    manifest = json.loads((run_dir / "manifest.json").read_text())
+    model = json.loads((run_dir / "model.json").read_text())
+    chunks = [np.load(run_dir / name) for name in manifest.get("chunks", [])]
+    frames = {key: np.concatenate([c[key] for c in chunks]) for key in chunks[0].files} if chunks else {}
+    return manifest, model, frames
+
+
+def _bounding_radius(core):
+    return float(np.linalg.norm(core.vertices - core.vertices.mean(axis=0), axis=1).max()) + core.radius
+
+
+def _rotation_angle(a, b):
+    """Geodesic angle between two rotation matrices."""
+    c = (np.trace(a @ b.T) - 1.0) / 2.0
+    return float(np.arccos(np.clip(c, -1.0, 1.0)))
+
+
+def evaluate(run_dir, recipe, *, settle_s=0.05, grasp_window=500, stride=1):
+    """Measure every published frame of a run; returns the criteria dictionary (no PASS/FAIL)."""
+    manifest, model, frames = load_run(run_dir)
+    dt = manifest["dt_s"]
+    out = {
+        "source_sha": manifest["source_sha"],
+        "status": manifest["status"],
+        "counts": manifest["counts"],
+        "planned_steps": manifest.get("planned_steps"),
+        "published_steps": int(len(frames.get("step", ()))),
+    }
+    published = out["published_steps"]
+    out["stopped_fraction"] = manifest["counts"]["STOPPED_ACCEPTED"] / max(1, published)
+    if not published:
+        return out
+    shapes = {s["index"]: s for s in model["shapes"]}
+    cores = {i: _core_from_record(s) for i, s in shapes.items()}
+    radii = {i: _bounding_radius(c) for i, c in cores.items() if c is not None}
+    body_q = frames["body_q"].astype(np.float64)
+    obj = model["object_body"]
+    hand = set(model["hand_bodies"])
+    plane = [i for i, s in shapes.items() if s["type"] == "PLANE"]
+    labels = model["body_labels"]
+    exclude = {tuple(sorted(p)) for p in (recipe.get("self_collision") or {}).get("exclude", [])}
+    self_pairs = [
+        (a, b)
+        for a, b in model["same_tree_pairs"]
+        if tuple(sorted((labels[shapes[a]["body"]], labels[shapes[b]["body"]]))) not in exclude
+    ]
+
+    def placed(i, k):
+        return world_core(cores[i], body_q[k, shapes[i]["body"]])
+
+    def depth(a, b, k):
+        ca, cb = placed(a, k), placed(b, k)
+        center = np.linalg.norm(ca.vertices.mean(axis=0) - cb.vertices.mean(axis=0))
+        if center > radii[a] + radii[b]:
+            return 0.0
+        return penetration(ca, cb)
+
+    hand_shapes = [i for i, s in shapes.items() if s["body"] in hand and cores[i] is not None]
+    object_shapes = [i for i, s in shapes.items() if s["body"] == obj and cores[i] is not None]
+    series = {"hand_object": [], "object_table": [], "hand_table": [], "self": []}
+    frames_checked = range(0, published, stride)
+    for k in frames_checked:
+        series["hand_object"].append(max((depth(a, b, k) for a in hand_shapes for b in object_shapes), default=0.0))
+        series["object_table"].append(
+            max((max(0.0, -plane_signed_distance(placed(b, k))) for b in object_shapes), default=0.0) if plane else 0.0
+        )
+        series["hand_table"].append(
+            max((max(0.0, -plane_signed_distance(placed(a, k))) for a in hand_shapes), default=0.0) if plane else 0.0
+        )
+        series["self"].append(max((depth(a, b, k) for a, b in self_pairs), default=0.0))
+    out["penetration_m"] = {
+        name: {"max": float(np.max(v)), "p99": float(np.quantile(v, 0.99))} for name, v in series.items()
+    }
+    out["frames_checked"] = len(series["self"])
+    out["self_pairs_checked"] = len(self_pairs)
+    if model["palm_body"] is not None and np.any(frames["palm_target"][:, 3, 3]):
+        first = int(np.ceil(settle_s / dt))
+        palm = body_q[:, model["palm_body"]]
+        pos_err, ang_err = [], []
+        for k in range(first, published):
+            target = frames["palm_target"][k]
+            pos_err.append(float(np.linalg.norm(palm[k, :3] - target[:3, 3])))
+            ang_err.append(_rotation_angle(quaternion_matrix(palm[k, 3:]), target[:3, :3]))
+        out["root_tracking"] = {
+            "position_max_m": max(pos_err, default=0.0),
+            "angle_max_rad": max(ang_err, default=0.0),
+            "from_step": first,
+        }
+    if obj is not None:
+        z0 = body_q[0, obj, 2]
+        weight = model["body_mass"][obj] * abs(model["gravity"][2])
+        o = recipe["object"]
+        edge = 2 * min(o["half_extents"]) if o["kind"] == "box" else 2 * o["radius"]
+        table = [i for i, idx in enumerate(manifest.get("object_pair_shapes", [])) if idx in plane]
+        support = frames["object_pair_force"][:, table, 2].sum(axis=1) if table else np.zeros(published)
+        window = slice(max(0, published - grasp_window), published)
+        rise = body_q[:, obj, 2] - z0
+        out["grasp"] = {
+            "window_steps": int(min(grasp_window, published)),
+            "window_complete": published == manifest.get("planned_steps") and published >= grasp_window,
+            "weight_N": weight,
+            "max_ground_force_N": float(np.max(support[window])),
+            "min_com_rise_m": float(np.min(rise[window])),
+            "object_min_edge_m": edge,
+            "lift_ratio_min": float(np.min(rise[window]) / recipe["lift_m"]) if "lift_m" in recipe else None,
+        }
+    if recipe["scene"] == "E3":
+        # Root rows: the first six DoFs of the hand tree (FREE root or the six wrist joints).
+        root = slice(model["joint_qd_start"][0], model["joint_qd_start"][0] + 6)
+        values = frames["contact_joint_force"][:, root]
+        out["root_rows_contact_force"] = {
+            "max_abs": float(np.max(np.abs(values))),
+            "all_zero": bool(np.all(values == 0)),
+        }
+    out["solver"] = {
+        name: {"mean": float(np.mean(frames[name])), "max": int(np.max(frames[name]))}
+        for name in ("newton_iterations", "linear_iterations", "line_search_iterations", "regularization_retries")
+    }
+    return out
+
+
+def main(argv=None):
+    import argparse  # noqa: PLC0415
+    import json  # noqa: PLC0415
+    from pathlib import Path  # noqa: PLC0415
+
+    parser = argparse.ArgumentParser(description="Evaluate one run_floating_hand output directory in FP64.")
+    parser.add_argument("run_dir", type=Path)
+    parser.add_argument("--stride", type=int, default=1, help="evaluate every n-th frame (diagnostic runs only)")
+    args = parser.parse_args(argv)
+    manifest = json.loads((args.run_dir / "manifest.json").read_text())
+    recipe = json.loads(Path(manifest["arguments"]["recipe"]).read_text())
+    result = evaluate(args.run_dir, recipe, stride=args.stride)
+    result["stride"] = args.stride
+    (args.run_dir / "criteria.json").write_text(json.dumps(result, indent=2) + "\n")
+    print(json.dumps(result, indent=2))
+
+
+if __name__ == "__main__":
+    main()
