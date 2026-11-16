@@ -18,7 +18,7 @@ class CoupledState(ArticulationState):
     namespace = "_monolithic_coupled"
     version = 4
 
-    def __init__(self, kinematics, actors, rigid=None, materials=None, *, cloth_contact=False):
+    def __init__(self, kinematics, actors, rigid=None, materials=None, *, cloth_contact=False, cable_contact=False):
         self.actors = actors
         self.rigid = rigid
         self.materials = materials
@@ -64,6 +64,14 @@ class CoupledState(ArticulationState):
             self.schema.update(
                 cloth_contact_particle_force=((n,), self.vector),
                 cloth_contact_summary=((6,), self.dtype),
+            )
+        # Cable contact supersedes 6/7/8 as cloth contact supersedes 6/7: 9 alone, 10 with cloth contact.
+        self.cable_contact = cable_contact
+        if cable_contact:
+            self.version = 10 if cloth_contact else 9
+            self.schema.update(
+                cable_contact_particle_force=((n,), self.vector),
+                cable_contact_summary=((8,), self.dtype),
             )
         if materials is not None:
             edges = materials.theta_count
@@ -293,6 +301,9 @@ class CoupledState(ArticulationState):
         if self.cloth_contact:
             history.cloth_contact_particle_force.zero_()
             history.cloth_contact_summary.zero_()
+        if self.cable_contact:
+            history.cable_contact_particle_force.zero_()
+            history.cable_contact_summary.zero_()
         for name in (
             "contact_particle_force",
             "contact_body_force",

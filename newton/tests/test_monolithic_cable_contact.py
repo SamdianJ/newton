@@ -139,6 +139,39 @@ def reference_gradient(solver, rest, chains, positions, *, stiffness=1e5, smooth
     return energy, gradient, (segments, samples, pairs)
 
 
+def cloth_and_cable_solver(*, device=None, precision=SolverMonolithic.Precision.FP64):
+    """Two pressed cable strands and a separate cloth triangle with cloth and cable contact both enabled."""
+    points, chains = strands()
+    builder = newton.ModelBuilder(gravity=(0, 0, 0))
+    mass = np.zeros(len(points))
+    for chain in chains:
+        ids = list(chain)
+        half = np.linalg.norm(np.diff(points[ids], axis=0), axis=1) * DENSITY / 2
+        mass[ids[:-1]] += half
+        mass[ids[1:]] += half
+    for point, value in zip(points, mass, strict=True):
+        builder.add_particle(tuple(point), (0.0, 0.0, 0.0), mass=float(value))
+    first, face = builder.particle_count, builder.tri_count
+    for x, y in ((0.0, 0.05), (0.03, 0.05), (0.0, 0.08)):
+        builder.add_particle(wp.vec3(x, y, 0.0), wp.vec3(0.0), 0.00015)
+    builder.add_triangle(first, first + 1, first + 2, tri_ke=2, tri_ka=3, tri_kd=0)
+    model = builder.finalize(device=device)
+    solver = SolverMonolithic(
+        model,
+        cloth_inputs=[
+            SolverMonolithic.ClothInput(triangle_ids=(face,), bending=(0.01, 0.01), thickness=0.01, surface_density=1)
+        ],
+        cable_inputs=[cable_input(chain, points) for chain in chains],
+        cloth_contact={"radius": 0.02, "normal_stiffness": 1e3, "candidate_capacity": 64},
+        cable_contact={},
+        friction_velocity_scale=0.01,
+        mass_mode="lumped",
+        newton_max_iterations=20,
+        precision=precision,
+    )
+    return solver, solver.create_state(dt=0.001)
+
+
 class TestMonolithicCableContact(unittest.TestCase):
     precisions = (SolverMonolithic.Precision.FP64, SolverMonolithic.Precision.FP32)
 
@@ -336,13 +369,14 @@ class TestMonolithicCableContact(unittest.TestCase):
                             np.testing.assert_array_equal(snapshot(target)[name], value, err_msg=name)
 
     def test_disabled_contact_builds_nothing(self):
-        """Without cable_contact nothing new is built: no contact, producer, identity field or triplet capacity."""
+        """Without cable_contact nothing new is built: no contact, producer, state field or triplet capacity."""
         points, chains = strands()
         disabled, disabled_state = cable_contact_solver(points, chains, config=None)
         enabled, enabled_state = cable_contact_solver(points, chains, config={})
-        # No new state fields: the checkpoint schema version stays that of the trunk material layout.
+        # Only an enabled cable contact adds its state fields (schema 9); without it the trunk material layout stays 6.
         versions = [s._monolithic_coupled.schema_version.numpy().tolist() for s in (enabled_state, disabled_state)]
-        self.assertEqual(versions, [[6], [6]])
+        self.assertEqual(versions, [[9], [6]])
+        self.assertFalse(hasattr(disabled_state._monolithic_coupled, "cable_contact_summary"))
         self.assertIsNone(disabled._cable_contact)
         self.assertNotIn("cable_contact", [p.name for p in disabled._problem.producers])
         self.assertIn("cable_contact", [p.name for p in enabled._problem.producers])
@@ -355,36 +389,9 @@ class TestMonolithicCableContact(unittest.TestCase):
 
     def test_cloth_and_cable_contact_together(self):
         """Cloth and cable contact construct and step together; cable contact only pairs cable samples and segments."""
-        points, chains = strands()
-        builder = newton.ModelBuilder(gravity=(0, 0, 0))
-        mass = np.zeros(len(points))
-        for chain in chains:
-            ids = list(chain)
-            half = np.linalg.norm(np.diff(points[ids], axis=0), axis=1) * DENSITY / 2
-            mass[ids[:-1]] += half
-            mass[ids[1:]] += half
-        for point, value in zip(points, mass, strict=True):
-            builder.add_particle(tuple(point), (0.0, 0.0, 0.0), mass=float(value))
-        first, face = builder.particle_count, builder.tri_count
-        for x, y in ((0.0, 0.05), (0.03, 0.05), (0.0, 0.08)):
-            builder.add_particle(wp.vec3(x, y, 0.0), wp.vec3(0.0), 0.00015)
-        builder.add_triangle(first, first + 1, first + 2, tri_ke=2, tri_ka=3, tri_kd=0)
-        model = builder.finalize()
-        solver = SolverMonolithic(
-            model,
-            cloth_inputs=[
-                SolverMonolithic.ClothInput(
-                    triangle_ids=(face,), bending=(0.01, 0.01), thickness=0.01, surface_density=1
-                )
-            ],
-            cable_inputs=[cable_input(chain, points) for chain in chains],
-            cloth_contact={"radius": 0.02, "normal_stiffness": 1e3, "candidate_capacity": 64},
-            cable_contact={},
-            friction_velocity_scale=0.01,
-            mass_mode="lumped",
-            newton_max_iterations=20,
-        )
-        state = solver.create_state(dt=0.001)
+        solver, state = cloth_and_cable_solver()
+        # Both contacts add their state fields: schema 10.
+        self.assertEqual(state._monolithic_coupled.schema_version.numpy().tolist(), [10])
         solver.step(state, state, solver.create_control(), dt=0.001)
         self.assertFalse(solver.last_stats.rolled_back, solver.last_stats)
         names = [p.name for p in solver._problem.producers]
@@ -396,6 +403,61 @@ class TestMonolithicCableContact(unittest.TestCase):
         targets = contact.particles[segments["first"][pairs[:, 1]]]
         self.assertTrue(set(targets.tolist()) <= cable_particles)
         self.assertGreater(len(pairs), 0)
+        # Both diagnostics are published; the strands are two cables, so their pairs are inter-cable.
+        cable = solver.get_cable_contact_diagnostics(state)
+        self.assertEqual(solver.get_cloth_contact_diagnostics(state)["method"], "point-cloud")
+        self.assertGreater(cable["inter"]["active"], 0)
+        self.assertEqual(cable["self"]["candidates"], 0)
+
+    def test_diagnostics_off_and_on(self):
+        """Without cable contact the accessor reports it off; with it, counts, loads and overlap are consistent."""
+        points, chains = strands()
+        disabled, disabled_state = cable_contact_solver(points, chains, config=None)
+        self.assertEqual(disabled.get_cable_contact_diagnostics(disabled_state), {"method": "off", "enabled": False})
+        solver, state = cable_contact_solver(points, chains, config={"self": False})
+        # At rest every normal is vertical, so the summed compressive load is the vertical contact force on the
+        # upper strand (the vertex pairs subtract the double count at its interior vertices in both).
+        contact = solver._cable_contact
+        contact.begin_step(state)
+        contact.evaluate(wp.zeros_like(state.particle_q), 0.001)
+        force = contact.pool.force.result.numpy().reshape(-1, 3)
+        self.assertAlmostEqual(
+            float(contact.summary.numpy()[2]), float(force[list(chains[1]), 2].sum()), delta=1e-12 * np.abs(force).sum()
+        )
+        self.assertGreater(float(contact.summary.numpy()[2]), 0.0)
+        solver.step(state, state, solver.create_control(), dt=0.001)
+        self.assertFalse(solver.last_stats.rolled_back, solver.last_stats)
+        result = solver.get_cable_contact_diagnostics(state)
+        self.assertEqual((result["method"], result["enabled"], result["force_valid"]), ("cable-contact", True, True))
+        inter = result["inter"]
+        self.assertGreater(inter["candidates"], 0)
+        self.assertTrue(0 < inter["active"] <= inter["candidates"])
+        self.assertGreater(inter["compressive_load_N"], 0.0)
+        # Independent FP64 check from the published positions: cable 0 samples (three Gauss points per edge
+        # and both free ends) against the segments of cable 1, as counted one way between cables.
+        x = state.particle_q.numpy().astype(np.float64)
+        lower, upper = x[list(chains[0])], x[list(chains[1])]
+        gauss = np.array([0.5 - 0.5 * np.sqrt(0.6), 0.5, 0.5 + 0.5 * np.sqrt(0.6)])
+        samples = np.vstack(
+            [
+                lower[0],
+                lower[-1],
+                ((1 - gauss)[None, :, None] * lower[:-1, None] + gauss[None, :, None] * lower[1:, None]).reshape(-1, 3),
+            ]
+        )
+        a, e = upper[:-1], upper[1:] - upper[:-1]
+        t = np.clip(np.einsum("sij,ij->si", samples[:, None] - a[None], e) / np.einsum("ij,ij->i", e, e), 0.0, 1.0)
+        distance = np.linalg.norm(samples[:, None] - (a[None] + t[..., None] * e[None]), axis=2).min(axis=1)
+        expected = max(0.0, float((2 * R - distance).max()))
+        self.assertGreater(expected, 0.0)
+        self.assertAlmostEqual(inter["max_overlap_m"], expected, delta=1e-12)
+        self.assertEqual(
+            result["self"], {"candidates": 0, "active": 0, "compressive_load_N": 0.0, "max_overlap_m": 0.0}
+        )
+        np.testing.assert_array_equal(
+            result["particle_force_N"], state._monolithic_coupled.cable_contact_particle_force.numpy()
+        )
+        self.assertGreaterEqual(solver.last_stats.variational["cable_used_shift_max"], 0.0)
 
 
 if __name__ == "__main__":

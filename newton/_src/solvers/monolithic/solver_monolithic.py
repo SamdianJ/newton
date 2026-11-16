@@ -139,7 +139,9 @@ class SolverMonolithic(SolverBase):
     segment stretched beyond 1.5 times its rest length fails the step as invalid
     geometry. Zero padding and zero capacities are accepted (zero capacity
     reports any contact as overflow). This configuration is fixed for the solver
-    lifetime and checkpoint identity.
+    lifetime and checkpoint identity. ``get_cable_contact_diagnostics`` returns
+    publication-bound counts, loads and overlaps; enabled checkpoints use schema
+    9 (10 together with ``cloth_contact``).
 
     Experimental ``alignment_policy="frozen"`` retains each sample's physical
     step-start orientation weight through Newton and candidate refreshes.
@@ -673,6 +675,7 @@ class SolverMonolithic(SolverBase):
             self._rigid,
             self._materials,
             cloth_contact=self._cloth_contact is not None,
+            cable_contact=self._cable_contact is not None,
         )
 
     def get_cloth_contact_diagnostics(self, state):
@@ -691,6 +694,39 @@ class SolverMonolithic(SolverBase):
             "self": {"candidates": int(values[3]), "active": int(values[4]), "compressive_load_N": float(values[5])},
             "particle_force_N": history.cloth_contact_particle_force.numpy().copy(),
             "configuration": dict(self._cloth_contact.config),
+            "protection": {"strategy": "DCD", "continuous_path_checked": False},
+        }
+
+    def get_cable_contact_diagnostics(self, state):
+        """Return experimental cable contact counts, compressive loads [N] and deepest overlaps [m].
+
+        ``candidates`` and ``active`` count sample-segment pairs (``active``: positive normal load). The
+        compressive load sums the normal loads of all pairs with sign, a sample-vertex pair subtracting
+        its double count; ``max_overlap_m`` is the largest overlap of a sample-segment pair.
+        """
+        self._states.validate(state)
+        if self._cable_contact is None:
+            return {"method": "off", "enabled": False}
+        history = state._monolithic_coupled
+        values = history.cable_contact_summary.numpy()
+
+        def channel(offset):
+            return {
+                "candidates": int(values[offset]),
+                "active": int(values[offset + 1]),
+                "compressive_load_N": float(values[offset + 2]),
+                "max_overlap_m": float(values[offset + 3]),
+            }
+
+        return {
+            "method": "cable-contact",
+            "enabled": True,
+            "force_valid": bool(history.force_valid.numpy()[0]),
+            "generation": int(history.force_generation.numpy()[0]),
+            "inter": channel(0),
+            "self": channel(4),
+            "particle_force_N": history.cable_contact_particle_force.numpy().copy(),
+            "configuration": dict(self._cable_contact.config),
             "protection": {"strategy": "DCD", "continuous_path_checked": False},
         }
 
@@ -865,6 +901,9 @@ class SolverMonolithic(SolverBase):
             "linear_postchecks": [],
             "configuration": self._kinematics.digest.hex(),
         }
+        cable_preconditioner = self._linear._cable_preconditioner
+        if cable_preconditioner is not None:
+            cable_preconditioner.step_shift_max.zero_()
         k, obj = self._kinematics, self._objective
         k.evaluate(k.gather_q(self._accepted))
         if not self._domain(self._accepted):
@@ -907,6 +946,9 @@ class SolverMonolithic(SolverBase):
                 self._variational.pop("actor_contact_pairs", None)
             if isinstance(self._variational.get("residual"), wp.array):
                 self._variational["residual"] = _diagnostic_snapshot(self._variational["residual"])
+            if cable_preconditioner is not None:
+                # Largest preconditioner-only shift of any cable factor in this step (one read per step).
+                self._variational["cable_used_shift_max"] = float(cable_preconditioner.step_shift_max.numpy()[0])
             self._variational["graphs"] = self._graphs.summary()
             if self._contact_pool:
                 self._variational["contact_graphs"] = {

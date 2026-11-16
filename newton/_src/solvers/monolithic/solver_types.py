@@ -38,8 +38,9 @@ class CableInput:
     EA is in N; bending is an SPD 2x2 material tensor and GJ is in N m^2.
     Radius is a circular contact envelope in m, density is in kg/m, and
     rest_theta is unwrapped radians. Each rest_director is a unit vector
-    perpendicular to its edge. Contact-free cables share the global nonlinear
-    solve; material contacts, closed loops and branching are not available.
+    perpendicular to its edge. Cables share the global nonlinear solve with
+    shape contact and, optionally, experimental cable self and inter-cable
+    contact (``cable_contact``); closed loops and branching are not available.
     """
 
     particle_ids: tuple[int, ...]

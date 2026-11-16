@@ -378,6 +378,7 @@ def _select_shift(
     shifts: wp.array[Any],
     used: wp.array[Any],
     chosen: wp.array[int],
+    step_max: wp.array[Any],
     status: wp.array[int],
 ):
     # The serial ladder's outcome: the first shift that factors, a non-finite value stops the
@@ -390,6 +391,7 @@ def _select_shift(
     result = first_pending[0, actor]
     if result == 0:
         used[actor] = shifts[0]
+        wp.atomic_max(step_max, 0, shifts[0])
         return
     if result == _NONFINITE:
         wp.atomic_max(status, 0, 16)
@@ -401,6 +403,7 @@ def _select_shift(
         if result == 0:
             used[actor] = shifts[a + 1]
             chosen[actor] = a + 1
+            wp.atomic_max(step_max, 0, shifts[a + 1])
             return
         if result == _NONFINITE:
             wp.atomic_max(status, 0, 16)
@@ -690,6 +693,8 @@ class CablePreconditioner:
         self.retry_code = wp.zeros((retries, cables), dtype=int, device=device)
         self.retry_pending = wp.zeros((retries, cables), dtype=int, device=device)
         self.chosen = wp.zeros(cables, dtype=int, device=device)
+        # Largest shift any factor chose since the solver last cleared it (once per step).
+        self.step_shift_max = wp.zeros(1, dtype=dtype, device=device)
 
     def _views(self):
         return [
@@ -772,6 +777,7 @@ class CablePreconditioner:
             self.retry_code,
             self.retry_pending,
             self.chosen,
+            self.step_shift_max,
         )
         if self._records is not None:
             self._records.bind(self._views())
@@ -851,7 +857,15 @@ class CablePreconditioner:
         wp.launch(
             _select_shift,
             cables,
-            [self.first_pending, self.retry_pending, self.shifts, self.used_shift, self.chosen, status],
+            [
+                self.first_pending,
+                self.retry_pending,
+                self.shifts,
+                self.used_shift,
+                self.chosen,
+                self.step_shift_max,
+                status,
+            ],
             device=device,
         )
         wp.launch(

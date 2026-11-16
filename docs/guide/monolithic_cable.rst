@@ -9,8 +9,10 @@ Experimental monolithic cables
    ``SolverMonolithic.CableInput`` and its state/control namespaces are
    experimental. Open, independent chains support finite axial stiffness,
    anisotropic bending and natural curvature/twist. Closed loops, branches,
-   connectors, self-collision and soft-soft contacts are outside this interface.
-   Cable surfaces contact supported articulation, free rigid and static shapes.
+   connectors and soft-soft contacts are outside this interface. Cable surfaces
+   contact supported articulation, free rigid and static shapes; experimental
+   frictionless cable self and inter-cable contact is available through
+   ``cable_contact``.
    Cloth can share the solve; see :doc:`monolithic_cloth`.
 
 Supply ordered Model particle IDs, reference directors and material angles
@@ -63,6 +65,53 @@ are described in :doc:`monolithic_cloth`. CPU/CUDA short-contact qualification
 and graph coverage do not establish long contact-trajectory or performance
 qualification, or remove the existing localized-helix acceptance limitations.
 
+Cable contact
+-------------
+
+``cable_contact=None`` (the default) adds nothing to the solve. An experimental
+configuration dictionary enables frictionless contact between cables and within
+one cable, on centerline positions only, for example ``{"self": True, "inter": True,
+"normal_stiffness": 1e5}``. Each cable's ``radius`` is its contact radius.
+
+Keys: ``self`` and ``inter`` (bool, default True, not both False);
+``normal_stiffness``, a line stiffness [N/m²] (default 1e5; a method coefficient,
+not a calibrated value); ``samples_per_edge`` (2 or 3, default 3);
+``index_exclusion`` (integer ≥ 3, default 3) and ``arc_exclusion_factor``
+(default π/2); bounded ``candidate_capacity`` and ``support_capacity``; and
+``candidate_padding`` [m] (default the largest cable radius). The penalty
+smoothing width is the shared ``normal_smoothing``. The configuration is fixed
+for the solver lifetime and enters the checkpoint identity.
+
+Gauss sample points on each edge, plus one point at each free end, are tested
+against the segments of other cable parts. The energy of a sample counts its
+clamped distance to every nearby segment and subtracts the double count at
+shared interior vertices, so on a straight line and on the convex side of a bend
+it is the C-IE penalty of the distance to the polyline. Counting is one way:
+within a cable the lower edge index samples, between cables the lower cable
+index. A cable ignores itself within ``index_exclusion`` edges and within
+``arc_exclusion_factor`` times twice its radius of rest arc length. Every rest
+edge must lie between its own radius and four times the smallest radius of the
+cables it can touch.
+
+Detection is discrete: candidates are found at each Newton refresh from the
+current and step-start positions and stay frozen through the trials. Fast
+crossings are not prevented, and a segment stretched beyond 1.5 times its rest
+length fails the step as invalid geometry. A full candidate or support pool
+fails and rolls back the step rather than truncating force. The contact force
+acts on positions only and adds no twist reaction. In the cable band
+preconditioner only the principal blocks of each contact side are kept; the
+coupling between contact sides stays in the global operator.
+
+``get_cable_contact_diagnostics(state)`` returns publication-bound values for
+inter-cable and self contact: sample–segment candidates, active pairs (positive
+normal load), the compressive load [N] summed over all pairs with sign (a
+sample–vertex pair subtracts its double count), the deepest sample–segment
+overlap [m], and the cable contact particle forces [N]. These forces also enter
+``get_contact_forces()``. ``Stats.variational["cable_used_shift_max"]`` reports
+the largest preconditioner-only shift any cable factor needed in the step.
+Enabled cable-contact checkpoints use schema 9 (schema 10 together with
+``cloth_contact``); disabled and differently configured solvers reject them.
+
 Numerical contract
 ------------------
 
@@ -99,8 +148,10 @@ cable can stop before it resolves a small load. These accuracy requirements
 can also reject poorly conditioned inputs. Stopped publication is never analytical convergence. The material
 nonlinear driver uses host acceptance; CUDA graph mode captures the linear
 solve and supported segments, not the entire material step.
-Band factorization and triangular solves are sequential within each chain;
-long chains can be slower on CUDA than CPU. This experimental path has no
+Band factorization and triangular solves use block cyclic reduction of 10-row
+blocks, level by level across all cables; it factors the same matrix as a serial
+band Cholesky with a different rounding order. A cable whose band fails a pivot
+retries larger preconditioner-only shifts. This experimental path has no
 accelerator performance qualification yet.
 Use CPU for the full localized-helix analytical matrix. CUDA coverage includes
 the full cantilever and component checks; CPU/CUDA trajectory equivalence during

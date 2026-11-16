@@ -3,7 +3,9 @@
 
 """Cable contact runtime contracts on each device, precision and execution mode."""
 
+import tempfile
 import unittest
+from pathlib import Path
 from unittest import mock
 
 import numpy as np
@@ -103,7 +105,7 @@ def test_anchor_makes_the_response_translation_exact(test, device, *, precision)
 
 
 def test_slot_order_does_not_change_results(test, device, *, precision):
-    """Shuffling the candidate slots leaves residual, force and energy unchanged bit for bit."""
+    """Shuffling the candidate slots leaves residual, force, energy and the diagnostic summary unchanged bit for bit."""
     solver, state = _solver(*hairpin(), device, precision, False, config={})
     contact = solver._cable_contact
     contact.begin_step(state)
@@ -121,7 +123,12 @@ def test_slot_order_does_not_change_results(test, device, *, precision):
         results.append(
             [
                 a.numpy().copy()
-                for a in (contact.pool.residual.result, contact.pool.force.result, contact.pool.energy.result)
+                for a in (
+                    contact.pool.residual.result,
+                    contact.pool.force.result,
+                    contact.pool.energy.result,
+                    contact.summary,
+                )
             ]
         )
     test.assertGreater(np.abs(results[0][0]).max(), 0.0)
@@ -274,6 +281,58 @@ def test_overstretched_segment_fails_the_step(test, device):
         np.testing.assert_array_equal(snapshot(state)[name], value, err_msg=name)
 
 
+def test_diagnostics_and_checkpoint(test, device, *, precision, graph):
+    """Publish self-contact diagnostics in schema 9, continue a checkpoint bit for bit and reject other schemas."""
+    solver, state = _solver(*hairpin(), device, precision, graph, config={})
+    control = solver.create_control()
+    for _ in range(2):
+        solver.step(state, state, control, dt=DT)
+        test.assertFalse(solver.last_stats.rolled_back, solver.last_stats)
+        test.assertGreaterEqual(solver.last_stats.variational["cable_used_shift_max"], 0.0)
+    history = state._monolithic_coupled
+    test.assertEqual(history.schema_version.numpy().tolist(), [9])
+    result = solver.get_cable_contact_diagnostics(state)
+    test.assertEqual(result["inter"], {"candidates": 0, "active": 0, "compressive_load_N": 0.0, "max_overlap_m": 0.0})
+    pressed = result["self"]
+    test.assertTrue(0 < pressed["active"] <= pressed["candidates"], pressed)
+    test.assertGreater(pressed["compressive_load_N"], 0.0)
+    test.assertGreater(pressed["max_overlap_m"], 0.0)
+    test.assertGreater(np.abs(history.cable_contact_particle_force.numpy()).max(), 0.0)
+    with tempfile.TemporaryDirectory() as directory:
+        path = Path(directory) / "cable.npz"
+        solver.save_checkpoint(state, path)
+        restored_solver, restored = _solver(*hairpin(), device, precision, graph, config={})
+        restored_solver.load_checkpoint(restored, path)
+        # A schema-6 checkpoint (no cable contact) and this schema-9 one are not interchangeable.
+        plain, plain_state = _solver(*hairpin(), device, precision, graph, config=None)
+        other = Path(directory) / "plain.npz"
+        plain.save_checkpoint(plain_state, other)
+        for owner, owner_state, wrong in ((restored_solver, restored, other), (plain, plain_state, path)):
+            with test.assertRaises(ValueError):
+                owner.load_checkpoint(owner_state, wrong)
+    for key, value in snapshot(state).items():
+        np.testing.assert_array_equal(snapshot(restored)[key], value, err_msg=key)
+    solver.step(state, state, control, dt=DT)
+    restored_solver.step(restored, restored, restored_solver.create_control(), dt=DT)
+    actual = snapshot(restored)
+    for key, expected in snapshot(state).items():
+        # The diagnostic loads are summed in candidate identity order, so they match bit for bit too.
+        np.testing.assert_array_equal(actual[key], expected, err_msg=key)
+
+
+def test_failed_evaluation_publishes_no_diagnostics(test, device):
+    """An evaluation that fails leaves the summary at zero rather than partial counts."""
+    solver, state = _solver(*hairpin(), device, SolverMonolithic.Precision.FP64, False, config={})
+    contact = solver._cable_contact
+    contact.begin_step(state)
+    contact.evaluate(wp.zeros_like(state.particle_q), DT)
+    test.assertGreater(np.abs(contact.summary.numpy()).max(), 0.0)
+    broken = wp.full(state.particle_q.shape, wp.vec3d(np.nan, 0.0, 0.0), dtype=wp.vec3d, device=device)
+    contact.evaluate(broken, DT)
+    test.assertNotEqual(int(contact.flags.numpy()[0]), 0)
+    np.testing.assert_array_equal(contact.summary.numpy(), 0.0)
+
+
 class TestCableContactRuntime(unittest.TestCase):
     pass
 
@@ -284,6 +343,7 @@ for _test in (
     test_one_readback_per_evaluation,
     test_status_selects_the_failure,
     test_overstretched_segment_fails_the_step,
+    test_failed_evaluation_publishes_no_diagnostics,
 ):
     add_function_test(TestCableContactRuntime, _test.__name__, _test, devices=devices)
 for _precision in SolverMonolithic.Precision:
@@ -307,6 +367,7 @@ for _precision in SolverMonolithic.Precision:
             test_capacity_overflow_rolls_back,
             test_candidates_stay_frozen_within_trials,
             test_shared_vertex_keeps_one_term,
+            test_diagnostics_and_checkpoint,
         ):
             add_function_test(
                 TestCableContactRuntime,

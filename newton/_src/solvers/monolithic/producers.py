@@ -1123,7 +1123,10 @@ class _CableContactProducer(_Producer):
         super().__init__("cable_contact", np.empty(0, dtype=np.int32))
         self.contact = contact = solver._cable_contact
         self.energies = ((contact, "energy", "absolute_energy"),)
-        self.checks = ((contact, "flags", {}, "Invalid cable contact geometry"),)
+        self.checks = (
+            (contact, "flags", {}, "Invalid cable contact geometry"),
+            (contact, "summary_flags", {}, "Invalid cable contact diagnostics"),
+        )
         self.assembly_checks = ((contact.pool.records, "flags", {}, "Invalid cable contact assembly"),)
         self._materials = tuple(solver._cables)
         # Contact acts on centerline positions only: reactions fill the position rows of ``raw``.
@@ -1191,6 +1194,8 @@ class _CableContactProducer(_Producer):
         contact, history = self.contact, state._monolithic_coupled
         if contact.assembled_generation != contact.evaluation_generation:
             raise ValueError("Cable contact forces require the final assembled evaluation")
+        wp.copy(scalar_view(history.cable_contact_particle_force), contact.pool.force.result)
+        wp.copy(history.cable_contact_summary, contact.summary)
         wp.launch(
             _add_values,
             contact.pool.force.result.size,

@@ -11,6 +11,12 @@ A sample-segment pair carries four vertices and a non-negative Gauss-Newton term
 a sample-vertex pair subtracts the double count at a shared vertex and carries
 energy and gradient only. Both enter one ``_ContactPool``; the response acts on
 centerline positions only and adds nothing to the cable twist rows.
+
+Each evaluation also writes an 8-value summary, inter-cable then self contact, each as
+[sample-segment candidates, active sample-segment pairs, compressive load [N], deepest overlap [m]].
+The load sums every pair's normal load with its sign (a sample-vertex pair subtracts its double
+count) in candidate-identity order; the overlap is the largest ``radius sum - distance`` of a
+sample-segment pair, at least zero. A failed evaluation leaves the summary at zero.
 """
 
 import json
@@ -30,7 +36,7 @@ from .cable_contact_geometry import (
 )
 from .cloth_contact_point_cloud import _bucket, _cell, _finish_query
 from .contact_pipeline import _copy_pool_triplets, _reserve_pool_triplets
-from .contact_pool import _ContactPool
+from .contact_pool import _ContactPool, _ContactRows
 from .segment_graph import _SegmentGraphCache
 
 #: Longest current segment over its rest length that the candidate grid covers; a longer one fails the refresh.
@@ -255,6 +261,10 @@ def _respond(
     smoothing: Any,
     candidates: Any,
     flags: wp.array[int],
+    counts: wp.array[int],
+    overlaps: wp.array[Any],
+    load_rows: wp.array[int],
+    loads: wp.array[Any],
 ):
     i = wp.tid()
     if i >= candidates.count[0] or flags[0] != 0:
@@ -320,6 +330,46 @@ def _respond(
     candidates.weights[i, 1] = zero
     candidates.weights[i, 2] = zero
     candidates.rounding[i] = rounding + radius_sum
+    # Diagnostics: channel 0 between cables, 1 within one cable. The gradient on the sample is
+    # ga + gb = -load n, with the compressive load non-negative for a segment pair and the
+    # subtracted double count (non-positive) for a vertex pair.
+    channel = wp.where(tables.sample_cable[sample] == tables.seg_cable[target], 1, 0)
+    load = -wp.dot(ga + gb, normal)
+    load_rows[i] = channel
+    loads[i] = load
+    if kind == 0:
+        wp.atomic_add(counts, 2 * channel, 1)
+        if load > zero:
+            wp.atomic_add(counts, 2 * channel + 1, 1)
+        point = (one - xi) * xa + xi * xb
+        first = _relative(start, steps, c, a)
+        # The closest point y0 + t (y1 - y0), with c1 = -t.
+        overlap = radius_sum - wp.length(point - (first - c1 * (_relative(start, steps, d, a) - first)))
+        wp.atomic_max(overlaps, channel, wp.max(overlap, zero))
+
+
+@wp.kernel
+def _summary_count(flags: wp.array[int], count: wp.array[int], load_count: wp.array[int]):
+    # A failed evaluation leaves stale slots; reduce none of them.
+    load_count[0] = wp.where(flags[0] == 0, count[0], 0)
+
+
+@wp.kernel
+def _finish_summary(
+    flags: wp.array[int],
+    counts: wp.array[int],
+    loads: wp.array[Any],
+    overlaps: wp.array[Any],
+    summary: wp.array[Any],
+):
+    # A failed evaluation is never published; leave no partial values behind.
+    valid = flags[0] == 0
+    zero = summary.dtype(0.0)
+    for channel in range(2):
+        summary[4 * channel] = wp.where(valid, summary.dtype(counts[2 * channel]), zero)
+        summary[4 * channel + 1] = wp.where(valid, summary.dtype(counts[2 * channel + 1]), zero)
+        summary[4 * channel + 2] = wp.where(valid, loads[channel], zero)
+        summary[4 * channel + 3] = wp.where(valid, overlaps[channel], zero)
 
 
 def _positive(value, name, numpy_dtype, *, allow_zero=False):
@@ -466,6 +516,22 @@ class _CableContact:
         self.flags = wp.zeros(1, dtype=int, device=self.device)
         self.query_flags = wp.zeros(1, dtype=int, device=self.device)
         self._append_base = wp.zeros(1, dtype=int, device=self.device)
+        # Diagnostics (see the module docstring): per-channel counts and overlaps, and per-slot
+        # signed loads summed by candidate identity, so the sum does not depend on slot order.
+        self._summary_counts = wp.zeros(4, dtype=int, device=self.device)
+        self._overlaps = wp.zeros(2, dtype=self.dtype, device=self.device)
+        self._load_rows = wp.zeros(capacity, dtype=int, device=self.device)
+        self._load_locals = wp.zeros(capacity, dtype=int, device=self.device)
+        self._loads = wp.zeros(capacity, dtype=self.dtype, device=self.device)
+        self._load_count = wp.zeros(1, dtype=int, device=self.device)
+        self._load_sums = _ContactRows(
+            2, capacity, max(1, 2 * self.sample_count * self.segment_count), 1, self.dtype, self.device
+        )
+        self._load_sums._validate_inputs(
+            self._load_rows, self.pool.candidates.identities, self._load_locals, self._loads, self._load_count
+        )
+        self.summary_flags = self._load_sums.flags
+        self.summary = wp.zeros(8, dtype=self.dtype, device=self.device)
         self.graphs = _SegmentGraphCache(self.device, enabled=use_cuda_graph and self.device.is_cuda)
         self.evaluation_generation = 0
         self.assembled_generation = -1
@@ -592,6 +658,13 @@ class _CableContact:
             self.pairs,
             self.flags,
             self.query_flags,
+            self._summary_counts,
+            self._overlaps,
+            self._load_rows,
+            self._loads,
+            self._load_count,
+            self.summary,
+            *self._load_sums.buffers(),
             *self.pool.buffers(),
         )
         count, capacity = self._candidate_count, self.pairs.size
@@ -603,6 +676,8 @@ class _CableContact:
 
     def _evaluate(self, steps, span):
         wp.copy(self.flags, self.query_flags)
+        self._summary_counts.zero_()
+        self._overlaps.zero_()
         if span:
             wp.launch(
                 _respond,
@@ -617,9 +692,24 @@ class _CableContact:
                     self.dtype(self.smoothing),
                     self.pool.candidates,
                     self.flags,
+                    self._summary_counts,
+                    self._overlaps,
+                    self._load_rows,
+                    self._loads,
                 ],
                 device=self.device,
             )
+        wp.launch(_summary_count, 1, [self.flags, self.pool.candidates.count, self._load_count], device=self.device)
+        sums = self._load_sums
+        sums._reduce(
+            self._load_rows, self.pool.candidates.identities, self._load_locals, self._loads, self._load_count, span
+        )
+        wp.launch(
+            _finish_summary,
+            1,
+            [self.flags, self._summary_counts, sums.result, self._overlaps, self.summary],
+            device=self.device,
+        )
 
     def assemble(self, assembly):
         if self._last_assembly == assembly.generation:
