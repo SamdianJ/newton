@@ -1,0 +1,11 @@
+{
+  "self": true,
+  "inter": true,
+  "normal_stiffness": 300000.0,
+  "samples_per_edge": 3,
+  "index_exclusion": 3,
+  "arc_exclusion_factor": 1.5707963267948966,
+  "candidate_capacity": 32768,
+  "support_capacity": 393216,
+  "candidate_padding": 0.002
+}
