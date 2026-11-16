@@ -77,12 +77,69 @@ def test_plane_is_unchanged(test, device):
             np.testing.assert_array_equal(gradients, np.tile(np.array([0.0, 0.0, 1.0], dtype=dtype), (len(points), 1)))
 
 
+def _link_scene(device, link_shape, *, particle_flag=False, plane=True):
+    """One revolute link carrying ``link_shape`` (a callable adding it), optionally above a ground plane."""
+    import newton  # noqa: PLC0415
+
+    builder = newton.ModelBuilder()
+    cfg = builder.ShapeConfig(density=0.0, margin=0.0, has_particle_collision=particle_flag)
+    link = builder.add_link(
+        xform=wp.transform((0.0, 0.0, 0.2), wp.quat_identity()), mass=0.1, inertia=wp.diag(wp.vec3(1e-4)), label="arm"
+    )
+    joint = builder.add_joint_revolute(-1, link, axis=(0.0, 1.0, 0.0), limit_ke=0.0, limit_kd=0.0, label="hinge")
+    builder.add_articulation([joint])
+    link_shape(builder, link, cfg)
+    if plane:
+        builder.add_shape_plane(
+            body=-1,
+            width=0.0,
+            length=0.0,
+            cfg=builder.ShapeConfig(density=0.0, margin=0.0, has_particle_collision=False),
+            label="ground",
+        )
+    return builder.finalize(device=device)
+
+
+def _solver(model):
+    from newton.solvers.experimental.monolithic import SolverMonolithic  # noqa: PLC0415
+
+    return SolverMonolithic(model, friction_velocity_scale=0.01)
+
+
+def test_link_shape_without_samples_against_static_raises(test, device):
+    """F1: a link CYLINDER paired with the ground used to be dropped from contact silently."""
+
+    def cylinder(builder, link, cfg):
+        builder.add_shape_cylinder(link, radius=0.02, half_height=0.05, cfg=cfg, label="arm_cylinder")
+
+    model = _link_scene(device, cylinder)
+    with test.assertRaises(ValueError) as caught:
+        _solver(model)
+    message = str(caught.exception)
+    for part in ("arm_cylinder", "arm", "CYLINDER", "ground"):
+        test.assertIn(part, message)
+
+
+def test_link_plane_against_static_is_skipped(test, device):
+    """A link plane is a target-only shape: pairing it with the ground stays a skipped pair, not an error."""
+
+    def plane(builder, link, cfg):
+        builder.add_shape_plane(body=link, width=0.0, length=0.0, cfg=cfg, label="arm_plane")
+
+    _solver(_link_scene(device, plane))
+
+
 class TestContactUnsupportedShapes(unittest.TestCase):
     pass
 
 
 for _device in get_test_devices():
-    for _test in (test_unhandled_type_is_nonfinite, test_plane_is_unchanged):
+    for _test in (
+        test_unhandled_type_is_nonfinite,
+        test_plane_is_unchanged,
+        test_link_shape_without_samples_against_static_raises,
+        test_link_plane_against_static_is_skipped,
+    ):
         add_function_test(TestContactUnsupportedShapes, _test.__name__, _test, devices=[_device])
 
 
