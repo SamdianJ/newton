@@ -165,9 +165,71 @@ def test_unsupported_particle_target_still_raises(test, device):
     builder.add_articulation([builder.add_joint_free(body)])
     cfg = builder.ShapeConfig(density=0.0, margin=0.0, has_particle_collision=True, has_shape_collision=False)
     builder.add_shape_capsule(body, radius=0.01, half_height=0.02, cfg=cfg, label="probe")
-    # Actor sampling (tet-rigid pairs) or the particle-target whitelist rejects it, whichever runs first.
-    with test.assertRaisesRegex(ValueError, "Unsupported (contact shape|actor contact target)"):
+    # Actor sampling (tet-rigid pairs) rejects a capsule particle target by name; the legacy whitelist
+    # would reject it as an unsupported contact shape.
+    with test.assertRaisesRegex(ValueError, "(Unsupported contact shape|CAPSULE shape .* particle)"):
         _solver(builder.finalize(device=device), mass_mode="lumped")
+
+
+def test_link_plane_against_static_box_raises(test, device):
+    """A link plane has no samples and cannot be a target outside material contact: against a static box
+    the pair would silently have no contact, so construction fails (only plane-plane pairs are skipped)."""
+
+    def plane(builder, link, cfg):
+        builder.add_shape_plane(body=link, width=0.0, length=0.0, cfg=cfg, label="arm_plane")
+
+    with test.assertRaisesRegex(ValueError, "arm_plane.*PLANE.*static_box"):
+        _solver(_link_scene_with_static_box(device, plane))
+
+
+def _link_scene_with_static_box(device, link_shape):
+    import newton  # noqa: PLC0415
+
+    builder = newton.ModelBuilder()
+    cfg = builder.ShapeConfig(density=0.0, margin=0.0, has_particle_collision=False)
+    link = builder.add_link(
+        xform=wp.transform((0.0, 0.0, 0.2), wp.quat_identity()), mass=0.1, inertia=wp.diag(wp.vec3(1e-4)), label="arm"
+    )
+    joint = builder.add_joint_revolute(-1, link, axis=(0.0, 1.0, 0.0), limit_ke=0.0, limit_kd=0.0, label="hinge")
+    builder.add_articulation([joint])
+    link_shape(builder, link, cfg)
+    builder.add_shape_box(body=-1, hx=0.1, hy=0.1, hz=0.01, cfg=cfg, label="static_box")
+    return builder.finalize(device=device)
+
+
+def test_mesh_link_without_particles_constructs(test, device):
+    """F2 (review round 1): without tet particles the particle-target checks do not run, so a link MESH
+    that carries COLLIDE_PARTICLES (URDF default) no longer fails for a missing CPU texture SDF."""
+    import newton  # noqa: PLC0415
+
+    def mesh(builder, link, cfg):
+        builder.add_shape_mesh(link, mesh=newton.Mesh.create_box(0.02, 0.02, 0.02, compute_inertia=False), cfg=cfg)
+
+    _solver(_link_scene(device, mesh, particle_flag=True, plane=False))
+
+
+def test_nonconvex_convex_mesh_raises(test, device):
+    """CONVEX_MESH contacts with its own triangles and SDF, so a non-convex mesh is rejected by name."""
+    import newton  # noqa: PLC0415
+
+    # An L-shaped prism: one vertex lies outside the plane of a neighbouring face.
+    outline = np.array([[0, 0], [2, 0], [2, 1], [1, 1], [1, 2], [0, 2]], dtype=float) * 0.01
+    vertices = np.vstack((np.c_[outline, np.zeros(6)], np.c_[outline, np.full(6, 0.01)]))
+    faces = []
+    for i in range(6):
+        j = (i + 1) % 6
+        faces += [(i, j, 6 + j), (i, 6 + j, 6 + i)]
+    for a, b, c in ((0, 1, 2), (0, 2, 3), (0, 3, 5), (3, 4, 5)):
+        faces += [(a, c, b), (6 + a, 6 + b, 6 + c)]
+    builder = newton.ModelBuilder()
+    cfg = builder.ShapeConfig(density=500.0, margin=0.0, has_particle_collision=False)
+    pose = wp.transform((0.0, 0.0, 0.0), wp.quat_identity())
+    body = builder.add_link(xform=pose)
+    builder.add_articulation([builder.add_joint_free(body, parent_xform=pose)])
+    builder.add_shape_convex_hull(body, mesh=newton.Mesh(vertices, np.asarray(faces).ravel()), cfg=cfg, label="l_shape")
+    builder.add_shape_plane(body=-1, width=0.0, length=0.0, cfg=cfg)
+    with test.assertRaisesRegex(ValueError, "CONVEX_MESH shape 'l_shape' is not convex"):
+        _solver(builder.finalize(device=device))
 
 
 class TestContactUnsupportedShapes(unittest.TestCase):
@@ -182,6 +244,9 @@ for _device in get_test_devices():
         test_link_plane_against_static_is_skipped,
         test_particle_flag_without_particles_constructs,
         test_unsupported_particle_target_still_raises,
+        test_link_plane_against_static_box_raises,
+        test_mesh_link_without_particles_constructs,
+        test_nonconvex_convex_mesh_raises,
     ):
         add_function_test(TestContactUnsupportedShapes, _test.__name__, _test, devices=[_device])
 

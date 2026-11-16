@@ -62,6 +62,10 @@ def analytic_geometry_magnitude(geo: int, scale: Any, y: Any, point_magnitude: A
         offset_magnitude = type(y)(point_magnitude[0], point_magnitude[1], type(phi)(0.0))
         if axial != y[2]:
             offset_magnitude[2] = point_magnitude[2] + wp.abs(y[2]) + wp.abs(scale[1])
+        elif wp.abs(y[2]) >= scale[1] - point_magnitude[2]:
+            # Within one perturbation of the cap seam the gradient's axial part can switch on;
+            # the value is unaffected (its axial normal component is zero here).
+            offset_magnitude[2] = point_magnitude[2]
         _n, _length, gradient, alength = _unit_magnitude(offset, offset_magnitude)
         value = alength + wp.abs(phi)
     elif geo == GeoType.BOX and ell > type(ell)(0.0):

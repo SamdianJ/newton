@@ -529,7 +529,8 @@ class ContactObjective:
             shapes = np.empty(0, dtype=np.int32)
         table = model._texture_sdf_data
         descriptors = table.numpy() if table is not None else None
-        for i in shapes:
+        # Validate only shapes tet triangles actually query; elsewhere the set is never evaluated.
+        for i in shapes if particle_targets else ():
             geo, scale = v["shape_type"][i], v["shape_scale"][i]
             if not np.isfinite(scale).all() or not np.isfinite(v["shape_margin"][i]) or v["shape_margin"][i] < 0:
                 raise ValueError("Invalid shape scale or margin")
@@ -537,7 +538,7 @@ class ContactObjective:
                 raise ValueError("Only infinite planes are supported")
             if (geo == GeoType.SPHERE and scale[0] <= 0) or (geo == GeoType.BOX and np.any(scale <= 0)):
                 raise ValueError("Analytic shape size must be positive")
-            if geo == GeoType.MESH:
+            if geo == GeoType.MESH:  # CONVEX_MESH is not a particle target (rejected by the whitelist)
                 index = int(v["_shape_sdf_index"][i])
                 if model.device.is_cpu or descriptors is None or index < 0 or index >= len(descriptors):
                     raise ValueError("Mesh contact requires an existing CUDA texture SDF")

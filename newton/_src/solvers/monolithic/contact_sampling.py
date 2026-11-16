@@ -12,6 +12,31 @@ from .actors import articulation_support
 MESH_TYPES = (GeoType.MESH, GeoType.CONVEX_MESH)
 
 
+def _check_convex(mesh, scale, label):
+    """CONVEX_MESH contacts with its own triangles and SDF, so the mesh itself must be convex."""
+    vertices = np.asarray(mesh.vertices, dtype=np.float64) * np.asarray(scale, dtype=np.float64)
+    tri = vertices[np.asarray(mesh.indices).reshape(-1, 3)]
+    normal = np.cross(tri[:, 1] - tri[:, 0], tri[:, 2] - tri[:, 0])
+    normal /= np.linalg.norm(normal, axis=1)[:, None]
+    # Signed height of every vertex above every face plane; orientation is fixed by the centroid.
+    height = np.einsum("fk,fvk->fv", normal, vertices[None, :, :] - tri[:, None, 0])
+    inward = np.einsum("fk,fk->f", normal, vertices.mean(axis=0) - tri[:, 0]) > 0
+    height[inward] *= -1
+    # Mesh vertices are stored in their own precision (FP32 for Newton meshes): coplanar hull points
+    # round off their planes by a few ulps of the coordinates.
+    eps = (
+        np.finfo(np.asarray(mesh.vertices).dtype).eps
+        if np.issubdtype(np.asarray(mesh.vertices).dtype, np.floating)
+        else 0.0
+    )
+    tolerance = 64 * max(eps, np.finfo(np.float64).eps) * float(np.abs(vertices).max())
+    if height.max() > tolerance:
+        raise ValueError(
+            f"CONVEX_MESH shape {label!r} is not convex: a vertex lies {height.max():.3e} m outside a face plane. "
+            "Monolithic contacts with the mesh triangles and SDF; pass its convex hull"
+        )
+
+
 def _sampled_source(geo, mesh):
     """Return whether a shape type can be a contact source surface."""
     return geo in (GeoType.SPHERE, GeoType.BOX, GeoType.CAPSULE) or (geo in MESH_TYPES and isinstance(mesh, Mesh))
@@ -321,20 +346,20 @@ class ContactSamples:
                 else "A-R"
             )
             arm = a if dynamic[0] else b
-            if kind == "A-static" and types[arm] == GeoType.PLANE:
-                # A plane is a target-only shape: a link plane meets the static world only
-                # through other sources, and static shapes are never sources.
+            other = b if arm == a else a
+            if kind == "A-static" and types[arm] == GeoType.PLANE and types[other] == GeoType.PLANE:
+                # Two planes have no surface to sample: neither is a source. Any other static
+                # partner would lose contact with the link plane, so it fails below.
                 continue
             if kind == "A-static" and not _sampled_source(types[arm], model.shape_source[arm]):
-                # Any other link surface the solver cannot sample would have no contact with
-                # the world; fail rather than drop the pair (clear COLLIDE_SHAPES to opt out).
-                other = b if arm == a else a
+                # A link surface the solver cannot sample would have no contact with the world;
+                # fail rather than drop the pair (clear COLLIDE_SHAPES to opt out).
                 label = lambda s: model.shape_label[s] if s < len(model.shape_label) else str(s)  # noqa: E731
                 body = int(bodies[arm])
                 raise ValueError(
                     f"Link shape {label(arm)!r} (index {arm}, body {model.body_label[body]!r}, "
                     f"{GeoType(int(types[arm])).name}) cannot be a contact source; it is paired with static "
-                    f"shape {label(other)!r}. Use a sphere, box or mesh, or clear its COLLIDE_SHAPES flag"
+                    f"shape {label(other)!r}. Use a sphere, box, capsule or mesh, or clear its COLLIDE_SHAPES flag"
                 )
             self.pair_kinds[pair] = kind
             for source, target, enabled in ((a, b, dynamic[0]), (b, a, dynamic[1])):
@@ -346,6 +371,8 @@ class ContactSamples:
                     )
                 if types[source] in MESH_TYPES:
                     mesh = model.shape_source[source]
+                    if types[source] == GeoType.CONVEX_MESH:
+                        _check_convex(mesh, scales[source], model.shape_label[source])
                     self.meshes[source] = (mesh, np.array(mesh.vertices, copy=True), np.array(mesh.indices, copy=True))
                 targets_used.add(target)
                 ps, ns, ws = surfaces[source]
@@ -403,6 +430,8 @@ class ContactSamples:
             if geo in MESH_TYPES:
                 mesh = model.shape_source[s]
                 _surface_samples(geo, scale.astype(float), mesh)
+                if geo == GeoType.CONVEX_MESH:
+                    _check_convex(mesh, scale, model.shape_label[s])
                 self.meshes[s] = (mesh, np.array(mesh.vertices, copy=True), np.array(mesh.indices, copy=True))
         self.targets_used = tuple(sorted(targets_used))
         self.source_shapes = np.asarray(source_shapes, dtype=np.int32)

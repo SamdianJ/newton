@@ -492,7 +492,7 @@ class _ContactSpatial:
             material
             and bool(unique_faces)
             and len(unique_targets) == 1
-            and types[unique_targets[0]] in (GeoType.SPHERE, GeoType.MESH)
+            and types[unique_targets[0]] in (GeoType.SPHERE, GeoType.MESH)  # cloth never targets CONVEX_MESH
             and bodies[unique_targets[0]] == -1
             and sample_stride == 6
             and len(unique_faces) % 6 == 0
