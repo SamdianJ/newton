@@ -34,7 +34,8 @@
     }
   },
   "performance": {
-    "self_collision_off_per_newton_increase_max": 0.10,
+    "self_collision_off_step_median_increase_max": 0.10,
+    "metric": "median solver.step time per step on floating_hand_fixed_grasp_box_v1.json, floating root versus 6-joint wrist (user 2026-11-16, P9d plan K17); 0- and 1-Newton step medians and Newton/PCG counts reported separately",
     "self_collision_on": "set by the user after the PR4 measurement (K5)"
   }
 }
