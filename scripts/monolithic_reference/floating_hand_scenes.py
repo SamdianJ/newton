@@ -149,3 +149,45 @@ def add_allegro(builder, *, mount, palm_pose, self_collisions=True):
         raise ValueError(f"Expected {HAND_DOFS} Allegro finger DoFs, got {dofs}")
     root = next(j for j in range(first_joint, builder.joint_count) if builder.joint_parent[j] == -1)
     return {"dofs": dofs, "bodies": bodies, "root_joint": root, "first_dof": first_dof}
+
+
+FINGER_ROLES = {
+    "abduct": ("joint_0.0", "joint_4.0", "joint_8.0"),
+    "flex": tuple(f"joint_{i}.0" for i in (1, 2, 3, 5, 6, 7, 9, 10, 11, 14, 15)),
+    "thumb_oppose": ("joint_12.0",),
+    "thumb_abduct": ("joint_13.0",),
+}
+FIST_THUMB_ABDUCT = 0.6
+
+
+def finger_pose(model, layout, kind):
+    """Finger coordinates by joint name: ``open`` (zero, clipped to limits) or ``fist`` (flexion at the upper limits)."""
+    if kind not in ("open", "fist"):
+        raise ValueError(f"finger pose must be 'open' or 'fist', got {kind!r}")
+    lower, upper = model.joint_limit_lower.numpy(), model.joint_limit_upper.numpy()
+    start = model.joint_qd_start.numpy()
+    labels = [_short(model.joint_label[j]) for j in range(model.joint_count)]
+    pose = {}
+    for name in (n for role in FINGER_ROLES.values() for n in role):
+        dof = int(start[labels.index(name)])
+        lo, hi = float(lower[dof]), float(upper[dof])
+        if kind == "open":
+            value = 0.0
+        elif name in FINGER_ROLES["abduct"]:
+            value = 0.0
+        elif name in FINGER_ROLES["thumb_abduct"]:
+            value = FIST_THUMB_ABDUCT
+        else:
+            value = hi
+        pose[name] = min(max(value, lo), hi)
+    return pose
+
+
+def set_finger_coordinates(model, joint_q, pose):
+    """Write named finger coordinates into a joint_q vector (numpy, Model coordinate layout)."""
+    q_start = model.joint_q_start.numpy()
+    labels = [_short(model.joint_label[j]) for j in range(model.joint_count)]
+    joint_q = np.array(joint_q, dtype=np.float64, copy=True)
+    for name, value in pose.items():
+        joint_q[int(q_start[labels.index(name)])] = value
+    return joint_q
