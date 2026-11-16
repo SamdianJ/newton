@@ -345,6 +345,8 @@ def evaluate(run_dir, recipe, *, settle_s=0.05, grasp_window=500, stride=1):
             "object_min_edge_m": edge,
             "lift_ratio_min": float(np.min(rise[window]) / recipe["lift_m"]) if "lift_m" in recipe else None,
         }
+    if recipe["scene"] == "E2":
+        out["chain"] = chain_balance(model, frames, recipe, dt)
     if recipe["scene"] == "E3":
         # Root rows: the first six DoFs of the hand tree (FREE root or the six wrist joints).
         root = slice(model["joint_qd_start"][0], model["joint_qd_start"][0] + 6)
@@ -358,6 +360,80 @@ def evaluate(run_dir, recipe, *, settle_s=0.05, grasp_window=500, stride=1):
         for name in ("newton_iterations", "linear_iterations", "line_search_iterations", "regularization_retries")
     }
     return out
+
+
+def _penalty_energy(gap, stiffness, smoothing):
+    """FP64 copy of the C-IE normal penalty energy (contact.py _penalty64) for gaps in metres."""
+    u = -np.asarray(gap, dtype=np.float64)
+    p = np.where(u >= smoothing, u, 0.0)
+    if smoothing > 0:
+        t = (u + smoothing) / (2.0 * smoothing)
+        mid = (u > -smoothing) & (u < smoothing)
+        p = np.where(mid, smoothing * t**3 * (2.0 - t), p)
+    else:
+        p = np.maximum(u, 0.0)
+    return stiffness * p * p / 2.0
+
+
+def chain_balance(model, frames, recipe, dt):
+    """E2: free-flight linear momentum and the largest energy gain over any window (K14)."""
+    gravity = np.asarray(model["gravity"], dtype=np.float64)
+    mass = np.asarray(model["body_mass"], dtype=np.float64)
+    com = np.asarray(model["body_com"], dtype=np.float64)
+    inertia = np.asarray(model["body_inertia"], dtype=np.float64)
+    q, qd = frames["body_q"].astype(np.float64), frames["body_qd"].astype(np.float64)
+    steps = frames["step"].astype(np.float64)
+    n = len(steps)
+    rotations = np.array([[quaternion_matrix(q[k, b, 3:]) for b in range(len(mass))] for k in range(n)])
+    x_com = q[:, :, :3] + np.einsum("kbij,bj->kbi", rotations, com)
+    momentum = np.einsum("b,kbi->ki", mass, qd[:, :, :3])
+    flight = round(recipe["phases_s"]["flight"] / dt)
+    touching = np.flatnonzero(np.abs(frames["contact_body_wrench"]).sum(axis=(1, 2)) > 0)
+    free_end = min(flight, int(touching[0]) if len(touching) else n, n)
+    elapsed = (steps[:free_end] - steps[0]) * dt
+    impulse = mass.sum() * gravity[None, :] * elapsed[:, None]
+    drift = np.linalg.norm(momentum[:free_end] - momentum[0] - impulse, axis=1)
+    reference = np.maximum(mass.sum() * np.linalg.norm(gravity) * elapsed, np.finfo(float).tiny)
+    omega = qd[:, :, 3:]
+    world_inertia = np.einsum("kbij,bjl,kbml->kbim", rotations, inertia, rotations)
+    kinetic = 0.5 * np.einsum("b,kbi,kbi->k", mass, qd[:, :, :3], qd[:, :, :3]) + 0.5 * np.einsum(
+        "kbi,kbij,kbj->k", omega, world_inertia, omega
+    )
+    potential = -np.einsum("b,kbi,i->k", mass, x_com, gravity)
+    spring_ke = recipe["chain"]["spring_ke"]
+    labels, types, starts = model["joint_labels"], model["joint_type"], model["joint_q_start"]
+    scalar = [starts[j] for j, t in enumerate(types) if labels[j].startswith("chain_joint")]
+    spring = 0.5 * spring_ke * (frames["joint_q"][:, scalar].astype(np.float64) ** 2).sum(axis=1)
+    contact, contact_note = np.zeros(n), "C-IE normal penalty on the solver's P1Q3 samples, FP64"
+    try:
+        from newton._src.solvers.monolithic.contact_sampling import _surface_samples  # noqa: PLC0415
+
+        solver = recipe["solver"]
+        for shape in model["shapes"]:
+            if shape["body"] < 0:
+                continue
+            geo = getattr(newton.GeoType, shape["type"])
+            points, _, weights = _surface_samples(int(geo), np.asarray(shape["scale"], dtype=np.float64))
+            x = np.asarray(shape["transform"], dtype=np.float64)
+            local = points @ quaternion_matrix(x[3:]).T + x[:3]
+            world = np.einsum("kij,pj->kpi", rotations[:, shape["body"]], local) + q[:, shape["body"], None, :3]
+            gap = world[:, :, 2] - recipe["table"]["z"]
+            contact += (_penalty_energy(gap, solver["contact_stiffness"], solver["normal_smoothing"]) * weights).sum(
+                axis=1
+            )
+    except ValueError as missing:
+        contact, contact_note = None, f"NOT_APPLICABLE: {missing}"
+    total = kinetic + potential + spring + (contact if contact is not None else 0.0)
+    gain = float(np.max(total - np.minimum.accumulate(total)))
+    budget = float(kinetic[0] + max(0.0, potential[0] - potential.min()))
+    return {
+        "free_flight_steps": int(free_end),
+        "momentum_drift_ratio_max": float(np.max(drift / reference)) if free_end > 1 else None,
+        "energy_gain_max_J": gain if contact is not None else None,
+        "energy_budget_J": budget,
+        "energy_gain_ratio": gain / budget if contact is not None and budget > 0 else None,
+        "contact_energy": contact_note,
+    }
 
 
 def main(argv=None):

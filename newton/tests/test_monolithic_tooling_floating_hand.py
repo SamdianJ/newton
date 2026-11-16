@@ -212,3 +212,47 @@ class TestFeatureOffTrace(unittest.TestCase):
         self.assertEqual(result["k"], {"verdict": "DIFFERENT", "first_step": 1, "fields": ["forces"]})
         self.assertEqual(result["m"]["verdict"], "MISSING")
         self.assertEqual(compare(x, x)["k"]["verdict"], "IDENTICAL")
+
+
+class TestChainBalance(unittest.TestCase):
+    def test_projectile_conserves_momentum_and_energy(self):
+        """An analytic tumbling projectile has zero momentum drift and no energy gain."""
+        dt, n, g = 0.001, 300, np.array([0.0, 0.0, -9.81])
+        v0, x0, omega = np.array([0.3, 0.0, 1.0]), np.array([0.0, 0.0, 0.3]), np.array([2.0, 5.0, 1.0])
+        t = (np.arange(n) + 1) * dt
+        body_q = np.zeros((n, 1, 7))
+        body_q[:, 0, :3] = x0 + v0 * t[:, None] + 0.5 * g * t[:, None] ** 2
+        angle = np.linalg.norm(omega) * t
+        axis = omega / np.linalg.norm(omega)
+        body_q[:, 0, 3:6] = np.sin(angle / 2)[:, None] * axis
+        body_q[:, 0, 6] = np.cos(angle / 2)
+        body_qd = np.zeros((n, 1, 6))
+        body_qd[:, 0, :3] = v0 + g * t[:, None]
+        body_qd[:, 0, 3:] = omega
+        model = {
+            "gravity": g.tolist(),
+            "body_mass": [2.0],
+            "body_com": [[0.0, 0.0, 0.0]],
+            "body_inertia": [(np.eye(3) * 0.01).tolist()],
+            "joint_labels": [],
+            "joint_type": [],
+            "joint_q_start": [0],
+            "shapes": [],
+        }
+        frames = {
+            "step": np.arange(n),
+            "body_q": body_q,
+            "body_qd": body_qd,
+            "joint_q": np.zeros((n, 7)),
+            "contact_body_wrench": np.zeros((n, 1, 6)),
+        }
+        recipe = {
+            "phases_s": {"flight": 0.3, "settle": 0.0},
+            "chain": {"spring_ke": 2.0},
+            "solver": {},
+            "table": {"z": 0.0},
+        }
+        result = fc.chain_balance(model, frames, recipe, dt)
+        self.assertEqual(result["free_flight_steps"], n)
+        self.assertLess(result["momentum_drift_ratio_max"], 1e-12)
+        self.assertLess(result["energy_gain_ratio"], 1e-12)
