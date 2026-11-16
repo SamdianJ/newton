@@ -176,7 +176,7 @@ class TestCableContactGates(unittest.TestCase):
 
     def test_method_sidecar_is_frozen(self):
         """The E2E method sidecar (frozen at PR3, K4) is unchanged, carries every judged key and constructs."""
-        path = FIXTURES / "cable_contact_method_v1.json"
+        path = FIXTURES / "cable_contact_method_frozen_v1.json"
         self.assertEqual(
             hashlib.sha256(path.read_bytes()).hexdigest(),
             "ae9c92c047875d970b4e164a6496262008ec5aa1479047cd59d1d550fc95e239",
