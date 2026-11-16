@@ -213,10 +213,14 @@ class TestMonolithicCableLinear(unittest.TestCase):
             factors = [a.numpy() for a in (cable.block_factor, cable.block_left, cable.block_right)]
             results[config is None] = (snapshot(state), factors)
         enabled, disabled = results[False], results[True]
-        # The configuration digest differs by design: cable contact enters the checkpoint identity.
+        # The configuration digest and the schema version differ by design: cable contact enters the checkpoint
+        # identity and adds its own state fields (schema 9). With no pair in reach those fields stay zero.
         self.assertFalse(np.array_equal(enabled[0]["history.config_digest"], disabled[0]["history.config_digest"]))
+        self.assertEqual((enabled[0]["history.schema_version"][0], disabled[0]["history.schema_version"][0]), (9, 6))
+        np.testing.assert_array_equal(enabled[0]["history.cable_contact_summary"], 0.0)
+        np.testing.assert_array_equal(enabled[0]["history.cable_contact_particle_force"], 0.0)
         for name, value in disabled[0].items():
-            if name != "history.config_digest":
+            if name not in ("history.config_digest", "history.schema_version"):
                 np.testing.assert_array_equal(enabled[0][name], value, err_msg=name)
         for a, b in zip(enabled[1], disabled[1], strict=True):
             np.testing.assert_array_equal(a, b)
