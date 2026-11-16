@@ -11,13 +11,89 @@ from .actors import articulation_support
 
 def _sampled_source(geo, mesh):
     """Return whether a shape type can be a contact source surface."""
-    return geo in (GeoType.SPHERE, GeoType.BOX) or (geo == GeoType.MESH and isinstance(mesh, Mesh))
+    return geo in (GeoType.SPHERE, GeoType.BOX, GeoType.CAPSULE) or (geo == GeoType.MESH and isinstance(mesh, Mesh))
+
+
+def _sphere_grid():
+    """Unit-sphere grid of the sphere sampler: 33 polar rings (pole to pole) by 32 azimuth slices."""
+    theta, phi = np.linspace(0, np.pi, 33), np.arange(32) * (2 * np.pi / 32)
+    return np.stack(
+        (
+            np.sin(theta[:, None]) * np.cos(phi),
+            np.sin(theta[:, None]) * np.sin(phi),
+            np.broadcast_to(np.cos(theta[:, None]), (33, 32)),
+        ),
+        axis=-1,
+    )
+
+
+def _sphere_faces(grid, rings):
+    """Unit-sphere triangles of the given polar ring bands, with the pole triangles collapsed."""
+    faces = []
+    for i in rings:
+        for j in range(32):
+            a, b, c, d = grid[i, j], grid[i, (j + 1) % 32], grid[i + 1, j], grid[i + 1, (j + 1) % 32]
+            if i > 0:
+                faces.append((a, b, c))
+            if i < 31:
+                faces.append((b, d, c))
+    return np.asarray(faces)
+
+
+def _spherical_area(tri):
+    """Exact unit-sphere area of each spherical triangle (Van Oosterom-Strackee)."""
+    u, v, w = tri[:, 0], tri[:, 1], tri[:, 2]
+    return 2 * np.arctan2(abs(np.einsum("ij,ij->i", u, np.cross(v, w))), 1 + np.sum(u * v + v * w + w * u, axis=1))
+
+
+def _capsule_samples(radius, half_height, bary):
+    """P1Q3 samples of a capsule along local z: two hemispherical caps and a cylinder band.
+
+    Points lie on the exact surface with exact normals; weights are exact patch areas, so they
+    sum to 4 pi r^2 + 4 pi r h. Caps use the sphere sampler's grid split at the equator; the band
+    uses the same 32 azimuth slices and bands no taller than one slice's arc.
+    """
+    grid = _sphere_grid()
+    points, normals, areas, triangles = [], [], [], []
+    for rings, center in ((range(16), half_height), (range(16, 32), -half_height)):
+        tri = _sphere_faces(grid, rings)
+        on_sphere = np.einsum("qn,fni->fqi", bary, tri)
+        n = on_sphere / np.linalg.norm(on_sphere, axis=2)[..., None]
+        offset = np.array([0.0, 0.0, center])
+        points.append(n * radius + offset)
+        normals.append(n)
+        areas.append(radius**2 * _spherical_area(tri))
+        triangles.append(tri * radius + offset)
+    if half_height > 0:
+        bands = max(1, int(np.ceil(2 * half_height / (2 * np.pi * radius / 32))))
+        z = np.linspace(-half_height, half_height, bands + 1)
+        phi = np.arange(33) * (2 * np.pi / 32)
+        params = []
+        for k in range(bands):
+            for j in range(32):
+                a, b = (phi[j], z[k]), (phi[j + 1], z[k])
+                c, d = (phi[j], z[k + 1]), (phi[j + 1], z[k + 1])
+                params += [(a, b, c), (b, d, c)]
+        params = np.asarray(params)  # (faces, 3 corners, (phi, z))
+        sample = np.einsum("qn,fnk->fqk", bary, params)
+        n = np.stack((np.cos(sample[..., 0]), np.sin(sample[..., 0]), np.zeros(sample.shape[:2])), axis=-1)
+        points.append(n * radius + np.stack((np.zeros_like(sample[..., 1]),) * 2 + (sample[..., 1],), axis=-1))
+        normals.append(n)
+        dphi, dz = 2 * np.pi / 32, 2 * half_height / bands
+        areas.append(np.full(len(params), radius * dphi * dz / 2))
+        corners = np.stack((radius * np.cos(params[..., 0]), radius * np.sin(params[..., 0]), params[..., 1]), axis=-1)
+        triangles.append(corners)
+    return np.concatenate(points), np.concatenate(normals), np.concatenate(areas), np.concatenate(triangles)
 
 
 def _surface_samples(geo, scale, mesh=None, *, _return_triangles=False):
     """Return local P1Q3 points, outward normals and scaled surface weights."""
     bary = np.eye(3) * 0.5 + np.full((3, 3), 1 / 6)
-    if geo == GeoType.SPHERE:
+    if geo == GeoType.CAPSULE:
+        if not np.isfinite(scale).all() or scale[0] <= 0 or scale[1] < 0:
+            raise ValueError("Invalid source capsule scale: radius must be positive and half_height nonnegative")
+        points, normals, area, tri = _capsule_samples(float(scale[0]), float(scale[1]), bary)
+    elif geo == GeoType.SPHERE:
         if not np.isfinite(scale).all() or scale[0] <= 0:
             raise ValueError("Invalid source sphere scale")
         theta, phi = np.linspace(0, np.pi, 33), np.arange(32) * (2 * np.pi / 32)
@@ -292,12 +368,24 @@ class ContactSamples:
         if _materials is not None:
             from .contact_material_sampling import _append_material_samples  # noqa: PLC0415
 
-            targets_used.update(_append_material_samples(self, _materials, support, append))
+            material_targets = set(_append_material_samples(self, _materials, support, append))
+            targets_used.update(material_targets)
+        # Shapes that particles (tet surface, cloth, cable) contact. CAPSULE is a rigid/link target only.
+        particle_targets = (set(tet_targets) if len(triangles) else set()) | (
+            material_targets if _materials is not None else set()
+        )
         used_shapes = targets_used | {s for s in source_shapes if s >= 0}
         for s in used_shapes:
             geo, scale = types[s], scales[s]
-            if geo not in (GeoType.PLANE, GeoType.SPHERE, GeoType.BOX, GeoType.MESH):
+            if geo not in (GeoType.PLANE, GeoType.SPHERE, GeoType.BOX, GeoType.MESH, GeoType.CAPSULE):
                 raise ValueError("Unsupported actor contact target")
+            if geo == GeoType.CAPSULE and s in particle_targets:
+                raise ValueError(
+                    f"Capsule shape {s} is a particle (tet, cloth or cable) contact target; capsules support "
+                    "only rigid and link contact. Clear its COLLIDE_PARTICLES flag or use a sphere, box or mesh"
+                )
+            if geo == GeoType.CAPSULE and (scale[0] <= 0 or scale[1] < 0):
+                raise ValueError("Invalid capsule target scale: radius must be positive and half_height nonnegative")
             if not np.isfinite(scale).all() or not np.isfinite(margins[s]) or margins[s] < 0:
                 raise ValueError("Invalid target shape scale or margin")
             if geo == GeoType.PLANE and (

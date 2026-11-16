@@ -52,6 +52,18 @@ def analytic_geometry_magnitude(geo: int, scale: Any, y: Any, point_magnitude: A
             return type(phi)(wp.inf), type(y)(wp.inf)
         _n, _length, gradient, alength = _unit_magnitude(y, point_magnitude)
         value = alength + wp.abs(phi)
+    elif geo == GeoType.CAPSULE:
+        # Sphere branch on y' = y - clamp(y_z) e_z. Inside the axial span y'_z is exactly zero;
+        # beyond it the subtraction of the half height rounds once.
+        axial = wp.clamp(y[2], -scale[1], scale[1])
+        offset = type(y)(y[0], y[1], y[2] - axial)
+        if wp.length(offset) == type(phi)(0.0):
+            return type(phi)(wp.inf), type(y)(wp.inf)
+        offset_magnitude = type(y)(point_magnitude[0], point_magnitude[1], type(phi)(0.0))
+        if axial != y[2]:
+            offset_magnitude[2] = point_magnitude[2] + wp.abs(y[2]) + wp.abs(scale[1])
+        _n, _length, gradient, alength = _unit_magnitude(offset, offset_magnitude)
+        value = alength + wp.abs(phi)
     elif geo == GeoType.BOX and ell > type(ell)(0.0):
         planes = wp.vector(type(ell)(0.0), length=6)
         z = wp.vector(type(ell)(0.0), length=6)

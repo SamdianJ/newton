@@ -94,6 +94,15 @@ def _shape64(geo: int, scale: Any, point: Any, index: int, table: wp.array[Textu
         gradient = type(point)(0.0)
         if length > type(point[0])(0.0):
             gradient = point / length
+    elif geo == GeoType.CAPSULE:
+        # Distance to the segment z in [-h, h] (scale = radius, half_height), minus the radius.
+        axial = wp.clamp(point[2], -scale[1], scale[1])
+        offset = type(point)(point[0], point[1], point[2] - axial)
+        length = wp.length(offset)
+        value = length - scale[0]
+        gradient = type(point)(0.0)
+        if length > type(point[0])(0.0):
+            gradient = offset / length
     elif geo == GeoType.BOX:
         d = type(point)(wp.abs(point[0]), wp.abs(point[1]), wp.abs(point[2])) - scale
         outside = type(point)(
