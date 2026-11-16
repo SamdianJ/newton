@@ -66,8 +66,11 @@ through the keyword-only ``cloth_inputs`` and ``cable_inputs`` arguments.
 Independent cloth/cable and supported mixed articulation/rigid/tet/material
 scenes use the shared nonlinear solve and transactional publication path.
 Material surfaces contact supported articulation, rigid and static targets
-through the same spatial candidates as other scenes. Self-collision and soft-soft
-contact remain unsupported. Existing nonmaterial stepping is unchanged.
+through the same spatial candidates as other scenes. Experimental cloth
+inter/self contact (``cloth_contact``) and cable self and inter-cable contact
+(``cable_contact``) are described in :doc:`../guide/monolithic_cloth` and
+:doc:`../guide/monolithic_cable`; cable-cloth contact remains
+unsupported. Existing nonmaterial stepping is unchanged.
 
 Cloth inputs select Model triangle rows, bending coefficients ``(alpha, beta)``,
 thickness [m] and surface density [kg/m²]. Cable inputs select ordered particle

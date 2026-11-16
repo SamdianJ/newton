@@ -326,6 +326,8 @@ def test_step_shift_max_tracks_the_largest_shift(test, device):
             if device.is_cuda:
                 with wp.ScopedCapture(device) as capture:
                     run.pre._factor_blocks(dtype(0.0), dtype(0.0), run.status)
+                # The replay itself must raise a cleared maximum again.
+                run.pre.step_shift_max.zero_()
                 wp.capture_launch(capture.graph)
                 test.assertEqual(float(run.pre.step_shift_max.numpy()[0]), expected)
             plain = _Run(device, dtype, _synthetic(np.random.default_rng(5), LENGTHS, element_only=(4,)))

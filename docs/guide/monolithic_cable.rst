@@ -156,8 +156,9 @@ band Cholesky with a different rounding order. A cable whose band fails a pivot
 retries larger preconditioner-only shifts, multiples of its own diagonal.
 ``Stats.variational["cable_used_shift_max"]`` reports, for any solver with
 cables, the largest shift a cable factor chose in the step, including factors
-of rejected regularization retries and of rolled-back steps; 0 means every
-factor used shift 0 or the step factored nothing. This experimental path has
+of rejected regularization retries and of rolled-back steps; 0 means that no
+cable factor succeeded with a positive shift (every factor used shift 0, the
+step factored nothing, or every shift failed). This experimental path has
 no accelerator performance qualification yet.
 Use CPU for the full localized-helix analytical matrix. CUDA coverage includes
 the full cantilever and component checks; CPU/CUDA trajectory equivalence during

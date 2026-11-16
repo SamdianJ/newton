@@ -309,7 +309,7 @@ def test_diagnostics_and_checkpoint(test, device, *, precision, graph):
         other = Path(directory) / "plain.npz"
         plain.save_checkpoint(plain_state, other)
         for owner, owner_state, wrong in ((restored_solver, restored, other), (plain, plain_state, path)):
-            with test.assertRaises(ValueError):
+            with test.assertRaisesRegex(ValueError, "schema version"):
                 owner.load_checkpoint(owner_state, wrong)
     for key, value in snapshot(state).items():
         np.testing.assert_array_equal(snapshot(restored)[key], value, err_msg=key)
@@ -374,8 +374,11 @@ def test_failed_publication_restores_the_diagnostics(test, device):
     test.assertGreater(np.abs(history.cable_contact_particle_force.numpy()).max(), 0.0)
     before = snapshot(state)
     failure = _StepFailure(solver.Status.NONFINITE, "forced after publication")
-    with mock.patch.object(solver, "_joint_force_metrics", side_effect=failure):
+    with mock.patch.object(solver, "_joint_force_metrics", side_effect=failure) as forced:
         solver.step(state, state, control, dt=DT)
+    # The step failed after it wrote state_out, not earlier inside the iteration.
+    forced.assert_called_once()
+    test.assertEqual(solver.last_stats.failure_reason, "forced after publication")
     test.assertTrue(solver.last_stats.rolled_back)
     for name, value in before.items():
         np.testing.assert_array_equal(snapshot(state)[name], value, err_msg=name)
@@ -398,7 +401,7 @@ def test_cloth_and_cable_checkpoint(test, device, *, precision):
         other = Path(directory) / "cable.npz"
         cable_only.save_checkpoint(cable_state, other)
         for owner, owner_state, wrong in ((restored_solver, restored, other), (cable_only, cable_state, path)):
-            with test.assertRaises(ValueError):
+            with test.assertRaisesRegex(ValueError, "schema version"):
                 owner.load_checkpoint(owner_state, wrong)
     for key, value in snapshot(state).items():
         np.testing.assert_array_equal(snapshot(restored)[key], value, err_msg=key)
