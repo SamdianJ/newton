@@ -515,9 +515,15 @@ class ContactObjective:
         if self.actor_samples is not None:
             shapes = shapes[~np.isin(shapes, self.actor_samples.rigid_shapes)]
             shapes = np.asarray(_canonical_shapes(actors, shapes), dtype=np.int32)
-        if not np.isin(
-            v["shape_type"][shapes], [int(GeoType.PLANE), int(GeoType.SPHERE), int(GeoType.BOX), int(GeoType.MESH)]
-        ).all():
+        # These shapes are particle targets only for tet surface triangles; without them (or with
+        # materials, which use actor sampling) the set is never queried, so its types do not matter.
+        particle_targets = _materials is None and len(v["tri_indices"]) > 0
+        if (
+            particle_targets
+            and not np.isin(
+                v["shape_type"][shapes], [int(GeoType.PLANE), int(GeoType.SPHERE), int(GeoType.BOX), int(GeoType.MESH)]
+            ).all()
+        ):
             raise ValueError("Unsupported contact shape")
         if _materials is not None:
             shapes = np.empty(0, dtype=np.int32)
