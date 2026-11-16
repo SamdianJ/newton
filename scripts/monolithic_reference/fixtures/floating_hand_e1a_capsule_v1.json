@@ -1,7 +1,7 @@
 {
   "schema": "p9d-floating-hand/v1",
-  "status": "PROPOSED",
-  "approval": null,
+  "status": "FROZEN",
+  "approval": "Values confirmed by the user on 2026-11-16 (P9d PRD section 2 items 6-8 and the PR0 recipe questions); frozen at P9d PR0.",
   "stage": "P9d PR0",
   "scene": "E1a",
   "dt_s": 0.001,

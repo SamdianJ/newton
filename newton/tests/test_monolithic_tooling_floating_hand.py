@@ -189,10 +189,15 @@ class TestFloatingHandRecipes(unittest.TestCase):
         from scripts.monolithic_reference.floating_hand_scenes import load_recipe  # noqa: PLC0415
 
         fixtures = Path(__file__).resolve().parents[2] / "scripts/monolithic_reference/fixtures"
-        names = sorted(p.name for p in fixtures.glob("floating_*_v1.json"))
-        self.assertEqual(len(names), 5)
+        names = (
+            "floating_hand_wrist_box_baseline_v1.json",
+            "floating_hand_e1a_capsule_v1.json",
+            "floating_hand_e1b_convex_v1.json",
+            "floating_chain_e2_v1.json",
+            "floating_hand_e3_fist_v1.json",
+        )
         for name in names:
-            load_recipe(fixtures / name)
+            self.assertEqual(load_recipe(fixtures / name)["status"], "FROZEN", name)
 
 
 class TestFeatureOffTrace(unittest.TestCase):
