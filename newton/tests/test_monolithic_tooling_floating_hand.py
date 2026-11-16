@@ -193,3 +193,22 @@ class TestFloatingHandRecipes(unittest.TestCase):
         self.assertEqual(len(names), 5)
         for name in names:
             load_recipe(fixtures / name)
+
+
+class TestFeatureOffTrace(unittest.TestCase):
+    def test_digest_detects_one_bit_and_compare_reports_first_step(self):
+        from scripts.monolithic_reference.feature_off_trace import _digest, compare  # noqa: PLC0415
+
+        a = np.linspace(0.0, 1.0, 17)
+        b = a.copy()
+        b.view(np.uint64)[5] ^= np.uint64(1)
+        self.assertNotEqual(_digest([("x", a)]), _digest([("x", b)]))
+        self.assertEqual(_digest([("x", a)]), _digest([("x", a.copy())]))
+        record = {"state": "s", "forces": "f", "stats": {"status": "SUCCESS"}, "error": None}
+        changed = dict(record, forces="g")
+        x = {"scenes": {"k": {"status": "TRACED", "records": [record, record]}, "m": {"status": "NOT_RUN"}}}
+        y = {"scenes": {"k": {"status": "TRACED", "records": [record, changed]}, "m": {"status": "NOT_RUN"}}}
+        result = compare(x, y)
+        self.assertEqual(result["k"], {"verdict": "DIFFERENT", "first_step": 1, "fields": ["forces"]})
+        self.assertEqual(result["m"]["verdict"], "MISSING")
+        self.assertEqual(compare(x, x)["k"]["verdict"], "IDENTICAL")
