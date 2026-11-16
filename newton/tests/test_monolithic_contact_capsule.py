@@ -101,6 +101,12 @@ def test_roundoff_magnitude(test, device):
     error = np.abs(observed.astype(np.float64) - value_ref.astype(np.float64))
     # A is an operation magnitude: |error| <= c * eps32 * A with a small constant.
     test.assertTrue(np.all(error <= 32 * np.finfo(np.float32).eps * a[:-2] + 1e-12), np.max(error / a[:-2]))
+    # The gradient magnitude bounds the FP32 gradient error too, including within rounding of the cap seams.
+    ag = np.linalg.norm(gradients.numpy()[:-2], axis=1)
+    _, gradient_ref = _reference(points[:-2])
+    _, observed_g = _query(device, "fp32", GeoType.CAPSULE, (RADIUS, HALF, 0.0), points[:-2].astype(np.float32))
+    gradient_error = np.linalg.norm(observed_g.astype(np.float64) - gradient_ref.astype(np.float64), axis=1)
+    test.assertTrue(np.all(gradient_error <= 32 * np.finfo(np.float32).eps * ag + 1e-12), np.max(gradient_error / ag))
 
 
 def test_surface_samples(test, device):
@@ -154,8 +160,8 @@ def test_resting_pairs(test, device):
             RADIUS + RADIUS + RADIUS,
         ),
     }
-    for name, (support, top) in supports.items():
-        with test.subTest(support=name):
+    for (name, (support, top)), precision in __import__("itertools").product(supports.items(), ("fp64", "fp32")):
+        with test.subTest(support=name, precision=precision):
             builder = newton.ModelBuilder()
             plane_cfg = builder.ShapeConfig(density=0.0, margin=0.0, has_particle_collision=False)
             builder.add_shape_plane(body=-1, width=0.0, length=0.0, cfg=plane_cfg)
@@ -175,6 +181,7 @@ def test_resting_pairs(test, device):
                 contact_stiffness=1e9,
                 friction_coefficient=0.5,
                 publish_policy="current_iterate",
+                precision=precision,
             )
             state, control = solver.create_state(dt=0.001), model.control()
             for _ in range(300):
@@ -190,6 +197,82 @@ def test_resting_pairs(test, device):
             test.assertLess(abs(q[-1, 2] - top), 1e-3)
 
 
+def test_dense_capsule_contact(test, device):
+    """A capsule rigid body (axis along y, the fixture box's x extent) matches the independent dense
+    oracle's energy, residual and tangent in link, rigid and static pairs (FP64)."""
+    from newton.tests.test_monolithic_contact_actor_pairs import native_batch, perturb, physical, query  # noqa: PLC0415
+    from newton.tests.test_monolithic_contact_components import batch_matrix  # noqa: PLC0415
+    from newton.tests.test_monolithic_solver_actor_contacts import (  # noqa: PLC0415
+        contact_scene,
+        contact_solver,
+        contact_state,
+    )
+    from scripts.monolithic_reference.actor_contact_oracle import fixture_terms  # noqa: PLC0415
+
+    for kind in ("A-R", "R-R", "R-static"):
+        with test.subTest(kind=kind):
+            run = contact_solver(contact_scene(device, kind, capsule=True))
+            batch = native_batch(run)
+            state = contact_state(run, kind)
+            start = physical(state)
+            query(batch, run, state, start=True)
+            direction = np.linspace(-0.2, 0.3, run._layout.scalar_dof_count)
+            perturb(run, state, start, direction, 1e-6)
+            query(batch, run, state)
+            energy, residual, b = fixture_terms(run.model, run._actors, physical(state), start)
+            test.assertEqual(int(batch.flags.numpy()[0]), 0)
+            test.assertGreater(abs(energy[0]), 0.0)  # the capsule pair is in contact
+            np.testing.assert_allclose(batch.pool.energy.result.numpy()[:2], energy, rtol=1e-8, atol=1e-12)
+            np.testing.assert_allclose(batch.pool.residual.result.numpy(), residual, rtol=1e-8, atol=1e-10)
+            matrix = batch_matrix(batch)
+            scale = max(1, np.linalg.norm(b))
+            test.assertLess(np.linalg.norm(matrix - b) / scale, 1e-5)
+
+
+def test_capsule_rejected_as_material_target(test, device):
+    """Cloth and cable particles may not contact a capsule (PRD 2.9); the error names the shape type."""
+    from newton.solvers.experimental.monolithic import SolverMonolithic  # noqa: PLC0415
+
+    for material in ("cloth", "cable"):
+        with test.subTest(material=material):
+            builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0))
+            builder.add_shape_capsule(body=-1, radius=RADIUS, half_height=HALF, label="static_capsule")
+            cloth, cables = [], []
+            if material == "cloth":
+                first, face = builder.particle_count, builder.tri_count
+                # Lumped material mass: area (2e-4 m^2) x surface density / 3 per node.
+                for point in ((0.0, 0.0, 0.03), (0.02, 0.0, 0.03), (0.0, 0.02, 0.03)):
+                    builder.add_particle(wp.vec3(point), wp.vec3(0.0), 2e-4 / 3)
+                builder.add_triangle(first, first + 1, first + 2, tri_ke=2, tri_ka=3, tri_kd=0, tri_drag=0, tri_lift=0)
+                cloth.append(
+                    SolverMonolithic.ClothInput(
+                        triangle_ids=(face,), bending=(1, 2), thickness=0.001, surface_density=1
+                    )
+                )
+            else:
+                # Lumped material mass: linear density x half of each adjacent 0.02 m segment.
+                masses = (0.01, 0.02, 0.01)
+                ids = tuple(builder.add_particle((0.02 * i, 0.0, 0.03), (0, 0, 0), m) for i, m in enumerate(masses))
+                cables.append(
+                    SolverMonolithic.CableInput(
+                        particle_ids=ids,
+                        EA=100,
+                        bending=((1, 0), (0, 1)),
+                        GJ=1,
+                        radius=0.002,
+                        linear_density=1,
+                        rest_theta=(0, 0),
+                        rest_director=((0, 1, 0), (0, 1, 0)),
+                        fixed_theta=(False, False),
+                    )
+                )
+            model = builder.finalize(device=device)
+            with test.assertRaisesRegex(ValueError, "CAPSULE shape .* particle"):
+                SolverMonolithic(
+                    model, friction_velocity_scale=0.01, cloth_inputs=cloth, cable_inputs=cables, mass_mode="lumped"
+                )
+
+
 class TestContactCapsule(unittest.TestCase):
     pass
 
@@ -201,6 +284,8 @@ for _device in get_test_devices():
         test_roundoff_magnitude,
         test_surface_samples,
         test_resting_pairs,
+        test_dense_capsule_contact,
+        test_capsule_rejected_as_material_target,
     ):
         add_function_test(TestContactCapsule, _test.__name__, _test, devices=[_device])
 

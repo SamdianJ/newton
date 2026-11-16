@@ -42,6 +42,57 @@ def rigid_terms(com, rot, predicted_com, predicted_rot, mass, inertia, dt, force
     return energy, residual, b
 
 
+def capsule_samples(radius, half_height, subdivisions=32):
+    """Independent capsule quadrature along local z: two UV hemispheres split at the equator and a
+    cylinder band of at most one azimuth arc per band height, with exact projected points and areas."""
+    theta = np.linspace(0, np.pi, subdivisions + 1)
+    phi = np.arange(subdivisions) * (2 * np.pi / subdivisions)
+    unit = np.stack(
+        (
+            np.sin(theta[:, None]) * np.cos(phi),
+            np.sin(theta[:, None]) * np.sin(phi),
+            np.broadcast_to(np.cos(theta[:, None]), (subdivisions + 1, subdivisions)),
+        ),
+        axis=-1,
+    )
+    bary = np.eye(3) * 0.5 + np.full((3, 3), 1 / 6)
+    points, areas = [], []
+    half_rings = subdivisions // 2
+    for rings, center in ((range(half_rings), half_height), (range(half_rings, subdivisions), -half_height)):
+        for i in rings:
+            for j in range(subdivisions):
+                a, b = unit[i, j], unit[i, (j + 1) % subdivisions]
+                c, d = unit[i + 1, j], unit[i + 1, (j + 1) % subdivisions]
+                for tri, keep in (((a, b, c), i > 0), ((b, d, c), i < subdivisions - 1)):
+                    if not keep:
+                        continue
+                    u, v, w = tri
+                    solid = 2 * np.arctan2(abs(u @ np.cross(v, w)), 1 + u @ v + v @ w + w @ u)
+                    for weights in bary:
+                        q = weights @ np.array(tri)
+                        points.append(radius * q / np.linalg.norm(q) + np.array([0.0, 0.0, center]))
+                        areas.append(radius**2 * solid / 3)
+    if half_height > 0:
+        arc = 2 * np.pi * radius / subdivisions
+        bands = max(1, int(np.ceil(2 * half_height / arc)))
+        dz, dphi = 2 * half_height / bands, 2 * np.pi / subdivisions
+        for k in range(bands):
+            for j in range(subdivisions):
+                corners = {
+                    "a": (j * dphi, -half_height + k * dz),
+                    "b": ((j + 1) * dphi, -half_height + k * dz),
+                    "c": (j * dphi, -half_height + (k + 1) * dz),
+                    "d": ((j + 1) * dphi, -half_height + (k + 1) * dz),
+                }
+                for names in (("a", "b", "c"), ("b", "d", "c")):
+                    param = np.array([corners[n] for n in names])
+                    for weights in bary:
+                        angle, z = weights @ param
+                        points.append(np.array([radius * np.cos(angle), radius * np.sin(angle), z]))
+                        areas.append(radius * dphi * dz / 2 / 3)
+    return np.asarray(points), np.asarray(areas)
+
+
 def sphere_samples(radius, subdivisions=32):
     """Project P1Q3 points to a UV sphere and use exact spherical triangle areas."""
     theta = np.linspace(0, np.pi, subdivisions + 1)

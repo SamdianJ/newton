@@ -44,6 +44,14 @@ def geometry(y, kind, scale, *, box_smoothing=0.0):
         length = np.linalg.norm(y)
         g = y / length
         return length - scale[0], g, (np.eye(3) - np.outer(g, g)) / length
+    if kind == "capsule":
+        # Segment z in [-h, h] (scale = radius, half_height); beside the segment the axial curvature is zero.
+        axial = np.clip(y[2], -scale[1], scale[1])
+        offset = y - np.array([0.0, 0.0, axial])
+        length = np.linalg.norm(offset)
+        g = offset / length
+        mask = np.eye(3) if abs(y[2]) > scale[1] else np.diag([1.0, 1.0, 0.0])
+        return length - scale[0], g, (mask - np.outer(g, g)) / length
     if box_smoothing > 0:
         normals = np.vstack((np.eye(3), -np.eye(3)))
         planes = normals @ y - np.tile(scale, 2)

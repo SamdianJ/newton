@@ -18,13 +18,19 @@ _SDF64 = _sdf_type(wp.float64)
 SQRT_HALF = float(np.sqrt(0.5))
 # Set before measuring (P9d PR1): 10% of the 2 mm penetration gate, within 5 mm of the surface.
 HULL_FIELD_TOLERANCE_M, HULL_FIELD_BAND_M = 2e-4, 5e-3
+# Set before measuring (P9d PR1 review round 1): contact normal within 2 degrees of the exact distance
+# gradient, 2-5 mm outside face centroids (the distance to a convex set is C1 outside it).
+HULL_GRADIENT_ANGLE_RAD = np.radians(2.0)
 
 
 @wp.kernel
-def _field(table: wp.array[_SDF64], points: wp.array[wp.vec3d], values: wp.array[wp.float64]):
+def _field(
+    table: wp.array[_SDF64], points: wp.array[wp.vec3d], values: wp.array[wp.float64], gradients: wp.array[wp.vec3d]
+):
     i = wp.tid()
-    value, _gradient, _hessian = smooth_query(table[0], points[i])
+    value, gradient, _hessian = smooth_query(table[0], points[i])
     values[i] = value
+    gradients[i] = gradient
 
 
 def _hull_mesh(device):
@@ -120,27 +126,75 @@ def test_pinned_hull_field_accuracy(test, device):
             n = sign * normal
             normals_offsets.append((n, float((vertices @ n).max())))
     rng = np.random.default_rng(5)
-    # Points along random directions from the axis, at signed distances in the band, over the whole surface.
-    surface = vertices[rng.integers(len(vertices), size=400)]
-    direction = surface - np.c_[np.zeros((400, 2)), np.clip(surface[:, 2], -0.04, 0.04)]
-    direction /= np.linalg.norm(direction, axis=1)[:, None]
-    points = surface + direction * rng.uniform(-HULL_FIELD_BAND_M, HULL_FIELD_BAND_M, size=(400, 1))
-    exact = []
-    for p in points:
+
+    def exact_distance(p):
         inside = max(float(p @ n) - d for n, d in normals_offsets)
-        if inside <= 0:
-            exact.append(inside)
-        else:
-            exact.append(fc.core_distance(fc.point().placed(np.eye(3), p), hull))
-    exact = np.asarray(exact)
+        return inside if inside <= 0 else fc.core_distance(fc.point().placed(np.eye(3), p), hull)
+
+    # Radial rays through hull vertices, face centroids along face normals, and edge midpoints along the
+    # mean of their two face normals, at signed distances across the band.
+    surface = vertices[rng.integers(len(vertices), size=300)]
+    radial = surface - np.c_[np.zeros((300, 2)), np.clip(surface[:, 2], -0.04, 0.04)]
+    radial /= np.linalg.norm(radial, axis=1)[:, None]
+    triangles = vertices[np.asarray(mesh.indices).reshape(-1, 3)]
+    face_normal = np.cross(triangles[:, 1] - triangles[:, 0], triangles[:, 2] - triangles[:, 0])
+    face_normal /= np.linalg.norm(face_normal, axis=1)[:, None]
+    face_normal *= np.sign(np.einsum("fk,fk->f", face_normal, triangles.mean(axis=1)))[:, None]
+    faces = rng.choice(len(triangles), size=200, replace=False)
+    edge_faces = rng.choice(len(triangles), size=200, replace=False)
+    edge_mid = (triangles[edge_faces, 0] + triangles[edge_faces, 1]) / 2
+    origins = np.vstack((surface, triangles[faces].mean(axis=1), edge_mid))
+    directions = np.vstack((radial, face_normal[faces], face_normal[edge_faces]))
+    offsets = rng.uniform(-HULL_FIELD_BAND_M, HULL_FIELD_BAND_M, size=(len(origins), 1))
+    points = origins + directions * offsets
+    exact = np.array([exact_distance(p) for p in points])
     keep = np.abs(exact) <= HULL_FIELD_BAND_M
-    values = wp.zeros(len(points), dtype=wp.float64, device=device)
-    wp.launch(
-        _field, len(points), [fields.table, wp.array(points, dtype=wp.vec3d, device=device), values], device=device
+    # Gradient probes: 2-5 mm outside face centroids; the exact gradient by central differences.
+    outside = triangles[faces].mean(axis=1) + face_normal[faces] * rng.uniform(2e-3, 5e-3, size=(len(faces), 1))
+    h = 1e-7
+    exact_gradient = np.array(
+        [[(exact_distance(p + h * e) - exact_distance(p - h * e)) / (2 * h) for e in np.eye(3)] for p in outside]
     )
-    error = np.abs(values.numpy() - exact)[keep]
-    test.assertGreater(int(keep.sum()), 300)
+    queries = np.vstack((points, outside))
+    values = wp.zeros(len(queries), dtype=wp.float64, device=device)
+    gradients = wp.zeros(len(queries), dtype=wp.vec3d, device=device)
+    wp.launch(
+        _field,
+        len(queries),
+        [fields.table, wp.array(queries, dtype=wp.vec3d, device=device), values, gradients],
+        device=device,
+    )
+    error = np.abs(values.numpy()[: len(points)] - exact)[keep]
+    test.assertGreater(int(keep.sum()), 500)
     test.assertLessEqual(float(error.max()), HULL_FIELD_TOLERANCE_M, f"max field error {error.max():.3e} m")
+    field_gradient = gradients.numpy()[len(points) :]
+    cosine = np.einsum("ik,ik->i", field_gradient, exact_gradient) / (
+        np.linalg.norm(field_gradient, axis=1) * np.linalg.norm(exact_gradient, axis=1)
+    )
+    angle = np.arccos(np.clip(cosine, -1.0, 1.0))
+    test.assertLessEqual(
+        float(angle.max()), HULL_GRADIENT_ANGLE_RAD, f"max normal angle {np.degrees(angle.max()):.3f} deg"
+    )
+
+
+def test_convex_mesh_rejected_as_cloth_target(test, device):
+    """Cloth particles may not contact a CONVEX_MESH (PRD 2.9); the error names the shape type."""
+    from newton.solvers.experimental.monolithic import SolverMonolithic  # noqa: PLC0415
+
+    if not fhs.CONVEX_HULL.is_file():
+        test.skipTest("Pinned convex hull not present")
+    mesh, _ = _hull_mesh(device)
+    builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0))
+    builder.add_shape_convex_hull(-1, mesh=mesh, label="static_hull")
+    first, face = builder.particle_count, builder.tri_count
+    for point in ((0.0, 0.0, 0.05), (0.02, 0.0, 0.05), (0.0, 0.02, 0.05)):
+        builder.add_particle(wp.vec3(point), wp.vec3(0.0), 2e-4 / 3)
+    builder.add_triangle(first, first + 1, first + 2, tri_ke=2, tri_ka=3, tri_kd=0, tri_drag=0, tri_lift=0)
+    cloth = [SolverMonolithic.ClothInput(triangle_ids=(face,), bending=(1, 2), thickness=0.001, surface_density=1)]
+    with test.assertRaisesRegex(ValueError, "CONVEX_MESH shape .* particle"):
+        SolverMonolithic(
+            builder.finalize(device=device), friction_velocity_scale=0.01, cloth_inputs=cloth, mass_mode="lumped"
+        )
 
 
 class TestContactConvexMesh(unittest.TestCase):
@@ -148,7 +202,11 @@ class TestContactConvexMesh(unittest.TestCase):
 
 
 for _device in get_cuda_test_devices():
-    for _test in (test_convex_mesh_equals_mesh, test_pinned_hull_field_accuracy):
+    for _test in (
+        test_convex_mesh_equals_mesh,
+        test_pinned_hull_field_accuracy,
+        test_convex_mesh_rejected_as_cloth_target,
+    ):
         add_function_test(TestContactConvexMesh, _test.__name__, _test, devices=[_device])
 for _device in get_test_devices():
     if not wp.get_device(_device).is_cuda:

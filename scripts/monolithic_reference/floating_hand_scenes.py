@@ -354,7 +354,7 @@ CONVEX_HULL = INPUTS / "p9d_convex_capsule/hull_r20_hh40.npz"
 # Texture SDF build for the pinned hull (CUDA only); its C2 field is checked against the exact hull
 # distance in test_monolithic_contact_convex_mesh.py (P9d PR1).
 CONVEX_HULL_SDF = {
-    "max_resolution": 64,
+    "max_resolution": 128,
     "margin": 0.02,
     "narrow_band_range": (-0.05, 0.05),
     "texture_format": "float32",
