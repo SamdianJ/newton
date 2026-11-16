@@ -138,7 +138,7 @@ class _Run:
         self.status = wp.zeros(1, dtype=int, device=device)
         self.pre.gauge_rows.assign(data["gauge"])
 
-    def factor(self, *, masked=False, regularization=0.0, serial=False):
+    def factor(self, *, masked=False, regularization=0.0):
         pre, data, device, dtype = self.pre, self.data, self.device, self.dtype
         self.status.zero_()
         pre.band.assign(data["band"].ravel())
@@ -165,7 +165,7 @@ class _Run:
                 ],
                 device=device,
             )
-        pre._factor_blocks(dtype(regularization), dtype(0.0), self.status, serial=serial)
+        pre._factor_blocks(dtype(regularization), dtype(0.0), self.status)
         return int(self.status.numpy()[0])
 
     def snapshot(self):
@@ -189,7 +189,9 @@ def test_factor_reproduces_the_shifted_band(test, device):
     for dtype in (wp.float32, wp.float64):
         for masked in (False, True):
             for seed in (1, 2):
-                data = _synthetic(np.random.default_rng(seed), LENGTHS, element_only=(2,), shifted=2)
+                # Masked runs also carry far couplings, which the template must drop.
+                far = (0, 4) if masked else ()
+                data = _synthetic(np.random.default_rng(seed), LENGTHS, far=far, element_only=(2,), shifted=2)
                 run = _Run(device, dtype, data)
                 status = run.factor(masked=masked, regularization=2e-5)
                 used = run.pre.used_shift.numpy().astype(np.float64)
@@ -246,81 +248,109 @@ def test_apply_solves_with_the_factor(test, device):
             np.testing.assert_array_equal(replay.numpy(), result.numpy())
 
 
-def test_serial_ladder_matches_the_levels_bit_for_bit(test, device):
-    """The per-cable shift ladder repeats the level kernels' arithmetic exactly, shift 0 included."""
+def test_retried_cable_matches_a_first_attempt_at_its_shift(test, device):
+    """A cable factored in the retry round equals, bit for bit, a first-round factor at the shift it chose."""
     for dtype in (wp.float32, wp.float64):
         for masked in (False, True):
             data = _synthetic(np.random.default_rng(5), LENGTHS, element_only=(4,), shifted=4)
-            run = _Run(device, dtype, data)
-            levels_status = run.factor(masked=masked)
-            levels = run.snapshot()
-            serial_status = run.factor(masked=masked, serial=True)
-            serial = run.snapshot()
+            retried = _Run(device, dtype, data)
+            test.assertEqual(retried.factor(masked=masked), 0)
+            shift = float(retried.pre.used_shift.numpy()[4])
+            first = _Run(device, dtype, data)
+            first.pre.shifts.fill_(shift)
+            test.assertEqual(first.factor(masked=masked), 0)
+            base, count = first.pre.block_spans.numpy()[4]
             with test.subTest(dtype=dtype.__name__, masked=masked):
-                test.assertEqual(levels_status, 0)
-                test.assertEqual(serial_status, 0)
-                test.assertGreater(float(levels[-1][4]), 0.0)
-                for a, b in zip(levels, serial, strict=True):
-                    np.testing.assert_array_equal(a, b)
-            again = _Run(device, dtype, data)
-            again.factor(masked=masked)
-            for a, b in zip(levels, again.snapshot(), strict=True):
-                np.testing.assert_array_equal(a, b)
+                test.assertGreater(shift, 0.0)
+                test.assertEqual(float(first.pre.used_shift.numpy()[4]), shift)
+                # The factor and both multipliers (the coupling scratch keeps the failed attempt).
+                for index in (0, 2, 3):
+                    a, b = retried.snapshot()[index], first.snapshot()[index]
+                    np.testing.assert_array_equal(a[base : base + count], b[base : base + count])
+                # Cables that factored at shift 0 are untouched by the retry round.
+                again = _Run(device, dtype, _synthetic(np.random.default_rng(5), LENGTHS, element_only=(4,)))
+                again.factor(masked=masked)
+                keep = np.ones(len(retried.pre.blocks.numpy()), dtype=bool)
+                keep[base : base + count] = False
+                for a, b in zip(retried.snapshot()[:1], again.snapshot()[:1], strict=True):
+                    np.testing.assert_array_equal(a[keep], b[keep])
 
 
 def test_status_codes_of_different_cables_merge(test, device):
-    """Out-of-band 1, failed pivot 12 and non-finite 16 merge as 16 > 12 > 1; an out-of-band cable is not factored."""
+    """Out-of-band 1, failed pivot 12 and non-finite 16 merge as 16 > 12 > 1, deterministically per cable."""
+    # Cable 4 (51 rows) has blocks 0..5: level 0 eliminates blocks 1, 3, 5, the root is block 0.
+    pivot, nan = -1e6, np.nan
     cases = (
-        # (cables with out-of-band entries, failed pivots, non-finite entries, status)
-        ((0,), (2,), (4,), 16),
-        ((0,), (2,), (), 12),
-        ((0,), (), (), 1),
-        ((), (2,), (), 12),
-        ((), (), (4,), 16),
+        # (cables with out-of-band entries, {(cable, band row): diagonal value}, status)
+        ((0,), {(2, 0): pivot, (4, 5): nan}, 16),
+        ((0,), {(2, 0): pivot}, 12),
+        ((0,), {}, 1),
+        ((), {(2, 0): pivot}, 12),
+        ((), {(4, 5): nan}, 16),
         # Both in one cable: its assembly rejects it before the non-finite entry is factored.
-        ((4,), (), (4,), 1),
+        ((4,), {(4, 5): nan}, 1),
+        # A pivot that fails under every shift and a non-finite entry in one level (blocks 1 and 3):
+        # the level reports both, the larger code wins and the cable is not retried.
+        ((), {(4, 10): pivot, (4, 30): nan}, 16),
+        # The pivot fails at level 0 (block 1) on every shift, so the root's non-finite entry is
+        # never factored (2826c5a0, factoring in row order, met the root's rows first and gave 16).
+        ((), {(4, 10): pivot, (4, 5): nan}, 12),
     )
     for dtype in (wp.float32, wp.float64):
-        for far, negative, nonfinite, expected in cases:
+        for far, diagonal, expected in cases:
             data = _synthetic(np.random.default_rng(6), LENGTHS, far=far)
-            for actor in negative:
-                data["band"][data["spans"][actor, 0], 0] = -1e6
-            for actor in nonfinite:
-                data["band"][data["spans"][actor, 0] + 5, 0] = np.nan
-            run = _Run(device, dtype, data)
-            run.pre.used_shift.fill_(-1.0)
-            status = run.factor()
-            used = run.pre.used_shift.numpy()
-            with test.subTest(dtype=dtype.__name__, far=far, negative=negative, nonfinite=nonfinite):
-                test.assertEqual(status, expected)
-                failed = set(far) | set(negative) | set(nonfinite)
-                for actor in range(len(LENGTHS)):
-                    # A cable records a shift only when it factored.
-                    test.assertEqual(float(used[actor]) == -1.0, actor in failed, actor)
+            for (actor, row), value in diagonal.items():
+                data["band"][data["spans"][actor, 0] + row, 0] = value
+            for repeat in range(2):
+                run = _Run(device, dtype, data)
+                run.pre.used_shift.fill_(-1.0)
+                status = run.factor()
+                used = run.pre.used_shift.numpy()
+                with test.subTest(dtype=dtype.__name__, far=far, diagonal=diagonal, repeat=repeat):
+                    test.assertEqual(status, expected)
+                    failed = set(far) | {actor for actor, _ in diagonal}
+                    for actor in range(len(LENGTHS)):
+                        # A cable records a shift only when it factored.
+                        test.assertEqual(float(used[actor]) == -1.0, actor in failed, actor)
 
 
 def test_launches_follow_the_levels(test, device):
-    """Apply launches 3L + 3 kernels whose sizes are the per-level block counts, for any number of cables."""
+    """Factor and apply launch by level, with sizes set by the blocks per level, for any number of cables.
+
+    The factor runs shift 0 by levels, then shifts 1..5 side by side in one more round of the same
+    level kernels (each launch over jobs x 5 attempts), then selects each cable's shift and adopts its
+    retry; a retry never runs a cable's levels serially in one thread.
+    """
     sequences = {}
     for lengths in ((41,), (41, 41, 7)):
         data = _synthetic(np.random.default_rng(7), lengths)
-        pre = CablePreconditioner(_layout(lengths), data["order"], device=device, dtype=wp.float64)
+        run = _Run(device, wp.float64, data)
+        test.assertEqual(run.factor(), 0)
         size = len(data["inverse"])
         rhs, result = (wp.zeros(size, dtype=wp.float64, device=device) for _ in range(2))
         launches = []
         original = wp.launch
 
         def launch(kernel, dim, *args, launches=launches, original=original, **kwargs):
-            launches.append(int(dim))
+            launches.append(tuple(dim) if isinstance(dim, (tuple, list)) else int(dim))
             return original(kernel, dim, *args, **kwargs)
 
         with patch.object(wp, "launch", launch):
-            pre.apply(rhs, result)  # counts launches only; the factor is never computed here
-        sequences[lengths] = launches
+            run.pre._factor_blocks(wp.float64(0.0), wp.float64(0.0), run.status)
+            factor = list(launches)
+            launches.clear()
+            run.pre.apply(rhs, result)
+        sequences[lengths] = factor, launches
     # 41 rows are 5 blocks: level 0 eliminates blocks 1, 3 (keeps 0, 2, 4), level 1 block 2
-    # (keeps 0, 4), level 2 block 4; then the root, the backward levels and the scatter.
-    test.assertEqual(sequences[(41,)], [50, 2, 3, 1, 2, 1, 1, 1, 1, 1, 2, 41])
-    test.assertEqual(sequences[(41, 41, 7)], [110, 4, 6, 2, 4, 2, 2, 3, 2, 2, 4, 89])
+    # (keeps 0, 4), level 2 block 4; then the root.
+    levels = [2, 3, 1, 2, 1, 1]
+    factor = [(1, 1), (5, 1), *((n, 1) for n in levels), (1, 1)]
+    factor += [(5, 1), (5, 5), *((n, 5) for n in levels), (1, 5), 1, 5]
+    test.assertEqual(sequences[(41,)], (factor, [50, 2, 3, 1, 2, 1, 1, 1, 1, 1, 2, 41]))
+    levels = [4, 6, 2, 4, 2, 2]
+    factor = [(1, 3), (11, 1), *((n, 1) for n in levels), (3, 1)]
+    factor += [(5, 3), (11, 5), *((n, 5) for n in levels), (3, 5), 3, 11]
+    test.assertEqual(sequences[(41, 41, 7)], (factor, [110, 4, 6, 2, 4, 2, 2, 3, 2, 2, 4, 89]))
 
 
 def _factor_status(device, matrix, order, layout):
@@ -378,7 +408,7 @@ for _test in (
     test_factor_reproduces_the_shifted_band,
     test_launches_follow_the_levels,
     test_out_of_band_entry_is_reported_behind_a_failed_pivot,
-    test_serial_ladder_matches_the_levels_bit_for_bit,
+    test_retried_cable_matches_a_first_attempt_at_its_shift,
     test_status_codes_of_different_cables_merge,
 ):
     add_function_test(TestCablePreconditioner, _test.__name__, _test, devices=devices)

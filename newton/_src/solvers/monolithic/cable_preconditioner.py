@@ -11,6 +11,10 @@ neighbour, then of its right one, and takes the coupling ``-W_R W_L^T`` to the b
 left. Block 0 of each cable is factored last. This is the Cholesky factor of the matrix with its
 blocks reordered by level, so the preconditioner is the same matrix in exact arithmetic as a serial
 band Cholesky, with a different rounding order and O(log n) parallel depth per cable.
+
+A cable whose first attempt (shift 0) fails a pivot is factored again with shifts 1..5 side by side
+in a second round of the same level kernels; the first shift that factors is kept. The second round
+always launches and returns at once for every other cable, so no host read decides it.
 """
 
 from functools import cache
@@ -28,10 +32,11 @@ wp.set_module_options({"enable_backward": False})
 #: Rows per block; the band half-width, so only neighbouring blocks couple.
 BLOCK = wp.constant(10)
 
-# Per-cable factor codes (integer ``atomic_max``): a pivot failure is retried with the next shift.
+# Per-cable factor codes (integer ``atomic_max``): only a pivot failure is retried with the next shift.
 _PIVOT = wp.constant(1)
 _NONFINITE = wp.constant(2)
 _INVALID = wp.constant(3)
+_SKIPPED = wp.constant(4)  # a retry slot of a cable whose first attempt did not fail a pivot
 
 
 @cache
@@ -99,7 +104,7 @@ def _assemble_rows(
                 return
 
 
-# ---- block operations (shared by the level kernels and the serial shift ladder) --------------------
+# ---- block operations ---------------------------------------------------------------------------------
 # Loop bounds come from the array shape at run time, which keeps the factor-side loops rolled.
 
 
@@ -239,14 +244,27 @@ def _eliminate_even(
 
 
 # ---- factor kernels -----------------------------------------------------------------------------------
+# Each kernel runs over (job, attempt). Attempt a of a launch factors block g in storage slot
+# a * blocks + g with ``shifts[first + a]``: the first round is attempt 0 alone, the second round
+# shifts 1..5 together, entered only by cables whose attempt 0 failed a pivot. ``code[a, actor]``
+# is the cable's code as of the previous level (read by odd, root and load kernels); odd and root
+# kernels raise ``pending[a, actor]``, which the even kernels read and the even job of the cable's
+# block 0 copies into ``code``. No kernel reads a flag that its own launch writes.
 
 
 @wp.kernel
-def _begin_factor(invalid: wp.array[int], failed: wp.array[int]):
-    actor = wp.tid()
-    failed[actor] = 0
-    if invalid[actor] != 0:
-        failed[actor] = _INVALID
+def _begin_attempts(
+    invalid: wp.array[int], first_pending: wp.array2d[int], retry: int, code: wp.array2d[int], pending: wp.array2d[int]
+):
+    a, actor = wp.tid()
+    value = int(0)
+    if retry == 0:
+        if invalid[actor] != 0:
+            value = _INVALID
+    elif first_pending[0, actor] != _PIVOT:
+        value = _SKIPPED
+    code[a, actor] = value
+    pending[a, actor] = value
 
 
 @wp.kernel
@@ -257,24 +275,25 @@ def _load_blocks(
     gauge_rows: wp.array[int],
     assembled: wp.array2d[Any],
     shifts: wp.array[Any],
+    first: int,
     regularization: Any,
-    failed: wp.array[int],
+    code: wp.array2d[int],
     d: wp.array3d[Any],
     coupling: wp.array3d[Any],
 ):
-    g = wp.tid()
+    g, a = wp.tid()
     actor = blocks[g, 0]
-    if failed[actor] != 0:
+    if code[a, actor] != 0:
         return
     _load_block(
-        g,
+        a * blocks.shape[0] + g,
         blocks[g, 1],
         spans[actor, 0],
         spans[actor, 1],
         gauge_rows[actor],
         rows,
         assembled,
-        shifts[0],
+        shifts[first + a],
         regularization,
         d,
         coupling,
@@ -284,124 +303,133 @@ def _load_blocks(
 @wp.kernel
 def _factor_odd(
     jobs: wp.array2d[int],
+    blocks: int,
     d: wp.array3d[Any],
     coupling: wp.array3d[Any],
     left_w: wp.array3d[Any],
     right_w: wp.array3d[Any],
     tolerance: Any,
-    failed: wp.array[int],
-    status: wp.array[int],
+    code: wp.array2d[int],
+    pending: wp.array2d[int],
 ):
-    t = wp.tid()
+    t, a = wp.tid()
     actor = jobs[t, 0]
-    if failed[actor] != 0:
+    if code[a, actor] != 0:
         return
-    code = _eliminate_odd(jobs[t, 1], jobs[t, 3], d, coupling, left_w, right_w, tolerance)
-    if code == _NONFINITE:
-        wp.atomic_max(status, 0, 16)
-    if code != 0:
-        wp.atomic_max(failed, actor, code)
+    offset = a * blocks
+    right = int(-1)
+    if jobs[t, 3] >= 0:
+        right = jobs[t, 3] + offset
+    result = _eliminate_odd(jobs[t, 1] + offset, right, d, coupling, left_w, right_w, tolerance)
+    if result != 0:
+        wp.atomic_max(pending, a, actor, result)
 
 
 @wp.kernel
 def _factor_even(
     jobs: wp.array2d[int],
+    block_spans: wp.array2d[int],
+    blocks: int,
     d: wp.array3d[Any],
     coupling: wp.array3d[Any],
     left_w: wp.array3d[Any],
     right_w: wp.array3d[Any],
-    failed: wp.array[int],
+    code: wp.array2d[int],
+    pending: wp.array2d[int],
 ):
-    t = wp.tid()
-    if failed[jobs[t, 0]] != 0:
+    t, a = wp.tid()
+    actor, e = jobs[t, 0], jobs[t, 1]
+    if e == block_spans[actor, 0]:
+        code[a, actor] = pending[a, actor]
+    if pending[a, actor] != 0:
         return
-    _eliminate_even(jobs[t, 1], jobs[t, 2], jobs[t, 3], d, coupling, left_w, right_w)
+    offset = a * blocks
+    left_odd = int(-1)
+    right_odd = int(-1)
+    if jobs[t, 2] >= 0:
+        left_odd = jobs[t, 2] + offset
+    if jobs[t, 3] >= 0:
+        right_odd = jobs[t, 3] + offset
+    _eliminate_even(e + offset, left_odd, right_odd, d, coupling, left_w, right_w)
 
 
 @wp.kernel
 def _factor_root(
-    roots: wp.array2d[int], d: wp.array3d[Any], tolerance: Any, failed: wp.array[int], status: wp.array[int]
+    roots: wp.array2d[int],
+    blocks: int,
+    d: wp.array3d[Any],
+    tolerance: Any,
+    code: wp.array2d[int],
+    pending: wp.array2d[int],
 ):
-    t = wp.tid()
+    t, a = wp.tid()
     actor = roots[t, 0]
-    if failed[actor] != 0:
+    if code[a, actor] != 0:
         return
-    code = _block_cholesky(d, roots[t, 1], tolerance)
-    if code == _NONFINITE:
-        wp.atomic_max(status, 0, 16)
-    if code != 0:
-        wp.atomic_max(failed, actor, code)
+    result = _block_cholesky(d, a * blocks + roots[t, 1], tolerance)
+    if result != 0:
+        wp.atomic_max(pending, a, actor, result)
 
 
 @wp.kernel
-def _finish_factor(
-    spans: wp.array2d[int],
-    block_spans: wp.array2d[int],
-    rows: wp.array[int],
-    gauge_rows: wp.array[int],
-    assembled: wp.array2d[Any],
+def _select_shift(
+    first_pending: wp.array2d[int],
+    retry_pending: wp.array2d[int],
     shifts: wp.array[Any],
-    first: int,
-    regularization: Any,
-    tolerance: Any,
-    d: wp.array3d[Any],
-    coupling: wp.array3d[Any],
-    left_w: wp.array3d[Any],
-    right_w: wp.array3d[Any],
-    failed: wp.array[int],
     used: wp.array[Any],
+    chosen: wp.array[int],
     status: wp.array[int],
 ):
-    # One thread per cable. With first = 1 it records the level kernels' attempt 0 or, after a
-    # pivot failure, redoes the cable for the next shifts, level by level with the same block
-    # functions (so a serial attempt equals the parallel one bit for bit). FP32 sums of stiff
-    # stretch entries can leave the band indefinite in a general orientation; only the
-    # PRECONDITIONER is then shifted by a growing multiple of its own diagonal, and the operator
-    # PCG applies keeps the requested regularization.
+    # The serial ladder's outcome: the first shift that factors, a non-finite value stops the
+    # ladder, and 12 after every shift failed a pivot. FP32 sums of stiff stretch entries can leave
+    # the band indefinite in a general orientation; only the PRECONDITIONER is then shifted by a
+    # growing multiple of its own diagonal, and the operator PCG applies keeps the requested
+    # regularization.
     actor = wp.tid()
-    code = failed[actor]
-    if code == 0 and first > 0:
+    chosen[actor] = 0
+    result = first_pending[0, actor]
+    if result == 0:
         used[actor] = shifts[0]
         return
-    if code != 0 and code != _PIVOT:
+    if result == _NONFINITE:
+        wp.atomic_max(status, 0, 16)
         return
-    base, count = block_spans[actor, 0], block_spans[actor, 1]
-    start, end = spans[actor, 0], spans[actor, 1]
-    for attempt in range(first, shifts.shape[0]):
-        shift = shifts[attempt]
-        for k in range(count):
-            _load_block(base + k, k, start, end, gauge_rows[actor], rows, assembled, shift, regularization, d, coupling)
-        result = int(0)
-        stride = int(1)
-        while stride < count and result == 0:
-            k = stride + 0
-            while k < count and result == 0:
-                right = int(-1)
-                if k + stride < count:
-                    right = base + k + stride
-                result = _eliminate_odd(base + k, right, d, coupling, left_w, right_w, tolerance)
-                k += 2 * stride
-            if result == 0:
-                k = int(0)
-                while k < count:
-                    left_odd = int(-1)
-                    right_odd = int(-1)
-                    if k > 0:
-                        left_odd = base + k - stride
-                    if k + stride < count:
-                        right_odd = base + k + stride
-                    _eliminate_even(base + k, left_odd, right_odd, d, coupling, left_w, right_w)
-                    k += 2 * stride
-            stride *= 2
-        if result == 0 and count > 0:
-            result = _block_cholesky(d, base, tolerance)
+    if result != _PIVOT:
+        return
+    for a in range(retry_pending.shape[0]):
+        result = retry_pending[a, actor]
+        if result == 0:
+            used[actor] = shifts[a + 1]
+            chosen[actor] = a + 1
+            return
         if result == _NONFINITE:
             wp.atomic_max(status, 0, 16)
             return
-        if result == 0:
-            used[actor] = shift
-            return
     wp.atomic_max(status, 0, 12)
+
+
+@wp.kernel
+def _adopt_retry(
+    blocks: wp.array2d[int],
+    chosen: wp.array[int],
+    retry_d: wp.array3d[Any],
+    retry_left: wp.array3d[Any],
+    retry_right: wp.array3d[Any],
+    d: wp.array3d[Any],
+    left_w: wp.array3d[Any],
+    right_w: wp.array3d[Any],
+):
+    # Copy the factor of a cable's successful retry over its failed first attempt.
+    g = wp.tid()
+    a = chosen[blocks[g, 0]]
+    if a == 0:
+        return
+    source = (a - 1) * blocks.shape[0] + g
+    for p in range(BLOCK):
+        for q in range(BLOCK):
+            d[g, p, q] = retry_d[source, p, q]
+            left_w[g, p, q] = retry_left[source, p, q]
+            right_w[g, p, q] = retry_right[source, p, q]
 
 
 # ---- apply kernels ------------------------------------------------------------------------------------
@@ -649,7 +677,19 @@ class CablePreconditioner:
         self.block_left = wp.zeros((blocks, BLOCK, BLOCK), dtype=dtype, device=device)
         self.block_right = wp.zeros((blocks, BLOCK, BLOCK), dtype=dtype, device=device)
         self.block_rhs = wp.zeros((blocks, BLOCK), dtype=dtype, device=device)
-        self.failed = wp.zeros(max(len(spans), 1), dtype=int, device=device)
+        # The second round: shifts 1..5 side by side, entered only by cables whose first attempt
+        # failed a pivot; the selected retry is copied over the first attempt's blocks.
+        retries = len(self.SHIFTS) - 1
+        self.retry_factor = wp.zeros((retries * blocks, BLOCK, BLOCK), dtype=dtype, device=device)
+        self.retry_coupling = wp.zeros((retries * blocks, BLOCK, BLOCK), dtype=dtype, device=device)
+        self.retry_left = wp.zeros((retries * blocks, BLOCK, BLOCK), dtype=dtype, device=device)
+        self.retry_right = wp.zeros((retries * blocks, BLOCK, BLOCK), dtype=dtype, device=device)
+        cables = max(len(spans), 1)
+        self.first_code = wp.zeros((1, cables), dtype=int, device=device)
+        self.first_pending = wp.zeros((1, cables), dtype=int, device=device)
+        self.retry_code = wp.zeros((retries, cables), dtype=int, device=device)
+        self.retry_pending = wp.zeros((retries, cables), dtype=int, device=device)
+        self.chosen = wp.zeros(cables, dtype=int, device=device)
 
     def _views(self):
         return [
@@ -723,7 +763,15 @@ class CablePreconditioner:
             self.block_left,
             self.block_right,
             self.block_rhs,
-            self.failed,
+            self.retry_factor,
+            self.retry_coupling,
+            self.retry_left,
+            self.retry_right,
+            self.first_code,
+            self.first_pending,
+            self.retry_code,
+            self.retry_pending,
+            self.chosen,
         )
         if self._records is not None:
             self._records.bind(self._views())
@@ -775,66 +823,97 @@ class CablePreconditioner:
             )
         self._factor_blocks(self.dtype(workspace._lambda), self.dtype(tolerance), workspace._status)
 
-    def _factor_blocks(self, regularization, tolerance, status, *, serial=False):
-        """Shift 0 by levels for every cable, then the serial ladder for cables whose pivot failed.
-
-        ``serial`` runs every attempt in the per-cable ladder instead (tests compare the two paths).
-        """
+    def _factor_blocks(self, regularization, tolerance, status):
+        """Shift 0 by levels for every cable, then shifts 1..5 together for cables whose pivot failed."""
         device, cables = self.device, self.spans.shape[0]
-        factor, coupling, left, right = self.block_factor, self.block_coupling, self.block_left, self.block_right
-        wp.launch(_begin_factor, cables, [self.invalid, self.failed], device=device)
-        if not serial:
-            wp.launch(
-                _load_blocks,
-                self.blocks.shape[0],
-                [
-                    self.blocks,
-                    self.spans,
-                    self.rows,
-                    self.gauge_rows,
-                    self.assembled,
-                    self.shifts,
-                    regularization,
-                    self.failed,
-                    factor,
-                    coupling,
-                ],
-                device=device,
-            )
-            for odd, even in zip(self.odd_jobs, self.even_jobs, strict=True):
-                wp.launch(
-                    _factor_odd,
-                    odd.shape[0],
-                    [odd, factor, coupling, left, right, tolerance, self.failed, status],
-                    device=device,
-                )
-                wp.launch(
-                    _factor_even, even.shape[0], [even, factor, coupling, left, right, self.failed], device=device
-                )
-            wp.launch(
-                _factor_root, self.roots.shape[0], [self.roots, factor, tolerance, self.failed, status], device=device
-            )
+        self._attempts(
+            regularization,
+            tolerance,
+            0,
+            self.block_factor,
+            self.block_coupling,
+            self.block_left,
+            self.block_right,
+            self.first_code,
+            self.first_pending,
+        )
+        self._attempts(
+            regularization,
+            tolerance,
+            1,
+            self.retry_factor,
+            self.retry_coupling,
+            self.retry_left,
+            self.retry_right,
+            self.retry_code,
+            self.retry_pending,
+        )
         wp.launch(
-            _finish_factor,
+            _select_shift,
             cables,
+            [self.first_pending, self.retry_pending, self.shifts, self.used_shift, self.chosen, status],
+            device=device,
+        )
+        wp.launch(
+            _adopt_retry,
+            self.blocks.shape[0],
             [
+                self.blocks,
+                self.chosen,
+                self.retry_factor,
+                self.retry_left,
+                self.retry_right,
+                self.block_factor,
+                self.block_left,
+                self.block_right,
+            ],
+            device=device,
+        )
+
+    def _attempts(self, regularization, tolerance, first, factor, coupling, left, right, code, pending):
+        """One round of attempts (shift ``first`` onward, one storage slot per attempt) through the levels."""
+        device, attempts, blocks = self.device, code.shape[0], self.blocks.shape[0]
+        wp.launch(
+            _begin_attempts,
+            (attempts, self.spans.shape[0]),
+            [self.invalid, self.first_pending, first, code, pending],
+            device=device,
+        )
+        wp.launch(
+            _load_blocks,
+            (blocks, attempts),
+            [
+                self.blocks,
                 self.spans,
-                self.block_spans,
                 self.rows,
                 self.gauge_rows,
                 self.assembled,
                 self.shifts,
-                0 if serial else 1,
+                first,
                 regularization,
-                tolerance,
+                code,
                 factor,
                 coupling,
-                left,
-                right,
-                self.failed,
-                self.used_shift,
-                status,
             ],
+            device=device,
+        )
+        for odd, even in zip(self.odd_jobs, self.even_jobs, strict=True):
+            wp.launch(
+                _factor_odd,
+                (odd.shape[0], attempts),
+                [odd, blocks, factor, coupling, left, right, tolerance, code, pending],
+                device=device,
+            )
+            wp.launch(
+                _factor_even,
+                (even.shape[0], attempts),
+                [even, self.block_spans, blocks, factor, coupling, left, right, code, pending],
+                device=device,
+            )
+        wp.launch(
+            _factor_root,
+            (self.roots.shape[0], attempts),
+            [self.roots, blocks, factor, tolerance, code, pending],
             device=device,
         )
 
