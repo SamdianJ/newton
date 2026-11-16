@@ -393,7 +393,7 @@ class _ContactSpatial:
         if c.smooth_sdf is not None:
             descriptors, sdf_indices = c.table.numpy(), c.sdf_indices.numpy()
             for ordinal, target in enumerate(unique_targets):
-                if types[target] != GeoType.MESH:
+                if types[target] not in (GeoType.MESH, GeoType.CONVEX_MESH):
                     continue
                 index = int(sdf_indices[target])
                 field = c.smooth_sdf.fields[index]

@@ -8,10 +8,13 @@ import numpy as np
 from ...geometry import GeoType, Mesh, ShapeFlags
 from .actors import articulation_support
 
+# CONVEX_MESH contacts through the MESH path: its own triangles as source, its texture SDF as target.
+MESH_TYPES = (GeoType.MESH, GeoType.CONVEX_MESH)
+
 
 def _sampled_source(geo, mesh):
     """Return whether a shape type can be a contact source surface."""
-    return geo in (GeoType.SPHERE, GeoType.BOX, GeoType.CAPSULE) or (geo == GeoType.MESH and isinstance(mesh, Mesh))
+    return geo in (GeoType.SPHERE, GeoType.BOX, GeoType.CAPSULE) or (geo in MESH_TYPES and isinstance(mesh, Mesh))
 
 
 def _sphere_grid():
@@ -129,7 +132,7 @@ def _surface_samples(geo, scale, mesh=None, *, _return_triangles=False):
             raise ValueError("Invalid source shape scale")
         if geo == GeoType.BOX:
             mesh = Mesh.create_box(1.0, compute_inertia=False)
-        elif geo != GeoType.MESH or not isinstance(mesh, Mesh):
+        elif geo not in MESH_TYPES or not isinstance(mesh, Mesh):
             raise ValueError("Unsupported contact source shape")
         indices = np.asarray(mesh.indices)
         vertices = np.asarray(mesh.vertices, dtype=np.float64)
@@ -341,7 +344,7 @@ class ContactSamples:
                     surfaces[source] = _surface_samples(
                         types[source], scales[source].astype(float), model.shape_source[source]
                     )
-                if types[source] == GeoType.MESH:
+                if types[source] in MESH_TYPES:
                     mesh = model.shape_source[source]
                     self.meshes[source] = (mesh, np.array(mesh.vertices, copy=True), np.array(mesh.indices, copy=True))
                 targets_used.add(target)
@@ -377,12 +380,13 @@ class ContactSamples:
         used_shapes = targets_used | {s for s in source_shapes if s >= 0}
         for s in used_shapes:
             geo, scale = types[s], scales[s]
-            if geo not in (GeoType.PLANE, GeoType.SPHERE, GeoType.BOX, GeoType.MESH, GeoType.CAPSULE):
+            if geo not in (GeoType.PLANE, GeoType.SPHERE, GeoType.BOX, GeoType.CAPSULE, *MESH_TYPES):
                 raise ValueError("Unsupported actor contact target")
-            if geo == GeoType.CAPSULE and s in particle_targets:
+            if geo in (GeoType.CAPSULE, GeoType.CONVEX_MESH) and s in particle_targets:
                 raise ValueError(
-                    f"Capsule shape {s} is a particle (tet, cloth or cable) contact target; capsules support "
-                    "only rigid and link contact. Clear its COLLIDE_PARTICLES flag or use a sphere, box or mesh"
+                    f"{GeoType(int(geo)).name} shape {s} is a particle (tet, cloth or cable) contact target; this "
+                    "type supports only rigid and link contact. Clear its COLLIDE_PARTICLES flag or use a sphere, "
+                    "box or mesh"
                 )
             if geo == GeoType.CAPSULE and (scale[0] <= 0 or scale[1] < 0):
                 raise ValueError("Invalid capsule target scale: radius must be positive and half_height nonnegative")
@@ -396,7 +400,7 @@ class ContactSamples:
                 raise ValueError("New plane target must be infinite and static outside material contact")
             if (geo == GeoType.SPHERE and scale[0] <= 0) or (geo == GeoType.BOX and np.any(scale <= 0)):
                 raise ValueError("Invalid analytic target scale")
-            if geo == GeoType.MESH:
+            if geo in MESH_TYPES:
                 mesh = model.shape_source[s]
                 _surface_samples(geo, scale.astype(float), mesh)
                 self.meshes[s] = (mesh, np.array(mesh.vertices, copy=True), np.array(mesh.indices, copy=True))

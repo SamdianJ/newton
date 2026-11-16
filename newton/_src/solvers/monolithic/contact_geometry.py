@@ -123,7 +123,7 @@ def _shape64(geo: int, scale: Any, point: Any, index: int, table: wp.array[Textu
         for a in range(3):
             if point[a] < type(point[0])(0.0):
                 gradient[a] = -gradient[a]
-    elif geo == GeoType.MESH:
+    elif geo == GeoType.MESH or geo == GeoType.CONVEX_MESH:
         sdf = table[index]
         query = point
         if not sdf.scale_baked:

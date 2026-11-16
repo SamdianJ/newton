@@ -691,7 +691,7 @@ class ContactObjective:
             _validate_actor_targets(self, samples)
         targets = shapes if samples is None else np.union1d(shapes, np.asarray(samples.targets_used, dtype=np.int32))
         if alignment_policy == "frozen":
-            for target in targets[v["shape_type"][targets] == GeoType.MESH]:
+            for target in targets[np.isin(v["shape_type"][targets], [int(GeoType.MESH), int(GeoType.CONVEX_MESH)])]:
                 index = int(v["_shape_sdf_index"][target])
                 if smooth_sdf is None or smooth_sdf.fields[index].representation != "c2-bspline":
                     raise ValueError("Frozen mesh orientation requires bound C2 SDF")

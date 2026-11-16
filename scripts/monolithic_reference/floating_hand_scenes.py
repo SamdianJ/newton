@@ -351,6 +351,15 @@ def _object_volume(o):
 
 
 CONVEX_HULL = INPUTS / "p9d_convex_capsule/hull_r20_hh40.npz"
+# Texture SDF build for the pinned hull (CUDA only); its C2 field is checked against the exact hull
+# distance in test_monolithic_contact_convex_mesh.py (P9d PR1).
+CONVEX_HULL_SDF = {
+    "max_resolution": 64,
+    "margin": 0.02,
+    "narrow_band_range": (-0.05, 0.05),
+    "texture_format": "float32",
+    "sign_method": "winding",
+}
 
 
 def convex_hull_asset(spec):
@@ -366,7 +375,7 @@ def convex_hull_asset(spec):
     return data["vertices"].astype(np.float64), data["indices"].astype(np.int32)
 
 
-def add_object(builder, spec):
+def add_object(builder, spec, device=None):
     """Add the FREE object (box, capsule or convex hull of a capsule) at its recipe pose."""
     kind = spec["kind"]
     if kind not in ("box", "capsule", "convex"):
@@ -391,7 +400,10 @@ def add_object(builder, spec):
         )
     else:
         points, indices = convex_hull_asset(spec)
-        builder.add_shape_convex_hull(body, mesh=newton.Mesh(points, indices), cfg=cfg, label="object_convex")
+        mesh = newton.Mesh(points, indices)
+        if device is not None and wp.get_device(device).is_cuda:
+            mesh.build_sdf(device=device, **CONVEX_HULL_SDF)
+        builder.add_shape_convex_hull(body, mesh=mesh, cfg=cfg, label="object_convex")
     return body
 
 
@@ -461,7 +473,7 @@ class FloatingHandScene:
         else:
             self._add_hand(builder, recipe)
             if "object" in recipe:
-                self.object_body = add_object(builder, recipe["object"])
+                self.object_body = add_object(builder, recipe["object"], device)
         if recipe.get("table", {}).get("kind") == "plane":
             cfg = builder.ShapeConfig(density=0.0, margin=0.0, has_particle_collision=False)
             builder.add_shape_plane(body=-1, width=0.0, length=0.0, cfg=cfg, label="table")
@@ -481,6 +493,11 @@ class FloatingHandScene:
         )
         if self_collision == "recipe" and recipe.get("self_collision"):
             options["self_collision"] = recipe["self_collision"]
+        # Only shapes with a texture SDF (the E1b hull) need smooth fields; visual meshes have none.
+        if self.model.device.is_cuda and (self.model._shape_sdf_index.numpy() >= 0).any():
+            from newton.solvers.experimental.monolithic import build_smooth_sdf  # noqa: PLC0415
+
+            options["smooth_sdf"] = build_smooth_sdf(self.model)
         self.solver = SolverMonolithic(
             self.model,
             joint_terms=joint_terms,
