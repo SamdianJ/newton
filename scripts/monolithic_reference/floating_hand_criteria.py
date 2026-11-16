@@ -298,21 +298,31 @@ def evaluate(run_dir, recipe, *, settle_s=0.05, grasp_window=500, stride=1):
 
     hand_shapes = [i for i, s in shapes.items() if s["body"] in hand and cores[i] is not None]
     object_shapes = [i for i, s in shapes.items() if s["body"] == obj and cores[i] is not None]
-    series = {"hand_object": [], "object_table": [], "hand_table": [], "self": []}
-    frames_checked = range(0, published, stride)
-    for k in frames_checked:
-        series["hand_object"].append(max((depth(a, b, k) for a in hand_shapes for b in object_shapes), default=0.0))
-        series["object_table"].append(
-            max((max(0.0, -plane_signed_distance(placed(b, k))) for b in object_shapes), default=0.0) if plane else 0.0
-        )
-        series["hand_table"].append(
-            max((max(0.0, -plane_signed_distance(placed(a, k))) for a in hand_shapes), default=0.0) if plane else 0.0
-        )
-        series["self"].append(max((depth(a, b, k) for a, b in self_pairs), default=0.0))
-    out["penetration_m"] = {
-        name: {"max": float(np.max(v)), "p99": float(np.quantile(v, 0.99))} for name, v in series.items()
+    dynamic_shapes = [i for i, s in shapes.items() if s["body"] >= 0 and cores[i] is not None]
+
+    def table_depth(group, k):
+        return max(max(0.0, -plane_signed_distance(placed(i, k))) for i in group)
+
+    # Each category is measured only when both sides exist; otherwise it is NOT_APPLICABLE, never 0.
+    categories = {
+        "hand_object": (
+            hand_shapes and object_shapes,
+            lambda k: max(depth(a, b, k) for a in hand_shapes for b in object_shapes),
+        ),
+        "object_table": (object_shapes and plane, lambda k: table_depth(object_shapes, k)),
+        "hand_table": (hand_shapes and plane, lambda k: table_depth(hand_shapes, k)),
+        "dynamic_table": (dynamic_shapes and plane, lambda k: table_depth(dynamic_shapes, k)),
+        "self": (self_pairs, lambda k: max(depth(a, b, k) for a, b in self_pairs)),
     }
-    out["frames_checked"] = len(series["self"])
+    frames_checked = list(range(0, published, stride))
+    out["penetration_m"] = {}
+    for name, (applicable, measure) in categories.items():
+        if not applicable:
+            out["penetration_m"][name] = "NOT_APPLICABLE"
+            continue
+        values = [measure(k) for k in frames_checked]
+        out["penetration_m"][name] = {"max": float(np.max(values)), "p99": float(np.quantile(values, 0.99))}
+    out["frames_checked"] = len(frames_checked)
     out["self_pairs_checked"] = len(self_pairs)
     if model["palm_body"] is not None and np.any(frames["palm_target"][:, 3, 3]):
         first = int(np.ceil(settle_s / dt))
@@ -340,7 +350,7 @@ def evaluate(run_dir, recipe, *, settle_s=0.05, grasp_window=500, stride=1):
             "window_steps": int(min(grasp_window, published)),
             "window_complete": published == manifest.get("planned_steps") and published >= grasp_window,
             "weight_N": weight,
-            "max_ground_force_N": float(np.max(support[window])),
+            "max_ground_force_N": float(np.max(np.abs(support[window]))),
             "min_com_rise_m": float(np.min(rise[window])),
             "object_min_edge_m": edge,
             "lift_ratio_min": float(np.min(rise[window]) / recipe["lift_m"]) if "lift_m" in recipe else None,
@@ -433,6 +443,12 @@ def chain_balance(model, frames, recipe, dt):
         "energy_budget_J": budget,
         "energy_gain_ratio": gain / budget if contact is not None and budget > 0 else None,
         "contact_energy": contact_note,
+        "energy_initial_J": {
+            "kinetic": float(kinetic[0]),
+            "potential": float(potential[0]),
+            "spring": float(spring[0]),
+            "contact": float(contact[0]) if contact is not None else None,
+        },
     }
 
 

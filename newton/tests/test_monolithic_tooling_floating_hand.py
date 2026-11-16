@@ -92,10 +92,6 @@ class TestConvexDepth(unittest.TestCase):
         self.assertAlmostEqual(fc.plane_signed_distance(cap), -0.001, places=14)
 
 
-if __name__ == "__main__":
-    unittest.main(verbosity=2)
-
-
 class TestFeatureInventory(unittest.TestCase):
     def test_classifies_link_capsule_and_free_capsule(self):
         """A link capsule against the static plane is an F1 hit; a FREE capsule only becomes a new collider."""
@@ -261,3 +257,278 @@ class TestChainBalance(unittest.TestCase):
         self.assertEqual(result["free_flight_steps"], n)
         self.assertLess(result["momentum_drift_ratio_max"], 1e-12)
         self.assertLess(result["energy_gain_ratio"], 1e-12)
+
+
+def _write_run(directory, *, model, frames, scene_steps=None, dt=0.001, object_pair_shapes=()):
+    """Synthetic run_floating_hand output: manifest.json, model.json and one state chunk."""
+    import json  # noqa: PLC0415
+
+    n = len(frames["body_q"])
+    frames = dict(frames)
+    frames.setdefault("step", np.arange(n))
+    for name in ("newton_iterations", "linear_iterations", "line_search_iterations", "regularization_retries"):
+        frames.setdefault(name, np.zeros(n, dtype=np.int32))
+    np.savez(directory / "states-0000.npz", **frames)
+    manifest = {
+        "source_sha": "synthetic",
+        "status": "COMPLETE",
+        "counts": {"CONVERGED": n, "STOPPED_ACCEPTED": 0, "HARD_FAILURE": 0},
+        "planned_steps": scene_steps or n,
+        "dt_s": dt,
+        "chunks": ["states-0000.npz"],
+        "object_pair_shapes": list(object_pair_shapes),
+    }
+    (directory / "manifest.json").write_text(json.dumps(manifest))
+    base = {"palm_body": None, "object_body": None, "hand_bodies": [], "same_tree_pairs": [], "gravity": [0, 0, -9.81]}
+    (directory / "model.json").write_text(json.dumps({**base, **model}))
+
+
+def _box(index, body, half, label="b"):
+    return {
+        "index": index,
+        "label": label,
+        "body": body,
+        "type": "BOX",
+        "scale": list(half),
+        "transform": [0, 0, 0, 0, 0, 0, 1],
+    }
+
+
+PLANE = {
+    "index": 9,
+    "label": "table",
+    "body": -1,
+    "type": "PLANE",
+    "scale": [0, 0, 0],
+    "transform": [0, 0, 0, 0, 0, 0, 1],
+}
+
+
+class TestRunCriteria(unittest.TestCase):
+    def setUp(self):
+        import tempfile  # noqa: PLC0415
+        from pathlib import Path  # noqa: PLC0415
+
+        self._tmp = tempfile.TemporaryDirectory()
+        self.dir = Path(self._tmp.name)
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def test_chain_ground_penetration_is_measured(self):
+        """E2 has no hand or object, yet a chain box 1 mm into the plane must be reported (review BLOCKER)."""
+        body_q = np.zeros((3, 1, 7))
+        body_q[:, 0, 6] = 1.0
+        body_q[:, 0, 2] = [0.03, 0.02, 0.019]
+        model = {
+            "shapes": [_box(0, 0, (0.03, 0.02, 0.02)), PLANE],
+            "body_labels": ["chain_root"],
+            "body_mass": [0.1],
+            "body_com": [[0, 0, 0]],
+            "body_inertia": [np.eye(3).tolist()],
+            "joint_labels": [],
+            "joint_type": [],
+            "joint_q_start": [0],
+        }
+        frames = {
+            "body_q": body_q,
+            "body_qd": np.zeros((3, 1, 6)),
+            "joint_q": np.zeros((3, 7)),
+            "contact_body_wrench": np.ones((3, 1, 6)),
+        }
+        _write_run(self.dir, model=model, frames=frames)
+        recipe = {
+            "scene": "E2",
+            "phases_s": {"flight": 0.0, "settle": 0.003},
+            "chain": {"spring_ke": 0.0},
+            "table": {"z": 0.0},
+            "solver": {"contact_stiffness": 1e9, "normal_smoothing": 1e-4},
+        }
+        out = fc.evaluate(self.dir, recipe)
+        self.assertAlmostEqual(out["penetration_m"]["dynamic_table"]["max"], 0.001, places=12)
+        for name in ("hand_object", "object_table", "hand_table", "self"):
+            self.assertEqual(out["penetration_m"][name], "NOT_APPLICABLE", name)
+
+    def test_root_tracking_known_offset_and_rotation(self):
+        n, angle = 120, np.radians(1.5)
+        body_q = np.zeros((n, 1, 7))
+        body_q[:, 0, :3] = [0.002, 0.0, 0.3]
+        body_q[:, 0, 3:] = [0.0, 0.0, np.sin(angle / 2), np.cos(angle / 2)]
+        target = np.tile(np.eye(4), (n, 1, 1))
+        target[:, 2, 3] = 0.3
+        model = {"shapes": [], "body_labels": ["palm_link"], "palm_body": 0, "body_mass": [0.4]}
+        _write_run(self.dir, model=model, frames={"body_q": body_q, "palm_target": target})
+        out = fc.evaluate(self.dir, {"scene": "E1a", "self_collision": None}, settle_s=0.05)
+        self.assertAlmostEqual(out["root_tracking"]["position_max_m"], 0.002, places=12)
+        self.assertAlmostEqual(out["root_tracking"]["angle_max_rad"], angle, places=9)
+        self.assertEqual(out["root_tracking"]["from_step"], 50)
+
+    def _grasp_run(self, rise, support):
+        n = len(rise)
+        body_q = np.zeros((n, 1, 7))
+        body_q[:, 0, 6] = 1.0
+        body_q[:, 0, 2] = 0.02 + np.asarray(rise)
+        force = np.zeros((n, 1, 3))
+        force[:, 0, 2] = support
+        model = {
+            "shapes": [_box(0, 0, (0.06, 0.02, 0.02)), PLANE],
+            "body_labels": ["object"],
+            "object_body": 0,
+            "body_mass": [0.1],
+        }
+        _write_run(self.dir, model=model, frames={"body_q": body_q, "object_pair_force": force}, object_pair_shapes=[9])
+        recipe = {"scene": "B1", "lift_m": 0.1, "object": {"kind": "box", "half_extents": [0.06, 0.02, 0.02]}}
+        return fc.evaluate(self.dir, recipe, grasp_window=10)["grasp"]
+
+    def test_grasp_window_positive_and_negative(self):
+        """Lifted and unsupported passes the v2 measures; resting on the table shows the full weight."""
+        held = self._grasp_run(np.r_[np.zeros(10), np.full(10, 0.1)], np.r_[np.full(10, 0.981), np.zeros(10)])
+        self.assertTrue(held["window_complete"])
+        self.assertEqual(held["max_ground_force_N"], 0.0)
+        self.assertAlmostEqual(held["lift_ratio_min"], 1.0, places=12)
+        self.assertGreaterEqual(held["min_com_rise_m"], 0.25 * held["object_min_edge_m"])
+        dropped = self._grasp_run(np.zeros(20), np.full(20, -0.981))
+        self.assertAlmostEqual(dropped["max_ground_force_N"], 0.981, places=12)  # sign-independent
+        self.assertEqual(dropped["min_com_rise_m"], 0.0)
+
+    def test_self_pairs_respect_the_exclusion_list(self):
+        """Overlapping same-tree pairs count unless their bodies are excluded by label."""
+        body_q = np.zeros((1, 3, 7))
+        body_q[0, :, 6] = 1.0
+        body_q[0, 1, 0] = 0.015  # 5 mm overlap with body 0
+        body_q[0, 2, 0] = -0.018  # 2 mm overlap with body 0
+        shapes = [_box(i, i, (0.01, 0.01, 0.01)) for i in range(3)]
+        model = {
+            "shapes": shapes,
+            "body_labels": ["palm_link", "link_13.0", "link_1.0"],
+            "same_tree_pairs": [[0, 1], [0, 2]],
+            "body_mass": [1, 1, 1],
+        }
+        _write_run(self.dir, model=model, frames={"body_q": body_q})
+        out = fc.evaluate(self.dir, {"scene": "E1a", "self_collision": {"exclude": [["link_13.0", "palm_link"]]}})
+        self.assertEqual(out["self_pairs_checked"], 1)
+        self.assertAlmostEqual(out["penetration_m"]["self"]["max"], 0.002, places=12)
+
+    def test_chain_contact_energy_on_samples(self):
+        """A box resting 1 mm into the plane stores k * area * p^2 / 2 on its bottom-face samples."""
+        p, k, n = 0.001, 1e9, 5
+        body_q = np.zeros((n, 1, 7))
+        body_q[:, 0, 6] = 1.0
+        body_q[:, 0, 2] = 0.02 - p
+        model = {
+            "shapes": [_box(0, 0, (0.03, 0.02, 0.02)), PLANE],
+            "body_labels": ["chain_root"],
+            "body_mass": [0.1],
+            "body_com": [[0, 0, 0]],
+            "body_inertia": [np.eye(3).tolist()],
+            "joint_labels": [],
+            "joint_type": [],
+            "joint_q_start": [0],
+            "gravity": [0, 0, -9.81],
+        }
+        frames = {
+            "step": np.arange(n),
+            "body_q": body_q,
+            "body_qd": np.zeros((n, 1, 6)),
+            "joint_q": np.zeros((n, 7)),
+            "contact_body_wrench": np.ones((n, 1, 6)),
+        }
+        recipe = {
+            "phases_s": {"flight": 0.0, "settle": 0.005},
+            "chain": {"spring_ke": 0.0},
+            "table": {"z": 0.0},
+            "solver": {"contact_stiffness": k, "normal_smoothing": 1e-4},
+        }
+        result = fc.chain_balance(model, frames, recipe, 0.001)
+        self.assertAlmostEqual(result["energy_initial_J"]["contact"], k * (0.06 * 0.04) * p * p / 2, delta=1e-9)
+        self.assertLess(result["energy_gain_max_J"], 1e-12)
+
+
+class TestRunnerIdentity(unittest.TestCase):
+    def test_partial_run_records_identity(self):
+        """A --max-steps run is PARTIAL, records SHA and recipe hash, and its frames evaluate."""
+        import json  # noqa: PLC0415
+        import tempfile  # noqa: PLC0415
+        from pathlib import Path  # noqa: PLC0415
+
+        from scripts.monolithic_reference import floating_hand_scenes as fhs  # noqa: PLC0415
+        from scripts.monolithic_reference.run_floating_hand import main  # noqa: PLC0415
+
+        if not fhs.ALLEGRO.is_dir():
+            self.skipTest("Allegro asset not present")
+        recipe = (
+            Path(__file__).resolve().parents[2] / "scripts/monolithic_reference/fixtures/floating_hand_e3_fist_v1.json"
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / "run"
+            code = main(
+                [
+                    "E3",
+                    "--recipe",
+                    str(recipe),
+                    "--mount",
+                    "wrist",
+                    "--self-collision",
+                    "off",
+                    "--device",
+                    "cpu",
+                    "--precision",
+                    "fp64",
+                    "--max-steps",
+                    "2",
+                    "--output",
+                    str(out),
+                ]
+            )
+            manifest = json.loads((out / "manifest.json").read_text())
+            self.assertEqual(code, 0)
+            self.assertEqual(manifest["status"], "PARTIAL")
+            self.assertEqual(manifest["published_steps"], 2)
+            self.assertEqual(len(manifest["source_sha"]), 40)
+            self.assertEqual(manifest["recipe_sha256"], __import__("hashlib").sha256(recipe.read_bytes()).hexdigest())
+            criteria = fc.evaluate(out, fhs.load_recipe(recipe))
+            self.assertEqual(criteria["published_steps"], 2)
+            self.assertEqual(criteria["penetration_m"]["hand_table"], "NOT_APPLICABLE")
+
+
+class TestPinnedGeometry(unittest.TestCase):
+    def test_convex_object_is_the_pinned_hull(self):
+        from scripts.monolithic_reference import floating_hand_scenes as fhs  # noqa: PLC0415
+
+        if not fhs.CONVEX_HULL.is_file():
+            self.skipTest("Pinned convex hull not present")
+        points, indices = fhs.convex_hull_asset({"radius": 0.02, "half_height": 0.04})
+        self.assertEqual(points.shape, (962, 3))
+        self.assertEqual(len(indices), 3 * 1920)
+        # Inscribed 32-gon rings: radial extent cos(pi/32) * r, axial extent half_height + r.
+        np.testing.assert_allclose(
+            np.abs(points).max(axis=0), [0.02, 0.02, 0.06], atol=0.02 * (1 - np.cos(np.pi / 32)) + 1e-12
+        )
+        with self.assertRaisesRegex(ValueError, "pinned hull"):
+            fhs.convex_hull_asset({"radius": 0.03, "half_height": 0.04})
+
+    def test_survey_adds_grasp_targets(self):
+        from pathlib import Path  # noqa: PLC0415
+
+        from scripts.monolithic_reference import floating_hand_scenes as fhs  # noqa: PLC0415
+        from scripts.monolithic_reference.self_collision_survey import build  # noqa: PLC0415
+
+        if not fhs.ALLEGRO.is_dir():
+            self.skipTest("Allegro asset not present")
+        recipe = (
+            Path(__file__).resolve().parents[2]
+            / "scripts/monolithic_reference/fixtures/floating_hand_e1a_capsule_v1.json"
+        )
+        model, poses = build("wrist", [recipe])
+        self.assertEqual(sorted(poses), ["E1a_closed", "E1a_open_at_grasp", "fist", "open", "rest"])
+        names, _, open_, closed = fhs.hand_keyframes(model, fhs.load_recipe(recipe))
+        # Flex joints close past the grasp by squeeze_rad (clipped); joints kept open at the grasp are not squeezed.
+        grasp = np.array([fhs.load_recipe(recipe)["grasp"]["grasp"][n] for n in names])
+        moved = [i for i, n in enumerate(names) if n.startswith("joint_") and closed[i] != grasp[i]]
+        self.assertTrue(moved)
+        for i in moved:
+            self.assertNotEqual(grasp[i], open_[i], names[i])
+
+
+if __name__ == "__main__":
+    unittest.main(verbosity=2)

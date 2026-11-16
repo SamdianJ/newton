@@ -301,7 +301,12 @@ def main(argv=None):
         write_json(args.output / "receipt.json", receipt)
         return 1
     device = scene.model.device
-    replay = _run_window(scene, (0, window[0]), device, timed=False)
+    try:
+        replay = _run_window(scene, (0, window[0]), device, timed=False)
+    except NotImplementedError as missing:
+        receipt["status"] = f"NOT_APPLICABLE: {missing}"
+        write_json(args.output / "receipt.json", receipt)
+        return 1
     receipt["replay"] = {"publication": dict(Counter(r["publication"] for r in replay)), "steps": len(replay)}
     if scene.steps != window[0]:
         receipt["status"] = f"FAILED: replay stopped at step {scene.steps}"
@@ -335,14 +340,15 @@ def main(argv=None):
         for name, entry in receipt["passes"].items()
         if name.startswith("W") and name != "W0"
     }
-    receipt["status"] = "COMPLETE"
+    # Repeats that do not reproduce W0 leave only W0 as the natural continuation; say so in the status.
+    receipt["status"] = "COMPLETE" if all(receipt["repeats_reproduce_W0"].values()) else "REPEATS_DIFFER"
     write_json(args.output / "receipt.json", receipt)
     print(
         json.dumps(
             {k: receipt["passes"][k]["solver_step"]["median_ms"] for k in receipt["passes"] if k.startswith("W")}
         )
     )
-    return 0
+    return 0 if receipt["status"] == "COMPLETE" else 1
 
 
 if __name__ == "__main__":

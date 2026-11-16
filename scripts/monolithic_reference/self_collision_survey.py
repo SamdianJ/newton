@@ -22,6 +22,8 @@ from scripts.monolithic_reference.floating_hand_scenes import (
     _short,
     add_allegro,
     finger_pose,
+    hand_keyframes,
+    load_recipe,
     set_finger_coordinates,
 )
 
@@ -123,7 +125,8 @@ def survey(model, poses):
     return {"pairs": rows, "totals": totals}
 
 
-def build(mount):
+def build(mount, recipes=()):
+    """Rest, open and fist poses, plus each grasp recipe's open-at-grasp and squeezed closed finger targets."""
     builder = newton.ModelBuilder()
     layout = add_allegro(builder, mount=mount, palm_pose=wp.transform((0.0, 0.0, 0.3), wp.quat_identity()))
     model = builder.finalize(device="cpu")
@@ -133,15 +136,24 @@ def build(mount):
         "open": set_finger_coordinates(model, rest, finger_pose(model, layout, "open")),
         "fist": set_finger_coordinates(model, rest, finger_pose(model, layout, "fist")),
     }
+    for path in recipes:
+        recipe = load_recipe(path)
+        names, _, open_, closed = hand_keyframes(model, recipe)
+        for label, values in (("open_at_grasp", open_), ("closed", closed)):
+            fingers = dict(zip(names[6:], values[6:], strict=True))
+            poses[f"{recipe['scene']}_{label}"] = set_finger_coordinates(model, rest, fingers)
     return model, poses
 
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--mount", choices=MOUNTS, default="wrist")
+    parser.add_argument(
+        "--recipe", type=Path, action="append", default=[], help="grasp recipe whose finger targets to add"
+    )
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args(argv)
-    model, poses = build(args.mount)
+    model, poses = build(args.mount, args.recipe)
     result = survey(model, poses)
     result["mount"] = args.mount
     args.output.parent.mkdir(parents=True, exist_ok=True)

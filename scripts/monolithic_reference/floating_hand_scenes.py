@@ -204,6 +204,36 @@ def finger_pose(model, layout, kind):
     return pose
 
 
+def hand_keyframes(model, recipe):
+    """Names, pregrasp, open and closed values (wrist then fingers) of a grasp recipe.
+
+    Closed = grasp + squeeze_rad along sign(grasp - open) on flex and oppose joints, clipped to the
+    joint limits: the task screen's rule (monolithic-tasks manip/screen.py hand_schedule).
+    """
+    g = recipe["grasp"]
+    names = [f"wrist_{n}" for n, _, _ in WRIST_JOINTS] + [n for role in FINGER_ROLES.values() for n in role]
+    pre = np.array([g["pregrasp"][n] for n in names])
+    open_ = np.array([g["open_at_grasp"][n] for n in names])
+    grasp = np.array([g["grasp"][n] for n in names])
+    squeeze = np.zeros(len(names))
+    for i, n in enumerate(names):
+        if n in FINGER_ROLES["flex"] or n in FINGER_ROLES["thumb_oppose"]:
+            squeeze[i] = recipe["squeeze_rad"] * np.sign(grasp[i] - open_[i])
+    labels = [_short(model.joint_label[j]) for j in range(model.joint_count)]
+    start = model.joint_qd_start.numpy()
+    lower, upper = model.joint_limit_lower.numpy(), model.joint_limit_upper.numpy()
+    lo, hi = [], []
+    for n in names:
+        if n in labels:
+            dof = int(start[labels.index(n)])
+            lo.append(lower[dof])
+            hi.append(upper[dof])
+        else:  # Wrist names on a floating mount: the palm pose comes from the wrist chain, no limits apply.
+            lo.append(-np.inf)
+            hi.append(np.inf)
+    return names, pre, open_, np.clip(grasp + squeeze, lo, hi)
+
+
 def set_finger_coordinates(model, joint_q, pose):
     """Write named finger coordinates into a joint_q vector (numpy, Model coordinate layout)."""
     q_start = model.joint_q_start.numpy()
@@ -244,6 +274,11 @@ def load_recipe(path):
         steps = duration / dt
         if not np.isfinite(steps) or steps <= 0 or abs(steps - round(steps)) > 1e-9:
             raise ValueError(f"{path}: phases_s.{name} = {duration} s is not a positive whole number of dt_s steps")
+    table = recipe.get("table")
+    if table is not None and (table.get("kind") != "plane" or table.get("z") != 0.0):
+        raise ValueError(
+            f"{path}: table must be {{'kind': 'plane', 'z': 0.0}} (the criteria assume the plane z = 0), got {table}"
+        )
     for key in ("solver", "joint_terms"):
         if not isinstance(recipe.get(key), dict):
             raise ValueError(f"{path}: {key} must be an object")
@@ -304,6 +339,22 @@ def _object_volume(o):
     return float(np.pi * r * r * 2 * h + 4.0 / 3.0 * np.pi * r**3)
 
 
+CONVEX_HULL = INPUTS / "p9d_convex_capsule/hull_r20_hh40.npz"
+
+
+def convex_hull_asset(spec):
+    """Pinned E1b hull (vertices, indices), checked against the manifest and the recipe's capsule size."""
+    if not CONVEX_HULL.is_file():
+        raise FileNotFoundError(f"Convex object asset missing: {CONVEX_HULL} (pinned by P9d PR0)")
+    verify_retained(CONVEX_HULL, retained_hashes())
+    if (spec["radius"], spec["half_height"]) != (0.02, 0.04):
+        raise ValueError(
+            f"The pinned hull is r 0.02 m, half_height 0.04 m; the object asks for {spec['radius']}, {spec['half_height']}"
+        )
+    data = np.load(CONVEX_HULL)
+    return data["vertices"].astype(np.float64), data["indices"].astype(np.int32)
+
+
 def capsule_mesh_points(radius, half_height, count=32):
     """Deterministic capsule surface points along local z, used as the convex-object hull."""
     import trimesh
@@ -336,10 +387,8 @@ def add_object(builder, spec):
             body, radius=spec["radius"], half_height=spec["half_height"], cfg=cfg, label="object_capsule"
         )
     else:
-        points = capsule_mesh_points(spec["radius"], spec["half_height"])
-        builder.add_shape_convex_hull(
-            body, mesh=newton.Mesh(points, _hull_indices(points)), cfg=cfg, label="object_convex"
-        )
+        points, indices = convex_hull_asset(spec)
+        builder.add_shape_convex_hull(body, mesh=newton.Mesh(points, indices), cfg=cfg, label="object_convex")
     return body
 
 
@@ -498,17 +547,7 @@ class FloatingHandScene:
 
     def _hand_keyframes(self):
         """Pregrasp, open and squeezed-closed coordinates by name (wrist and fingers), as the task screen does."""
-        g = self.recipe["grasp"]
-        names = [f"wrist_{n}" for n, _, _ in WRIST_JOINTS] + [n for role in FINGER_ROLES.values() for n in role]
-        pre = np.array([g["pregrasp"][n] for n in names])
-        open_ = np.array([g["open_at_grasp"][n] for n in names])
-        grasp = np.array([g["grasp"][n] for n in names])
-        squeeze = np.zeros(len(names))
-        for i, n in enumerate(names):
-            if n in FINGER_ROLES["flex"] or n in FINGER_ROLES["thumb_oppose"]:
-                squeeze[i] = self.recipe["squeeze_rad"] * np.sign(grasp[i] - open_[i])
-        lo, hi = self._limits(names)
-        return names, pre, open_, np.clip(grasp + squeeze, lo, hi)
+        return hand_keyframes(self.model, self.recipe)
 
     def _limits(self, names):
         lower, upper = self.model.joint_limit_lower.numpy(), self.model.joint_limit_upper.numpy()

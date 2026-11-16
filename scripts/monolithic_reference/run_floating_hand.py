@@ -15,6 +15,7 @@ as converged. ``model.json`` holds the geometry and inertia the criteria need, s
 
 import argparse
 import hashlib
+import importlib.metadata
 import platform
 import subprocess
 import time
@@ -29,7 +30,7 @@ from scripts.monolithic_reference.floating_hand_scenes import (
     MOUNTS,
     SCENES,
     FloatingHandScene,
-    capsule_mesh_points,
+    convex_hull_asset,
     load_recipe,
 )
 
@@ -59,8 +60,7 @@ def model_record(scene):
             "transform": model.shape_transform.numpy()[s].tolist(),
         }
         if geo == newton.GeoType.CONVEX_MESH:
-            o = scene.recipe["object"]
-            row["hull_points"] = capsule_mesh_points(o["radius"], o["half_height"]).tolist()
+            row["hull_points"] = convex_hull_asset(scene.recipe["object"])[0].tolist()
         shapes.append(row)
     articulation = np.full(model.joint_count, -1)
     starts = model.articulation_start.numpy()
@@ -137,10 +137,13 @@ def main(argv=None):
             "numpy": np.__version__,
             "warp": wp.__version__,
             "newton": newton.__file__,
+            "scipy": importlib.metadata.version("scipy"),
+            "trimesh": importlib.metadata.version("trimesh"),
         },
     }
     write_json(args.output / "manifest.json", manifest)
     counts = dict.fromkeys(STATUS_CODE, 0)
+    recorded, planned = 0, None
     stopped, frames, chunks, error = [], [], [], None
 
     def flush():
@@ -165,6 +168,7 @@ def main(argv=None):
         others = [s["index"] for s in record["shapes"] if s["body"] != record["object_body"]]
         object_shapes = {s["index"] for s in record["shapes"] if s["body"] == record["object_body"]}
         stop = min(args.max_steps or scene.total_steps, scene.total_steps)
+        planned = scene.total_steps
         manifest.update(
             status="RUNNING",
             planned_steps=scene.total_steps,
@@ -201,6 +205,7 @@ def main(argv=None):
                     if mine in object_shapes and other in others:
                         pair_force[others.index(other)] += np.asarray(pair["world_wrench"][end][:3])
             target = scene.palm_target(step)
+            recorded += 1
             frames.append(
                 {
                     "step": np.int32(step),
@@ -224,7 +229,7 @@ def main(argv=None):
         flush()
         manifest.update(
             rollout_seconds=time.perf_counter() - rollout,
-            published_steps=scene.steps,
+            published_steps=recorded,
             memory=_memory(scene.model.device),
         )
     except NotImplementedError as missing:
@@ -233,10 +238,13 @@ def main(argv=None):
         error = f"{type(failure).__name__}: {failure}"
     flush()
     complete = error is None and counts["HARD_FAILURE"] == 0
+    if not complete:
+        status = "NOT_APPLICABLE" if error and error.startswith("NOT_APPLICABLE") else "FAILED"
+    else:
+        # A run shortened with --max-steps is PARTIAL, never COMPLETE (AGENTS.md: filtered runs remain PARTIAL).
+        status = "COMPLETE" if recorded == planned else "PARTIAL"
     manifest.update(
-        status="COMPLETE"
-        if complete
-        else ("NOT_APPLICABLE" if error and error.startswith("NOT_APPLICABLE") else "FAILED"),
+        status=status,
         error=error,
         counts=counts,
         stopped_steps=stopped,
@@ -245,7 +253,7 @@ def main(argv=None):
     )
     write_json(args.output / "manifest.json", manifest)
     print({"status": manifest["status"], "counts": counts, "error": error, "output": str(args.output)})
-    return 0 if complete else 1
+    return 0 if status in ("COMPLETE", "PARTIAL") else 1
 
 
 if __name__ == "__main__":

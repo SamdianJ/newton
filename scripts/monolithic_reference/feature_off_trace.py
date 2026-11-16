@@ -13,6 +13,8 @@ PASS. Run the same command in both checkouts with the same device and precision.
 """
 
 import argparse
+import dataclasses
+import enum
 import hashlib
 import json
 import sys
@@ -25,15 +27,6 @@ import newton
 
 SOURCE = Path(__file__).resolve().parents[2]
 FIXTURES = SOURCE / "scripts/monolithic_reference/fixtures"
-STAT_FIELDS = (
-    "status",
-    "rolled_back",
-    "step_generation",
-    "nonlinear_iterations",
-    "linear_iterations",
-    "line_search_iterations",
-    "regularization_retries",
-)
 # (scene, device, precision, use_cuda_graph)
 CONFIGS = {
     "quick-windows": (("cuda:0", "fp64", True), ("cuda:0", "fp32", True)),
@@ -70,7 +63,13 @@ def step_record(solver, state):
         record["forces"] = _digest(
             (name, getattr(forces, name)) for name in ("particle_force", "body_wrench", "joint_force", "cable_torque")
         )
-    record["stats"] = {name: str(getattr(stats, name)) for name in STAT_FIELDS}
+    # Every scalar Stats field (repr is exact for floats), except wall-clock timing fields.
+    record["stats"] = {
+        field.name: repr(getattr(stats, field.name))
+        for field in dataclasses.fields(stats)
+        if "time" not in field.name
+        and isinstance(getattr(stats, field.name), (int, float, str, bool, enum.Enum, type(None)))
+    }
     record["stats"]["publication"] = str((stats.variational or {}).get("publication_status"))
     return record
 
@@ -229,7 +228,9 @@ def compare(a, b):
         if len(x["records"]) != len(y["records"]):
             result[key] = {"verdict": "DIFFERENT", "reason": "step counts differ"}
             continue
-        verdict = {"verdict": "IDENTICAL", "steps": len(x["records"])}
+        errors = sum(1 for r in x["records"] + y["records"] if r.get("error"))
+        # A scene that fails in a checkout proves nothing about bit identity, even if both fail alike.
+        verdict = {"verdict": "ERRORS" if errors else "IDENTICAL", "steps": len(x["records"]), "error_records": errors}
         for i, (p, q) in enumerate(zip(x["records"], y["records"], strict=True)):
             fields = [f for f in ("state", "forces", "stats", "error") if p.get(f) != q.get(f)]
             if fields:

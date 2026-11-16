@@ -72,7 +72,10 @@ class TestAllegroAsset(unittest.TestCase):
                 self.assertTrue(np.all(modes == int(newton.JointTargetMode.POSITION_VELOCITY)))
 
     def test_fp32_initial_sweep(self):
-        """Both mounts stay within the FP32 swept-FK roundoff bound at their initial pose."""
+        """The wrist mount stays within the FP32 swept-FK roundoff bound at its initial pose.
+
+        The floating mount needs the PR2 FREE sweep branch and is tested there.
+        """
         _require_asset(self)
         from newton._src.solvers.monolithic.articulation import _TreeKinematics  # noqa: PLC0415
         from newton._src.solvers.monolithic.contact_sweep import _ArticulationSweep  # noqa: PLC0415
