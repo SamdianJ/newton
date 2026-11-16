@@ -484,6 +484,11 @@ class FloatingHandScene:
                 builder.joint_target_ke[first + k] = root_pd["linear_ke" if linear else "angular_ke"]
                 builder.joint_target_kd[first + k] = root_pd["linear_kd" if linear else "angular_kd"]
                 builder.joint_effort_limit[first + k] = root_pd["force_limit_N" if linear else "torque_limit_Nm"]
+        effort = recipe.get("hand_import", {}).get("finger_effort_limit_Nm")
+        if effort is not None:
+            first = self.layout["first_dof"] + 6
+            for dof in range(first, first + HAND_DOFS):
+                builder.joint_effort_limit[dof] = effort
         self.palm_body = self.layout["bodies"]["palm_link"]
 
     def _wrist_start(self, recipe):

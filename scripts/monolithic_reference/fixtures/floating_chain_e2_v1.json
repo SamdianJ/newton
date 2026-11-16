@@ -20,7 +20,7 @@
   },
   "solver": {
     "friction_velocity_scale": 0.01,
-    "contact_stiffness": 10000000.0,
+    "contact_stiffness": 1000000000.0,
     "friction_coefficient": 0.5,
     "normal_smoothing": 0.0001,
     "publish_policy": "current_iterate",
@@ -64,5 +64,6 @@
       5.0,
       1.0
     ]
-  }
+  },
+  "contact_note": "contact_stiffness 1e9 for rigid objects (user decision 2026-11-16); production Franka uses 1e7 for its soft cube"
 }
