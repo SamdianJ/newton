@@ -100,10 +100,10 @@ def _link_scene(device, link_shape, *, particle_flag=False, plane=True):
     return builder.finalize(device=device)
 
 
-def _solver(model):
+def _solver(model, **options):
     from newton.solvers.experimental.monolithic import SolverMonolithic  # noqa: PLC0415
 
-    return SolverMonolithic(model, friction_velocity_scale=0.01)
+    return SolverMonolithic(model, friction_velocity_scale=0.01, **options)
 
 
 def test_link_shape_without_samples_against_static_raises(test, device):
@@ -129,6 +129,47 @@ def test_link_plane_against_static_is_skipped(test, device):
     _solver(_link_scene(device, plane))
 
 
+def test_particle_flag_without_particles_constructs(test, device):
+    """F2: without particles nothing is a particle target, so a COLLIDE_PARTICLES CYLINDER (the URDF
+    import default) must not be rejected. No ground plane, so F1 (A-static pairs) does not apply."""
+
+    def cylinder(builder, link, cfg):
+        builder.add_shape_cylinder(link, radius=0.02, half_height=0.05, cfg=cfg, label="arm_cylinder")
+
+    _solver(_link_scene(device, cylinder, particle_flag=True, plane=False))
+
+
+def test_unsupported_particle_target_still_raises(test, device):
+    """With a tet in the scene, COLLIDE_PARTICLES shapes are real particle targets: capsule stays rejected."""
+    import newton  # noqa: PLC0415
+
+    builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0))
+    builder.add_soft_grid(
+        pos=wp.vec3(0.0, 0.0, 0.1),
+        rot=wp.quat_identity(),
+        vel=wp.vec3(0.0),
+        dim_x=1,
+        dim_y=1,
+        dim_z=1,
+        cell_x=0.02,
+        cell_y=0.02,
+        cell_z=0.02,
+        density=1000.0,
+        k_mu=1e4,
+        k_lambda=1e4,
+        k_damp=0.0,
+    )
+    body = builder.add_link(
+        xform=wp.transform((0.0, 0.0, 0.3), wp.quat_identity()), mass=0.1, inertia=wp.diag(wp.vec3(1e-4))
+    )
+    builder.add_articulation([builder.add_joint_free(body)])
+    cfg = builder.ShapeConfig(density=0.0, margin=0.0, has_particle_collision=True, has_shape_collision=False)
+    builder.add_shape_capsule(body, radius=0.01, half_height=0.02, cfg=cfg, label="probe")
+    # Actor sampling (tet-rigid pairs) or the particle-target whitelist rejects it, whichever runs first.
+    with test.assertRaisesRegex(ValueError, "Unsupported (contact shape|actor contact target)"):
+        _solver(builder.finalize(device=device), mass_mode="lumped")
+
+
 class TestContactUnsupportedShapes(unittest.TestCase):
     pass
 
@@ -139,6 +180,8 @@ for _device in get_test_devices():
         test_plane_is_unchanged,
         test_link_shape_without_samples_against_static_raises,
         test_link_plane_against_static_is_skipped,
+        test_particle_flag_without_particles_constructs,
+        test_unsupported_particle_target_still_raises,
     ):
         add_function_test(TestContactUnsupportedShapes, _test.__name__, _test, devices=[_device])
 
