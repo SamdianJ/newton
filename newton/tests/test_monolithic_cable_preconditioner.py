@@ -177,7 +177,10 @@ class _Run:
 
 
 def _first_shift(matrix, regularization, dtype):
-    """The first preconditioner shift under which the float64 band factors, rounded to ``dtype``."""
+    """The first preconditioner shift under which the float64 band factors, rounded to ``dtype``.
+
+    No gauge lift is modelled: use it only for cables without a gauge row (cable 0 carries it here).
+    """
     for shift in CablePreconditioner.SHIFTS:
         try:
             np.linalg.cholesky(matrix + np.diag(regularization + shift * np.abs(np.diag(matrix))))
@@ -333,11 +336,16 @@ def test_status_codes_of_different_cables_merge(test, device):
         # retries at 1e-6..1e-4 fail it too, the one at 1e-3 passes it and meets the root: 16.
         data = _synthetic(np.random.default_rng(5), LENGTHS, element_only=(4,), shifted=4)
         data["band"][data["spans"][4, 0] + 5, 0] = np.nan
-        run = _Run(device, dtype, data)
-        with test.subTest(dtype=dtype.__name__, case="retry meets a non-finite entry"):
-            test.assertEqual(run.factor(), 16)
-            test.assertEqual(int(run.pre.first_pending.numpy()[0, 4]), 1)
-            np.testing.assert_array_equal(run.pre.retry_pending.numpy()[:4, 4], [1, 1, 1, 2])
+        for repeat in range(2):
+            run = _Run(device, dtype, data)
+            run.pre.used_shift.fill_(-1.0)
+            with test.subTest(dtype=dtype.__name__, case="retry meets a non-finite entry", repeat=repeat):
+                test.assertEqual(run.factor(), 16)
+                test.assertEqual(int(run.pre.first_pending.numpy()[0, 4]), 1)
+                np.testing.assert_array_equal(run.pre.retry_pending.numpy()[:4, 4], [1, 1, 1, 2])
+                # The cable did not factor: no shift is recorded and no retry slot is adopted.
+                test.assertEqual(float(run.pre.used_shift.numpy()[4]), -1.0)
+                test.assertEqual(int(run.pre.chosen.numpy()[4]), 0)
         for far, diagonal, expected in cases:
             data = _synthetic(np.random.default_rng(6), LENGTHS, far=far)
             for (actor, row), value in diagonal.items():
