@@ -176,6 +176,17 @@ class _Run:
         ]
 
 
+def _first_shift(matrix, regularization, dtype):
+    """The first preconditioner shift under which the float64 band factors, rounded to ``dtype``."""
+    for shift in CablePreconditioner.SHIFTS:
+        try:
+            np.linalg.cholesky(matrix + np.diag(regularization + shift * np.abs(np.diag(matrix))))
+        except np.linalg.LinAlgError:
+            continue
+        return float(np.float32(shift) if dtype == wp.float32 else shift)
+    return None
+
+
 def _gamma(levels, dtype):
     # Componentwise backward-error constant of a Cholesky whose longest accumulated sum has
     # m = 10 (2 levels + 1) + 1 products (Higham, ASNA 2nd ed., Theorem 10.3: |dA| <= gamma |L||L^T|).
@@ -198,6 +209,8 @@ def test_factor_reproduces_the_shifted_band(test, device):
                 gamma = 2 * _gamma(len(run.pre.odd_jobs), dtype)
                 with test.subTest(dtype=dtype.__name__, masked=masked, seed=seed):
                     test.assertEqual(status, 0)
+                    # The ladder keeps the first shift that factors (1e-3 here), not any later one.
+                    test.assertEqual(used[2], _first_shift(_assembled(data, masked)[2], 2e-5, dtype))
                     test.assertGreater(used[2], 0.0)
                     test.assertEqual(used[0], 0.0)
                     for actor, (matrix, lower) in enumerate(
@@ -262,6 +275,7 @@ def test_retried_cable_matches_a_first_attempt_at_its_shift(test, device):
             base, count = first.pre.block_spans.numpy()[4]
             with test.subTest(dtype=dtype.__name__, masked=masked):
                 test.assertGreater(shift, 0.0)
+                test.assertEqual(shift, _first_shift(_assembled(data, masked)[4], 0.0, dtype))
                 test.assertEqual(float(first.pre.used_shift.numpy()[4]), shift)
                 # The factor and both multipliers (the coupling scratch keeps the failed attempt).
                 for index in (0, 2, 3):
@@ -274,6 +288,24 @@ def test_retried_cable_matches_a_first_attempt_at_its_shift(test, device):
                 keep[base : base + count] = False
                 for a, b in zip(retried.snapshot()[:1], again.snapshot()[:1], strict=True):
                     np.testing.assert_array_equal(a[keep], b[keep])
+
+
+def test_refactoring_forgets_the_previous_retry(test, device):
+    """A second factor on the same storage equals a fresh factor, whether or not either one retried."""
+    shifted = _synthetic(np.random.default_rng(5), LENGTHS, element_only=(4,), shifted=4)
+    plain = _synthetic(np.random.default_rng(5), LENGTHS, element_only=(4,))
+    for dtype in (wp.float32, wp.float64):
+        for before, after in ((shifted, plain), (plain, shifted)):
+            reused = _Run(device, dtype, before)
+            test.assertEqual(reused.factor(), 0)
+            reused.data = after
+            test.assertEqual(reused.factor(), 0)
+            fresh = _Run(device, dtype, after)
+            test.assertEqual(fresh.factor(), 0)
+            with test.subTest(dtype=dtype.__name__, retried_first=before is shifted):
+                np.testing.assert_array_equal(reused.pre.chosen.numpy(), fresh.pre.chosen.numpy())
+                for index in (0, 2, 3, 4):  # factor, both multipliers and used_shift
+                    np.testing.assert_array_equal(reused.snapshot()[index], fresh.snapshot()[index])
 
 
 def test_status_codes_of_different_cables_merge(test, device):
@@ -297,6 +329,15 @@ def test_status_codes_of_different_cables_merge(test, device):
         ((), {(4, 10): pivot, (4, 5): nan}, 12),
     )
     for dtype in (wp.float32, wp.float64):
+        # A pivot that a shift recovers and a non-finite root entry: shift 0 fails the pivot, the
+        # retries at 1e-6..1e-4 fail it too, the one at 1e-3 passes it and meets the root: 16.
+        data = _synthetic(np.random.default_rng(5), LENGTHS, element_only=(4,), shifted=4)
+        data["band"][data["spans"][4, 0] + 5, 0] = np.nan
+        run = _Run(device, dtype, data)
+        with test.subTest(dtype=dtype.__name__, case="retry meets a non-finite entry"):
+            test.assertEqual(run.factor(), 16)
+            test.assertEqual(int(run.pre.first_pending.numpy()[0, 4]), 1)
+            np.testing.assert_array_equal(run.pre.retry_pending.numpy()[:4, 4], [1, 1, 1, 2])
         for far, diagonal, expected in cases:
             data = _synthetic(np.random.default_rng(6), LENGTHS, far=far)
             for (actor, row), value in diagonal.items():
@@ -408,6 +449,7 @@ for _test in (
     test_factor_reproduces_the_shifted_band,
     test_launches_follow_the_levels,
     test_out_of_band_entry_is_reported_behind_a_failed_pivot,
+    test_refactoring_forgets_the_previous_retry,
     test_retried_cable_matches_a_first_attempt_at_its_shift,
     test_status_codes_of_different_cables_merge,
 ):
