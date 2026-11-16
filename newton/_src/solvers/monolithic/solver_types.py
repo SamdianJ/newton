@@ -40,7 +40,8 @@ class CableInput:
     rest_theta is unwrapped radians. Each rest_director is a unit vector
     perpendicular to its edge. Cables share the global nonlinear solve with
     shape contact and, optionally, experimental cable self and inter-cable
-    contact (``cable_contact``); closed loops and branching are not available.
+    contact (``cable_contact``); cable-cloth and cable-tet contacts, closed
+    loops and branching are not available.
     """
 
     particle_ids: tuple[int, ...]

@@ -700,9 +700,10 @@ class SolverMonolithic(SolverBase):
     def get_cable_contact_diagnostics(self, state):
         """Return experimental cable contact counts, compressive loads [N] and deepest overlaps [m].
 
-        ``candidates`` and ``active`` count sample-segment pairs (``active``: positive normal load). The
-        compressive load sums the normal loads of all pairs with sign, a sample-vertex pair subtracting
-        its double count; ``max_overlap_m`` is the largest overlap of a sample-segment pair.
+        ``candidates`` and ``active`` count sample-segment pairs (``active``: positive normal load; both
+        segments clamped at a convex vertex count). The compressive load sums the normal loads of all
+        pairs with sign, a sample-vertex pair subtracting its double count. ``max_overlap_m`` is the
+        largest overlap at a sample point, a lower bound of the segment-segment penetration at crossings.
         """
         self._states.validate(state)
         if self._cable_contact is None:

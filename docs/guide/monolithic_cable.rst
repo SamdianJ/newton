@@ -9,10 +9,10 @@ Experimental monolithic cables
    ``SolverMonolithic.CableInput`` and its state/control namespaces are
    experimental. Open, independent chains support finite axial stiffness,
    anisotropic bending and natural curvature/twist. Closed loops, branches,
-   connectors and soft-soft contacts are outside this interface. Cable surfaces
-   contact supported articulation, free rigid and static shapes; experimental
-   frictionless cable self and inter-cable contact is available through
-   ``cable_contact``.
+   connectors, and cable–cloth and cable–tet contacts are outside this
+   interface. Cable surfaces contact supported articulation, free rigid and
+   static shapes; experimental frictionless cable self and inter-cable contact
+   is available through ``cable_contact``.
    Cloth can share the solve; see :doc:`monolithic_cloth`.
 
 Supply ordered Model particle IDs, reference directors and material angles
@@ -104,11 +104,13 @@ coupling between contact sides stays in the global operator.
 
 ``get_cable_contact_diagnostics(state)`` returns publication-bound values for
 inter-cable and self contact: sample–segment candidates, active pairs (positive
-normal load), the compressive load [N] summed over all pairs with sign (a
+normal load; at a convex vertex both clamped segments count, while the load nets
+to one contact), the compressive load [N] summed over all pairs with sign (a
 sample–vertex pair subtracts its double count), the deepest sample–segment
-overlap [m], and the cable contact particle forces [N]. These forces also enter
-``get_contact_forces()``. ``Stats.variational["cable_used_shift_max"]`` reports
-the largest preconditioner-only shift any cable factor needed in the step.
+overlap [m], and the cable contact particle forces [N]. The overlap is measured
+at the sample points only; at crossings it is a lower bound of the
+segment–segment penetration, so use an exact segment distance, not this value,
+to judge penetration. These forces also enter ``get_contact_forces()``.
 Enabled cable-contact checkpoints use schema 9 (schema 10 together with
 ``cloth_contact``); disabled and differently configured solvers reject them.
 
@@ -151,8 +153,12 @@ solve and supported segments, not the entire material step.
 Band factorization and triangular solves use block cyclic reduction of 10-row
 blocks, level by level across all cables; it factors the same matrix as a serial
 band Cholesky with a different rounding order. A cable whose band fails a pivot
-retries larger preconditioner-only shifts. This experimental path has no
-accelerator performance qualification yet.
+retries larger preconditioner-only shifts, multiples of its own diagonal.
+``Stats.variational["cable_used_shift_max"]`` reports, for any solver with
+cables, the largest shift a cable factor chose in the step, including factors
+of rejected regularization retries and of rolled-back steps; 0 means every
+factor used shift 0 or the step factored nothing. This experimental path has
+no accelerator performance qualification yet.
 Use CPU for the full localized-helix analytical matrix. CUDA coverage includes
 the full cantilever and component checks; CPU/CUDA trajectory equivalence during
 helical buckling has not been qualified.

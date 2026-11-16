@@ -11,9 +11,10 @@ from unittest import mock
 import numpy as np
 import warp as wp
 
+from newton._src.solvers.monolithic.cable_preconditioner import CablePreconditioner
 from newton._src.solvers.monolithic.solver_types import _StepFailure
 from newton.solvers.experimental.monolithic import SolverMonolithic
-from newton.tests.test_monolithic_cable_contact import cable_contact_solver, hairpin, strands
+from newton.tests.test_monolithic_cable_contact import cable_contact_solver, cloth_and_cable_solver, hairpin, strands
 from newton.tests.test_monolithic_material_state import snapshot
 from newton.tests.unittest_utils import add_function_test, get_test_devices
 
@@ -333,6 +334,81 @@ def test_failed_evaluation_publishes_no_diagnostics(test, device):
     np.testing.assert_array_equal(contact.summary.numpy(), 0.0)
 
 
+def test_used_shift_is_reported_per_step(test, device, *, precision, graph):
+    """Stats report each step's own largest cable preconditioner shift: forced to 1e-3, then the normal ladder."""
+    solver, state = _solver(*hairpin(), device, precision, graph, config={})
+    pre = solver._linear._cable_preconditioner
+    original = CablePreconditioner.factor
+    seen = []
+
+    def factor(self, workspace, tolerance):
+        original(self, workspace, tolerance)
+        seen.append(float(self.used_shift.numpy().max()))
+
+    control = solver.create_control()
+    with mock.patch.object(CablePreconditioner, "factor", factor):
+        for forced in (True, False):
+            seen.clear()
+            pre.shifts.assign(np.full(len(pre.SHIFTS), 1e-3) if forced else np.asarray(pre.SHIFTS))
+            solver.step(state, state, control, dt=DT)
+            test.assertFalse(solver.last_stats.rolled_back, solver.last_stats)
+            reported = solver.last_stats.variational["cable_used_shift_max"]
+            with test.subTest(forced=forced):
+                test.assertGreater(len(seen), 0)
+                test.assertEqual(reported, max(seen))
+                if forced:
+                    test.assertEqual(reported, float(pre.shifts.numpy()[0]))
+                else:
+                    # Below the forced value: the previous step's maximum was cleared.
+                    test.assertLess(reported, float(np.asarray(1e-3, dtype=pre.shifts.numpy().dtype)))
+
+
+def test_failed_publication_restores_the_diagnostics(test, device):
+    """A step that fails after writing its output restores the previous cable contact force and summary."""
+    solver, state = _solver(*hairpin(), device, SolverMonolithic.Precision.FP64, False, config={})
+    control = solver.create_control()
+    solver.step(state, state, control, dt=DT)
+    test.assertFalse(solver.last_stats.rolled_back, solver.last_stats)
+    history = state._monolithic_coupled
+    test.assertGreater(np.abs(history.cable_contact_summary.numpy()).max(), 0.0)
+    test.assertGreater(np.abs(history.cable_contact_particle_force.numpy()).max(), 0.0)
+    before = snapshot(state)
+    failure = _StepFailure(solver.Status.NONFINITE, "forced after publication")
+    with mock.patch.object(solver, "_joint_force_metrics", side_effect=failure):
+        solver.step(state, state, control, dt=DT)
+    test.assertTrue(solver.last_stats.rolled_back)
+    for name, value in before.items():
+        np.testing.assert_array_equal(snapshot(state)[name], value, err_msg=name)
+
+
+def test_cloth_and_cable_checkpoint(test, device, *, precision):
+    """Schema 10 (cloth and cable contact) continues a checkpoint bit for bit; schema 9 and 10 reject each other."""
+    solver, state = cloth_and_cable_solver(device=device, precision=precision)
+    control = solver.create_control()
+    for _ in range(2):
+        solver.step(state, state, control, dt=DT)
+        test.assertFalse(solver.last_stats.rolled_back, solver.last_stats)
+    test.assertEqual(state._monolithic_coupled.schema_version.numpy().tolist(), [10])
+    with tempfile.TemporaryDirectory() as directory:
+        path = Path(directory) / "both.npz"
+        solver.save_checkpoint(state, path)
+        restored_solver, restored = cloth_and_cable_solver(device=device, precision=precision)
+        restored_solver.load_checkpoint(restored, path)
+        cable_only, cable_state = _solver(*strands(), device, precision, False, config={})
+        other = Path(directory) / "cable.npz"
+        cable_only.save_checkpoint(cable_state, other)
+        for owner, owner_state, wrong in ((restored_solver, restored, other), (cable_only, cable_state, path)):
+            with test.assertRaises(ValueError):
+                owner.load_checkpoint(owner_state, wrong)
+    for key, value in snapshot(state).items():
+        np.testing.assert_array_equal(snapshot(restored)[key], value, err_msg=key)
+    solver.step(state, state, control, dt=DT)
+    restored_solver.step(restored, restored, restored_solver.create_control(), dt=DT)
+    actual = snapshot(restored)
+    for key, expected in snapshot(state).items():
+        np.testing.assert_array_equal(actual[key], expected, err_msg=key)
+
+
 class TestCableContactRuntime(unittest.TestCase):
     pass
 
@@ -344,10 +420,15 @@ for _test in (
     test_status_selects_the_failure,
     test_overstretched_segment_fails_the_step,
     test_failed_evaluation_publishes_no_diagnostics,
+    test_failed_publication_restores_the_diagnostics,
 ):
     add_function_test(TestCableContactRuntime, _test.__name__, _test, devices=devices)
 for _precision in SolverMonolithic.Precision:
-    for _test in (test_slot_order_does_not_change_results, test_anchor_makes_the_response_translation_exact):
+    for _test in (
+        test_slot_order_does_not_change_results,
+        test_anchor_makes_the_response_translation_exact,
+        test_cloth_and_cable_checkpoint,
+    ):
         add_function_test(
             TestCableContactRuntime,
             f"{_test.__name__}_{_precision.value}",
@@ -368,6 +449,7 @@ for _precision in SolverMonolithic.Precision:
             test_candidates_stay_frozen_within_trials,
             test_shared_vertex_keeps_one_term,
             test_diagnostics_and_checkpoint,
+            test_used_shift_is_reported_per_step,
         ):
             add_function_test(
                 TestCableContactRuntime,

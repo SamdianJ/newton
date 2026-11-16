@@ -311,6 +311,29 @@ def test_refactoring_forgets_the_previous_retry(test, device):
                     np.testing.assert_array_equal(reused.snapshot()[index], fresh.snapshot()[index])
 
 
+def test_step_shift_max_tracks_the_largest_shift(test, device):
+    """The step maximum is the largest chosen shift (a retry here), stays zero for an SPD band and survives a replay."""
+    for dtype in (wp.float32, wp.float64):
+        data = _synthetic(np.random.default_rng(5), LENGTHS, element_only=(4,), shifted=4)
+        run = _Run(device, dtype, data)
+        run.pre.step_shift_max.zero_()
+        test.assertEqual(run.factor(), 0)
+        expected = _first_shift(_assembled(data, False)[4], 0.0, dtype)
+        with test.subTest(dtype=dtype.__name__):
+            test.assertGreater(int(run.pre.chosen.numpy()[4]), 0)  # chosen in the retry round
+            test.assertEqual(float(run.pre.used_shift.numpy().max()), expected)
+            test.assertEqual(float(run.pre.step_shift_max.numpy()[0]), expected)
+            if device.is_cuda:
+                with wp.ScopedCapture(device) as capture:
+                    run.pre._factor_blocks(dtype(0.0), dtype(0.0), run.status)
+                wp.capture_launch(capture.graph)
+                test.assertEqual(float(run.pre.step_shift_max.numpy()[0]), expected)
+            plain = _Run(device, dtype, _synthetic(np.random.default_rng(5), LENGTHS, element_only=(4,)))
+            plain.pre.step_shift_max.zero_()
+            test.assertEqual(plain.factor(), 0)
+            test.assertEqual(float(plain.pre.step_shift_max.numpy()[0]), 0.0)
+
+
 def test_status_codes_of_different_cables_merge(test, device):
     """Out-of-band 1, failed pivot 12 and non-finite 16 merge as 16 > 12 > 1, deterministically per cable."""
     # Cable 4 (51 rows) has blocks 0..5: level 0 eliminates blocks 1, 3, 5, the root is block 0.
@@ -460,6 +483,7 @@ for _test in (
     test_refactoring_forgets_the_previous_retry,
     test_retried_cable_matches_a_first_attempt_at_its_shift,
     test_status_codes_of_different_cables_merge,
+    test_step_shift_max_tracks_the_largest_shift,
 ):
     add_function_test(TestCablePreconditioner, _test.__name__, _test, devices=devices)
 
