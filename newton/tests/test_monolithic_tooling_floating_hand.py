@@ -489,6 +489,16 @@ class TestRunnerIdentity(unittest.TestCase):
             criteria = fc.evaluate(out, fhs.load_recipe(recipe))
             self.assertEqual(criteria["published_steps"], 2)
             self.assertEqual(criteria["penetration_m"]["hand_table"], "NOT_APPLICABLE")
+            # The CLI evaluates against the recipe the run used, and refuses one edited since.
+            edited = Path(tmp) / "recipe.json"
+            edited.write_bytes(recipe.read_bytes())
+            manifest["arguments"]["recipe"] = str(edited)
+            (out / "manifest.json").write_text(json.dumps(manifest))
+            fc.main([str(out)])
+            self.assertTrue((out / "criteria.json").is_file())
+            edited.write_bytes(recipe.read_bytes() + b" ")
+            with self.assertRaisesRegex(ValueError, "changed since the run"):
+                fc.main([str(out)])
 
 
 class TestPinnedGeometry(unittest.TestCase):
@@ -568,6 +578,8 @@ class TestReviewRoundTwo(unittest.TestCase):
         result = compare(narrow, wide)["k"]
         self.assertEqual(result["verdict"], "IDENTICAL")
         self.assertEqual(result["stats_fields"], {"only_a": [], "only_b": ["extra"]})
+        empty = {"scenes": {"k": {"status": "TRACED", "records": []}}}
+        self.assertEqual(compare(empty, empty)["k"]["verdict"], "MISSING")
 
     def test_recipe_rejects_a_raised_table(self):
         import json  # noqa: PLC0415

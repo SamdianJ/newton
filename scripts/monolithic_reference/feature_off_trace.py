@@ -228,6 +228,10 @@ def compare(a, b):
         if len(x["records"]) != len(y["records"]):
             result[key] = {"verdict": "DIFFERENT", "reason": "step counts differ"}
             continue
+        if not x["records"]:
+            # A trace without steps (trace --steps 0) compares nothing.
+            result[key] = {"verdict": "MISSING", "reason": "no traced steps"}
+            continue
         errors = sum(1 for r in x["records"] + y["records"] if r.get("error"))
         # A scene that fails in a checkout proves nothing about bit identity, even if both fail alike.
         verdict = {"verdict": "ERRORS" if errors else "IDENTICAL", "steps": len(x["records"]), "error_records": errors}
