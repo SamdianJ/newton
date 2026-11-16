@@ -242,10 +242,21 @@ class ContactSamples:
                 else "A-R"
             )
             arm = a if dynamic[0] else b
-            if kind == "A-static" and not _sampled_source(types[arm], model.shape_source[arm]):
-                # Only supported link surfaces meet the world; other link shapes,
-                # such as planes, were never contact sources and stay outside.
+            if kind == "A-static" and types[arm] == GeoType.PLANE:
+                # A plane is a target-only shape: a link plane meets the static world only
+                # through other sources, and static shapes are never sources.
                 continue
+            if kind == "A-static" and not _sampled_source(types[arm], model.shape_source[arm]):
+                # Any other link surface the solver cannot sample would have no contact with
+                # the world; fail rather than drop the pair (clear COLLIDE_SHAPES to opt out).
+                other = b if arm == a else a
+                label = lambda s: model.shape_label[s] if s < len(model.shape_label) else str(s)  # noqa: E731
+                body = int(bodies[arm])
+                raise ValueError(
+                    f"Link shape {label(arm)!r} (index {arm}, body {model.body_label[body]!r}, "
+                    f"{GeoType(int(types[arm])).name}) cannot be a contact source; it is paired with static "
+                    f"shape {label(other)!r}. Use a sphere, box or mesh, or clear its COLLIDE_SHAPES flag"
+                )
             self.pair_kinds[pair] = kind
             for source, target, enabled in ((a, b, dynamic[0]), (b, a, dynamic[1])):
                 if not enabled:

@@ -73,7 +73,7 @@ def inventory(model):
             same_tree += 1
             continue
         for arm, other in ((a, b), (b, a)):
-            if dynamic_link(arm) and static(other) and types[arm] not in SAMPLED:
+            if dynamic_link(arm) and static(other) and types[arm] not in (*SAMPLED, newton.GeoType.PLANE):
                 f1.append({"link_shape": label(arm), "type": name(arm), "static_shape": label(other)})
     new = [
         {
