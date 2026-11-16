@@ -81,9 +81,14 @@ def _mesh64(sdf: TextureSDFData, point: Any):
 
 @wp.func
 def _shape64(geo: int, scale: Any, point: Any, index: int, table: wp.array[TextureSDFData]):
-    value = point[2]
-    gradient = type(point)(0.0, 0.0, 1.0)
-    if geo == GeoType.SPHERE:
+    # A type without a branch is NaN, so a loaded sample fails as NONFINITE
+    # instead of silently acting as another shape.
+    value = type(point[0])(wp.nan)
+    gradient = type(point)(type(point[0])(wp.nan))
+    if geo == GeoType.PLANE:
+        value = point[2]
+        gradient = type(point)(0.0, 0.0, 1.0)
+    elif geo == GeoType.SPHERE:
         length = wp.length(point)
         value = length - scale[0]
         gradient = type(point)(0.0)
