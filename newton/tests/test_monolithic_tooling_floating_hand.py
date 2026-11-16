@@ -481,7 +481,7 @@ class TestRunnerIdentity(unittest.TestCase):
                 ]
             )
             manifest = json.loads((out / "manifest.json").read_text())
-            self.assertEqual(code, 0)
+            self.assertEqual(code, 2)  # PARTIAL never exits 0
             self.assertEqual(manifest["status"], "PARTIAL")
             self.assertEqual(manifest["published_steps"], 2)
             self.assertEqual(len(manifest["source_sha"]), 40)
@@ -528,6 +528,99 @@ class TestPinnedGeometry(unittest.TestCase):
         self.assertTrue(moved)
         for i in moved:
             self.assertNotEqual(grasp[i], open_[i], names[i])
+
+
+class TestReviewRoundTwo(unittest.TestCase):
+    def test_required_categories_fail_when_not_measured(self):
+        import json  # noqa: PLC0415
+        from pathlib import Path  # noqa: PLC0415
+
+        gates = json.loads(
+            (
+                Path(__file__).resolve().parents[2]
+                / "scripts/monolithic_reference/fixtures/floating_hand_gates_frozen_v1.json"
+            ).read_text()
+        )
+        self.assertEqual(gates["common"]["penetration_max_m"]["dynamic_table"], 0.002)
+        measured = {"max": 0.0, "p99": 0.0}
+        e2 = {"penetration_m": {"dynamic_table": "NOT_APPLICABLE", "self": "NOT_APPLICABLE"}}
+        self.assertEqual(fc.missing_categories(e2, gates, "E2"), ["dynamic_table"])
+        e1 = {
+            "penetration_m": {
+                "hand_object": "NOT_APPLICABLE",
+                "object_table": measured,
+                "hand_table": measured,
+                "self": measured,
+            }
+        }
+        self.assertEqual(fc.missing_categories(e1, gates, "E1a"), ["hand_object"])
+        self.assertEqual(fc.missing_categories({"penetration_m": {"self": measured}}, gates, "E3"), [])
+
+    def test_trace_compare_errors_and_field_sets(self):
+        from scripts.monolithic_reference.feature_off_trace import compare  # noqa: PLC0415
+
+        ok = {"state": "s", "forces": "f", "stats": {"status": "1", "extra": "0"}, "error": None}
+        failed = dict(ok, error="RuntimeError: boom")
+        both_failed = {"scenes": {"k": {"status": "TRACED", "records": [failed]}}}
+        self.assertEqual(compare(both_failed, both_failed)["k"]["verdict"], "ERRORS")
+        narrow = {"scenes": {"k": {"status": "TRACED", "records": [dict(ok, stats={"status": "1"})]}}}
+        wide = {"scenes": {"k": {"status": "TRACED", "records": [ok]}}}
+        result = compare(narrow, wide)["k"]
+        self.assertEqual(result["verdict"], "IDENTICAL")
+        self.assertEqual(result["stats_fields"], {"only_a": [], "only_b": ["extra"]})
+
+    def test_recipe_rejects_a_raised_table(self):
+        import json  # noqa: PLC0415
+        import tempfile  # noqa: PLC0415
+        from pathlib import Path  # noqa: PLC0415
+
+        from scripts.monolithic_reference.floating_hand_scenes import load_recipe  # noqa: PLC0415
+
+        recipe = {
+            "schema": "p9d-floating-hand/v1",
+            "scene": "E3",
+            "mount": "floating",
+            "dt_s": 0.001,
+            "phases_s": {"close": 1.0, "hold": 1.0},
+            "solver": {},
+            "joint_terms": {},
+            "table": {"kind": "plane", "z": 0.01},
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "r.json"
+            path.write_text(json.dumps(recipe))
+            with self.assertRaisesRegex(ValueError, "table must be"):
+                load_recipe(path)
+
+    def test_benchmark_status(self):
+        from scripts.monolithic_reference.benchmark_floating_hand import receipt_status  # noqa: PLC0415
+
+        self.assertEqual(receipt_status({"W1": True, "W2": True}), "COMPLETE")
+        self.assertEqual(receipt_status({"W1": True, "W2": False}), "REPEATS_DIFFER")
+
+    def test_floating_wrist_keyframes_stay_within_wrist_limits(self):
+        import copy  # noqa: PLC0415
+        from pathlib import Path  # noqa: PLC0415
+
+        import warp as wp  # noqa: PLC0415
+
+        import newton  # noqa: PLC0415
+        from scripts.monolithic_reference import floating_hand_scenes as fhs  # noqa: PLC0415
+
+        if not fhs.ALLEGRO.is_dir():
+            self.skipTest("Allegro asset not present")
+        recipe = fhs.load_recipe(
+            Path(__file__).resolve().parents[2]
+            / "scripts/monolithic_reference/fixtures/floating_hand_e1a_capsule_v1.json"
+        )
+        builder = newton.ModelBuilder()
+        fhs.add_allegro(builder, mount="floating", palm_pose=wp.transform_identity())
+        model = builder.finalize(device="cpu")
+        fhs.hand_keyframes(model, recipe)
+        bad = copy.deepcopy(recipe)
+        bad["grasp"]["pregrasp"]["wrist_pz"] = 0.5
+        with self.assertRaisesRegex(ValueError, "wrist limit"):
+            fhs.hand_keyframes(model, bad)
 
 
 if __name__ == "__main__":

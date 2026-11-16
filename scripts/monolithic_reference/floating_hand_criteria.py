@@ -452,6 +452,12 @@ def chain_balance(model, frames, recipe, dt):
     }
 
 
+def missing_categories(criteria, gates, scene):
+    """Required penetration categories without a measured value (NOT_APPLICABLE or absent): each is a FAIL."""
+    measured = criteria.get("penetration_m", {})
+    return [name for name in gates["required_categories"].get(scene, []) if not isinstance(measured.get(name), dict)]
+
+
 def main(argv=None):
     import argparse  # noqa: PLC0415
     import json  # noqa: PLC0415
@@ -461,8 +467,16 @@ def main(argv=None):
     parser.add_argument("run_dir", type=Path)
     parser.add_argument("--stride", type=int, default=1, help="evaluate every n-th frame (diagnostic runs only)")
     args = parser.parse_args(argv)
+    import hashlib  # noqa: PLC0415
+
+    from scripts.monolithic_reference.floating_hand_scenes import load_recipe  # noqa: PLC0415
+
     manifest = json.loads((args.run_dir / "manifest.json").read_text())
-    recipe = json.loads(Path(manifest["arguments"]["recipe"]).read_text())
+    recipe_path = Path(manifest["arguments"]["recipe"])
+    digest = hashlib.sha256(recipe_path.read_bytes()).hexdigest()
+    if digest != manifest["recipe_sha256"]:
+        raise ValueError(f"{recipe_path} changed since the run (sha256 {digest}, run used {manifest['recipe_sha256']})")
+    recipe = load_recipe(recipe_path)
     result = evaluate(args.run_dir, recipe, stride=args.stride)
     result["stride"] = args.stride
     (args.run_dir / "criteria.json").write_text(json.dumps(result, indent=2) + "\n")

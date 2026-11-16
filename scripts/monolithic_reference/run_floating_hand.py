@@ -253,7 +253,8 @@ def main(argv=None):
     )
     write_json(args.output / "manifest.json", manifest)
     print({"status": manifest["status"], "counts": counts, "error": error, "output": str(args.output)})
-    return 0 if status in ("COMPLETE", "PARTIAL") else 1
+    # 0 only for a complete run; a PARTIAL (--max-steps) run exits 2 so wrappers cannot mistake it for complete.
+    return {"COMPLETE": 0, "PARTIAL": 2}.get(status, 1)
 
 
 if __name__ == "__main__":

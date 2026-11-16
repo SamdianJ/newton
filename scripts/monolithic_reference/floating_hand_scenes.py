@@ -228,9 +228,20 @@ def hand_keyframes(model, recipe):
             dof = int(start[labels.index(n)])
             lo.append(lower[dof])
             hi.append(upper[dof])
-        else:  # Wrist names on a floating mount: the palm pose comes from the wrist chain, no limits apply.
-            lo.append(-np.inf)
-            hi.append(np.inf)
+        else:  # Floating mount: wrist keyframes only define the palm path; keep them within the wrist limits.
+            limit = (
+                WRIST_LINEAR_LIMIT
+                if n in ("wrist_px", "wrist_py", "wrist_pz")
+                else (np.pi if n == "wrist_rz" else WRIST_ANGULAR_LIMIT)
+            )
+            for key, values in (("pregrasp", pre), ("open_at_grasp", open_), ("grasp", grasp)):
+                value = values[names.index(n)]
+                if abs(value) > limit:
+                    raise ValueError(
+                        f"grasp.{key}.{n} = {value} is outside the wrist limit {limit}; both mounts must see the same palm path"
+                    )
+            lo.append(-limit)
+            hi.append(limit)
     return names, pre, open_, np.clip(grasp + squeeze, lo, hi)
 
 
@@ -355,14 +366,6 @@ def convex_hull_asset(spec):
     return data["vertices"].astype(np.float64), data["indices"].astype(np.int32)
 
 
-def capsule_mesh_points(radius, half_height, count=32):
-    """Deterministic capsule surface points along local z, used as the convex-object hull."""
-    import trimesh
-
-    mesh = trimesh.creation.capsule(height=2 * half_height, radius=radius, count=[count, count])
-    return np.asarray(mesh.vertices, dtype=np.float64)
-
-
 def add_object(builder, spec):
     """Add the FREE object (box, capsule or convex hull of a capsule) at its recipe pose."""
     kind = spec["kind"]
@@ -390,19 +393,6 @@ def add_object(builder, spec):
         points, indices = convex_hull_asset(spec)
         builder.add_shape_convex_hull(body, mesh=newton.Mesh(points, indices), cfg=cfg, label="object_convex")
     return body
-
-
-def _hull_indices(points):
-    from scipy.spatial import ConvexHull
-
-    hull = ConvexHull(points)
-    faces = hull.simplices.copy()
-    centroid = points.mean(axis=0)
-    for f in faces:  # Orient each face outward.
-        a, b, c = points[f]
-        if np.dot(np.cross(b - a, c - a), a - centroid) < 0:
-            f[1], f[2] = f[2], f[1]
-    return faces.reshape(-1).astype(np.int32)
 
 
 def add_chain(builder, spec):

@@ -231,7 +231,16 @@ def compare(a, b):
         errors = sum(1 for r in x["records"] + y["records"] if r.get("error"))
         # A scene that fails in a checkout proves nothing about bit identity, even if both fail alike.
         verdict = {"verdict": "ERRORS" if errors else "IDENTICAL", "steps": len(x["records"]), "error_records": errors}
-        for i, (p, q) in enumerate(zip(x["records"], y["records"], strict=True)):
+        if set(x["records"][0]["stats"]) != set(y["records"][0]["stats"]):
+            # A Stats field added or removed between checkouts is not a numeric difference.
+            verdict["stats_fields"] = {
+                "only_a": sorted(set(x["records"][0]["stats"]) - set(y["records"][0]["stats"])),
+                "only_b": sorted(set(y["records"][0]["stats"]) - set(x["records"][0]["stats"])),
+            }
+        shared = set(x["records"][0]["stats"]) & set(y["records"][0]["stats"])
+        for i, (ra, rb) in enumerate(zip(x["records"], y["records"], strict=True)):
+            p = dict(ra, stats={k: v for k, v in ra["stats"].items() if k in shared})
+            q = dict(rb, stats={k: v for k, v in rb["stats"].items() if k in shared})
             fields = [f for f in ("state", "forces", "stats", "error") if p.get(f) != q.get(f)]
             if fields:
                 verdict = {"verdict": "DIFFERENT", "first_step": i, "fields": fields}

@@ -251,6 +251,11 @@ def _instrument_syncs(scene, window, device):
     }
 
 
+def receipt_status(repeats_reproduce):
+    """COMPLETE only if every repeat reproduces W0; otherwise only W0 is the natural continuation."""
+    return "COMPLETE" if all(repeats_reproduce.values()) else "REPEATS_DIFFER"
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--fixed-state", type=Path, required=True)
@@ -297,14 +302,14 @@ def main(argv=None):
             mount=args.mount,
         )
     except NotImplementedError as missing:
-        receipt["status"] = f"NOT_APPLICABLE: {missing}"
+        receipt["status"], receipt["error"] = "NOT_APPLICABLE", str(missing)
         write_json(args.output / "receipt.json", receipt)
         return 1
     device = scene.model.device
     try:
         replay = _run_window(scene, (0, window[0]), device, timed=False)
     except NotImplementedError as missing:
-        receipt["status"] = f"NOT_APPLICABLE: {missing}"
+        receipt["status"], receipt["error"] = "NOT_APPLICABLE", str(missing)
         write_json(args.output / "receipt.json", receipt)
         return 1
     receipt["replay"] = {"publication": dict(Counter(r["publication"] for r in replay)), "steps": len(replay)}
@@ -341,7 +346,7 @@ def main(argv=None):
         if name.startswith("W") and name != "W0"
     }
     # Repeats that do not reproduce W0 leave only W0 as the natural continuation; say so in the status.
-    receipt["status"] = "COMPLETE" if all(receipt["repeats_reproduce_W0"].values()) else "REPEATS_DIFFER"
+    receipt["status"] = receipt_status(receipt["repeats_reproduce_W0"])
     write_json(args.output / "receipt.json", receipt)
     print(
         json.dumps(
