@@ -94,3 +94,28 @@ class TestConvexDepth(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+class TestFeatureInventory(unittest.TestCase):
+    def test_classifies_link_capsule_and_free_capsule(self):
+        """A link capsule against the static plane is an F1 hit; a FREE capsule only becomes a new collider."""
+        import warp as wp  # noqa: PLC0415
+
+        import newton  # noqa: PLC0415
+        from scripts.monolithic_reference.feature_inventory import inventory  # noqa: PLC0415
+
+        builder = newton.ModelBuilder()
+        cfg = builder.ShapeConfig(density=0, has_particle_collision=False)
+        link = builder.add_link(mass=0.1, inertia=wp.diag(wp.vec3(1e-4)), label="link")
+        joint = builder.add_joint_revolute(-1, link, axis=(0, 1, 0), label="hinge")
+        builder.add_articulation([joint])
+        builder.add_shape_capsule(link, radius=0.01, half_height=0.02, cfg=cfg, label="link_capsule")
+        body = builder.add_link(
+            xform=wp.transform((0.2, 0, 0.1), wp.quat_identity()), mass=0.1, inertia=wp.diag(wp.vec3(1e-4))
+        )
+        builder.add_articulation([builder.add_joint_free(body)])
+        builder.add_shape_capsule(body, radius=0.01, half_height=0.02, cfg=cfg, label="free_capsule")
+        builder.add_shape_plane(body=-1, width=0, length=0, cfg=cfg, label="ground")
+        result = inventory(builder.finalize(device="cpu"))
+        self.assertEqual([hit["link_shape"] for hit in result["f1"]], ["link_capsule"])
+        self.assertEqual(sorted(s["shape"] for s in result["capsule_convex"]), ["free_capsule", "link_capsule"])
