@@ -299,8 +299,15 @@ def test_floating_chain_contact(test, device):
                     run.step(state, state, control, dt=H)
                     test.assertTrue(run.last_stats.converged, run.last_stats.failure_reason)
                     refreshes += run.last_stats.variational["contact_spatial"]["refreshes"]
-                    sweep = run._contact._spatial.sweep.displacement.numpy()
-                    test.assertTrue(np.all(sweep > 0), sweep)
+                    spatial = run._contact._spatial
+                    sweep = spatial.sweep.displacement.numpy()
+                    # Candidates follow the moving root: the last refresh of the step sees at least half
+                    # the root's COM travel since the step start (the initial guess already carries h v).
+                    travel = np.linalg.norm(
+                        state._monolithic_coupled.floating_com.numpy()[0].astype(np.float64)
+                        - spatial.root_com0.numpy()[0].astype(np.float64)
+                    )
+                    test.assertTrue(np.all(sweep >= 0.5 * travel), (sweep, travel))
                     q = state.body_q.numpy().astype(np.float64)
                     for shape, core in cores.items():
                         body = int(model.shape_body.numpy()[shape])

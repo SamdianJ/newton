@@ -292,33 +292,38 @@ def test_rejections(test, device):
 
 
 def test_failed_reset_leaves_state_unchanged(test, device):
-    """A reset rejected for nonfinite root coordinates or a too-fast root leaves every array untouched."""
+    """A rejected reset of a floating-base state leaves every array untouched (the state owner resets
+    in scratch); an incomplete history fails with a ValueError naming the missing field."""
     run = make_solver(floating_chain(device))
-    state = run.create_state(dt=1e-3)
-    for index, value, message in (
-        (3, np.nan, "Floating root coordinates and rates must be finite"),
-        (None, 2000.0, "Initial angular velocity requires dt \\* \\|omega\\| < 1"),
-    ):
-        with test.subTest(message=message):
-            if index is None:
-                rates = state.joint_qd.numpy()
-                rates[5] = value
-                state.joint_qd.assign(rates)
+    for case in ("nonfinite", "fast"):
+        with test.subTest(case=case):
+            state = run.create_state(dt=1e-3)
+            coordinates, rates = state.joint_q.numpy(), state.joint_qd.numpy()
+            if case == "nonfinite":
+                coordinates[3] = np.nan
+                message = "finite|Nonfinite"
             else:
-                coordinates = state.joint_q.numpy()
-                coordinates[index] = value
-                state.joint_q.assign(coordinates)
+                # Within the unit-norm tolerance, so a reset would renormalize the mirror before the
+                # angular-velocity check rejects the too-fast root.
+                coordinates[3:7] *= 1 + 5e-6
+                rates[5] = 2000.0
+                message = "Initial angular velocity requires dt \\* \\|omega\\| < 1"
+            state.joint_q.assign(coordinates)
+            state.joint_qd.assign(rates)
+            history = state._monolithic_coupled
             before = {
                 name: getattr(state, name).numpy().copy() for name in ("joint_q", "joint_qd", "body_q", "body_qd")
             }
-            history = state._monolithic_coupled
             before.update({"history." + name: getattr(history, name).numpy().copy() for name in run._states.schema})
             with test.assertRaisesRegex(ValueError, message):
-                run.reset_state(state, dt=1e-3)
+                run._states.reset(state, dt=1e-3)
             for name, expected in before.items():
                 actual = getattr(history, name[8:]) if name.startswith("history.") else getattr(state, name)
                 np.testing.assert_array_equal(actual.numpy(), expected, err_msg=name)
-            state = run.create_state(dt=1e-3)
+    state = run.create_state(dt=1e-3)
+    del state._monolithic_coupled.floating_com
+    with test.assertRaisesRegex(ValueError, "Invalid articulation history schema: missing floating_com"):
+        run._states.reset(state, dt=1e-3)
 
 
 def test_single_free_body_stays_rigid(test, device):
