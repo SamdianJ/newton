@@ -24,12 +24,13 @@ from .cloth_contact_run import write_json
 
 FIXTURES = Path(__file__).with_name("fixtures")
 FROZEN_GATES = FIXTURES / "cable_contact_gates_frozen_v1.json"
+FROZEN_METHOD = FIXTURES / "cable_contact_method_frozen_v1.json"
 GAUSS = ((1 - 1 / np.sqrt(3)) / 2, (1 + 1 / np.sqrt(3)) / 2)
 RING = 64
 
 
 def judge_files():
-    """The judge, the modules whose numbers it uses, and the canonical frozen gates."""
+    """The judge, the modules whose numbers it uses, the canonical frozen gates and method sidecar."""
     here = Path(__file__).resolve().parent
     return [
         Path(__file__).resolve(),
@@ -37,6 +38,7 @@ def judge_files():
         here / "cable_contact_oracle.py",
         here / "cloth_contact_run.py",
         FROZEN_GATES.resolve(),
+        FROZEN_METHOD.resolve(),
     ]
 
 
@@ -56,7 +58,7 @@ def evaluator_identity():
         "sha256": hashlib.sha256(files[0].read_bytes()).hexdigest(),
         "inputs_sha256": {path.name: hashlib.sha256(path.read_bytes()).hexdigest() for path in files[1:]},
         "source_sha": git("rev-parse", "HEAD"),
-        # Uncommitted changes to the judge, its oracle or the canonical gates all count.
+        # Uncommitted changes to the judge, its oracle, the canonical gates or the method sidecar all count.
         "file_status": git("status", "--porcelain", "--", *(str(path) for path in files)),
     }
 
@@ -436,7 +438,12 @@ def evaluate(run, gates):
             frames["x"][k], frames["x"][k + 1], segments, i, j, min_sine=gates["crossing"]["min_sine"]
         )
         crossings.extend(
-            {"step": int(frames["step"][k + 1]), "segments": [int(p), int(q)]} for p, q in zip(a, b, strict=True)
+            {
+                "step": int(frames["step"][k + 1]),
+                "segments": [int(p), int(q)],
+                "self": bool(segments["cable"][p] == segments["cable"][q]),
+            }
+            for p, q in zip(a, b, strict=True)
         )
 
     # Energy, driver work and link, per cable in FP64.
@@ -542,11 +549,16 @@ def evaluate(run, gates):
     recipe_frozen = run.manifest.get("recipe_sha256") in frozen_recipes
     # Missing receipt fields count as unclean: a receipt must show a clean, unchanged tree.
     source_clean = run.manifest.get("git_status") == "" and run.manifest.get("source_files_changed_during_run") == []
+    # The E2E method parameters are those of the frozen sidecar, key for key (PR3, K4).
+    method_frozen = method == "cable-contact" and run.manifest["scene"].get("method_config") == json.loads(
+        FROZEN_METHOD.read_text()
+    )
     gated = scene in penetration_gate["scenes"]
     verdict = "PASS" if complete and all(g["pass"] for g in gate_results.values()) else "FAIL"
     if not complete:
         verdict = "PARTIAL" if status == "PARTIAL" else "FAIL"
-    # A PASS binds a frozen recipe, frozen gates and committed source; anything else is not a PASS.
+    # A PASS binds a frozen recipe, frozen gates, the frozen method sidecar and committed source;
+    # a run with contact off is a control and never a PASS.
     if verdict == "PASS":
         if not gated:
             verdict = "NOT_GATED"
@@ -554,6 +566,10 @@ def evaluate(run, gates):
             verdict = "PASS_ON_DRAFT_GATES"
         elif not recipe_frozen:
             verdict = "NOT_FROZEN_RECIPE"
+        elif method != "cable-contact":
+            verdict = "METHOD_OFF"
+        elif not method_frozen:
+            verdict = "NOT_FROZEN_METHOD"
         elif not source_clean:
             verdict = "DIRTY_SOURCE"
     stopped = counts["STOPPED_ACCEPTED"]
@@ -568,6 +584,7 @@ def evaluate(run, gates):
         "evaluator": evaluator_identity(),
         "recipe_sha256": run.manifest.get("recipe_sha256"),
         "recipe_frozen": recipe_frozen,
+        "method_frozen": method_frozen,
         "source_clean": source_clean,
         "verdict": verdict,
         "gates": gate_results,
@@ -581,6 +598,8 @@ def evaluate(run, gates):
             "penetration_peak_step": int(frames["step"][int(np.argmax(peak))]),
             "overlapping_pairs_max": int(overlapping.max()),
             "crossing_events": len(crossings),
+            "crossing_events_self": sum(event["self"] for event in crossings),
+            "crossing_events_inter": sum(not event["self"] for event in crossings),
             "crossing_limits": (
                 "lower bound: misses passages at less than the min_sine angle (stacked near-parallel turns), "
                 "tunnelling with neither frame closer than rA + rB, and a crossing point that moves to the "
@@ -601,6 +620,8 @@ def evaluate(run, gates):
             "rest_window_max_speed_m_s": rest_speed,
             "min_curvature_radius_over_radius": [r / float(np.max(topo["radius"])) for r in curvature_radius],
             "contact_pairs_checked": len(i),
+            # Solver-side peaks the runner recorded per step (cable contact counts, triplets, used shift).
+            "solver_cable": run.summary.get("cable"),
             "frames": count,
         },
     }

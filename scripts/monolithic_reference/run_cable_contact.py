@@ -122,6 +122,11 @@ def execute(args):
     scene, error, stage = None, None, "construction"
     counts = dict.fromkeys(("CONVERGED", "STOPPED_ACCEPTED", "HARD_FAILURE"), 0)
     frames, chunks, stopped, published, attempted = [], [], [], 0, 0
+    # Per-run peaks of the per-step cable diagnostics (plan section 2: used shift, contact and triplet counts).
+    cable = {"used_shift_max": 0.0}
+    if args.method == "cable-contact":
+        cable.update(dict.fromkeys(("triplets_max", "inter_candidates_max", "inter_active_max"), 0))
+        cable.update(dict.fromkeys(("self_candidates_max", "self_active_max"), 0))
     rollout_start = rollout_seconds = None
     construction_start = time.perf_counter()
 
@@ -191,6 +196,13 @@ def execute(args):
                     row.update({name: getattr(stats, name) for name in STAT_FIELDS})
                     row.update(_graph_totals(stats.variational))
                     row["contact_pool"] = (stats.variational or {}).get("contact_pool")
+                    row["cable_used_shift_max"] = (stats.variational or {}).get("cable_used_shift_max")
+                    cable["used_shift_max"] = max(cable["used_shift_max"], row["cable_used_shift_max"] or 0.0)
+                    if args.method == "cable-contact":
+                        # Triplets of the last cable contact evaluation; the solver has no public accessor.
+                        records = scene.solver._cable_contact.pool.records
+                        row["cable_contact_triplets"] = int(records.triplet_count.numpy()[0])
+                        cable["triplets_max"] = max(cable["triplets_max"], row["cable_contact_triplets"])
                 try:
                     forces = scene.solver.get_contact_forces(scene.state)
                     label = publication(stats, forces, previous_generation=previous)
@@ -207,6 +219,13 @@ def execute(args):
                     if label == "STOPPED_ACCEPTED":
                         stopped.append({"step": before + 1, "reason": stats.failure_reason})
                     history = scene.state._monolithic_coupled
+                    if args.method == "cable-contact":
+                        diagnostics = scene.solver.get_cable_contact_diagnostics(scene.state)
+                        row["cable_contact"] = {name: diagnostics[name] for name in ("inter", "self")}
+                        for name in ("inter", "self"):
+                            for key in ("candidates", "active"):
+                                peak = f"{name}_{key}_max"
+                                cable[peak] = max(cable[peak], diagnostics[name][key])
                     x, v = scene.state.particle_q.numpy(), scene.state.particle_qd.numpy()
                     if not (np.isfinite(x).all() and np.isfinite(v).all()):
                         error = "Nonfinite published particle state"
@@ -272,6 +291,7 @@ def execute(args):
             "planned_steps": planned,
             "publication_counts": counts,
             "stopped_steps": stopped,
+            "cable": cable,
             "construction_seconds": manifest.get("construction_seconds"),
             "rollout_seconds": rollout_seconds,
             "memory": _memory(None if scene is None else scene.model.device),

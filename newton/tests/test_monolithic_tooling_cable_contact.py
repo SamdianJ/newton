@@ -357,7 +357,7 @@ class TestCableContactVerdict(unittest.TestCase):
         self.assertEqual(bind_verdict(failed, FROZEN_GATES)["verdict"], "FAIL")
 
     def test_judge_identity_covers_its_oracle_and_the_canonical_gates(self):
-        """An uncommitted edit to the gates or to the energy oracle must demote a PASS like an edit to the judge."""
+        """An uncommitted edit to the gates, the method sidecar or the energy oracle demotes a PASS like the judge."""
         names = [path.name for path in judge_files()]
         self.assertEqual(
             names,
@@ -367,6 +367,7 @@ class TestCableContactVerdict(unittest.TestCase):
                 "cable_contact_oracle.py",
                 "cloth_contact_run.py",
                 "cable_contact_gates_frozen_v1.json",
+                "cable_contact_method_frozen_v1.json",
             ],
         )
         dirty = {
@@ -633,7 +634,22 @@ class TestCableContactReceipt(unittest.TestCase):
             self.assertEqual(evaluate(run, GATES)[0]["verdict"], "NOT_FROZEN_RECIPE")
             frozen = copy.deepcopy(GATES)
             frozen["frozen"]["recipes_sha256"]["test.json"] = run.manifest["recipe_sha256"]
-            self.assertEqual(evaluate(run, frozen)[0]["verdict"], "PASS")
+            # Contact off is a control run, never an acceptance PASS.
+            self.assertEqual(evaluate(run, frozen)[0]["verdict"], "METHOD_OFF")
+            # A PASS binds the frozen method sidecar; any other method configuration is not one.
+            sidecar = json.loads((FIXTURES / "cable_contact_method_frozen_v1.json").read_text())
+            run.manifest["arguments"]["method"] = "cable-contact"
+            run.manifest["scene"]["method_config"] = dict(sidecar, normal_stiffness=1e6)
+            criteria = evaluate(run, frozen)[0]
+            self.assertEqual(criteria["verdict"], "NOT_FROZEN_METHOD")
+            self.assertFalse(criteria["method_frozen"])
+            run.manifest["scene"]["method_config"] = {k: v for k, v in sidecar.items() if k != "candidate_capacity"}
+            self.assertEqual(evaluate(run, frozen)[0]["verdict"], "NOT_FROZEN_METHOD")
+            run.manifest["scene"]["method_config"] = dict(sidecar)
+            criteria = evaluate(run, frozen)[0]
+            self.assertEqual(criteria["verdict"], "PASS")
+            self.assertTrue(criteria["method_frozen"])
+            self.assertIn("cable_contact_method_frozen_v1.json", criteria["evaluator"]["inputs_sha256"])
             run.manifest["git_status"] = " M scripts/monolithic_reference/cable_contact_scenes.py"
             self.assertEqual(evaluate(run, frozen)[0]["verdict"], "DIRTY_SOURCE")
             del run.manifest["git_status"]  # a receipt without the field is not clean either
@@ -652,6 +668,47 @@ class TestCableContactReceipt(unittest.TestCase):
             self.assertEqual(written["evaluator"]["source_sha"], head)
             with self.assertRaisesRegex(ValueError, "differs from the recipe scene"):
                 run_main(["E1", "--recipe", str(path), "--max-steps", "1", "--output", str(output / "again")])
+
+    def test_cable_contact_run_records_solver_diagnostics(self):
+        """Every published step of a cable-contact run records the solver's cable counts and used shift."""
+        recipe = json.loads((FIXTURES / "cable_contact_e4_cross_v1.json").read_text())
+        recipe["cables"] = [{"vertices": 8, "segment_length_m": 0.007}] * 2
+        recipe["cross"] = dict(recipe["cross"], angles_deg=[0.0, 90.0], heights_m=[0.02, 0.025])
+        sidecar = FIXTURES / "cable_contact_method_frozen_v1.json"
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "recipe.json"
+            path.write_text(json.dumps(recipe))
+            output = Path(directory) / "run"
+            arguments = ["E4", "--recipe", str(path), "--max-steps", "2", "--output", str(output)]
+            with contextlib.redirect_stdout(io.StringIO()):
+                code = run_main([*arguments, "--method", "cable-contact", "--method-config", str(sidecar)])
+            self.assertEqual(code, 0)
+            rows = [json.loads(line) for line in (output / "steps.jsonl").read_text().splitlines()]
+            self.assertEqual(len(rows), 2)
+            for row in rows:
+                self.assertEqual(row["publication_status"], "CONVERGED")
+                self.assertGreaterEqual(row["cable_used_shift_max"], 0.0)
+                # Triplets come from active pairs only; a gap inside the padding gives candidates and none.
+                self.assertGreaterEqual(row["cable_contact_triplets"], 0)
+                for name in ("inter", "self"):
+                    channel = row["cable_contact"][name]
+                    self.assertEqual(set(channel), {"candidates", "active", "compressive_load_N", "max_overlap_m"})
+                    self.assertLessEqual(channel["active"], channel["candidates"])
+            # The strands start with a 1 mm gap, inside the 2 mm candidate padding: inter candidates exist.
+            self.assertGreater(rows[-1]["cable_contact"]["inter"]["candidates"], 0)
+            summary = json.loads((output / "summary.json").read_text())
+            peaks = summary["cable"]
+            self.assertEqual(peaks["triplets_max"], max(row["cable_contact_triplets"] for row in rows))
+            self.assertEqual(
+                peaks["inter_candidates_max"], max(row["cable_contact"]["inter"]["candidates"] for row in rows)
+            )
+            self.assertEqual(peaks["used_shift_max"], max(row["cable_used_shift_max"] for row in rows))
+            criteria, _ = evaluate(load_run(output), GATES)
+            self.assertEqual(criteria["diagnostics"]["solver_cable"], peaks)
+            self.assertEqual(
+                criteria["diagnostics"]["crossing_events_self"] + criteria["diagnostics"]["crossing_events_inter"],
+                criteria["diagnostics"]["crossing_events"],
+            )
 
 
 if __name__ == "__main__":
