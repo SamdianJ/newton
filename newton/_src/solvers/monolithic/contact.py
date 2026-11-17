@@ -396,22 +396,30 @@ def _law(
         c = beta - geometric * wp.dot(across, ha)
         if a != radial or b != type(radius)(0.0) or c != beta:
             half = type(radius)(0.5) * (a - c)
-            root = wp.sqrt(half * half + b * b)
+            # Normalize by the larger entry first: for a barely loaded contact
+            # the squares of these entries underflow.
+            size = wp.max(wp.abs(half), wp.abs(b))
+            root = type(radius)(0.0)
             cosine = type(radius)(1.0)
             sine = type(radius)(0.0)
-            if b != type(radius)(0.0):
-                # Eigenvector of the larger eigenvalue, from the better conditioned row.
-                cosine = half + root
-                sine = b
-                if half < type(radius)(0.0):
-                    cosine = b
-                    sine = root - half
-                length = wp.sqrt(cosine * cosine + sine * sine)
-                cosine /= length
-                sine /= length
-            elif half < type(radius)(0.0):
-                cosine = type(radius)(0.0)
-                sine = type(radius)(1.0)
+            if size > type(radius)(0.0):
+                half_unit = half / size
+                b_unit = b / size
+                unit = wp.sqrt(half_unit * half_unit + b_unit * b_unit)
+                root = size * unit
+                if b_unit != type(radius)(0.0):
+                    # Eigenvector of the larger eigenvalue, from the better conditioned row.
+                    cosine = half_unit + unit
+                    sine = b_unit
+                    if half_unit < type(radius)(0.0):
+                        cosine = b_unit
+                        sine = unit - half_unit
+                    length = wp.sqrt(cosine * cosine + sine * sine)
+                    cosine /= length
+                    sine /= length
+                elif half_unit < type(radius)(0.0):
+                    cosine = type(radius)(0.0)
+                    sine = type(radius)(1.0)
             t = cosine * basis + sine * across
             radial = type(radius)(0.5) * (a + c) + root
             beta = type(radius)(0.5) * (a + c) - root

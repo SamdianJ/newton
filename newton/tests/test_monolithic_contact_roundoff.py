@@ -307,7 +307,19 @@ def test_frozen_weight_classification(test, device, dtype):
     np.testing.assert_array_equal(values[:, 2:], 0)
 
 
-def _law_probe(device, dtype, distance, gradient, *, start_uncertified=0, smoothing=0.0, offset=0.0, stiffness=1.0):
+def _law_probe(
+    device,
+    dtype,
+    distance,
+    gradient,
+    *,
+    start_uncertified=0,
+    smoothing=0.0,
+    offset=0.0,
+    stiffness=1.0,
+    hessian=None,
+    tangent_terms=False,
+):
     vector = wp.vec3d if dtype == wp.float64 else wp.vec3
     native = np.float64 if dtype == wp.float64 else np.float32
     current, start = _geometry_type(dtype)(), _geometry_type(dtype)()
@@ -325,9 +337,14 @@ def _law_probe(device, dtype, distance, gradient, *, start_uncertified=0, smooth
         geometry.field_magnitude = wp.array([0.1], dtype=dtype, device=device)
         geometry.uncertified = wp.array([uncertified], dtype=int, device=device)
         geometry.orientation = wp.ones(1, dtype=dtype, device=device)
+    if hessian is not None:
+        matrix = wp.mat33d if dtype == wp.float64 else wp.mat33
+        current.hessian = wp.array([hessian], dtype=matrix, device=device)
     integer = wp.zeros(1, dtype=int, device=device)
     scalar = wp.zeros(1, dtype=dtype, device=device)
     response = _response(dtype, 1, device)
+    tangent = wp.zeros(1, dtype=vector, device=device)
+    weights = wp.zeros((1, 3), dtype=dtype, device=device)
     flags = wp.zeros(2, dtype=int, device=device)
     energy = wp.zeros((1, 2), dtype=dtype, device=device)
     energy_magnitude = wp.zeros_like(energy)
@@ -351,8 +368,8 @@ def _law_probe(device, dtype, distance, gradient, *, start_uncertified=0, smooth
             energy,
             wp.empty(0, dtype=dtype, device=device),
             wp.zeros_like(residual),
-            wp.zeros_like(residual),
-            wp.zeros((1, 3), dtype=dtype, device=device),
+            tangent,
+            weights,
             residual,
             wp.zeros((1, 4), dtype=dtype, device=device),
             integer,
@@ -369,6 +386,8 @@ def _law_probe(device, dtype, distance, gradient, *, start_uncertified=0, smooth
         ],
         device=device,
     )
+    if tangent_terms:
+        return flags.numpy(), tangent.numpy()[0], weights.numpy()[0]
     return (
         flags.numpy(),
         energy.numpy(),
@@ -376,6 +395,29 @@ def _law_probe(device, dtype, distance, gradient, *, start_uncertified=0, smooth
         energy_magnitude.numpy(),
         response.residual_magnitude.numpy(),
     )
+
+
+def test_tiny_load_curvature(test, device, dtype):
+    """Diagonalize the curvature block of a barely loaded contact without underflow."""
+    native = np.float64 if dtype == wp.float64 else np.float32
+    # Curvature 1000 /m across the direction (1, 1, 0); squares of the block entries underflow.
+    stiffness = float(np.sqrt(np.finfo(native).tiny)) * 1e-6
+    direction = np.array([1.0, 1.0, 0.0]) / np.sqrt(2.0)
+    flags, tangent, weights = _law_probe(
+        device,
+        dtype,
+        -0.001,
+        [0, 0, 1],
+        stiffness=stiffness,
+        hessian=1000.0 * np.outer(direction, direction),
+        tangent_terms=True,
+    )
+    test.assertEqual(int(flags[0]), 0)
+    load = stiffness * 0.001
+    # The flat direction keeps weight zero; the curved one loses load times curvature.
+    np.testing.assert_allclose(weights, [stiffness, -1000.0 * load, 0.0], rtol=1e-5, atol=0.0)
+    test.assertLess(abs(tangent @ direction), 1e-6)
+    np.testing.assert_allclose(np.linalg.norm(tangent), 1.0, rtol=1e-6)
 
 
 def test_frozen_start_domain(test, device, dtype):
@@ -436,6 +478,7 @@ for _dtype, _suffix in ((wp.float32, "fp32"), (wp.float64, "fp64")):
         test_mesh_magnitudes,
         test_frozen_weight_classification,
         test_frozen_start_domain,
+        test_tiny_load_curvature,
         test_zero_residual_magnitude,
     ):
         add_function_test(
