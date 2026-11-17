@@ -49,6 +49,22 @@ def test_capacity_overflow_rolls_back(test, device, *, precision, graph):
                 np.testing.assert_array_equal(snapshot(state)[name], value, err_msg=name)
 
 
+def test_overflow_with_cloth_contact_rolls_back(test, device, *, precision):
+    """With cloth contact also enabled, a cable contact overflow still reports CONTACT_OVERFLOW and restores the state."""
+    for options in ({"candidate_capacity": 1}, {"support_capacity": 1}):
+        with test.subTest(options=options):
+            solver, state = cloth_and_cable_solver(device=device, precision=precision, cable_contact=options)
+            before = snapshot(state)
+            solver.step(state, state, solver.create_control(), dt=DT)
+            test.assertEqual(solver.last_stats.status, solver.Status.CONTACT_OVERFLOW)
+            test.assertTrue(solver.last_stats.rolled_back)
+            overflow, dropped, _ = (int(v) for v in solver._cable_contact.pool.status.numpy())
+            test.assertGreater(overflow + dropped, 0)
+            for name, value in before.items():
+                np.testing.assert_array_equal(snapshot(state)[name], value, err_msg=name)
+            test.assertEqual(state._monolithic_coupled.schema_version.numpy().tolist(), [10])
+
+
 def test_graph_matches_eager(test, device, *, precision):
     """Production PCG under CUDA graphs and eagerly gives the same hairpin steps bit for bit."""
     results = {}
@@ -431,6 +447,7 @@ for _precision in SolverMonolithic.Precision:
         test_slot_order_does_not_change_results,
         test_anchor_makes_the_response_translation_exact,
         test_cloth_and_cable_checkpoint,
+        test_overflow_with_cloth_contact_rolls_back,
     ):
         add_function_test(
             TestCableContactRuntime,

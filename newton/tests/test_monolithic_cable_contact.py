@@ -139,7 +139,7 @@ def reference_gradient(solver, rest, chains, positions, *, stiffness=1e5, smooth
     return energy, gradient, (segments, samples, pairs)
 
 
-def cloth_and_cable_solver(*, device=None, precision=SolverMonolithic.Precision.FP64):
+def cloth_and_cable_solver(*, device=None, precision=SolverMonolithic.Precision.FP64, cable_contact=None):
     """Two pressed cable strands and a separate cloth triangle with cloth and cable contact both enabled."""
     points, chains = strands()
     builder = newton.ModelBuilder(gravity=(0, 0, 0))
@@ -163,7 +163,7 @@ def cloth_and_cable_solver(*, device=None, precision=SolverMonolithic.Precision.
         ],
         cable_inputs=[cable_input(chain, points) for chain in chains],
         cloth_contact={"radius": 0.02, "normal_stiffness": 1e3, "candidate_capacity": 64},
-        cable_contact={},
+        cable_contact={} if cable_contact is None else cable_contact,
         friction_velocity_scale=0.01,
         mass_mode="lumped",
         newton_max_iterations=20,
