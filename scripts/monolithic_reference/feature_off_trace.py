@@ -87,7 +87,8 @@ def _quick(case_id):
 
         cases = json.loads((FIXTURES / "quick_cases_v1.json").read_text())["cases"]
         suffix = "-fp32" if precision == "fp32" else ""
-        case = next(c for c in cases if c["id"] == case_id + suffix)
+        # Sharpa has a separate -fp32 case and snapshot; Franka runs both precisions from one case.
+        case = next(c for c in cases if c["id"] in (case_id + suffix, case_id) and precision in c["gates"])
         window = WINDOWS[case["scene"]](precision, device)
         values, model_values = load_snapshot(ASSET_ROOT / "data" / case["snapshot"]["path"], case["snapshot"]["sha256"])
         window.start(values, model_values, case["snapshot"]["step"])

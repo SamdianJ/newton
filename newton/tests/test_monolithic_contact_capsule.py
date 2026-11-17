@@ -109,6 +109,37 @@ def test_roundoff_magnitude(test, device):
     test.assertTrue(np.all(gradient_error <= 32 * np.finfo(np.float32).eps * ag + 1e-12), np.max(gradient_error / ag))
 
 
+def test_roundoff_magnitude_at_seam(test, device):
+    """Per component, the gradient magnitude bounds an FP32 point one ulp across a cap seam.
+
+    The exact points lie on or just inside the axial span, where the exact gradient has no axial part.
+    Their FP32 images one ulp beyond float32(h) are within one rounding of the point (eps32 * |z|) and
+    switch the axial part on; the magnitude must cover that component (P9d PR1 review round 2).
+    """
+    rho = 1e-3
+    exact, rounded = [], []
+    for sign in (1.0, -1.0):
+        beyond = sign * np.nextafter(np.float32(HALF), np.float32(np.inf))
+        for z in (sign * HALF, sign * (HALF - 1e-9)):
+            for angle in (0.3, 2.0):
+                exact.append((rho * np.cos(angle), rho * np.sin(angle), z))
+                rounded.append((np.float32(exact[-1][0]), np.float32(exact[-1][1]), beyond))
+    exact, rounded = np.asarray(exact), np.asarray(rounded, dtype=np.float32)
+    test.assertTrue(np.all(np.abs(rounded[:, 2].astype(np.float64) - exact[:, 2]) <= np.finfo(np.float32).eps * HALF))
+    pts = wp.array(exact, dtype=wp.vec3d, device=device)
+    values = wp.zeros(len(exact), dtype=wp.float64, device=device)
+    gradients = wp.zeros(len(exact), dtype=wp.vec3d, device=device)
+    pm = wp.array(np.abs(exact), dtype=wp.vec3d, device=device)
+    wp.launch(_magnitude64, len(exact), [pts, wp.vec3d(RADIUS, HALF, 0.0), pm, values, gradients], device=device)
+    _, gradient_ref = _reference(exact)
+    _, observed = _query(device, "fp32", GeoType.CAPSULE, (RADIUS, HALF, 0.0), rounded)
+    error = np.abs(observed.astype(np.float64) - gradient_ref.astype(np.float64))
+    # The FP32 gradient's axial part is about ulp(h) / rho here: far above eps32, so a zero bound fails.
+    test.assertGreater(float(error[:, 2].min()), 1e-6)
+    bound = 32 * np.finfo(np.float32).eps * gradients.numpy() + 1e-12
+    test.assertTrue(np.all(error <= bound), np.max(error / bound))
+
+
 def test_surface_samples(test, device):
     """Exact area 4 pi r^2 + 4 pi r h, points on the surface, exact outward normals; h = 0 is the sphere area."""
     for half in (HALF, 0.0, 0.001):
@@ -282,6 +313,7 @@ for _device in get_test_devices():
         test_field_matches_long_double,
         test_gradient_is_field_derivative,
         test_roundoff_magnitude,
+        test_roundoff_magnitude_at_seam,
         test_surface_samples,
         test_resting_pairs,
         test_dense_capsule_contact,

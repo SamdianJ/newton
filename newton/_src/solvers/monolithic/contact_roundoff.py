@@ -63,8 +63,10 @@ def analytic_geometry_magnitude(geo: int, scale: Any, y: Any, point_magnitude: A
         if axial != y[2]:
             offset_magnitude[2] = point_magnitude[2] + wp.abs(y[2]) + wp.abs(scale[1])
         elif wp.abs(y[2]) >= scale[1] - point_magnitude[2]:
-            # Within one perturbation of the cap seam the gradient's axial part can switch on;
-            # the value is unaffected (its axial normal component is zero here).
+            # A point perturbation of size eps * point_magnitude can cross a cap seam and switch the
+            # gradient's axial part on; the value is unaffected (its axial normal component is zero).
+            # point_magnitude carries no eps, so this covers nearly every in-span point: a conservative
+            # axial bound of relative order one for capsules.
             offset_magnitude[2] = point_magnitude[2]
         _n, _length, gradient, alength = _unit_magnitude(offset, offset_magnitude)
         value = alength + wp.abs(phi)

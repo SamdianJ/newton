@@ -19,7 +19,8 @@ SQRT_HALF = float(np.sqrt(0.5))
 # Set before measuring (P9d PR1): 10% of the 2 mm penetration gate, within 5 mm of the surface.
 HULL_FIELD_TOLERANCE_M, HULL_FIELD_BAND_M = 2e-4, 5e-3
 # Set before measuring (P9d PR1 review round 1): contact normal within 2 degrees of the exact distance
-# gradient, 2-5 mm outside face centroids (the distance to a convex set is C1 outside it).
+# gradient, 2-5 mm outside face centroids (the distance to a convex set is C1 outside it). Review round 2
+# extends the same bound, unchanged, to probes outside edge midpoints and vertices.
 HULL_GRADIENT_ANGLE_RAD = np.radians(2.0)
 
 
@@ -149,8 +150,31 @@ def test_pinned_hull_field_accuracy(test, device):
     points = origins + directions * offsets
     exact = np.array([exact_distance(p) for p in points])
     keep = np.abs(exact) <= HULL_FIELD_BAND_M
-    # Gradient probes: 2-5 mm outside face centroids; the exact gradient by central differences.
-    outside = triangles[faces].mean(axis=1) + face_normal[faces] * rng.uniform(2e-3, 5e-3, size=(len(faces), 1))
+    # Gradient probes 2-5 mm outside face centroids, edge midpoints (along the mean of the two face
+    # normals) and vertices (along the mean of the incident face normals); the exact gradient by central
+    # differences.
+    indices = np.asarray(mesh.indices).reshape(-1, 3)
+    edge_normals, vertex_normals = {}, np.zeros_like(vertices)
+    for face, corners in enumerate(indices):
+        for a, b in ((0, 1), (1, 2), (2, 0)):
+            key = tuple(sorted((int(corners[a]), int(corners[b]))))
+            edge_normals[key] = edge_normals.get(key, 0.0) + face_normal[face]
+        np.add.at(vertex_normals, corners, face_normal[face])
+    edges = list(edge_normals)
+    edges = [edges[i] for i in rng.choice(len(edges), size=200, replace=False)]
+    edge_points = np.array([(vertices[a] + vertices[b]) / 2 for a, b in edges])
+    edge_directions = np.array([edge_normals[e] / np.linalg.norm(edge_normals[e]) for e in edges])
+    corner_ids = rng.choice(len(vertices), size=200, replace=False)
+    corner_directions = vertex_normals[corner_ids] / np.linalg.norm(vertex_normals[corner_ids], axis=1)[:, None]
+    probe_kinds = ("face", "edge", "vertex")
+    probe_origins = (triangles[faces].mean(axis=1), edge_points, vertices[corner_ids])
+    probe_directions = (face_normal[faces], edge_directions, corner_directions)
+    outside = np.vstack(
+        [
+            o + d * rng.uniform(2e-3, 5e-3, size=(len(o), 1))
+            for o, d in zip(probe_origins, probe_directions, strict=True)
+        ]
+    )
     h = 1e-7
     exact_gradient = np.array(
         [[(exact_distance(p + h * e) - exact_distance(p - h * e)) / (2 * h) for e in np.eye(3)] for p in outside]
@@ -172,9 +196,11 @@ def test_pinned_hull_field_accuracy(test, device):
         np.linalg.norm(field_gradient, axis=1) * np.linalg.norm(exact_gradient, axis=1)
     )
     angle = np.arccos(np.clip(cosine, -1.0, 1.0))
-    test.assertLessEqual(
-        float(angle.max()), HULL_GRADIENT_ANGLE_RAD, f"max normal angle {np.degrees(angle.max()):.3f} deg"
-    )
+    for kind, part in zip(probe_kinds, np.split(angle, np.cumsum([len(o) for o in probe_origins])[:-1]), strict=True):
+        with test.subTest(probe=kind):
+            test.assertLessEqual(
+                float(part.max()), HULL_GRADIENT_ANGLE_RAD, f"max {kind} normal angle {np.degrees(part.max()):.3f} deg"
+            )
 
 
 def test_convex_mesh_rejected_as_cloth_target(test, device):

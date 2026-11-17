@@ -208,6 +208,16 @@ def test_mesh_link_without_particles_constructs(test, device):
     _solver(_link_scene(device, mesh, particle_flag=True, plane=False))
 
 
+def test_unqueried_particle_box_skips_target_checks(test, device):
+    """F2 (review round 2): without tet triangles a COLLIDE_PARTICLES link box is never queried, so the
+    BOX smoothing interior check must not reject it; it once ran on every particle-flagged shape."""
+
+    def box(builder, link, cfg):
+        builder.add_shape_box(link, hx=0.001, hy=0.001, hz=0.001, cfg=cfg, label="arm_box")
+
+    _solver(_link_scene(device, box, particle_flag=True, plane=False), box_smoothing=0.002, alignment_policy="frozen")
+
+
 def test_nonconvex_convex_mesh_raises(test, device):
     """CONVEX_MESH contacts with its own triangles and SDF, so a non-convex mesh is rejected by name."""
     import newton  # noqa: PLC0415
@@ -246,6 +256,7 @@ for _device in get_test_devices():
         test_unsupported_particle_target_still_raises,
         test_link_plane_against_static_box_raises,
         test_mesh_link_without_particles_constructs,
+        test_unqueried_particle_box_skips_target_checks,
         test_nonconvex_convex_mesh_raises,
     ):
         add_function_test(TestContactUnsupportedShapes, _test.__name__, _test, devices=[_device])

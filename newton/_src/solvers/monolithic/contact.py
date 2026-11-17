@@ -690,7 +690,9 @@ class ContactObjective:
             from .contact_actor import _validate_actor_targets  # noqa: PLC0415
 
             _validate_actor_targets(self, samples)
-        targets = shapes if samples is None else np.union1d(shapes, np.asarray(samples.targets_used, dtype=np.int32))
+        # Only queried shapes are targets: particle-flagged shapes without tet triangles are never evaluated.
+        queried = shapes if particle_targets else np.empty(0, dtype=np.int32)
+        targets = queried if samples is None else np.union1d(queried, np.asarray(samples.targets_used, dtype=np.int32))
         if alignment_policy == "frozen":
             for target in targets[np.isin(v["shape_type"][targets], [int(GeoType.MESH), int(GeoType.CONVEX_MESH)])]:
                 index = int(v["_shape_sdf_index"][target])

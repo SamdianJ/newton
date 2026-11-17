@@ -311,6 +311,14 @@ class ContactSamples:
                     )
         surfaces, seen = {}, set()
         targets_used = set(tet_targets)
+        # Each CONVEX_MESH shape is checked once, however many pairs and roles it takes.
+        convex_checked = set()
+
+        def check_convex(shape, scale):
+            if types[shape] == GeoType.CONVEX_MESH and shape not in convex_checked:
+                _check_convex(model.shape_source[shape], scale, model.shape_label[shape])
+                convex_checked.add(shape)
+
         # Pairs, and each pair's two directions, follow the canonical shape order.
         rank = {s: i for i, s in enumerate(_canonical_shapes(actors, range(model.shape_count)))}
         ordered = sorted(
@@ -371,8 +379,7 @@ class ContactSamples:
                     )
                 if types[source] in MESH_TYPES:
                     mesh = model.shape_source[source]
-                    if types[source] == GeoType.CONVEX_MESH:
-                        _check_convex(mesh, scales[source], model.shape_label[source])
+                    check_convex(source, scales[source])
                     self.meshes[source] = (mesh, np.array(mesh.vertices, copy=True), np.array(mesh.indices, copy=True))
                 targets_used.add(target)
                 ps, ns, ws = surfaces[source]
@@ -430,8 +437,7 @@ class ContactSamples:
             if geo in MESH_TYPES:
                 mesh = model.shape_source[s]
                 _surface_samples(geo, scale.astype(float), mesh)
-                if geo == GeoType.CONVEX_MESH:
-                    _check_convex(mesh, scale, model.shape_label[s])
+                check_convex(s, scale)
                 self.meshes[s] = (mesh, np.array(mesh.vertices, copy=True), np.array(mesh.indices, copy=True))
         self.targets_used = tuple(sorted(targets_used))
         self.source_shapes = np.asarray(source_shapes, dtype=np.int32)
