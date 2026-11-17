@@ -248,6 +248,83 @@ def test_predicted_point_outside_domain_restarts_from_step_start(test, device):
     np.testing.assert_allclose(states[1][0].joint_q.numpy(), states[0][0].joint_q.numpy(), atol=1e-9)
 
 
+def test_zero_gravity_conserves_linear_momentum(test, device):
+    """Without external forces the discrete linear momentum of an articulated floating tree is constant.
+
+    The root translation rows are the total momentum balance (their Jacobian columns are e_k for every
+    link), so the drift is the nonlinear residual tolerance accumulated over the steps.
+    """
+    for precision, bound in (("fp64", 1e-9), ("fp32", 2e-5)):
+        with test.subTest(precision=precision):
+            model = floating_chain(device, gravity=(0.0, 0.0, 0.0))
+            run = make_solver(model, precision)
+            state, control = run.create_state(dt=H), run.create_control()
+            mass = model.body_mass.numpy().astype(np.float64)
+
+            initial = mass @ state._monolithic_coupled.link_v_com.numpy().astype(np.float64)
+            for _ in range(100):
+                run.step(state, state, control, dt=H)
+                test.assertTrue(run.last_stats.converged, run.last_stats.failure_reason)
+            final = mass @ state._monolithic_coupled.link_v_com.numpy().astype(np.float64)
+            drift = np.abs(final - initial).max() / np.abs(initial).max()
+            test.assertLessEqual(drift, bound, f"relative linear momentum drift {drift:.3e}")
+
+
+def test_floating_chain_contact(test, device):
+    """A floating box chain dropped on the ground: every step converges, candidates follow the moving
+    root (refreshes, nonzero sweep of every link), penetration stays at the box-sampling level, and the
+    eager diagnostic path matches the production path (CUDA graphs on CUDA)."""
+    from scripts.monolithic_reference import floating_base_integration as scene  # noqa: PLC0415
+    from scripts.monolithic_reference import floating_hand_criteria as fc  # noqa: PLC0415
+
+    for precision in ("fp64", "fp32"):
+        frames = []
+        for mode, graph in (("diagnostic", False), ("production", device.is_cuda)):
+            with test.subTest(precision=precision, mode=mode):
+                model = scene.chain(GRAVITY, ground=True).finalize(device=device)
+                run = make_solver(
+                    model,
+                    precision,
+                    contact_stiffness=1e9,
+                    publish_policy="current_iterate",
+                    pcg_mode=mode,
+                    use_cuda_graph=graph,
+                )
+                state, control = run.create_state(dt=H), run.create_control()
+                cores = {
+                    s: fc.model_core(model, s) for s in range(model.shape_count) if model.shape_body.numpy()[s] >= 0
+                }
+                worst, refreshes = 0.0, 0
+                for _ in range(60):
+                    run.step(state, state, control, dt=H)
+                    test.assertTrue(run.last_stats.converged, run.last_stats.failure_reason)
+                    refreshes += run.last_stats.variational["contact_spatial"]["refreshes"]
+                    sweep = run._contact._spatial.sweep.displacement.numpy()
+                    test.assertTrue(np.all(sweep > 0), sweep)
+                    q = state.body_q.numpy().astype(np.float64)
+                    for shape, core in cores.items():
+                        body = int(model.shape_body.numpy()[shape])
+                        worst = max(worst, -fc.plane_signed_distance(fc.world_core(core, q[body])))
+                test.assertGreater(refreshes, 0)
+                with test.assertRaisesRegex(ValueError, "current native floating-root poses"):
+                    run._contact._spatial.update(
+                        run._kinematics.gather_q(state),
+                        state.particle_q,
+                        rigid_com=state._monolithic_coupled.rigid_com,
+                    )
+                # Box sources are sampled away from their corners: a single FREE rigid box in the same
+                # pose sinks 4.2 mm at a corner, this chain 4.0 mm (CPU FP64, P9d PR2).
+                test.assertLessEqual(worst, 5e-3, f"corner penetration {worst:.3e} m")
+                test.assertGreater(worst, 0.0)
+                frames.append(np.concatenate([state.body_q.numpy().ravel(), state.body_qd.numpy().ravel()]))
+        np.testing.assert_allclose(
+            frames[1],
+            frames[0],
+            rtol=1e-4 if precision == "fp32" else 1e-8,
+            atol=1e-5 if precision == "fp32" else 1e-9,
+        )
+
+
 class TestSolverFloatingBase(unittest.TestCase):
     pass
 
@@ -258,6 +335,8 @@ for _test in (
     test_schema_versions,
     test_coexists_with_fixed_trees_and_rigid_bodies,
     test_predicted_point_outside_domain_restarts_from_step_start,
+    test_zero_gravity_conserves_linear_momentum,
+    test_floating_chain_contact,
 ):
     add_function_test(TestSolverFloatingBase, _test.__name__, _test, devices=get_test_devices())
 

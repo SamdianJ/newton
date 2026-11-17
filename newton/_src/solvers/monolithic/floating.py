@@ -113,6 +113,9 @@ class FloatingRoots:
         if not self.count:
             return
         q = state.joint_q.numpy()[self.coord_indices]
+        qd = state.joint_qd.numpy()[self.dof_indices]
+        if not np.isfinite(q).all() or not np.isfinite(qd).all():
+            raise ValueError("Floating root coordinates and rates must be finite")
         if np.any(abs(np.linalg.norm(q[:, 3:], axis=1) - 1) > 1e-5):
             raise ValueError("Floating root coordinates require unit quaternions")
         history = state._monolithic_coupled

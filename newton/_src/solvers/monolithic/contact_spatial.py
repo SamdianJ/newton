@@ -635,7 +635,8 @@ class _ContactSpatial:
         self.validate_storage()
         self.mode_counts = None
         com = self.com0 if rigid_com is None else rigid_com
-        roots = self._roots(roots)
+        if self.kinematics.floating_count and roots is None:
+            raise ValueError("Spatial contact query requires the current native floating-root poses")
         checked = ((q, self.q0), (x, self.x0), (com, self.com0))
         if roots is not None:
             checked += ((roots[0], self.root_com0), (roots[1], self.root_rotation0))

@@ -287,7 +287,10 @@ class CoupledState(ArticulationState):
                     raise ValueError("Cable coordinates/frames changed; explicitly reset coupled history")
 
     def reset(self, state, *, dt):
-        if self.materials is not None or (self.rigid is not None and self.rigid.count):
+        # Native poses (rigid actors, floating roots) are initialized before validation, so reset
+        # them in scratch: a failed reset leaves the state untouched.
+        native = (self.rigid is not None and self.rigid.count) or (self.floating is not None and self.floating.count)
+        if self.materials is not None or native:
             scratch = self._copy_unchecked(state)
             self._reset(scratch, dt=dt)
             if self.rigid is not None and self.rigid.count:

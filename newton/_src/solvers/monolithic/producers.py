@@ -277,7 +277,7 @@ class ArticulationProducer(_Producer):
         super().__init__("articulation", solver._layout.articulation_indices())
         obj = solver._objective
         self.energies = ((obj, "link_energy", None), (obj, "joint_energy", None))
-        self.owners = (obj, solver._kinematics, solver._joint_terms)
+        self.owners = (obj, solver._kinematics, solver._joint_terms, solver._floating)
 
     def begin_step(self, solver, state_in):
         k, obj, device = solver._kinematics, solver._objective, solver.model.device

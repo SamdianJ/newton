@@ -599,6 +599,9 @@ class _TreeKinematics:
 
         joints = np.asarray(joint_ids, dtype=np.int32)[root_joints]
         count = len(joints)
+        coordinates = model.joint_q.numpy()[[range(int(s), int(s) + 7) for s in model.joint_q_start.numpy()[joints]]]
+        if not np.isfinite(coordinates).all() or np.any(abs(np.linalg.norm(coordinates[:, 3:], axis=1) - 1) > 1e-5):
+            raise ValueError("Floating root Model coordinates require finite values and unit quaternions")
 
         def array(data, dtype):
             return wp.array(data, dtype=dtype, device=self.device)

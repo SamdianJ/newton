@@ -201,8 +201,12 @@ class ArticulationState:
         state = self.model.state()
         self._copy_coordinates(state, source)
         history = Model.AttributeNamespace(self.namespace)
+        previous = getattr(source, self.namespace, None)
         for name in self.schema:
-            setattr(history, name, wp.clone(getattr(getattr(source, self.namespace), name)))
+            value = getattr(previous, name, None)
+            if not isinstance(value, wp.array):
+                raise ValueError(f"Invalid articulation history schema: missing {name}")
+            setattr(history, name, wp.clone(value))
         setattr(state, self.namespace, history)
         state.assign(source)
         return state

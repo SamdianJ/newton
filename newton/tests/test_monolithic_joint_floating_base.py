@@ -229,6 +229,25 @@ def test_rejections(test, device):
         )
 
     cases.append((ball, "Joint 'shoulder'.*BALL"))
+
+    def d6(builder):
+        parent = builder.add_link(mass=0.1, inertia=wp.diag(wp.vec3(1e-4)))
+        child = builder.add_link(mass=0.1, inertia=wp.diag(wp.vec3(1e-4)))
+        axis = newton.ModelBuilder.JointDofConfig(axis=(1.0, 0.0, 0.0))
+        builder.add_articulation(
+            [builder.add_joint_free(parent), builder.add_joint_d6(parent, child, linear_axes=[axis], label="slide6")]
+        )
+
+    cases.append((d6, "Joint 'slide6'.*D6"))
+
+    def distance(builder):
+        parent = builder.add_link(mass=0.1, inertia=wp.diag(wp.vec3(1e-4)))
+        child = builder.add_link(mass=0.1, inertia=wp.diag(wp.vec3(1e-4)))
+        builder.add_articulation(
+            [builder.add_joint_free(parent), builder.add_joint_distance(parent, child, label="tether")]
+        )
+
+    cases.append((distance, "Joint 'tether'.*DISTANCE"))
     for edit, message in cases:
         with test.subTest(message=message):
             with test.assertRaisesRegex(ValueError, message):
@@ -239,7 +258,15 @@ def test_rejections(test, device):
 
     with test.assertRaisesRegex(ValueError, "FREE joint 'free'.*kinematic"):
         ActorTable.from_model(floating_chain(device, edit=kinematic))
-    for name, value in (("joint_armature", 0.01), ("joint_damping", 0.1), ("joint_target_ke", 10.0)):
+    for name, value in (
+        ("joint_armature", 0.01),
+        ("joint_damping", 0.1),
+        ("joint_target_ke", 10.0),
+        ("joint_target_kd", 1.0),
+        ("joint_limit_ke", 10.0),
+        ("joint_limit_kd", 1.0),
+        ("joint_friction", 0.1),
+    ):
         with test.subTest(field=name):
             model = floating_chain(device)
             values = getattr(model, name).numpy()
@@ -255,6 +282,43 @@ def test_rejections(test, device):
     control.joint_f.assign(efforts)
     with test.assertRaisesRegex(ValueError, "joint_f on a floating root"):
         run.step(state, state, control, dt=1e-3)
+    # Invalid Model root coordinates fail at construction, before any root pose is derived.
+    model = floating_chain(device)
+    coordinates = model.joint_q.numpy()
+    coordinates[3:7] = (0.0, 0.0, 0.0, 0.5)
+    model.joint_q.assign(coordinates)
+    with test.assertRaisesRegex(ValueError, "Floating root Model coordinates"):
+        make_solver(model)
+
+
+def test_failed_reset_leaves_state_unchanged(test, device):
+    """A reset rejected for nonfinite root coordinates or a too-fast root leaves every array untouched."""
+    run = make_solver(floating_chain(device))
+    state = run.create_state(dt=1e-3)
+    for index, value, message in (
+        (3, np.nan, "Floating root coordinates and rates must be finite"),
+        (None, 2000.0, "Initial angular velocity requires dt \\* \\|omega\\| < 1"),
+    ):
+        with test.subTest(message=message):
+            if index is None:
+                rates = state.joint_qd.numpy()
+                rates[5] = value
+                state.joint_qd.assign(rates)
+            else:
+                coordinates = state.joint_q.numpy()
+                coordinates[index] = value
+                state.joint_q.assign(coordinates)
+            before = {
+                name: getattr(state, name).numpy().copy() for name in ("joint_q", "joint_qd", "body_q", "body_qd")
+            }
+            history = state._monolithic_coupled
+            before.update({"history." + name: getattr(history, name).numpy().copy() for name in run._states.schema})
+            with test.assertRaisesRegex(ValueError, message):
+                run.reset_state(state, dt=1e-3)
+            for name, expected in before.items():
+                actual = getattr(history, name[8:]) if name.startswith("history.") else getattr(state, name)
+                np.testing.assert_array_equal(actual.numpy(), expected, err_msg=name)
+            state = run.create_state(dt=1e-3)
 
 
 def test_single_free_body_stays_rigid(test, device):
@@ -264,10 +328,18 @@ def test_single_free_body_stays_rigid(test, device):
         body = builder.add_link(mass=0.3, inertia=wp.diag(wp.vec3(1e-3)), label="loose")
         builder.add_articulation([builder.add_joint_free(body, label="loose_free")])
 
-    table = ActorTable.from_model(floating_chain(device, edit=add_free_body))
+    model = floating_chain(device, edit=add_free_body)
+    table = ActorTable.from_model(model)
     test.assertEqual([a.kind for a in table.actors], ["articulation", "rigid"])
     test.assertEqual(table.actors[0].dof_count, 8)
     test.assertEqual(table.actors[0].state_count, 9)
+    # A driven single FREE body keeps the rigid path and its existing rejection (PRD 2.10).
+    gains = model.joint_target_ke.numpy()
+    gains[list(table.actors[1].dof_indices)] = 10.0
+    model.joint_target_ke.assign(gains)
+    test.assertEqual([a.kind for a in ActorTable.from_model(model).actors], ["articulation", "rigid"])
+    with test.assertRaisesRegex(ValueError, "Unsupported FREE joint term: joint_target_ke"):
+        make_solver(model)
 
 
 class TestJointFloatingBase(unittest.TestCase):
@@ -280,6 +352,7 @@ for _test in (
     test_mirrors_match_newton_fk,
     test_rejections,
     test_single_free_body_stays_rigid,
+    test_failed_reset_leaves_state_unchanged,
 ):
     add_function_test(TestJointFloatingBase, _test.__name__, _test, devices=get_test_devices())
 

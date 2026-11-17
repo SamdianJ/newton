@@ -509,6 +509,7 @@ class _MonolithicProblem:
             solver._theta_step(state),
             solver._joint_step(state),
             *solver._rigid_steps(state),
+            *solver._root_steps(state),
         ]
         if self._state_fields is None:
             self._state_fields = tuple(
