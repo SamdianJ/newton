@@ -118,7 +118,8 @@ above 1e-8, with squared adjacent-normal sum above 1e-8. The whole trial segment
 must retain positive area projection onto each accepted triangle normal. This
 conservative chart guard can shorten a valid large rotation, and rejects
 collapse hidden between valid endpoints. An invalid inertial predictor falls
-back to the input positions. These checks do not provide self-collision or CCD.
+back to the input positions. These checks are not contact: self-contact needs
+``cloth_contact`` (above), and continuous collision detection is not provided.
 
 The material nonlinear loop uses host decisions. CUDA graph mode captures the
 linear solve and supported segments, not an entire cloth step. This small-scene

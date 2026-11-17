@@ -69,8 +69,8 @@ Material surfaces contact supported articulation, rigid and static targets
 through the same spatial candidates as other scenes. Experimental cloth
 inter/self contact (``cloth_contact``) and cable self and inter-cable contact
 (``cable_contact``) are described in :doc:`../guide/monolithic_cloth` and
-:doc:`../guide/monolithic_cable`; cable-cloth contact remains
-unsupported. Existing nonmaterial stepping is unchanged.
+:doc:`../guide/monolithic_cable`. Cable-cloth, cable-tet and cloth-tet contact
+and tet self-contact are unsupported. Existing nonmaterial stepping is unchanged.
 
 Cloth inputs select Model triangle rows, bending coefficients ``(alpha, beta)``,
 thickness [m] and surface density [kg/m²]. Cable inputs select ordered particle

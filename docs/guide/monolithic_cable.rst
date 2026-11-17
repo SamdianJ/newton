@@ -75,7 +75,9 @@ one cable, on centerline positions only, for example ``{"self": True, "inter": T
 
 Keys: ``self`` and ``inter`` (bool, default True, not both False);
 ``normal_stiffness``, a line stiffness [N/m²] (default 1e5; a method coefficient,
-not a calibrated value); ``samples_per_edge`` (2 or 3, default 3);
+not a calibrated value; the default is not qualified for fast crossings: with
+2 mm radius cables and 7 mm edges, a 1 m/s right-angle crossing reached about
+0.21 radius of penetration at 1e5, and the acceptance scenes use 3e5); ``samples_per_edge`` (2 or 3, default 3);
 ``index_exclusion`` (integer ≥ 3, default 3) and ``arc_exclusion_factor``
 (default π/2); bounded ``candidate_capacity`` and ``support_capacity``; and
 ``candidate_padding`` [m] (default the largest cable radius). The penalty
@@ -91,7 +93,9 @@ within a cable the lower edge index samples, between cables the lower cable
 index. A cable ignores itself within ``index_exclusion`` edges and within
 ``arc_exclusion_factor`` times twice its radius of rest arc length. Every rest
 edge must lie between its own radius and four times the smallest radius of the
-cables it can touch.
+cables it can touch. This bound keeps the onset of contact under a
+crossing below about 0.16 radius with three samples per edge; two samples per
+edge do not have that guarantee.
 
 Detection is discrete: candidates are found at each Newton refresh from the
 current and step-start positions and stay frozen through the trials. Fast

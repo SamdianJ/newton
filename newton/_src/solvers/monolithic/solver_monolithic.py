@@ -128,7 +128,8 @@ class SolverMonolithic(SolverBase):
     contact on centerline positions; the contact radius of each cable is its
     ``CableInput.radius``. Its dictionary configures ``self``/``inter`` (bool,
     default True, not both False), ``normal_stiffness`` (line stiffness [N/m^2],
-    default 1e5), ``index_exclusion`` (int >= 3, default 3),
+    default 1e5, not qualified for fast crossings; see the cable guide),
+    ``index_exclusion`` (int >= 3, default 3),
     ``arc_exclusion_factor`` (default pi/2: a cable ignores itself within that
     multiple of twice its radius in rest arc length), ``samples_per_edge`` (2 or
     3, default 3), bounded ``candidate_capacity`` and ``support_capacity``, and
