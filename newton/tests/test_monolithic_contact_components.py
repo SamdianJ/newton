@@ -194,7 +194,14 @@ def test_oracle_and_actual_trials(test, device):
                 test.assertLessEqual(
                     np.linalg.norm(matrix - matrix.T), np.finfo(np.float32).eps * np.linalg.norm(matrix)
                 )
-                test.assertGreaterEqual(np.linalg.eigvalsh(matrix).min(), -1e-6 * np.linalg.norm(matrix))
+                # A curved target makes the tangent indefinite; it is never
+                # more so than the independent fitted tangent.
+                test.assertGreaterEqual(
+                    np.linalg.eigvalsh(matrix).min(),
+                    np.linalg.eigvalsh(oracle[3]).min() - 1e-6 * np.linalg.norm(matrix),
+                )
+                if kind != "sphere":
+                    test.assertGreaterEqual(np.linalg.eigvalsh(matrix).min(), -1e-6 * np.linalg.norm(matrix))
                 direction = rng.normal(size=oracle[1].size)
                 direction /= np.linalg.norm(direction)
                 free = np.flatnonzero(obj.mapping.numpy() >= 0)
@@ -250,6 +257,32 @@ def test_friction_radial_tangent(test, device):
                 test.assertLess(error / scale, 3e-5)
                 if abs(ratio) >= 1.0001 and axis is along:
                     test.assertLess(np.linalg.norm((matrix @ direction)[2:]) / scale, 1e-6)
+
+
+def test_curved_normal_tangent(test, device):
+    """Match the residual derivative on a curved target, where the normal force turns with the gradient."""
+    model, xn = fixture(device, "sphere")
+    batch = native(contact(model, mu=0.0))
+    q = np.zeros(2)
+    batch.begin_step(*state(model, xn, q))
+    x = xn + np.array([2e-6, -1e-6, 1e-6])
+    batch.evaluate(*state(model, x, q), dt=0.001)
+    test.assertEqual(int(batch.flags.numpy()[0]), ContactStatus.SUCCESS)
+    # Only the x block: the q rows also contain omitted FK geometry.
+    matrix = batch_matrix(batch)[2:, 2:]
+    test.assertLess(np.linalg.eigvalsh(matrix).min(), 0)
+    rng = np.random.default_rng(417)
+    h = 1e-9
+    for _ in range(4):
+        direction = rng.normal(size=x.size)
+        direction /= np.linalg.norm(direction)
+        values = []
+        for sign in (1, -1):
+            batch.evaluate(*state(model, x + sign * h * direction.reshape(-1, 3), q), dt=0.001)
+            test.assertEqual(int(batch.flags.numpy()[0]), ContactStatus.SUCCESS)
+            values.append(residual(batch)[2:])
+        derivative = (values[0] - values[1]) / (2 * h)
+        test.assertLess(np.linalg.norm(matrix @ direction - derivative), 1e-6 * np.linalg.norm(derivative))
 
 
 def test_friction_normal_motion_limit(test, device):
@@ -499,6 +532,7 @@ class TestContactComponents(unittest.TestCase):
 
 for _device in get_test_devices():
     for _test in (
+        test_curved_normal_tangent,
         test_friction_normal_motion_limit,
         test_friction_radial_tangent,
         test_zero_smoothing,

@@ -102,6 +102,12 @@ def local(y, yn, kind, scale, *, offset, stiffness, width=1e-4, mu=0.5, a=1e-5, 
     friction = mu * load * factor * v
     dr = curvature * np.outer(g, g) - force * h + mu * (np.outer(factor * v, dload) + load * radial @ dv)
     b = curvature * np.outer(g, g) + mu * load * radial @ p
+    if not isinstance(kind, dict) or "smooth_grid" in kind:
+        # The normal force turns with the gradient on a curved target. The
+        # fitted tangent keeps the tangential part of that term, which makes
+        # it indefinite on a convex target. A raw texture field is piecewise
+        # trilinear and contributes no curvature.
+        b -= force * p @ h @ p
     return np.array([en, mu * load * psi]), -force * g + friction, dr, b
 
 
@@ -139,7 +145,7 @@ def frozen_local(
     box_smoothing=0.0,
     alignment_smoothing=0.1,
 ):
-    """Return E, residual, PSD approximation and physical-step-start weight.
+    """Return E, residual, fitted tangent and physical-step-start weight.
 
     Only the start normal and start field define c_n. The normal potential is
     c_n*P(gap) within this step; cross-step conservation is not asserted.
@@ -147,7 +153,7 @@ def frozen_local(
     """
     start_gradient = geometry(yn, kind, scale, box_smoothing=box_smoothing)[1]
     weight = frozen_orientation(start_source_normal, start_gradient, alignment_smoothing)
-    phi, g, _ = geometry(y, kind, scale, box_smoothing=box_smoothing)
+    phi, g, h = geometry(y, kind, scale, box_smoothing=box_smoothing)
     energy, residual, _, fitted = local(
         y,
         yn,
@@ -163,6 +169,10 @@ def frozen_local(
     _, load, curvature = penalty(phi - offset, stiffness, width)
     normal_r, normal_b = -load * g, curvature * np.outer(g, g)
     length = np.linalg.norm(g)
+    if not isinstance(kind, dict) or "smooth_grid" in kind:
+        # The turning normal force belongs to the normal part: weight only.
+        p = np.eye(3) - np.outer(g, g) / length**2
+        normal_b = normal_b - load * p @ h @ p
     residual = weight * (normal_r + length * (residual - normal_r))
     fitted = weight * (normal_b + length * (fitted - normal_b))
     return np.array([weight * energy[0], weight * length * energy[1]]), residual, fitted, weight

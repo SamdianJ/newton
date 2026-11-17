@@ -62,7 +62,14 @@ def test_native_contact(test, device):
                 np.testing.assert_allclose(contact.residual(batch), oracle[1], atol=atol, rtol=rtol)
                 matrix = contact.batch_matrix(batch)
                 test.assertTrue(np.isfinite(matrix).all())
-                test.assertGreaterEqual(np.linalg.eigvalsh(matrix).min(), -1e-6 * np.linalg.norm(matrix))
+                # A curved target makes the tangent indefinite; it is never
+                # more so than the independent fitted tangent.
+                test.assertGreaterEqual(
+                    np.linalg.eigvalsh(matrix).min(),
+                    np.linalg.eigvalsh(oracle[3]).min() - 1e-6 * np.linalg.norm(matrix),
+                )
+                if kind != "sphere":
+                    test.assertGreaterEqual(np.linalg.eigvalsh(matrix).min(), -1e-6 * np.linalg.norm(matrix))
             for bad in ("nan", "degenerate", "backface", "quaternion"):
                 inputs = list(native_inputs(model, xn, q, dtype))
                 invalid = xn.copy()

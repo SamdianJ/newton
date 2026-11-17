@@ -319,7 +319,9 @@ def contact_payload(dtype):
     data["weights"][3] = 1
     data["columns"][4, :2] = [1, 3]
     data["residual"][4, :2] = [0.5, -0.75]
-    data["weights"][4] = [2, 1, 0]
+    # A curved target gives a negative tangential weight; only the normal
+    # curvature is a square.
+    data["weights"][4] = [2, -1, 0]
     data["factors"][4, :, :2] = [[1, 2], [0.5, -1], [0, 0]]
     data["force_counts"][0] = data["force_counts"][4] = 2
     data["force_rows"][[0, 4], :2] = [0, 1]
@@ -398,7 +400,7 @@ def check_admitted(test, pool, data, *, stable_order=True):
                 np.add.at(expected_b[columns[a]], columns, values[a])
         supports += k
         forces += f
-        triplets += int(np.count_nonzero(data["weights"][i] > 0)) * k * k
+        triplets += int(np.count_nonzero(data["weights"][i])) * k * k
     test.assertEqual(int(record.support_count.numpy()[0]), supports)
     test.assertEqual(int(record.factor_count.numpy()[0]), 3 * n)
     test.assertEqual(int(record.triplet_count.numpy()[0]), triplets)
