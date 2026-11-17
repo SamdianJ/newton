@@ -120,6 +120,104 @@ def test_sweep_coverage(test, device):
         test.assertGreater(float(sweep.displacement.numpy()[7]), 0.5)
 
 
+def _rotvec_quat(v):
+    angle = np.linalg.norm(v)
+    if angle == 0:
+        return np.array([0.0, 0.0, 0.0, 1.0])
+    return np.r_[np.sin(angle / 2) * v / angle, np.cos(angle / 2)]
+
+
+def _quat_multiply(a, b):
+    av, aw, bv, bw = a[:3], a[3], b[:3], b[3]
+    return np.r_[aw * bv + bw * av + np.cross(av, bv), aw * bw - av @ bv]
+
+
+def test_floating_root_sweep(test, device):
+    """A floating root's COM step and geodesic rotation bound every point of its tree along the path,
+    near the origin and 100 m away, against FP64 native FK sampled densely along the path."""
+    from newton._src.solvers.monolithic.contact_sweep import _ArticulationSweep  # noqa: PLC0415
+    from newton.tests.test_monolithic_joint_floating_base import floating_chain, make_solver  # noqa: PLC0415
+
+    rng = np.random.default_rng(91)
+    points = rng.uniform(-0.15, 0.15, (3, 10, 3)) + np.array([0.05, -0.02, 0.03])
+    radii = np.linalg.norm(points, axis=2).max(axis=1)
+    paths = (
+        (np.zeros(3), np.zeros(3), np.zeros(2)),
+        (np.full(3, 1e-7), np.full(3, 1e-7), np.full(2, 1e-7)),
+        (np.array([0.3, -0.2, 0.5]), np.array([1.0, -0.5, 2.0]), np.array([1.2, 0.05])),
+    )
+    for offset in (np.zeros(3), np.array([100.0, -50.0, 20.0])):
+        kinematics = {}
+        for precision in ("fp64", "fp32"):
+            model = floating_chain(device)
+            q = model.joint_q.numpy()
+            q[:3] += offset
+            model.joint_q.assign(q)
+            run = make_solver(model, precision)
+            kinematics[precision] = (run, run.create_state(dt=1e-3))
+        reference = kinematics["fp64"][0]
+        for precision, (run, state) in kinematics.items():
+            with test.subTest(precision=precision, far=bool(offset.any())):
+                k = run._kinematics
+                sweep = _ArticulationSweep(k, radii)
+                q0 = wp.clone(k.gather_q(state))
+                com0 = state._monolithic_coupled.floating_com.numpy().astype(np.float64)
+                rot0 = state._monolithic_coupled.floating_rotation.numpy().astype(np.float64)
+                roots0 = (
+                    wp.clone(state._monolithic_coupled.floating_com),
+                    wp.clone(state._monolithic_coupled.floating_rotation),
+                )
+                roots1 = tuple(wp.clone(a) for a in roots0)
+                q1 = wp.clone(q0)
+
+                def pose(kin, q_host, com, rot, dtype):
+                    q = wp.array(q_host, dtype=dtype, device=device)
+                    roots = (
+                        wp.array(com, dtype=kin.vector, device=device),
+                        wp.array(rot, dtype=kin.quaternion, device=device),
+                    )
+                    kin.evaluate(q, roots=roots)
+                    poses = kin.poses.numpy().astype(np.float64)
+                    rotations = kin.rotations.numpy().astype(np.float64)
+                    return poses[:, None, :3] + np.einsum("bij,bpj->bpi", rotations, points)
+
+                q0_host = q0.numpy().astype(np.float64)
+                initial = pose(k, q0_host, com0, rot0, k.dtype)
+                exact_initial = pose(reference._kinematics, q0_host, com0, rot0, wp.float64)
+                # Observation tolerance of FP64 FK of the stored start (absolute positions up to ~110 m).
+                tolerance = 1e-12 * (1.0 + np.abs(offset).max())
+                for dc, phi, dq in paths:
+                    end_com = (com0 + dc).astype(k.numpy_dtype)
+                    end_rot = _quat_multiply(_rotvec_quat(phi), rot0[0])[None].astype(k.numpy_dtype)
+                    end_q = q0_host.copy()
+                    end_q[6:] += dq
+                    roots1[0].assign(end_com)
+                    roots1[1].assign(end_rot)
+                    q1.assign(end_q.astype(k.numpy_dtype))
+                    sweep.update(q0, q1, roots0, roots1)
+                    test.assertEqual(int(sweep.status.numpy()[0]), 0)
+                    bound, numerical = sweep.displacement.numpy().copy(), sweep.numerical.numpy().copy()
+                    for alpha in np.linspace(0, 1, 41):
+                        com = com0 + alpha * (end_com.astype(np.float64) - com0)
+                        rot = _quat_multiply(_rotvec_quat(alpha * phi), rot0[0])[None]
+                        q = q0_host + alpha * (end_q - q0_host)
+                        exact = pose(reference._kinematics, q, com, rot, wp.float64)
+                        test.assertLessEqual(
+                            float(np.max(np.linalg.norm(exact - exact_initial, axis=2) - bound[:, None])), tolerance
+                        )
+                        native = pose(
+                            k, q.astype(k.numpy_dtype), com.astype(k.numpy_dtype), rot.astype(k.numpy_dtype), k.dtype
+                        )
+                        test.assertLessEqual(
+                            float(
+                                np.max(np.linalg.norm(native - initial, axis=2) - bound[:, None] - numerical[:, None])
+                            ),
+                            0,
+                        )
+                if not offset.any():
+                    test.assertLess(float(bound.max()), 10.0)
+
+
 def test_sweep_storage_and_errors(test, device):
     """Reject invalid geometry and native inputs, keep fixed scratch and clear hard failures."""
     from newton._src.solvers.monolithic.contact_sweep import _ArticulationSweep  # noqa: PLC0415
@@ -214,7 +312,13 @@ class TestContactSweep(unittest.TestCase):
             _length_upper([[1e300, 1, 0]])
 
 
-for _test in (test_outward_arithmetic, test_sweep_coverage, test_sweep_storage_and_errors, test_sweep_graph):
+for _test in (
+    test_outward_arithmetic,
+    test_sweep_coverage,
+    test_sweep_storage_and_errors,
+    test_sweep_graph,
+    test_floating_root_sweep,
+):
     add_function_test(TestContactSweep, _test.__name__, _test, devices=get_test_devices())
 
 

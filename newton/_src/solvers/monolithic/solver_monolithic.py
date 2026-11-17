@@ -29,6 +29,7 @@ from .contact_forces import MonolithicContactForces
 from .contact_pipeline import _PooledContactObjective, _SpatialContactObjective
 from .contact_pipeline import _SpatialContactObjective as ContactObjective
 from .coupled_state import CoupledState
+from .floating import FloatingRoots
 from .iteration import iterate, measure
 from .joint_parameters import JointParameters
 from .linear import MonolithicLinearWorkspace
@@ -420,6 +421,7 @@ class SolverMonolithic(SolverBase):
             },
         )
         SolverBase.__init__(self, model)
+        self._floating = FloatingRoots(self._kinematics, model)
         self._states = self._make_states()
         self._objective = ArticulationObjective(self._kinematics, parameters)
         self._joint_parameters_host = parameters.astype(self._numpy_dtype)
@@ -508,6 +510,7 @@ class SolverMonolithic(SolverBase):
             wp.zeros(theta_count, dtype=self._dtype, device=device),
             self._objective.step,
             *self._rigid.external_steps,
+            *self._floating.external_steps,
         )
         self._cable_torque = wp.zeros_like(self._cable_target_theta)
         fixed_theta = np.zeros(theta_count, dtype=np.int32)
@@ -519,6 +522,7 @@ class SolverMonolithic(SolverBase):
         self._material_control_status = wp.zeros(4, dtype=int, device=device)
         self._out_backup = None
         self._dt = None
+        self._floating.bind_rows(self._linear.q_rows.numpy())
         self._producers = build_producers(self)
         coordinate = [p for p in self._producers if p.scale_policy == "coordinate"]
         scale, mask = np.ones(n, dtype=self._numpy_dtype), np.zeros(n, dtype=np.int32)
@@ -529,8 +533,14 @@ class SolverMonolithic(SolverBase):
         self._coordinate_scale = wp.array(scale, dtype=self._dtype, device=device)
         self._coordinate_mask = wp.array(mask, dtype=wp.int32, device=device)
         k = self._kinematics
-        revolute = k.types.numpy()[k.dof_joint.numpy()] == int(JointType.REVOLUTE)
-        units = np.where(revolute, convergence.Unit.TORQUE, convergence.Unit.FORCE)
+        dof_types = k.types.numpy()[k.dof_joint.numpy()]
+        # Floating-root rows 3-5 are rotations, like revolute rows.
+        root_rotation = (dof_types == int(JointType.FREE)) & (
+            np.arange(k.count) - k.starts.numpy()[k.dof_joint.numpy()] >= 3
+        )
+        units = np.where(
+            (dof_types == int(JointType.REVOLUTE)) | root_rotation, convergence.Unit.TORQUE, convergence.Unit.FORCE
+        )
         self._criterion = convergence.Criterion(
             convergence.row_groups(layout, units), self._config.convergence, dtype=self._dtype, device=device
         )
@@ -644,6 +654,7 @@ class SolverMonolithic(SolverBase):
             self._rigid,
             self._materials,
             cloth_contact=self._cloth_contact is not None,
+            floating=self._floating,
         )
 
     def get_cloth_contact_diagnostics(self, state):
@@ -804,6 +815,8 @@ class SolverMonolithic(SolverBase):
             if input_status[index]:
                 raise ValueError(f"Invalid articulation control: {name}")
         self._joint_terms.snapshot_targets(control)
+        if self._floating.count and np.any(control.joint_f.numpy()[self._floating.dof_indices] != 0):
+            raise ValueError("joint_f on a floating root is not supported; root wrenches arrive with root drives")
         if input_status[3]:
             raise ValueError("Articulation requires finite forces and zero spatial torque")
         self._rigid.prepare(state_in, control, dt)
@@ -821,6 +834,7 @@ class SolverMonolithic(SolverBase):
             for increment in self._steps[id(state)]:
                 increment.zero_()
             self._steps[id(state)][4].fill_(wp.quat_identity(self._dtype))
+            self._steps[id(state)][6].fill_(wp.quat_identity(self._dtype))
         self._prepare_step(state_in, state_out, dt)
         self._step_generation += 1
         self._metrics = {
@@ -837,9 +851,10 @@ class SolverMonolithic(SolverBase):
             "configuration": self._kinematics.digest.hex(),
         }
         k, obj = self._kinematics, self._objective
-        k.evaluate(k.gather_q(self._accepted))
+        k.evaluate_state(self._accepted)
         if not self._domain(self._accepted):
-            if self._rigid.count:
+            # Native poses (rigid actors, floating roots) fall back to the whole step start.
+            if self._rigid.count or self._floating.count:
                 self._accepted.assign(self._original)
                 for target, source in zip(
                     self._steps[id(self._accepted)], self._steps[id(self._original)], strict=True
@@ -999,7 +1014,12 @@ class SolverMonolithic(SolverBase):
         """Refresh before the current E/r/B/baseline, including the budget's final check."""
         state, k = self._accepted, self._kinematics
         try:
-            self._contact.refresh(k.gather_q(state), state.particle_q, rigid_com=state._monolithic_coupled.rigid_com)
+            self._contact.refresh(
+                k.gather_q(state),
+                state.particle_q,
+                rigid_com=state._monolithic_coupled.rigid_com,
+                **({"roots": k.state_roots(state)} if k.floating_count else {}),
+            )
             if self._cloth_contact is not None:
                 self._cloth_contact.refresh(state.particle_q)
         except ValueError as error:
@@ -1072,8 +1092,15 @@ class SolverMonolithic(SolverBase):
         """Return the native rigid COM and rotation increments of a state."""
         steps = self._steps.get(id(state))
         if steps is not None:
-            return steps[3:]
+            return steps[3:5]
         return self._rigid.derive_steps(state)
+
+    def _root_steps(self, state):
+        """Return the native floating-root COM and rotation increments of a state."""
+        steps = self._steps.get(id(state))
+        if steps is not None:
+            return steps[5:7]
+        return self._floating.derive_steps(state)
 
     def _contact_steps(self, state):
         """Return the particle, link and rigid increments contact forms its slip from.

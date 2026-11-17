@@ -39,10 +39,27 @@ def _forward(
     pivots: wp.array[Any],
     joint_rotations: wp.array[Any],
     joint_translations: wp.array[Any],
+    tree_floating: wp.array[int],
+    root_com: wp.array[Any],
+    root_rotation: wp.array[Any],
 ):
     # Each thread owns one tree, in parent-before-child order.
     tree = wp.tid()
     for j in range(tree_joints[tree], tree_joints[tree + 1]):
+        if types[j] == JointType.FREE:
+            # A floating root: its native COM and rotation are state, not coordinates.
+            f = tree_floating[tree]
+            rotation = root_rotation[f]
+            root = children[j]
+            pose = type(xp[0])(root_com[f] - wp.quat_rotate(rotation, local_com[root]), rotation)
+            world_axes[j] = type(axes[0])(0.0)
+            pivots[j] = root_com[f]
+            joint_rotations[j] = wp.quat_to_matrix(rotation)
+            joint_translations[j] = root_com[f]
+            poses[root] = pose
+            rotations[root] = wp.quat_to_matrix(rotation)
+            com[root] = root_com[f]
+            continue
         parent = type(xp[0])(type(axes[0])(0.0), wp.quat_identity(dtype=q.dtype))
         if parents[j] >= 0:
             parent = poses[parents[j]]
@@ -104,6 +121,9 @@ def _forward_step(
     com_steps: wp.array[Any],
     joint_rotation_steps: wp.array[Any],
     joint_translation_steps: wp.array[Any],
+    tree_floating: wp.array[int],
+    root_steps: wp.array[Any],
+    root_rotation_steps: wp.array[Any],
 ):
     # Advance every link from its step-start pose by the joint increments, in
     # parent-before-child order: R = (I + E) R_n and t = t_n + d. Each update is
@@ -111,6 +131,17 @@ def _forward_step(
     zero = type(axes[0])(0.0)
     tree = wp.tid()
     for j in range(tree_joints[tree], tree_joints[tree + 1]):
+        if types[j] == JointType.FREE:
+            # A floating root moves by its exact COM step and left rotation step.
+            f = tree_floating[tree]
+            root = children[j]
+            e = _rotation_step(root_rotation_steps[f])
+            rotation_steps[root] = e
+            translation_steps[root] = root_steps[f] - e * (rn[root] * local_com[root])
+            com_steps[root] = root_steps[f]
+            joint_rotation_steps[j] = e
+            joint_translation_steps[j] = root_steps[f]
+            continue
         parent_e = wp.matrix(dtype=type(step[0]), shape=(3, 3))
         parent_d = zero
         parent_rn = wp.identity(n=3, dtype=type(step[0]))
@@ -148,6 +179,7 @@ def _jacobians(
     body_dof_counts: wp.array[int],
     dof_joint: wp.array[int],
     types: wp.array[int],
+    starts: wp.array[int],
     axes: wp.array[Any],
     pivots: wp.array[Any],
     com: wp.array[Any],
@@ -163,7 +195,19 @@ def _jacobians(
     angular = type(com[0])(0.0)
     if ancestors[entry] != 0:
         joint = dof_joint[dof]
-        if types[joint] == JointType.REVOLUTE:
+        if types[joint] == JointType.FREE:
+            # Floating-root columns: COM translation along world e_k, then rotation about world e_k
+            # through the root COM (a left rotation increment).
+            k = dof - starts[joint]
+            unit = type(com[0])(0.0)
+            if k < 3:
+                unit[k] = type(unit[0])(1.0)
+                translation = unit
+            else:
+                unit[k - 3] = type(unit[0])(1.0)
+                angular = unit
+                translation = wp.cross(angular, com[body] - pivots[joint])
+        elif types[joint] == JointType.REVOLUTE:
             angular = axes[joint]
             translation = wp.cross(angular, com[body] - pivots[joint])
         else:
@@ -203,6 +247,28 @@ def _body_outputs(
         wp.vec3(wp.transform_get_translation(poses[b])), wp.quat(wp.transform_get_rotation(poses[b]))
     )
     body_qd[body_map[b]] = wp.spatial_vector(wp.vec3(linear), wp.vec3(angular))
+
+
+@wp.kernel
+def _gather_coordinates(source: wp.array[Any], mapping: wp.array[int], target: wp.array[Any]):
+    i = wp.tid()
+    # Floating-root DOFs have no scalar coordinate.
+    target[i] = target.dtype(0.0)
+    if mapping[i] >= 0:
+        target[i] = target.dtype(source[mapping[i]])
+
+
+@wp.kernel
+def _root_world_rates(starts: wp.array[int], xp: wp.array[Any], qd: wp.array[Any]):
+    # A FREE joint's rates are the COM velocity and angular velocity in its parent anchor frame.
+    f = wp.tid()
+    s = starts[f]
+    rotation = wp.transform_get_rotation(xp[f])
+    v = wp.quat_rotate(rotation, wp.vector(qd[s], qd[s + 1], qd[s + 2]))
+    w = wp.quat_rotate(rotation, wp.vector(qd[s + 3], qd[s + 4], qd[s + 5]))
+    for k in range(3):
+        qd[s + k] = v[k]
+        qd[s + 3 + k] = w[k]
 
 
 def _configuration_digest(fields):
@@ -283,7 +349,8 @@ class _TreeKinematics:
         self.vector = wp.vec3d if dtype == wp.float64 else wp.vec3
         self.matrix = wp.mat33d if dtype == wp.float64 else wp.mat33
         self.transform = wp.transformd if dtype == wp.float64 else wp.transform
-        _validate_joint_coordinate_layout(model, actor)
+        self.quaternion = wp.quatd if dtype == wp.float64 else wp.quat
+        coordinate_dofs = _validate_joint_coordinate_layout(model, actor)
         empty = actor is not None and not actor.joint_indices and not actor.body_indices and not actor.dof_indices
         if not empty and ((actor is None and model.articulation_count != 1) or not model.joint_dof_count):
             raise ValueError("Monolithic articulation requires one nonempty tree")
@@ -341,9 +408,13 @@ class _TreeKinematics:
             body_local = {body: i for i, body in enumerate(body_ids)}
             v["joint_parent"] = np.array([body_local[p] if p >= 0 else -1 for p in v["joint_parent"]], dtype=np.int32)
             v["joint_child"] = np.array([body_local[b] for b in v["joint_child"]], dtype=np.int32)
-            prefix = np.r_[0, np.cumsum(v["joint_type"] != JointType.FIXED)].astype(np.int32)
+            # Local DOF prefix: a floating root (FREE with world parent) owns six DOFs.
+            widths = (v["joint_type"] != JointType.FIXED).astype(np.int64)
+            widths[(v["joint_type"] == JointType.FREE) & (v["joint_parent"] == -1)] = 6
+            prefix = np.r_[0, np.cumsum(widths)].astype(np.int32)
             v["joint_q_start"] = v["joint_qd_start"] = prefix
         self.values = v
+        self.joint_ids = joint_ids
         if not v["joint_enabled"].all() or (not empty and len(np.unique(v["body_world"])) != 1):
             raise ValueError("Monolithic requires enabled joints in one world")
         self.count, self.bodies, self.joints = len(dof_ids), len(body_ids), len(joint_ids)
@@ -376,9 +447,9 @@ class _TreeKinematics:
                     raise ValueError("Mechanical parent must belong to the same articulation")
                 ancestors[child][:] = ancestors[parent]
             if v["joint_type"][j] != JointType.FIXED:
-                dof = v["joint_q_start"][j]
-                ancestors[child][dof - body_dof_starts[child]] = 1
-                dof_joint[dof] = j
+                for dof in range(v["joint_q_start"][j], v["joint_q_start"][j + 1]):
+                    ancestors[child][dof - body_dof_starts[child]] = 1
+                    dof_joint[dof] = j
         if roots != self.tree_count or len(seen) != self.bodies:
             raise ValueError("Monolithic tree must own every body")
         if not np.isin(v["body_flags"], [int(BodyFlags.DYNAMIC), int(BodyFlags.KINEMATIC)]).all():
@@ -418,6 +489,17 @@ class _TreeKinematics:
                 mechanical_dofs=np.asarray(dof_ids, dtype=np.int32),
                 mechanical_trees=np.asarray(sizes, dtype=np.int32).reshape(-1, 3),
             )
+        # Floating roots: FREE joints with world parent, at most one per tree (ActorTable checks).
+        root_joints = np.flatnonzero((v["joint_type"] == JointType.FREE) & (v["joint_parent"] == -1)).astype(np.int32)
+        self.floating_count = len(root_joints)
+        tree_floating = np.full(self.tree_count, -1, dtype=np.int32)
+        for f, j in enumerate(root_joints):
+            tree = int(np.searchsorted(tree_joints, j, side="right") - 1)
+            if tree_joints[tree] != j or tree_floating[tree] >= 0:
+                raise ValueError("A floating root must be the first joint of its tree")
+            tree_floating[tree] = f
+        if self.floating_count:
+            fields["floating_roots"] = np.asarray(joint_ids, dtype=np.int32)[root_joints]
         fields.update({} if extra_config is None else extra_config)
         if dtype == wp.float32:
             fields["native_precision"] = np.array([32], dtype=np.int32)
@@ -449,6 +531,9 @@ class _TreeKinematics:
             int,
         )
         axes = v["joint_axis"].astype(self.numpy_dtype)
+        # Floating-root DOFs use world unit columns; their Model axes are not read.
+        root_dofs = np.isin(dof_joint, root_joints) if self.count else np.zeros(0, dtype=bool)
+        axes[root_dofs] = np.tile(np.eye(3, dtype=self.numpy_dtype), (self.floating_count * 2, 1))
         norms = np.linalg.norm(axes, axis=1)
         if np.any(abs(norms - 1) > 1e-5):
             raise ValueError("Joint axes must be unit directions")
@@ -479,25 +564,99 @@ class _TreeKinematics:
         jac_shape = (self.bodies, self.count) if self.tree_count <= 1 else (int(jac_offsets[-1]), 1)
         self.jt = wp.zeros(jac_shape, dtype=self.vector, device=self.device)
         self.jw = wp.zeros_like(self.jt)
-        self._direct_q = coord_ids == list(range(model.joint_coord_count))
-        self._direct_qd = dof_ids == list(range(model.joint_dof_count))
-        self.coord_map = array(coord_ids, int)
+        # Floating roots always gather: their rows have no coordinate and rotate their rates.
+        self._direct_q = coord_ids == list(range(model.joint_coord_count)) and not self.floating_count
+        self._direct_qd = dof_ids == list(range(model.joint_dof_count)) and not self.floating_count
+        # Without floating roots every DOF has one scalar coordinate; a root's six map to -1.
+        self.coord_map = array(coordinate_dofs if self.floating_count else coord_ids, int)
         self.local_q = wp.zeros(self.count, dtype=self.dtype, device=self.device)
         self.local_qd = wp.zeros_like(self.local_q)
-        self.evaluate(wp.array(model.joint_q.numpy()[coord_ids], dtype=self.dtype, device=self.device))
+        self.tree_floating = array(tree_floating, int)
+        self.root_joints = array(root_joints, int)
+        self.root_bodies = array(v["joint_child"][root_joints], int)
+        self.root_dof_starts = array(v["joint_q_start"][root_joints], int)
+        self.root_rows = array(
+            np.asarray([v["joint_q_start"][j] + k for j in root_joints for k in range(6)], dtype=np.int32).reshape(
+                -1, 6
+            ),
+            int,
+        )
+        self.local_identity = array(np.arange(self.count, dtype=np.int32), int)
+        self.root_xp = array(self.xp.numpy()[root_joints], self.transform)
+        self._empty_roots = (
+            wp.zeros(0, dtype=self.vector, device=self.device),
+            wp.zeros(0, dtype=self.quaternion, device=self.device),
+        )
+        initial = np.where(np.asarray(coordinate_dofs) >= 0, model.joint_q.numpy()[np.maximum(coordinate_dofs, 0)], 0)
+        q = initial if self.floating_count else model.joint_q.numpy()[coord_ids]
+        q = wp.array(q, dtype=self.dtype, device=self.device)
+        self.evaluate(q, roots=self._model_roots(model, joint_ids, root_joints) if self.floating_count else None)
         self.validate_inertia()
 
+    def _model_roots(self, model, joint_ids, root_joints):
+        """Return native root COM and rotation arrays at the Model's FREE coordinates."""
+        from .rigid import _initialize  # noqa: PLC0415 (rigid imports this module)
+
+        joints = np.asarray(joint_ids, dtype=np.int32)[root_joints]
+        count = len(joints)
+
+        def array(data, dtype):
+            return wp.array(data, dtype=dtype, device=self.device)
+
+        com = wp.zeros(count, dtype=self.vector, device=self.device)
+        rotation = wp.zeros(count, dtype=self.quaternion, device=self.device)
+        wp.launch(
+            _initialize,
+            count,
+            [
+                array(model.joint_q.numpy(), self.dtype),
+                array(model.joint_qd.numpy(), self.dtype),
+                array(model.joint_q_start.numpy()[joints], int),
+                array(model.joint_qd_start.numpy()[joints], int),
+                array(self.xp.numpy()[root_joints], self.transform),
+                array(self.xc.numpy()[root_joints], self.transform),
+                array(self.local_com.numpy()[self.root_bodies.numpy()], self.vector),
+                com,
+                rotation,
+                wp.zeros_like(com),
+                wp.zeros_like(com),
+            ],
+            device=self.device,
+        )
+        return com, rotation
+
     def gather_q(self, state):
+        """Return native scalar coordinates; floating-root rows are zero (their pose is native state)."""
         if self._direct_q and state.joint_q.dtype == self.dtype:
             return state.joint_q
-        wp.launch(_gather_native, self.count, [state.joint_q, self.coord_map, self.local_q], device=self.device)
+        kernel = _gather_coordinates if self.floating_count else _gather_native
+        wp.launch(kernel, self.count, [state.joint_q, self.coord_map, self.local_q], device=self.device)
         return self.local_q
 
     def gather_qd(self, state):
+        """Return native rates; floating-root rows are the world COM velocity and angular velocity."""
         if self._direct_qd and state.joint_qd.dtype == self.dtype:
             return state.joint_qd
         wp.launch(_gather_native, self.count, [state.joint_qd, self.dof_map, self.local_qd], device=self.device)
+        if self.floating_count:
+            wp.launch(
+                _root_world_rates,
+                self.floating_count,
+                [self.root_dof_starts, self.root_xp, self.local_qd],
+                device=self.device,
+            )
         return self.local_qd
+
+    def state_roots(self, state):
+        """Return a coupled state's native floating-root COM and rotation arrays."""
+        if not self.floating_count:
+            return None
+        history = state._monolithic_coupled
+        return history.floating_com, history.floating_rotation
+
+    def evaluate_state(self, state, *, publish=False):
+        """Evaluate FK and Jacobians at a state's coordinates and native floating roots."""
+        self.evaluate(self.gather_q(state), state=state if publish else None, roots=self.state_roots(state))
 
     def timestep(self, value):
         """Validate a timestep in the arithmetic used by this component."""
@@ -534,12 +693,20 @@ class _TreeKinematics:
             if current is not original or not np.array_equal(current.numpy(), self._source_values[name]):
                 raise ValueError(f"Articulation configuration changed: {name}")
 
-    def evaluate(self, q, *, state=None):
-        """Evaluate FK and COM/angular Jacobians without using public FP32 FK."""
+    def evaluate(self, q, *, state=None, roots=None):
+        """Evaluate FK and COM/angular Jacobians without using public FP32 FK.
+
+        ``roots`` holds the native COM and rotation of every floating root, required when the
+        trees have one; ``state`` additionally publishes body poses and velocities.
+        """
         if (q.shape, q.dtype, q.device) != ((self.count,), self.dtype, self.device):
             raise ValueError("Monolithic FK requires owned-shape native coordinates on the model device")
         if not self.joints:
             return
+        if (roots is None) != (not self.floating_count):
+            raise ValueError("Floating-base FK requires exactly the native root poses")
+        if roots is None:
+            roots = self._empty_roots
         wp.launch(
             _forward,
             self.tree_count,
@@ -561,6 +728,8 @@ class _TreeKinematics:
                 self.pivots,
                 self.joint_rotations,
                 self.joint_translations,
+                self.tree_floating,
+                *roots,
             ],
             device=self.device,
         )
@@ -574,6 +743,7 @@ class _TreeKinematics:
                 self.body_dof_counts,
                 self.dof_joint,
                 self.types,
+                self.starts,
                 self.world_axes,
                 self.pivots,
                 self.com,
@@ -583,6 +753,10 @@ class _TreeKinematics:
             device=self.device,
         )
         if state is not None:
+            # Floating roots publish from world rates, which only the gathered rates carry.
+            rates, rate_map = (
+                (self.gather_qd(state), self.local_identity) if self.floating_count else (state.joint_qd, self.dof_map)
+            )
             wp.launch(
                 _body_outputs,
                 self.bodies,
@@ -593,19 +767,26 @@ class _TreeKinematics:
                     self.jac_offsets,
                     self.body_dof_starts,
                     self.body_dof_counts,
-                    state.joint_qd,
+                    rates,
                     self.body_map,
-                    self.dof_map,
+                    rate_map,
                     state.body_q,
                     state.body_qd,
                 ],
                 device=self.device,
             )
 
-    def evaluate_step(self, q, step, rn, axes_n):
-        """Evaluate link and joint motion increments from step-start rotations and world axes."""
+    def evaluate_step(self, q, step, rn, axes_n, root_steps=None):
+        """Evaluate link and joint motion increments from step-start rotations and world axes.
+
+        ``root_steps`` holds every floating root's exact COM and left rotation increments.
+        """
         if not self.joints:
             return
+        if (root_steps is None) != (not self.floating_count):
+            raise ValueError("Floating-base increments require exactly the native root steps")
+        if root_steps is None:
+            root_steps = self._empty_roots
         wp.launch(
             _forward_step,
             self.tree_count,
@@ -628,6 +809,8 @@ class _TreeKinematics:
                 self.com_steps,
                 self.joint_rotation_steps,
                 self.joint_translation_steps,
+                self.tree_floating,
+                *root_steps,
             ],
             device=self.device,
         )
@@ -912,16 +1095,16 @@ class ArticulationObjective:
         shape = (n, n) if k.tree_count <= 1 else (k.matrix_rows.size, 1)
         self.tangent = wp.zeros(shape, dtype=k.dtype, device=device)
 
-    def begin(self, qn):
+    def begin(self, qn, *, roots=None):
         """Freeze the step-start coordinates, link poses and world joint axes at ``qn``."""
         k = self.k
-        k.evaluate(qn)
+        k.evaluate(qn, roots=roots)
         wp.copy(self.qn, qn)
         wp.copy(self.tn, k.com)
         wp.copy(self.rn, k.rotations)
         wp.copy(self.axes_n, k.world_axes)
 
-    def evaluate(self, q, h, *, build_tangent=True, step=None, dt_buffer=None):
+    def evaluate(self, q, h, *, build_tangent=True, step=None, dt_buffer=None, roots=None, root_steps=None):
         """Evaluate without reading derived FP32 body outputs or changing history.
 
         ``step`` is the exact increment ``q - qn``; without it the increment is
@@ -932,8 +1115,8 @@ class ArticulationObjective:
         if step is None:
             step = self.step
             wp.launch(_difference, k.count, [q, self.qn, step], device=k.device)
-        k.evaluate(q)
-        k.evaluate_step(q, step, self.rn, self.axes_n)
+        k.evaluate(q, roots=roots)
+        k.evaluate_step(q, step, self.rn, self.axes_n, root_steps)
         wp.launch(
             _joint_variation,
             k.count,

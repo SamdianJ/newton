@@ -79,10 +79,15 @@ def _initial_joint_rates(
     j = wp.tid()
     v[j] = type(v[0])(0.0)
     omega[j] = type(v[0])(0.0)
+    s = starts[j]
     if types[j] == JointType.REVOLUTE:
-        omega[j] = axes[starts[j]] * qd[starts[j]]
+        omega[j] = axes[s] * qd[s]
     elif types[j] == JointType.PRISMATIC:
-        v[j] = axes[starts[j]] * qd[starts[j]]
+        v[j] = axes[s] * qd[s]
+    elif types[j] == JointType.FREE:
+        # Floating-root rates are gathered as world COM velocity and angular velocity.
+        v[j] = type(v[0])(qd[s], qd[s + 1], qd[s + 2])
+        omega[j] = type(v[0])(qd[s + 3], qd[s + 4], qd[s + 5])
 
 
 @wp.kernel
@@ -318,7 +323,7 @@ class ArticulationState:
         ):
             if result[size + index]:
                 raise ValueError(message)
-        k.evaluate(k.gather_q(state))
+        k.evaluate_state(state)
         k.validate_inertia()
         return history
 
@@ -326,6 +331,7 @@ class ArticulationState:
         """Explicitly initialize discrete velocities from physical q/qd and dt."""
         k = self.kinematics
         dt = k.timestep(dt)
+        self._initialize_roots(state)
         history = self.validate(state, bound=False)
         # Validate before modifying any published state, including on reset failure.
         local_qd = k.gather_qd(state)
@@ -375,8 +381,11 @@ class ArticulationState:
                 [getattr(history, prefix + "_omega"), self.dtype(dt), getattr(history, prefix + "_vsym")],
                 device=self.device,
             )
-        k.evaluate(k.gather_q(state), state=state)
+        k.evaluate_state(state, publish=True)
         self.bind(state, dt=dt)
+
+    def _initialize_roots(self, state):
+        """Initialize native floating-root poses from coordinates before validation reads them."""
 
     def bind(self, state, *, dt):
         """Bind metadata after complete initialization or physical-step recovery."""

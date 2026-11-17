@@ -309,7 +309,7 @@ class _SpatialContactObjective(_PooledContactObjective):
     def buffers(self):
         return super().buffers() + (() if self._spatial is None else self._spatial.buffers())
 
-    def begin_step(self, *state, kinematics, q0, **options):
+    def begin_step(self, *state, kinematics, q0, roots0=None, **options):
         self._selection_ready = False
         self._refreshes = self._query_dropped = 0
         self._query_warned = False
@@ -322,17 +322,18 @@ class _SpatialContactObjective(_PooledContactObjective):
                 state[1],
                 rigid_com=options.get("rigid_com"),
                 capacity=self.candidate_capacity,
+                roots0=roots0,
             )
         else:
             if kinematics is not self._spatial.kinematics:
                 raise ValueError("Spatial contact kinematics changed")
-            self._spatial.begin_step(q0, state[0], state[1], rigid_com=options.get("rigid_com"))
+            self._spatial.begin_step(q0, state[0], state[1], rigid_com=options.get("rigid_com"), roots=roots0)
         self._evaluated = False
         self._assembled_generation = -1
         self._tainted = self._warned = False
         self._batch.begin_step(*state, **options)
 
-    def refresh(self, q, x, *, rigid_com):
+    def refresh(self, q, x, *, rigid_com, roots=None):
         selection = self._spatial
         if selection is None:
             raise ValueError("Freeze a physical step before querying candidates")
@@ -340,8 +341,8 @@ class _SpatialContactObjective(_PooledContactObjective):
         self.query_graphs.run(
             "contact_candidates",
             (),
-            (q, x, rigid_com, *selection.buffers()),
-            lambda: selection._query(q, x, rigid_com=rigid_com),
+            (q, x, rigid_com, *(roots or ()), *selection.buffers()),
+            lambda: selection._query(q, x, rigid_com=rigid_com, roots=roots),
             # BVH refit/query must not have an in-flight warmup at capture.
             warmup=False,
         )

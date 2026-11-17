@@ -281,7 +281,7 @@ class ArticulationProducer(_Producer):
 
     def begin_step(self, solver, state_in):
         k, obj, device = solver._kinematics, solver._objective, solver.model.device
-        obj.begin(k.gather_q(state_in))
+        obj.begin(k.gather_q(state_in), roots=k.state_roots(state_in))
         wp.copy(obj.vn, k.gather_qd(state_in))
         history = getattr(state_in, solver._states.namespace)
         dt = solver._problem.dt
@@ -320,6 +320,7 @@ class ArticulationProducer(_Producer):
             ],
             device=device,
         )
+        solver._floating.begin_step(state_in, accepted, solver._root_steps(accepted), obj, dt)
 
     def candidate(self, solver, accepted, trial, direction, alpha, dt):
         k = solver._kinematics
@@ -341,11 +342,22 @@ class ArticulationProducer(_Producer):
             ],
             device=solver.model.device,
         )
+        solver._floating.trial(
+            solver._root_steps(accepted), trial, solver._root_steps(trial), direction, solver._problem.alpha
+        )
 
     def evaluate(self, solver, state, dt, residual, *, build_tangent):
         k, obj = solver._kinematics, solver._objective
         step = solver._joint_step(state)
-        obj.evaluate(k.gather_q(state), dt, build_tangent=build_tangent, step=step, dt_buffer=solver._problem.dt)
+        obj.evaluate(
+            k.gather_q(state),
+            dt,
+            build_tangent=build_tangent,
+            step=step,
+            dt_buffer=solver._problem.dt,
+            roots=k.state_roots(state),
+            root_steps=solver._root_steps(state) if k.floating_count else None,
+        )
         wp.launch(
             _scatter_rows,
             k.count,
@@ -366,6 +378,7 @@ class ArticulationProducer(_Producer):
         k = solver._kinematics
         q = solver._joint_step(state)
         wp.launch(_write_absolute, k.count, [q, solver._linear.q_rows, out], device=solver.model.device)
+        solver._floating.coordinates(solver._root_steps(state), out)
 
     def assemble(self, solver, assembly, dt):
         wp.launch(
@@ -389,6 +402,7 @@ class ArticulationProducer(_Producer):
             [solver._joint_step(accepted), solver._joint_step(trial), solver._linear.q_rows, out],
             device=solver.model.device,
         )
+        solver._floating.difference(solver._root_steps(accepted), solver._root_steps(trial), out)
 
     def domain(self, solver, accepted, candidate, flags):
         k, obj = solver._kinematics, solver._objective
@@ -414,7 +428,8 @@ class ArticulationProducer(_Producer):
         final = getattr(state, solver._states.namespace)
         dt = solver._problem.dt
         q = k.gather_q(state)
-        k.evaluate_step(q, solver._joint_step(state), obj.rn, obj.axes_n)
+        root_steps = solver._root_steps(state) if k.floating_count else None
+        k.evaluate_step(q, solver._joint_step(state), obj.rn, obj.axes_n, root_steps)
         wp.launch(
             _recover_step,
             k.bodies,
@@ -434,7 +449,9 @@ class ArticulationProducer(_Producer):
             ],
             device=device,
         )
-        k.evaluate(q, state=state)
+        # Root mirrors use the recovered link rates; body outputs then read them.
+        solver._floating.publish(state)
+        k.evaluate(q, state=state, roots=k.state_roots(state))
 
 
 class RigidProducer(_Producer):
@@ -881,7 +898,8 @@ class ContactProducer(_Producer):
     def begin_step(self, solver, state_in):
         contact, k = solver._contact, solver._kinematics
         q = k.gather_q(state_in)
-        k.evaluate(q)
+        roots = k.state_roots(state_in)
+        k.evaluate(q, roots=roots)
         history = state_in._monolithic_coupled
         surface = contact._batch.material_surface
         if surface is not None:
@@ -894,7 +912,7 @@ class ContactProducer(_Producer):
             k.jw,
             rigid_com=history.rigid_com,
             rigid_rotation=history.rigid_rotation,
-            **({"kinematics": k, "q0": q} if solver._contact_spatial else {}),
+            **({"kinematics": k, "q0": q, "roots0": roots} if solver._contact_spatial else {}),
         )
 
     def evaluate(self, solver, state, dt, residual, *, build_tangent):
