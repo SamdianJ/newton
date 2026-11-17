@@ -15,6 +15,7 @@ from .articulation_state import _predict, _recover_step
 from .contact import ContactStatus
 from .material_batch import _DeviceRecords
 from .rigid import _matrices, _scatter_residual, _scatter_tangent
+from .rigid_pose import _pose_coordinates, _pose_difference
 from .solver_types import _StepFailure
 from .state_checks import scalar_view
 from .tet_assembly import TetScatterBuffers, assemble_tet_residual_tangent
@@ -147,31 +148,6 @@ def _material_difference(
 
 
 @wp.kernel
-def _rigid_difference(
-    ta: wp.array[Any],
-    qa: wp.array[Any],
-    tb: wp.array[Any],
-    qb: wp.array[Any],
-    rows: wp.array2d[int],
-    out: wp.array[Any],
-):
-    i = wp.tid()
-    # Left relative quaternion logarithm, using the short representative.
-    relative = qb[i] * wp.quat_inverse(qa[i])
-    vector = wp.vector(relative[0], relative[1], relative[2])
-    scalar = relative[3]
-    if scalar < out.dtype(0):
-        vector = -vector
-    length = wp.length(vector)
-    factor = out.dtype(2)
-    if length > out.dtype(0):
-        factor = out.dtype(2) * wp.atan2(length, wp.abs(scalar)) / length
-    for axis in range(3):
-        out[rows[i, axis]] = tb[i][axis] - ta[i][axis]
-        out[rows[i, axis + 3]] = factor * vector[axis]
-
-
-@wp.kernel
 def _articulation_domain(
     q: wp.array[Any],
     qn: wp.array[Any],
@@ -242,16 +218,6 @@ def _contact_reaction(
 def _particle_coordinates(x: wp.array[Any], ids: wp.array[int], start: int, output: wp.array[Any]):
     i = wp.tid()
     output[start + i] = type(output[0])(wp.abs(x[ids[i / 3]][i % 3]))
-
-
-@wp.kernel
-def _rigid_coordinates(com: wp.array[Any], rotation: wp.array[Any], rows: wp.array2d[int], output: wp.array[Any]):
-    i, j = wp.tid()
-    # A rotation step q q_n^-1 near identity turns by about twice its vector part.
-    value = type(output[0])(2.0) * type(output[0])(wp.abs(rotation[i][j % 3]))
-    if j < 3:
-        value = type(output[0])(wp.abs(com[i][j]))
-    output[rows[i, j]] = value
 
 
 @wp.kernel
@@ -515,7 +481,7 @@ class RigidProducer(_Producer):
         rigid = solver._rigid
         if rigid.count:
             steps = solver._rigid_steps(state)
-            wp.launch(_rigid_coordinates, (rigid.count, 6), [*steps, rigid.rows, out], device=solver.model.device)
+            wp.launch(_pose_coordinates, (rigid.count, 6), [*steps, rigid.rows, out], device=solver.model.device)
 
     def assemble(self, solver, assembly, dt):
         rigid = solver._rigid
@@ -535,7 +501,7 @@ class RigidProducer(_Producer):
 
     def difference(self, solver, accepted, trial, out):
         wp.launch(
-            _rigid_difference,
+            _pose_difference,
             solver._rigid.count,
             [*solver._rigid_steps(accepted), *solver._rigid_steps(trial), solver._rigid.rows, out],
             device=solver.model.device,

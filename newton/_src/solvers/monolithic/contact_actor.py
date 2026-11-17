@@ -15,7 +15,7 @@ from .contact import _failure
 from .contact_geometry import _shape64
 from .contact_roundoff import _abs_vector, analytic_geometry_magnitude, mesh_geometry_magnitude
 from .contact_smoothing import box_field
-from .rigid import _rotation_step
+from .rigid_pose import _rotation_step
 from .smooth_sdf import smooth_query
 
 

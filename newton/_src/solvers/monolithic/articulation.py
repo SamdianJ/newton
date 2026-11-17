@@ -70,6 +70,13 @@ def _forward(
 
 
 @wp.func
+def _rotation_step(q: Any):
+    """Return ``R(q) - I`` of a unit quaternion near identity without cancellation."""
+    v = type(q[0])(2.0) * wp.skew(wp.vector(q[0], q[1], q[2]))
+    return q[3] * v + type(q[0])(0.5) * (v * v)
+
+
+@wp.func
 def _axis_rotation_step(axis: Any, angle: Any):
     """Return ``Rot(axis, angle) - I`` without cancellation for small angles."""
     k = wp.skew(axis)
