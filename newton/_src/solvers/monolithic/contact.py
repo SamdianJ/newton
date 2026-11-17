@@ -48,6 +48,8 @@ def _geometry_type(dtype):
         # Length by which rounding the local point y can move the gap.
         rounding: wp.array[dtype]
         gradient: wp.array[vector]
+        # Derivative of the gradient with respect to the local point [1/m].
+        hessian: wp.array[matrix]
         orientation: wp.array[dtype]
         orientation_magnitude: wp.array[dtype]
         orientation_condition: wp.array[dtype]
@@ -264,6 +266,7 @@ def _law(
     beta = mu * load * factor
     r = -load_normal * g + beta * v
     dissipative = mu * load * psi
+    normal_weight = type(radius)(1.0)
     if (
         not wp.isfinite(en)
         or not wp.isfinite(dissipative)
@@ -282,6 +285,7 @@ def _law(
                 return
             weight = type(radius)(0.0)
         response.orientation[output_key] = weight
+        normal_weight = weight
         # The orientation coefficient belongs to the physical step start.
         # Its derivative with respect to every Newton/trial coordinate is zero.
         friction_weight = weight * wp.length(g)
@@ -361,13 +365,60 @@ def _law(
     energy[output_key, 0] = en
     energy[output_key, 1] = dissipative
     normal[output_key] = n
-    tangent[output_key] = type(current.y[0])(0.0)
+    t = type(current.y[0])(0.0)
     # Reproject before normalization: near zero slip, cancellation can leave
     # a roundoff vector almost parallel to n instead of a tangent direction.
     transverse = wp.cross(n, v)
     transverse_length = wp.length(transverse)
     if transverse_length > type(radius)(0.0):
-        tangent[output_key] = wp.cross(transverse / transverse_length, n)
+        t = wp.cross(transverse / transverse_length, n)
+    # The normal force follows the gradient as the point moves over a curved
+    # target: d(-load_normal g) = -load_normal H dy. Its tangential part joins
+    # the friction block, which is then diagonal in its own principal frame
+    # and may be negative on a convex target. The part of H along the normal
+    # (zero for a distance field) and the friction derivatives through the
+    # turning normal stay out of the tangent.
+    geometric = normal_weight * load_normal
+    if geometric > type(radius)(0.0) and current.hessian.shape[0] > 0 and wp.length(n) > type(radius)(0.0):
+        basis = t
+        if wp.length(basis) == type(radius)(0.0):
+            axis = type(n)(type(radius)(1.0), type(radius)(0.0), type(radius)(0.0))
+            if wp.abs(n[1]) < wp.abs(n[0]) and wp.abs(n[1]) <= wp.abs(n[2]):
+                axis = type(n)(type(radius)(0.0), type(radius)(1.0), type(radius)(0.0))
+            elif wp.abs(n[2]) < wp.abs(n[0]):
+                axis = type(n)(type(radius)(0.0), type(radius)(0.0), type(radius)(1.0))
+            basis = wp.normalize(wp.cross(n, axis))
+        across = wp.cross(n, basis)
+        hb = current.hessian[key] * basis
+        ha = current.hessian[key] * across
+        a = radial - geometric * wp.dot(basis, hb)
+        b = -geometric * type(radius)(0.5) * (wp.dot(basis, ha) + wp.dot(across, hb))
+        c = beta - geometric * wp.dot(across, ha)
+        if a != radial or b != type(radius)(0.0) or c != beta:
+            half = type(radius)(0.5) * (a - c)
+            root = wp.sqrt(half * half + b * b)
+            cosine = type(radius)(1.0)
+            sine = type(radius)(0.0)
+            if b != type(radius)(0.0):
+                # Eigenvector of the larger eigenvalue, from the better conditioned row.
+                cosine = half + root
+                sine = b
+                if half < type(radius)(0.0):
+                    cosine = b
+                    sine = root - half
+                length = wp.sqrt(cosine * cosine + sine * sine)
+                cosine /= length
+                sine /= length
+            elif half < type(radius)(0.0):
+                cosine = type(radius)(0.0)
+                sine = type(radius)(1.0)
+            t = cosine * basis + sine * across
+            radial = type(radius)(0.5) * (a + c) + root
+            beta = type(radius)(0.5) * (a + c) - root
+            if not wp.isfinite(radial) or not wp.isfinite(beta) or not wp.isfinite(wp.length(t)):
+                _failure(flags, output_key, 1)
+                return
+    tangent[output_key] = t
     local_r[output_key] = r
     weights[output_key, 0] = curvature
     weights[output_key, 1] = beta

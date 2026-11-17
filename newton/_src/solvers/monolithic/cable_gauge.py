@@ -60,7 +60,8 @@ def _factor_modes(
     blocked: wp.array[int],
 ):
     factor = wp.tid()
-    if factor >= count[0] or not (weights[factor] > weights.dtype(0)):
+    # A curved target gives signed tangential weights; any weighted factor couples its rows.
+    if factor >= count[0] or weights[factor] == weights.dtype(0) or not wp.isfinite(weights[factor]):
         return
     begin, end = offsets[factor], offsets[factor + 1]
     # A current material contact reads one edge angle. Group by row ownership

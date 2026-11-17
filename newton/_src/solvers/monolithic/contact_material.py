@@ -128,7 +128,7 @@ def _project_surface(
     elif wp.abs(n[2]) < wp.abs(n[0]):
         axis = type(point)(0.0, 0.0, 1.0)
     t = tangent[i]
-    if weights[i, 1] > type(weights[0, 0])(0.0) and wp.length(t) == type(weights[0, 0])(0.0):
+    if weights[i, 1] != type(weights[0, 0])(0.0) and wp.length(t) == type(weights[0, 0])(0.0):
         t = wp.normalize(wp.cross(n, axis))
     transverse = wp.cross(n, t)
     candidates.weights[i, 0] = weights[i, 0]

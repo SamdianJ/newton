@@ -450,7 +450,9 @@ def _validate_contacts(candidates: Any, records: Any, row_count: int, force_row_
     zero = candidates.weights.dtype(0)
     for component in range(3):
         weight = candidates.weights[i, component]
-        if not wp.isfinite(weight) or weight < zero:
+        # Only the normal curvature is a square; a curved target makes the
+        # tangential weights signed.
+        if not wp.isfinite(weight) or (component == 0 and weight < zero):
             wp.atomic_or(records.flags, 0, 4)
         maximum = candidates.weights.dtype(0)
         for j in range(k):
@@ -463,7 +465,7 @@ def _validate_contacts(candidates: Any, records: Any, row_count: int, force_row_
         bound = (weight * maximum) * maximum
         if not wp.isfinite(bound):
             wp.atomic_or(records.flags, 0, 4)
-        nonzero = nonzero or (weight > zero and maximum != zero)
+        nonzero = nonzero or (weight != zero and maximum != zero)
     for j in range(f):
         force_row = candidates.force_rows[i, j] + 0
         force_value = candidates.forces[i, j] + candidates.forces.dtype(0)
@@ -518,9 +520,9 @@ def _reserve_contacts(
             return
     components = int(0)
     for axis in range(3):
-        if candidates.weights[i, axis] > candidates.weights.dtype(0):
+        if candidates.weights[i, axis] != candidates.weights.dtype(0):
             components += 1
-    # Keep zero products within positive factors, omitting zero-weight factors.
+    # Keep zero products within weighted factors, omitting zero-weight factors.
     demands[index] = wp.vec4i(1, k, components * k * k, candidates.force_counts[i])
 
 
@@ -635,7 +637,7 @@ def _write_contact_triplets(records: Any, workers: int):
         remaining = local // (k * k)
         component = int(0)
         for axis in range(3):
-            if records.factor_weights[3 * lo + axis] > records.factor_weights.dtype(0):
+            if records.factor_weights[3 * lo + axis] != records.factor_weights.dtype(0):
                 if remaining == 0:
                     component = axis
                 remaining -= 1
