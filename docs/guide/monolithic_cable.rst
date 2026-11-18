@@ -75,9 +75,10 @@ one cable, on centerline positions only, for example ``{"self": True, "inter": T
 
 Keys: ``self`` and ``inter`` (bool, default True, not both False);
 ``normal_stiffness``, a line stiffness [N/m²] (default 1e5; a method coefficient,
-not a calibrated value; the default is not qualified for fast crossings: with
-2 mm radius cables and 7 mm edges, a 1 m/s right-angle crossing reached about
-0.21 radius of penetration at 1e5, and the acceptance scenes use 3e5); ``samples_per_edge`` (2 or 3, default 3);
+not a calibrated value; the default is not qualified for fast crossings: for
+2 mm radius cables (1200 kg/m³, E = 2 MPa) with 7 mm edges and a 2 ms step, a
+1 m/s right-angle crossing onto a fixed strand reached about 0.21 radius of
+penetration at 1e5, and the acceptance scenes use 3e5); ``samples_per_edge`` (2 or 3, default 3);
 ``index_exclusion`` (integer ≥ 3, default 3) and ``arc_exclusion_factor``
 (default π/2); bounded ``candidate_capacity`` and ``support_capacity``; and
 ``candidate_padding`` [m] (default the largest cable radius). The penalty

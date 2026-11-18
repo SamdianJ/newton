@@ -50,15 +50,23 @@ def test_capacity_overflow_rolls_back(test, device, *, precision, graph):
 
 
 def test_overflow_with_cloth_contact_rolls_back(test, device, *, precision):
-    """With cloth contact also enabled, a cable contact overflow still reports CONTACT_OVERFLOW and restores the state."""
+    """With cloth contact also enabled, a cable contact overflow still reports CONTACT_OVERFLOW and restores the state.
+
+    Two close cloth triangles give the cloth pool records in the same step; cloth contact is evaluated before cable
+    contact, so the rollback must also undo what the cloth evaluation wrote.
+    """
     for options in ({"candidate_capacity": 1}, {"support_capacity": 1}):
         with test.subTest(options=options):
-            solver, state = cloth_and_cable_solver(device=device, precision=precision, cable_contact=options)
+            solver, state = cloth_and_cable_solver(
+                device=device, precision=precision, cable_contact=options, cloth_pair=True
+            )
             before = snapshot(state)
             solver.step(state, state, solver.create_control(), dt=DT)
             test.assertEqual(solver.last_stats.status, solver.Status.CONTACT_OVERFLOW)
             test.assertTrue(solver.last_stats.rolled_back)
-            overflow, dropped, _ = (int(v) for v in solver._cable_contact.pool.status.numpy())
+            test.assertGreater(solver._cloth_contact._candidate_count, 0)
+            overflow, dropped, flags = (int(v) for v in solver._cable_contact.pool.status.numpy())
+            test.assertEqual(flags, 0)
             test.assertGreater(overflow + dropped, 0)
             for name, value in before.items():
                 np.testing.assert_array_equal(snapshot(state)[name], value, err_msg=name)

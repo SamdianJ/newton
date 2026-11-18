@@ -123,6 +123,9 @@ def execute(args):
     counts = dict.fromkeys(("CONVERGED", "STOPPED_ACCEPTED", "HARD_FAILURE"), 0)
     frames, chunks, stopped, published, attempted = [], [], [], 0, 0
     # Per-run peaks of the per-step cable diagnostics (plan section 2: used shift, contact and triplet counts).
+    # Peaks over published steps, except used_shift_max, which covers every attempted step. triplets_max counts
+    # scalar COO entries (up to 144 per segment pair; sample-vertex pairs add none), comparable with the pool's
+    # triplet capacity, not with the contact counts.
     cable = {"used_shift_max": 0.0}
     if args.method == "cable-contact":
         cable.update(dict.fromkeys(("triplets_max", "inter_candidates_max", "inter_active_max"), 0))
@@ -196,13 +199,11 @@ def execute(args):
                     row.update({name: getattr(stats, name) for name in STAT_FIELDS})
                     row.update(_graph_totals(stats.variational))
                     row["contact_pool"] = (stats.variational or {}).get("contact_pool")
-                    row["cable_used_shift_max"] = (stats.variational or {}).get("cable_used_shift_max")
-                    cable["used_shift_max"] = max(cable["used_shift_max"], row["cable_used_shift_max"] or 0.0)
-                    if args.method == "cable-contact":
-                        # Triplets of the last cable contact evaluation; the solver has no public accessor.
-                        records = scene.solver._cable_contact.pool.records
-                        row["cable_contact_triplets"] = int(records.triplet_count.numpy()[0])
-                        cable["triplets_max"] = max(cable["triplets_max"], row["cable_contact_triplets"])
+                    shift = (stats.variational or {}).get("cable_used_shift_max")
+                    if shift is None:
+                        raise ValueError(f"Step {before + 1} statistics lack cable_used_shift_max")
+                    row["cable_used_shift_max"] = shift
+                    cable["used_shift_max"] = max(cable["used_shift_max"], shift)
                 try:
                     forces = scene.solver.get_contact_forces(scene.state)
                     label = publication(stats, forces, previous_generation=previous)
@@ -222,6 +223,11 @@ def execute(args):
                     if args.method == "cable-contact":
                         diagnostics = scene.solver.get_cable_contact_diagnostics(scene.state)
                         row["cable_contact"] = {name: diagnostics[name] for name in ("inter", "self")}
+                        # Scalar COO entries of the step's last cable contact evaluation (published steps only;
+                        # a failed step would leave a rejected or stale value). No public accessor exists.
+                        records = scene.solver._cable_contact.pool.records
+                        row["cable_contact_triplets"] = int(records.triplet_count.numpy()[0])
+                        cable["triplets_max"] = max(cable["triplets_max"], row["cable_contact_triplets"])
                         for name in ("inter", "self"):
                             for key in ("candidates", "active"):
                                 peak = f"{name}_{key}_max"

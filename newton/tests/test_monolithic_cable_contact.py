@@ -139,8 +139,13 @@ def reference_gradient(solver, rest, chains, positions, *, stiffness=1e5, smooth
     return energy, gradient, (segments, samples, pairs)
 
 
-def cloth_and_cable_solver(*, device=None, precision=SolverMonolithic.Precision.FP64, cable_contact=None):
-    """Two pressed cable strands and a separate cloth triangle with cloth and cable contact both enabled."""
+def cloth_and_cable_solver(
+    *, device=None, precision=SolverMonolithic.Precision.FP64, cable_contact=None, cloth_pair=False
+):
+    """Two pressed cable strands and a separate cloth triangle with cloth and cable contact both enabled.
+
+    ``cloth_pair`` adds a second triangle 5 mm above the first, inside the cloth contact radius.
+    """
     points, chains = strands()
     builder = newton.ModelBuilder(gravity=(0, 0, 0))
     mass = np.zeros(len(points))
@@ -155,11 +160,18 @@ def cloth_and_cable_solver(*, device=None, precision=SolverMonolithic.Precision.
     for x, y in ((0.0, 0.05), (0.03, 0.05), (0.0, 0.08)):
         builder.add_particle(wp.vec3(x, y, 0.0), wp.vec3(0.0), 0.00015)
     builder.add_triangle(first, first + 1, first + 2, tri_ke=2, tri_ka=3, tri_kd=0)
+    faces = [face]
+    if cloth_pair:
+        first, faces = builder.particle_count, [*faces, builder.tri_count]
+        for x, y in ((0.0, 0.05), (0.03, 0.05), (0.0, 0.08)):
+            builder.add_particle(wp.vec3(x, y, 0.005), wp.vec3(0.0), 0.00015)
+        builder.add_triangle(first, first + 1, first + 2, tri_ke=2, tri_ka=3, tri_kd=0)
     model = builder.finalize(device=device)
     solver = SolverMonolithic(
         model,
         cloth_inputs=[
-            SolverMonolithic.ClothInput(triangle_ids=(face,), bending=(0.01, 0.01), thickness=0.01, surface_density=1)
+            SolverMonolithic.ClothInput(triangle_ids=(f,), bending=(0.01, 0.01), thickness=0.01, surface_density=1)
+            for f in faces
         ],
         cable_inputs=[cable_input(chain, points) for chain in chains],
         cloth_contact={"radius": 0.02, "normal_stiffness": 1e3, "candidate_capacity": 64},

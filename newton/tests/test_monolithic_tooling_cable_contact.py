@@ -434,6 +434,80 @@ class TestCableContactVerdict(unittest.TestCase):
         self.assertLess(criteria["diagnostics"]["energy_max_rise_J"], 1e-12)
         self.assertNotIn("ground-plane", criteria["diagnostics"]["energy_scope"])
 
+    def test_crossings_are_split_into_self_and_inter(self):
+        """One cable passes through its own straight part, two through other cables: one self and two inter events."""
+        radius, h = 0.002, 0.003  # 3 mm on either side, closer than the 4 mm radius sum
+
+        def strand(z):
+            # Cable 0 runs along x, loops back at height z and passes over its own segment 2 at x = 0 along -y;
+            # cables 2 and 4 pass over cables 1 and 3 the same way at x = 0.1 and 0.2.
+            straight = [(x, 0.0, 0.0) for x in (-0.025, -0.015, -0.005, 0.005, 0.015, 0.025)]
+            loop = [(0.025, 0.015, z), (0.0, 0.015, z), (0.0, 0.005, z), (0.0, -0.005, z), (0.0, -0.015, z)]
+            pairs = []
+            for x0 in (0.1, 0.2):
+                pairs += [(x0 + dx, 0.0, 0.0) for dx in (-0.015, -0.005, 0.005, 0.015)]
+                pairs += [(x0, y, z) for y in (0.015, 0.005, -0.005, -0.015)]
+            return np.array(straight + loop + pairs)
+
+        ranges = np.array([[0, 11], [11, 15], [15, 19], [19, 23], [23, 27]])
+        xs = np.stack([strand(h), strand(-h)])
+        directors = []
+        for first, last in ranges:
+            tangent = np.diff(xs[0][first:last], axis=0)
+            tangent /= np.linalg.norm(tangent, axis=1, keepdims=True)
+            hint = np.where(np.abs(tangent[:, 2:3]) > 0.9, [[1.0, 0.0, 0.0]], [[0.0, 0.0, 1.0]])
+            director = hint - np.sum(hint * tangent, axis=1, keepdims=True) * tangent
+            directors.append(director / np.linalg.norm(director, axis=1, keepdims=True))
+        directors = np.vstack(directors)
+        edges, twists = len(directors), len(directors) - len(ranges)
+        topology = {
+            "vertex_ranges": ranges,
+            "rest_positions": xs[0],
+            "rest_directors": directors,
+            "theta_offsets": np.array([0, 10, 13, 16, 19]),
+            "radius": np.full(5, radius),
+            "EA": np.full(5, 10.0),
+            "EI": np.full(5, 1e-3),
+            "GJ": np.full(5, 2e-3),
+            "particle_mass": np.full(len(xs[0]), 1e-3),
+            "fixed_vertices": np.array([], dtype=int),
+            "gravity": np.zeros(3),
+            "ground_height": np.array([np.nan]),
+            "dt": np.array([0.002]),
+        }
+        series = {
+            "step": np.arange(2),
+            "x": xs,
+            "v": np.zeros_like(xs),
+            "theta": np.zeros((2, edges)),
+            "director": np.repeat(directors[None], 2, axis=0),
+            "twist": np.zeros((2, twists)),
+            "target_theta": np.zeros((2, edges)),
+        }
+        recipe = {"scene": "E4", "kind": "cross", "solver": {"contact_stiffness": 1e7, "normal_smoothing": 1e-4}}
+        run = SimpleNamespace(
+            manifest={
+                "scene": {"recipe": recipe},
+                "arguments": {"method": "off", "precision": "fp64", "device": "cpu"},
+                "source_sha": "synthetic",
+                "recipe_sha256": "synthetic",
+                "git_status": "",
+                "source_files_changed_during_run": [],
+            },
+            summary={
+                "status": "COMPLETE",
+                "publication_counts": {"CONVERGED": 1, "STOPPED_ACCEPTED": 0, "HARD_FAILURE": 0},
+            },
+            topology=topology,
+            frames=series,
+        )
+        diagnostics = evaluate(run, GATES)[0]["diagnostics"]
+        self.assertEqual(diagnostics["crossing_events"], 3)
+        self.assertEqual(diagnostics["crossing_events_self"], 1)
+        self.assertEqual(diagnostics["crossing_events_inter"], 2)
+        (event,) = [event for event in diagnostics["crossing_first"] if event["self"]]
+        self.assertEqual(sorted(event["segments"]), [2, 8])  # both on cable 0 (segments 0-9)
+
     def test_evaluate_adds_the_contact_energy_of_a_cable_contact_run(self):
         """A cable-contact run counts the reference contact energy of every frame; missing parameters are named."""
         count, frames, length, radius = 8, 5, 0.007, 0.002
@@ -673,7 +747,7 @@ class TestCableContactReceipt(unittest.TestCase):
         """Every published step of a cable-contact run records the solver's cable counts and used shift."""
         recipe = json.loads((FIXTURES / "cable_contact_e4_cross_v1.json").read_text())
         recipe["cables"] = [{"vertices": 8, "segment_length_m": 0.007}] * 2
-        recipe["cross"] = dict(recipe["cross"], angles_deg=[0.0, 90.0], heights_m=[0.02, 0.025])
+        recipe["cross"] = dict(recipe["cross"], angles_deg=[0.0, 90.0], heights_m=[0.02, 0.0238])
         sidecar = FIXTURES / "cable_contact_method_frozen_v1.json"
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "recipe.json"
@@ -688,14 +762,17 @@ class TestCableContactReceipt(unittest.TestCase):
             for row in rows:
                 self.assertEqual(row["publication_status"], "CONVERGED")
                 self.assertGreaterEqual(row["cable_used_shift_max"], 0.0)
-                # Triplets come from active pairs only; a gap inside the padding gives candidates and none.
-                self.assertGreaterEqual(row["cable_contact_triplets"], 0)
                 for name in ("inter", "self"):
                     channel = row["cable_contact"][name]
                     self.assertEqual(set(channel), {"candidates", "active", "compressive_load_N", "max_overlap_m"})
                     self.assertLessEqual(channel["active"], channel["candidates"])
-            # The strands start with a 1 mm gap, inside the 2 mm candidate padding: inter candidates exist.
-            self.assertGreater(rows[-1]["cable_contact"]["inter"]["candidates"], 0)
+                # Triplets come from active pairs: none exactly when no pair is active.
+                active = row["cable_contact"]["inter"]["active"] + row["cable_contact"]["self"]["active"]
+                self.assertEqual(row["cable_contact_triplets"] > 0, active > 0)
+            # The strands start 0.2 mm into each other: the first step has an active, compressive inter contact.
+            self.assertGreater(rows[0]["cable_contact"]["inter"]["active"], 0)
+            self.assertGreater(rows[0]["cable_contact"]["inter"]["compressive_load_N"], 0.0)
+            self.assertGreater(rows[0]["cable_contact_triplets"], 0)
             summary = json.loads((output / "summary.json").read_text())
             peaks = summary["cable"]
             self.assertEqual(peaks["triplets_max"], max(row["cable_contact_triplets"] for row in rows))
@@ -705,10 +782,8 @@ class TestCableContactReceipt(unittest.TestCase):
             self.assertEqual(peaks["used_shift_max"], max(row["cable_used_shift_max"] for row in rows))
             criteria, _ = evaluate(load_run(output), GATES)
             self.assertEqual(criteria["diagnostics"]["solver_cable"], peaks)
-            self.assertEqual(
-                criteria["diagnostics"]["crossing_events_self"] + criteria["diagnostics"]["crossing_events_inter"],
-                criteria["diagnostics"]["crossing_events"],
-            )
+            # The runner's manifest carries the in-tree sidecar unchanged through the write and the reload.
+            self.assertTrue(criteria["method_frozen"])
 
 
 if __name__ == "__main__":

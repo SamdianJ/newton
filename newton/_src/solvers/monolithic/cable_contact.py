@@ -41,8 +41,8 @@ from .segment_graph import _SegmentGraphCache
 
 #: Longest current segment over its rest length that the candidate grid covers; a longer one fails the refresh.
 MAX_STRETCH = 1.5
-#: Default line stiffness [N/m^2]: a static ten-layer stack overlaps << 0.2 r, but a 1 m/s right-angle crossing
-#: reaches about 0.21 r; the frozen E2E method sidecar uses 3e5 (not qualified for fast crossings).
+#: Default line stiffness [N/m^2]. A static ten-layer stack overlaps << 0.2 r, but this default is not qualified for
+#: fast crossings (about 0.21 r at a 1 m/s right-angle crossing); the frozen E2E method sidecar uses 3e5.
 DEFAULT_LINE_STIFFNESS = 1.0e5
 _ALLOWED = {
     "self",
