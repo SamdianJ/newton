@@ -318,6 +318,7 @@ def _law_probe(
     offset=0.0,
     stiffness=1.0,
     hessian=None,
+    orientation=1.0,
     tangent_terms=False,
 ):
     vector = wp.vec3d if dtype == wp.float64 else wp.vec3
@@ -336,7 +337,7 @@ def _law_probe(
         geometry.distance = wp.array([gap], dtype=dtype, device=device)
         geometry.field_magnitude = wp.array([0.1], dtype=dtype, device=device)
         geometry.uncertified = wp.array([uncertified], dtype=int, device=device)
-        geometry.orientation = wp.ones(1, dtype=dtype, device=device)
+        geometry.orientation = wp.array([orientation], dtype=dtype, device=device)
     if hessian is not None:
         matrix = wp.mat33d if dtype == wp.float64 else wp.mat33
         current.hessian = wp.array([hessian], dtype=matrix, device=device)
@@ -420,6 +421,24 @@ def test_tiny_load_curvature(test, device, dtype):
     np.testing.assert_allclose(np.linalg.norm(tangent), 1.0, rtol=1e-6)
 
 
+def test_frozen_curvature_weight(test, device, dtype):
+    """Scale the curvature term by the step-start orientation weight, not by the gradient length."""
+    direction = np.array([1.0, 1.0, 0.0]) / np.sqrt(2.0)
+    flags, tangent, weights = _law_probe(
+        device,
+        dtype,
+        -0.001,
+        [0, 0, 2],
+        hessian=1000.0 * np.outer(direction, direction),
+        orientation=0.25,
+        tangent_terms=True,
+    )
+    test.assertEqual(int(flags[0]), 0)
+    # Unit stiffness: normal load 0.001 N; the weighted term is 0.25 * 0.001 N * 1000 /m.
+    np.testing.assert_allclose(weights, [0.25, -0.25, 0.0], rtol=1e-5, atol=1e-7)
+    test.assertLess(abs(tangent @ direction), 1e-6)
+
+
 def test_frozen_start_domain(test, device, dtype):
     """Reject a loaded frozen normal whose step-start field was uncertified, even without friction."""
     flags, energy, residual, _, _ = _law_probe(device, dtype, -0.001, [0, 0, 1], start_uncertified=1)
@@ -477,6 +496,7 @@ for _dtype, _suffix in ((wp.float32, "fp32"), (wp.float64, "fp64")):
         test_lse_magnitudes,
         test_mesh_magnitudes,
         test_frozen_weight_classification,
+        test_frozen_curvature_weight,
         test_frozen_start_domain,
         test_tiny_load_curvature,
         test_zero_residual_magnitude,
