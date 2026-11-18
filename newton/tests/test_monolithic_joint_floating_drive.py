@@ -340,7 +340,6 @@ def test_target_conventions(test, device):
     makes the root track target_qd, a stiff drive brings the root to eval_fk(target_q), and a root force
     against the drive settles at f / k_t (joint_f on a driven root is allowed)."""
     for precision, _numpy_dtype, _dtype in PRECISIONS:
-        tolerance = 1e-6 if precision == "fp64" else 1e-4
         for case, wanted in (
             ("linear rates", (0.2, -0.1, 0.3, 0.0, 0.0, 0.0)),
             ("angular rates", (0, 0, 0, 0.3, 0.1, -0.2)),
@@ -358,7 +357,8 @@ def test_target_conventions(test, device):
                     test.assertTrue(run.last_stats.converged, run.last_stats.failure_reason)
                 mirror = state.joint_qd.numpy()[:6].astype(np.float64)
                 if case == "linear rates":
-                    np.testing.assert_allclose(mirror, rates[:6], atol=100 * tolerance)
+                    # Measured after 600 steps: 1.3e-6 m/s (FP64), 5.0e-5 m/s (FP32).
+                    np.testing.assert_allclose(mirror, rates[:6], atol=2e-5 if precision == "fp64" else 5e-4)
                 else:
                     # Turning about the root COM, off the composite COM, needs a centripetal force from the
                     # linear damper (|dv| = m w^2 r / d_t, about 3e-4 m/s) and a gyroscopic torque from the
@@ -421,6 +421,36 @@ def test_tangent_entries_in_packed_trees(test, device):
         blocks.append(tangent[run._floating.entries.numpy()[0]].reshape(6, 6))
     test.assertGreater(abs(blocks[0]).max(), 0.0)
     np.testing.assert_allclose(blocks[1], blocks[0], rtol=1e-9, atol=1e-9 * abs(blocks[0]).max())
+
+
+def test_snapshot_names_root_and_field(test, device):
+    """Nonfinite root targets or wrench and a non-unit target name the root joint and the field, with two
+    floating roots (the step's own input checks catch nonfinite values earlier; this is the drive's guard)."""
+
+    def second_root(builder):
+        body = builder.add_link(mass=0.3, inertia=wp.diag(wp.vec3(1e-3)), label="other_root")
+        child = builder.add_link(mass=0.1, inertia=wp.diag(wp.vec3(1e-4)), label="other_child")
+        builder.add_articulation(
+            [builder.add_joint_free(body, label="other_free"), builder.add_joint_fixed(body, child, label="other_weld")]
+        )
+
+    model = driven_chain(device, prefix=second_root)
+    run = make_solver(model, **_drive_terms_options())
+    test.assertEqual(run._floating.count, 2)
+    _, _c, d, t = root_offsets(model)
+    for name, index, message in (
+        ("joint_target_q", t + 1, "nonfinite joint_target_q"),
+        ("joint_target_qd", d + 4, "nonfinite joint_target_qd"),
+        ("joint_f", d + 2, "nonfinite joint_f"),
+        ("joint_target_q", t + 6, "target quaternion must be unit"),
+    ):
+        with test.subTest(field=name, message=message):
+            control = run.create_control()
+            values = getattr(control, name).numpy()
+            values[index] = np.nan if "nonfinite" in message else 2.0
+            getattr(control, name).assign(values)
+            with test.assertRaisesRegex(ValueError, f"Floating root joint 'free': .*{message}"):
+                run._floating.snapshot(control, run._objective)
 
 
 def test_drive_rejections(test, device):
@@ -511,6 +541,7 @@ for _test in (
     test_conservative_energy_truth_table,
     test_target_conventions,
     test_tangent_entries_in_packed_trees,
+    test_snapshot_names_root_and_field,
     test_drive_rejections,
 ):
     add_function_test(TestJointFloatingDrive, _test.__name__, _test, devices=get_test_devices())

@@ -163,7 +163,9 @@ def _snapshot_controls(
     norm = wp.sqrt(
         pose[f, 3] * pose[f, 3] + pose[f, 4] * pose[f, 4] + pose[f, 5] * pose[f, 5] + pose[f, 6] * pose[f, 6]
     )
-    # Every driven triple reads the quaternion: the COM target depends on it through xc and the COM offset.
+    # Stiff triples read the quaternion (the COM target through xc and the COM offset, the rotation error
+    # directly); damping-only triples do not, but any driven root is checked (Newton's builder sets unit
+    # free-joint targets).
     driven = params[f, 0] + params[f, 1] + params[f, 3] + params[f, 4] > type(norm)(0.0)
     if driven and not (wp.abs(norm - type(norm)(1.0)) <= type(norm)(1.0e-5)):
         bits = bits | _NONUNIT_TARGET
@@ -411,8 +413,9 @@ class FloatingRoots:
         )
         # One blocking read per step (floating scenes only): the per-root status bits.
         status = self.status.numpy()
-        for f, bits in enumerate(status):
-            name = self._root_name(f)
+        bad = _NONFINITE_TARGET_Q | _NONFINITE_TARGET_QD | _NONFINITE_JOINT_F | _NONUNIT_TARGET
+        for f in np.flatnonzero(status & bad):
+            bits, name = int(status[f]), self._root_name(int(f))
             for bit, field in (
                 (_NONFINITE_TARGET_Q, "joint_target_q"),
                 (_NONFINITE_TARGET_QD, "joint_target_qd"),
