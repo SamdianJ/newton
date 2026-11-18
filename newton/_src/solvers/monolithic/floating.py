@@ -100,7 +100,10 @@ def _left_jacobian_inverse(phi: Any):
         + theta * theta * theta * theta / type(theta)(30240.0)
     )
     if theta > type(theta)(1.0e-2):
-        c = one / (theta * theta) - (one + wp.cos(theta)) / (type(theta)(2.0) * theta * wp.sin(theta))
+        # 1/theta^2 - cot(theta/2)/(2 theta), equal to the (1 + cos)/sin form without its 0/0 at pi.
+        c = one / (theta * theta) - wp.cos(theta * type(theta)(0.5)) / (
+            type(theta)(2.0) * theta * wp.sin(theta * type(theta)(0.5))
+        )
     return wp.identity(n=3, dtype=type(theta)) - type(theta)(0.5) * k + c * (k * k)
 
 
@@ -117,6 +120,14 @@ def _huber(u: Any, a: Any, limit: Any):
         gradient = limit * unit
         hessian = a * (limit / norm) * (wp.identity(n=3, dtype=type(a)) - wp.outer(unit, unit))
     return energy, gradient, hessian
+
+
+# Per-root snapshot status bits.
+_NONFINITE_TARGET_Q = wp.constant(1)
+_NONFINITE_TARGET_QD = wp.constant(2)
+_NONFINITE_JOINT_F = wp.constant(4)
+_NONUNIT_TARGET = wp.constant(8)
+_ROOT_TORQUE = wp.constant(16)
 
 
 @wp.kernel
@@ -137,29 +148,34 @@ def _snapshot_controls(
 ):
     f = wp.tid()
     t, d = target_starts[f], dof_starts[f]
+    bits = int(0)
     for k in range(7):
         value = target_q[t + k]
         if not wp.isfinite(value):
-            wp.atomic_max(status, 0, 1)
+            bits = bits | _NONFINITE_TARGET_Q
         pose[f, k] = type(params[0, 0])(value)
     for k in range(6):
-        if not wp.isfinite(target_qd[d + k]) or not wp.isfinite(joint_f[d + k]):
-            wp.atomic_max(status, 0, 1)
+        if not wp.isfinite(target_qd[d + k]):
+            bits = bits | _NONFINITE_TARGET_QD
+        if not wp.isfinite(joint_f[d + k]):
+            bits = bits | _NONFINITE_JOINT_F
         rate[f, k] = type(params[0, 0])(target_qd[d + k])
     norm = wp.sqrt(
         pose[f, 3] * pose[f, 3] + pose[f, 4] * pose[f, 4] + pose[f, 5] * pose[f, 5] + pose[f, 6] * pose[f, 6]
     )
-    driven = params[f, 3] + params[f, 4] > type(norm)(0.0)
+    # Every driven triple reads the quaternion: the COM target depends on it through xc and the COM offset.
+    driven = params[f, 0] + params[f, 1] + params[f, 3] + params[f, 4] > type(norm)(0.0)
     if driven and not (wp.abs(norm - type(norm)(1.0)) <= type(norm)(1.0e-5)):
-        wp.atomic_max(status, 1, 1)
+        bits = bits | _NONUNIT_TARGET
     f3, t3 = type(force[0])(), type(torque[0])()
     for k in range(3):
         f3[k] = type(params[0, 0])(joint_f[d + k])
         t3[k] = type(params[0, 0])(joint_f[d + 3 + k])
         if joint_f[d + 3 + k] != 0.0:
-            wp.atomic_max(status, 2, 1)
+            bits = bits | _ROOT_TORQUE
     force[f] = f3
     torque[f] = t3
+    status[f] = bits
     # The wrench enters the root term; the scalar joint rows of the root carry no force.
     for k in range(6):
         joint_force[local_starts[f] + k] = type(params[0, 0])(0.0)
@@ -295,7 +311,6 @@ class FloatingRoots:
         self.mirror_v = wp.zeros((self.count, 6), dtype=self.dtype, device=self.device)
         self.poses = wp.zeros(self.count, dtype=self.transform, device=self.device)
         self.params = array(self._drive_parameters(model, implicit_pd), self.dtype)
-        self.driven = bool(np.any(self.params.numpy()[:, [0, 1, 3, 4]] > 0))
         # Local tree rows and flat tangent entries of each root's 6 x 6 block.
         local = k.root_rows.numpy().reshape(-1, 6)
         self.local_rows = array(local, int)
@@ -320,8 +335,14 @@ class FloatingRoots:
         for name in ("force", "torque", "error_t", "error_r", "target_v", "target_w"):
             setattr(self, name, wp.zeros(self.count, dtype=self.vector, device=self.device))
         self.energy = wp.zeros(self.count, dtype=self.dtype, device=self.device)
-        self.status = wp.zeros(3, dtype=int, device=self.device)
+        self.status = wp.zeros(self.count, dtype=int, device=self.device)
         self.has_torque = False
+
+    def _root_name(self, f):
+        joint = int(self.joint_indices[f])
+        labels = getattr(self.model, "joint_label", None)
+        label = labels[joint] if labels is not None and joint < len(labels) else None
+        return repr(label) if label else str(joint)
 
     def _drive_parameters(self, model, implicit_pd):
         """Per root [k_t, d_t, F_max, k_r, d_r, tau_max]; gains and limits are isotropic per triple."""
@@ -339,10 +360,8 @@ class FloatingRoots:
             name: getattr(model, name).numpy()
             for name in ("joint_target_ke", "joint_target_kd", "joint_effort_limit", "joint_target_mode")
         }
-        labels = getattr(model, "joint_label", None)
         for f, dofs in enumerate(self.dof_indices):
-            joint = int(self.joint_indices[f])
-            name = repr(labels[joint]) if labels is not None and joint < len(labels) and labels[joint] else joint
+            name = self._root_name(f)
             for part, rows in (("linear", dofs[:3]), ("angular", dofs[3:])):
                 kp, kd, limit = (values[n][rows] for n in ("joint_target_ke", "joint_target_kd", "joint_effort_limit"))
                 for field, triple in (("target_ke", kp), ("target_kd", kd), ("effort_limit", limit)):
@@ -370,7 +389,6 @@ class FloatingRoots:
         """Freeze root targets and the root wrench; zero the root's scalar joint forces."""
         if not self.count:
             return
-        self.status.zero_()
         wp.launch(
             _snapshot_controls,
             self.count,
@@ -391,12 +409,22 @@ class FloatingRoots:
             ],
             device=self.device,
         )
+        # One blocking read per step (floating scenes only): the per-root status bits.
         status = self.status.numpy()
-        if status[0]:
-            raise ValueError("Floating root targets and joint_f must be finite")
-        if status[1]:
-            raise ValueError("A driven floating root's target quaternion must be unit (within 1e-5)")
-        self.has_torque = bool(status[2])
+        for f, bits in enumerate(status):
+            name = self._root_name(f)
+            for bit, field in (
+                (_NONFINITE_TARGET_Q, "joint_target_q"),
+                (_NONFINITE_TARGET_QD, "joint_target_qd"),
+                (_NONFINITE_JOINT_F, "joint_f"),
+            ):
+                if bits & bit:
+                    raise ValueError(f"Floating root joint {name}: nonfinite {field}")
+            if bits & _NONUNIT_TARGET:
+                raise ValueError(
+                    f"Floating root joint {name}: a driven root's target quaternion must be unit (within 1e-5)"
+                )
+        self.has_torque = bool(np.any(status & _ROOT_TORQUE))
 
     def begin_drive(self):
         """Fix the drive's start errors and world target rates at the step start."""

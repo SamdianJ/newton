@@ -149,13 +149,13 @@ class JointParameters:
         driven = np.zeros(nq, dtype=np.int32)
         if implicit_pd:
             kp, kd = read("joint_target_ke"), read("joint_target_kd")
+            # A root's gains drive its 6D pose term (validated there, by joint name), never the scalar PD
+            # rows; joint_f on a driven root is a separate external wrench, so the duplicate-joint_f rule
+            # does not apply.
+            kp, kd = np.where(root_rows, 0, kp), np.where(root_rows, 0, kd)
             if np.any(kp < 0) or np.any(kd < 0):
                 raise ValueError("PD gains must be nonnegative")
             driven = ((kp > 0) | (kd > 0)).astype(np.int32)
-            # A root's gains drive its 6D pose term (validated there), never the scalar PD rows; joint_f on
-            # a driven root is a separate external wrench, so the duplicate-joint_f rule does not apply.
-            kp, kd = np.where(root_rows, 0, kp), np.where(root_rows, 0, kd)
-            driven[root_rows] = 0
             modes = model.joint_target_mode
             if modes is None or (modes.shape, modes.dtype, modes.device) != (
                 (model.joint_dof_count,),

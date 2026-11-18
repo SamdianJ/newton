@@ -17,9 +17,11 @@ ANCHOR = wp.transform((0.3, -0.2, 1.0), wp.quat_rpy(0.4, -0.3, 0.7))
 PRECISIONS = (("fp64", np.float64), ("fp32", np.float32))
 
 
-def floating_chain(device, *, fixed_child=False, gravity=(0.0, 0.0, -9.81), edit=None):
+def floating_chain(device, *, fixed_child=False, gravity=(0.0, 0.0, -9.81), edit=None, prefix=None):
     """A FREE root (offset COM, non-identity anchors) carrying a revolute link and a prismatic grandchild."""
     builder = newton.ModelBuilder(gravity=gravity)
+    if prefix is not None:
+        prefix(builder)
     root = builder.add_link(
         mass=1.0, inertia=wp.diag(wp.vec3(2e-3, 3e-3, 4e-3)), com=wp.vec3(0.01, -0.02, 0.005), label="root"
     )
@@ -67,17 +69,29 @@ def floating_chain(device, *, fixed_child=False, gravity=(0.0, 0.0, -9.81), edit
     if edit is not None:
         edit(builder)
     model = builder.finalize(device=device)
+    _, c, d, _ = root_offsets(model)
     q, qd = model.joint_q.numpy(), model.joint_qd.numpy()
-    q[:3] = (0.05, -0.02, 0.1)
+    q[c : c + 3] = (0.05, -0.02, 0.1)
     r = np.array([0.1, -0.2, 0.3, 0.9])
-    q[3:7] = r / np.linalg.norm(r)
-    qd[:6] = (0.1, 0.0, 0.2, 0.5, -1.0, 2.0)
+    q[c + 3 : c + 7] = r / np.linalg.norm(r)
+    qd[d : d + 6] = (0.1, 0.0, 0.2, 0.5, -1.0, 2.0)
     if not fixed_child:
-        q[7:9] = (0.4, 0.03)
-        qd[6:8] = (3.0, -0.2)
+        q[c + 7 : c + 9] = (0.4, 0.03)
+        qd[d + 6 : d + 8] = (3.0, -0.2)
     model.joint_q.assign(q)
     model.joint_qd.assign(qd)
     return model
+
+
+def root_offsets(model):
+    """(joint, coordinate start, DoF start, target start) of the model's floating root ('free')."""
+    joint = model.joint_label.index("free")
+    return (
+        joint,
+        int(model.joint_q_start.numpy()[joint]),
+        int(model.joint_qd_start.numpy()[joint]),
+        int(model.joint_target_q_start.numpy()[joint]),
+    )
 
 
 def make_solver(model, precision="fp64", **options):

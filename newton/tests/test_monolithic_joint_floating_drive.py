@@ -11,7 +11,7 @@ import warp as wp
 
 import newton
 from newton._src.solvers.monolithic.floating import _drive_terms
-from newton.tests.test_monolithic_joint_floating_base import floating_chain, make_solver, rotation_matrix
+from newton.tests.test_monolithic_joint_floating_base import floating_chain, make_solver, root_offsets, rotation_matrix
 from newton.tests.unittest_utils import add_function_test, get_test_devices
 from scripts.monolithic_reference.actor_contract_oracle import rotation
 
@@ -139,7 +139,8 @@ def test_energy_gradient_tangent(test, device):
 
 
 def test_truncation_is_c1_and_bounded(test, device):
-    """At the force limit the energy is C1 (one-sided slopes agree) and beyond it the force norm equals the limit."""
+    """Across the force limit the energy is continuous and its one-sided slopes agree (C1); beyond it the
+    force norm equals the limit. Steps cross the threshold: x0 sits exactly on |u| = limit."""
     limit = 5.0
     params = (2000.0, 0.0, limit, 0.0, 0.0, 1.0)
     drive = _Drive(
@@ -147,17 +148,46 @@ def test_truncation_is_c1_and_bounded(test, device):
     )
     identity = np.array([0.0, 0.0, 0.0, 1.0])
     direction = np.array([0.6, -0.8, 0.0])
-    at = limit / 2000.0
-    for side in (-1, 1):
-        x = (at + side * 1e-9) * direction
-        energy, residual, _ = drive(x, identity)
-        eps = 1e-10
-        left = (energy - drive(x - eps * direction, identity)[0]) / eps
-        right = (drive(x + eps * direction, identity)[0] - energy) / eps
-        test.assertAlmostEqual(left, right, delta=1e-4 * limit)
+    x0 = limit / 2000.0 * direction
+    eps = 1e-6 * np.linalg.norm(x0)
+    below, at, above = (drive(x0 + side * eps * direction, identity)[0] for side in (-1.0, 0.0, 1.0))
+    left, right = (at - below) / eps, (above - at) / eps
+    # A missing -limit/2 offset in the saturated branch would jump by limit^2 / (2 a) = 6.25e-3 here.
+    test.assertLess(abs(above - at), 2 * limit * eps)
+    test.assertLess(abs(at - below), 2 * limit * eps)
+    test.assertAlmostEqual(left, right, delta=1e-3 * limit)
+    test.assertAlmostEqual(left, limit, delta=1e-3 * limit)
     for scale in (2.0, 10.0):
-        _, residual, _ = drive(scale * at * direction, identity)
+        _, residual, _ = drive(scale * x0, identity)
         test.assertAlmostEqual(float(np.linalg.norm(residual[:3])), limit, places=9)
+
+
+def test_left_jacobian_branches(test, device):
+    """The closed-form J_l^-1 branch (|phi| > 1e-2) and its series below match finite differences and each other
+    at the switch; FP32 matches FP64 on the same inputs."""
+    params = (2000.0, 40.0, 1e6, 50.0, 2.0, 1e6)
+    args = ((0.01, -0.02, 0.005), (0.2, -0.1, 0.3), (0.05, 0.0, -0.02), (0.1, -0.2, 0.05), (0, 0, 0), (0, 0, 0))
+    drives = {dtype: _Drive(device, dtype, params, *args) for dtype in (wp.float64, wp.float32)}
+    axis = np.array([0.48, -0.6, 0.64])
+    dc = np.array([1e-4, -2e-4, 3e-4])
+    for angle in (0.05, 1.0):
+        with test.subTest(angle=angle):
+            phi = angle * axis
+            base = _quat(rotation(phi))
+            _energy, residual, _ = drives[wp.float64](dc, base)
+            eps = 1e-6
+            for k in range(3):
+                step = np.eye(3)[k] * eps
+                plus = drives[wp.float64](dc, _quat(rotation(step) @ rotation(phi)))[0]
+                minus = drives[wp.float64](dc, _quat(rotation(-step) @ rotation(phi)))[0]
+                test.assertAlmostEqual(
+                    (plus - minus) / (2 * eps), residual[3 + k], delta=1e-6 * (1 + abs(residual).max())
+                )
+            single = drives[wp.float32](dc.astype(np.float32), base.astype(np.float32))[1]
+            np.testing.assert_allclose(single, residual, rtol=2e-5, atol=2e-5 * abs(residual).max())
+    # Continuity at the series/closed-form switch.
+    sides = [drives[wp.float64](dc, _quat(rotation((1e-2 + d) * axis)))[1] for d in (-1e-9, 1e-9)]
+    np.testing.assert_allclose(sides[0], sides[1], rtol=1e-6, atol=1e-6)
 
 
 def _drive_terms_options():
@@ -167,10 +197,21 @@ def _drive_terms_options():
 
 
 def driven_chain(
-    device, *, kt=400.0, dt=40.0, kr=2.0, dr=0.3, force=1e6, torque=1e6, gravity=(0.0, 0.0, 0.0), fixed_child=False
+    device,
+    *,
+    kt=400.0,
+    dt=40.0,
+    kr=2.0,
+    dr=0.3,
+    force=1e6,
+    torque=1e6,
+    gravity=(0.0, 0.0, 0.0),
+    fixed_child=False,
+    prefix=None,
 ):
     """The floating chain with an isotropic root drive (POSITION_VELOCITY), started at rest."""
-    model = floating_chain(device, gravity=gravity, fixed_child=fixed_child)
+    model = floating_chain(device, gravity=gravity, fixed_child=fixed_child, prefix=prefix)
+    _, _, d, _ = root_offsets(model)
     rates = model.joint_qd.numpy()
     rates[:] = 0.0
     model.joint_qd.assign(rates)
@@ -180,25 +221,26 @@ def driven_chain(
         ("joint_effort_limit", (force, force, force, torque, torque, torque)),
     ):
         array = getattr(model, name).numpy()
-        array[:6] = values
+        array[d : d + 6] = values
         getattr(model, name).assign(array)
     modes = model.joint_target_mode.numpy()
-    modes[:6] = int(newton.JointTargetMode.POSITION_VELOCITY)
+    modes[d : d + 6] = int(newton.JointTargetMode.POSITION_VELOCITY)
     model.joint_target_mode.assign(modes)
     return model
 
 
 def _set_root_target(control, model, rotation_vector, offset=(0.0, 0.0, 0.0)):
-    """Target the root at its initial pose turned by a world rotation about its COM, then shifted."""
+    """Target the root at its initial pose turned by a world rotation about its joint frame, then shifted."""
+    joint, c, _, t = root_offsets(model)
     q = model.joint_q.numpy().astype(np.float64)
     targets = control.joint_target_q.numpy()
     turn = rotation(np.asarray(rotation_vector, dtype=np.float64))
     # The anchor rotation maps joint-frame rotations to world: R_world = R_p R_joint.
-    anchor = model.joint_X_p.numpy()[0].astype(np.float64)
+    anchor = model.joint_X_p.numpy()[joint].astype(np.float64)
     parent = rotation_matrix(anchor[3:])
-    joint_rotation = parent.T @ turn @ parent @ rotation_matrix(q[3:7])
-    targets[3:7] = _quat(joint_rotation)
-    targets[:3] = q[:3] + parent.T @ np.asarray(offset)
+    joint_rotation = parent.T @ turn @ parent @ rotation_matrix(q[c + 3 : c + 7])
+    targets[t + 3 : t + 7] = _quat(joint_rotation)
+    targets[t : t + 3] = q[c : c + 3] + parent.T @ np.asarray(offset)
     control.joint_target_q.assign(targets)
     return turn
 
@@ -293,6 +335,94 @@ def test_conservative_energy_truth_table(test, device):
         )
 
 
+def test_target_conventions(test, device):
+    """Targets in Newton's FREE convention with a rotated anchor and offset child frame and COM: a pure damper
+    makes the root track target_qd, a stiff drive brings the root to eval_fk(target_q), and a root force
+    against the drive settles at f / k_t (joint_f on a driven root is allowed)."""
+    for precision, _numpy_dtype, _dtype in PRECISIONS:
+        tolerance = 1e-6 if precision == "fp64" else 1e-4
+        for case, wanted in (
+            ("linear rates", (0.2, -0.1, 0.3, 0.0, 0.0, 0.0)),
+            ("angular rates", (0, 0, 0, 0.3, 0.1, -0.2)),
+        ):
+            with test.subTest(precision=precision, case=case):
+                model = driven_chain(device, kt=0.0, dt=40.0, kr=0.0, dr=2.0, fixed_child=True)
+                run = make_solver(model, precision, **_drive_terms_options())
+                state, control = run.create_state(dt=H), run.create_control()
+                rates = control.joint_target_qd.numpy()
+                rates[:6] = wanted
+                control.joint_target_qd.assign(rates)
+                # Linear time constant m / d_t = 1.7 / 40 s: 600 steps leave exp(-14) of the start error.
+                for _ in range(600):
+                    run.step(state, state, control, dt=H)
+                    test.assertTrue(run.last_stats.converged, run.last_stats.failure_reason)
+                mirror = state.joint_qd.numpy()[:6].astype(np.float64)
+                if case == "linear rates":
+                    np.testing.assert_allclose(mirror, rates[:6], atol=100 * tolerance)
+                else:
+                    # Turning about the root COM, off the composite COM, needs a centripetal force from the
+                    # linear damper (|dv| = m w^2 r / d_t, about 3e-4 m/s) and a gyroscopic torque from the
+                    # angular one (w x I w / d_r): the steady rates are within about 1% of the targets.
+                    np.testing.assert_allclose(mirror[3:], rates[3:6], rtol=1e-2, atol=1e-2 * abs(rates[3:6]).max())
+                    test.assertLess(np.abs(mirror[:3]).max(), 1e-3)
+        with test.subTest(precision=precision, case="pose"):
+            model = driven_chain(device, fixed_child=True)
+            run = make_solver(model, precision, **_drive_terms_options())
+            state, control = run.create_state(dt=H), run.create_control()
+            _set_root_target(control, model, np.radians(30.0) * np.array([0.6, 0.0, 0.8]), offset=(0.05, -0.03, 0.02))
+            for _ in range(1500):
+                run.step(state, state, control, dt=H)
+                test.assertTrue(run.last_stats.converged, run.last_stats.failure_reason)
+            reference = model.state()
+            newton.eval_fk(model, control.joint_target_q, wp.zeros_like(control.joint_target_qd), reference)
+            np.testing.assert_allclose(state.body_q.numpy()[0, :3], reference.body_q.numpy()[0, :3], atol=2e-4)
+            q, r = state.body_q.numpy()[0, 3:].astype(np.float64), reference.body_q.numpy()[0, 3:].astype(np.float64)
+            test.assertLess(2 * np.arccos(min(1.0, abs(q @ r))), 2e-3)
+            test.assertLess(np.linalg.norm(run._floating.error_t.numpy()[0]), 2e-4)
+        with test.subTest(precision=precision, case="force"):
+            kt = 400.0
+            model = driven_chain(device, kt=kt, dt=40.0, fixed_child=True)
+            run = make_solver(model, precision, **_drive_terms_options())
+            state, control = run.create_state(dt=H), run.create_control()
+            force = np.array([1.0, -0.5, 0.2])
+            efforts = control.joint_f.numpy()
+            efforts[:3] = force
+            control.joint_f.assign(efforts)
+            # The force acts at the root COM, off the composite COM: a slowly damped rotation rings first
+            # (measured: z within 2.4% after 1500 steps, 1e-4 after 3000).
+            for _ in range(3000):
+                run.step(state, state, control, dt=H)
+                test.assertTrue(run.last_stats.converged, run.last_stats.failure_reason)
+            # error_t = c_n - c_t at the last step start; the drive balances f with k_t (c - c_t).
+            np.testing.assert_allclose(
+                run._floating.error_t.numpy()[0], force / kt, rtol=1e-3, atol=1e-6 if precision == "fp64" else 1e-5
+            )
+
+
+def test_tangent_entries_in_packed_trees(test, device):
+    """With a fixed-base tree before it, the floating root's drive block lands in its own packed tree block:
+    equal to the single-tree result after one identical step."""
+
+    def first_tree(builder):
+        base = builder.add_link(mass=0.4, inertia=wp.diag(wp.vec3(1e-3)))
+        builder.add_articulation([builder.add_joint_revolute(-1, base, axis=(0, 0, 1), limit_ke=0.0, limit_kd=0.0)])
+
+    blocks = []
+    for prefix in (None, first_tree):
+        model = driven_chain(device, fixed_child=True, prefix=prefix)
+        run = make_solver(model, **_drive_terms_options())
+        state, control = run.create_state(dt=H), run.create_control()
+        _set_root_target(control, model, np.radians(20.0) * np.array([0.0, 0.0, 1.0]))
+        run.step(state, state, control, dt=H)
+        test.assertTrue(run.last_stats.converged, run.last_stats.failure_reason)
+        test.assertEqual(run._kinematics.tree_count, 1 if prefix is None else 2)
+        run._evaluate(run._accepted, H, build_tangent=True, device_result=True)
+        tangent = run._objective.tangent.numpy().ravel()
+        blocks.append(tangent[run._floating.entries.numpy()[0]].reshape(6, 6))
+    test.assertGreater(abs(blocks[0]).max(), 0.0)
+    np.testing.assert_allclose(blocks[1], blocks[0], rtol=1e-9, atol=1e-9 * abs(blocks[0]).max())
+
+
 def test_drive_rejections(test, device):
     """Anisotropic gains or limits, a non-PD mode, legacy target layouts and non-unit targets fail by name;
     joint_f on a driven scalar joint still fails as a duplicate drive."""
@@ -307,6 +437,17 @@ def test_drive_rejections(test, device):
             model = driven_chain(device)
             values = getattr(model, name).numpy()
             values[index] = value
+            getattr(model, name).assign(values)
+            with test.assertRaisesRegex(ValueError, f"Floating root joint 'free': {message}"):
+                make_solver(model, **_drive_terms_options())
+    for name, value, message in (
+        ("joint_effort_limit", 0.0, "a driven linear triple requires a positive effort limit"),
+        ("joint_target_ke", -1.0, "linear drive gains must be nonnegative"),
+    ):
+        with test.subTest(field=name, value=value):
+            model = driven_chain(device)
+            values = getattr(model, name).numpy()
+            values[:3] = value
             getattr(model, name).assign(values)
             with test.assertRaisesRegex(ValueError, f"Floating root joint 'free': {message}"):
                 make_solver(model, **_drive_terms_options())
@@ -325,6 +466,17 @@ def test_drive_rejections(test, device):
     state, control = run.create_state(dt=H), run.create_control()
     targets = control.joint_target_q.numpy()
     targets[3:7] = (0.0, 0.0, 0.0, 0.9)
+    control.joint_target_q.assign(targets)
+    with test.assertRaisesRegex(
+        ValueError, "Floating root joint 'free': a driven root's target quaternion must be unit"
+    ):
+        run.step(state, state, control, dt=H)
+    # Translation-only drive: the COM target still reads the quaternion (child frame and COM offsets).
+    model = driven_chain(device, kr=0.0, dr=0.0)
+    run = make_solver(model, **_drive_terms_options())
+    state, control = run.create_state(dt=H), run.create_control()
+    targets = control.joint_target_q.numpy()
+    targets[3:7] = 0.0
     control.joint_target_q.assign(targets)
     with test.assertRaisesRegex(ValueError, "target quaternion must be unit"):
         run.step(state, state, control, dt=H)
@@ -353,9 +505,12 @@ class TestJointFloatingDrive(unittest.TestCase):
 for _test in (
     test_energy_gradient_tangent,
     test_truncation_is_c1_and_bounded,
+    test_left_jacobian_branches,
     test_converges_from_far_rotations,
     test_root_wrench_matches_rigid_body,
     test_conservative_energy_truth_table,
+    test_target_conventions,
+    test_tangent_entries_in_packed_trees,
     test_drive_rejections,
 ):
     add_function_test(TestJointFloatingDrive, _test.__name__, _test, devices=get_test_devices())
