@@ -565,6 +565,11 @@ class FloatingHandScene:
         index = self._dof_index(names)
         return lower[index], upper[index]
 
+    def _target_index(self, names):
+        labels = [_short(self.model.joint_label[j]) for j in range(self.model.joint_count)]
+        start = self.model.joint_target_q_start.numpy()
+        return np.array([int(start[labels.index(n)]) for n in names])
+
     def _dof_index(self, names):
         labels = [_short(self.model.joint_label[j]) for j in range(self.model.joint_count)]
         start = self.model.joint_qd_start.numpy()
@@ -680,12 +685,13 @@ class FloatingHandScene:
             return
         target_q = self.control.joint_target_q.numpy()
         target_qd = self.control.joint_target_qd.numpy()
-        if self.mount == "wrist":
-            index = self._dof_index(self.names)
-            target_q[index], target_qd[index] = self.targets_q[k], self.targets_qd[k]
-        else:
-            index = self._dof_index(self.names[6:])
-            target_q[index], target_qd[index] = self.targets_q[k, 6:], self.targets_qd[k, 6:]
+        # Position targets use the coordinate layout (joint_target_q_start), rates the DoF layout; they
+        # differ after a floating root's 7 coordinates.
+        names = self.names if self.mount == "wrist" else self.names[6:]
+        columns = slice(None) if self.mount == "wrist" else slice(6, None)
+        target_q[self._target_index(names)] = self.targets_q[k, columns]
+        target_qd[self._dof_index(names)] = self.targets_qd[k, columns]
+        if self.mount != "wrist":
             pose, rates = self.root_target(k)
             root = self.layout["root_joint"]
             target_q[int(self.model.joint_target_q_start.numpy()[root]) + np.arange(7)] = pose

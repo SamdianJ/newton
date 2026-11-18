@@ -635,5 +635,36 @@ class TestReviewRoundTwo(unittest.TestCase):
             fhs.hand_keyframes(model, bad)
 
 
+class TestFloatingHandControl(unittest.TestCase):
+    def test_floating_finger_targets_use_coordinate_indices(self):
+        """With a floating root, joint_target_q (coordinate layout) is offset by the root's 7th coordinate:
+        each finger target lands at joint_target_q_start of its joint, and the root pose at the root's."""
+        from pathlib import Path  # noqa: PLC0415
+
+        from scripts.monolithic_reference import floating_hand_scenes as fhs  # noqa: PLC0415
+
+        if not fhs.ALLEGRO.is_dir():
+            self.skipTest("Allegro asset not present")
+        recipe = fhs.load_recipe(
+            Path(__file__).resolve().parents[2]
+            / "scripts/monolithic_reference/fixtures/floating_hand_e1a_capsule_v1.json"
+        )
+        scene = fhs.FloatingHandScene(recipe, device="cpu", precision="fp64", self_collision="off")
+        step = 700
+        scene._write_control(step)
+        model, targets = scene.model, scene.control.joint_target_q.numpy()
+        starts, rates = model.joint_target_q_start.numpy(), scene.control.joint_target_qd.numpy()
+        labels = [fhs._short(model.joint_label[j]) for j in range(model.joint_count)]
+        for name, value, rate in zip(
+            scene.names[6:], scene.targets_q[step, 6:], scene.targets_qd[step, 6:], strict=True
+        ):
+            joint = labels.index(name)
+            self.assertEqual(targets[starts[joint]], np.float32(value), name)
+            self.assertEqual(rates[model.joint_qd_start.numpy()[joint]], np.float32(rate), name)
+        root = scene.layout["root_joint"]
+        pose, _ = scene.root_target(step)
+        np.testing.assert_array_equal(targets[starts[root] : starts[root] + 7], pose.astype(np.float32))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
