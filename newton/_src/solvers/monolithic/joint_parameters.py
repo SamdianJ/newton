@@ -91,7 +91,7 @@ class JointParameters:
                 raise ValueError("Joint term switches must be bool")
         coordinates = _validate_joint_coordinate_layout(model, actor)
         dofs = tuple(range(model.joint_dof_count)) if actor is None else actor.dof_indices
-        # Rows of floating-root DOFs: PR2 roots are undriven and carry no scalar joint terms.
+        # Rows of floating-root DOFs carry no scalar joint terms; their 6D drive is FloatingRoots'.
         joints = () if actor is None else actor.joint_indices
         roots = _floating_roots(model, joints)
         qd_starts = model.joint_qd_start.numpy()
@@ -130,8 +130,6 @@ class JointParameters:
 
         if root_rows.any():
             names = (
-                "joint_target_ke",
-                "joint_target_kd",
                 "joint_limit_ke",
                 "joint_limit_kd",
                 "joint_friction",
@@ -142,8 +140,8 @@ class JointParameters:
                 values = getattr(model, name).numpy()[list(dofs)][root_rows]
                 if np.any(values != 0):
                     raise ValueError(
-                        f"Floating root joint has nonzero {name}; a floating base supports no scalar joint terms "
-                        "(root drives are not implemented)"
+                        f"Floating root joint has nonzero {name}; a floating base supports only its 6D pose drive "
+                        "(target_ke/target_kd/effort_limit) and joint_f"
                     )
         parameters = np.zeros((nq, 10), dtype=np.float32)
         parameters[:, 7] = scale(limit_width, limits, "limit_width")
@@ -154,6 +152,10 @@ class JointParameters:
             if np.any(kp < 0) or np.any(kd < 0):
                 raise ValueError("PD gains must be nonnegative")
             driven = ((kp > 0) | (kd > 0)).astype(np.int32)
+            # A root's gains drive its 6D pose term (validated there), never the scalar PD rows; joint_f on
+            # a driven root is a separate external wrench, so the duplicate-joint_f rule does not apply.
+            kp, kd = np.where(root_rows, 0, kp), np.where(root_rows, 0, kd)
+            driven[root_rows] = 0
             modes = model.joint_target_mode
             if modes is None or (modes.shape, modes.dtype, modes.device) != (
                 (model.joint_dof_count,),
@@ -162,6 +164,7 @@ class JointParameters:
             ):
                 raise ValueError("Invalid joint_target_mode")
             mode = modes.numpy()[list(dofs)]
+            mode[root_rows] = int(JointTargetMode.NONE)
             if np.any(mode[driven != 0] != int(JointTargetMode.POSITION_VELOCITY)) or np.any(
                 ~np.isin(
                     mode[driven == 0], [JointTargetMode.NONE, JointTargetMode.EFFORT, JointTargetMode.POSITION_VELOCITY]

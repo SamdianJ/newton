@@ -447,6 +447,14 @@ def add_chain(builder, spec):
     return root
 
 
+def articulation_dof_count(model):
+    """DoFs the solver's joint terms cover: every articulation tree, floating roots included; FREE
+    single bodies (rigid actors) excluded."""
+    from newton._src.solvers.monolithic.actors import ActorTable  # noqa: PLC0415
+
+    return sum(actor.dof_count for actor in ActorTable.from_model(model).actors if actor.kind == "articulation")
+
+
 class FloatingHandScene:
     """One recipe scene with its solver, state and per-step control targets.
 
@@ -481,11 +489,7 @@ class FloatingHandScene:
         self._schedule()
         options = dict(recipe["solver"])
         terms = recipe["joint_terms"]
-        # Scalar joint terms cover articulation DoFs only, not FREE bodies or roots.
-        types, starts = self.model.joint_type.numpy(), self.model.joint_qd_start.numpy()
-        dofs = sum(
-            int(starts[j + 1] - starts[j]) for j in range(self.model.joint_count) if types[j] != newton.JointType.FREE
-        )
+        dofs = articulation_dof_count(self.model)
         joint_terms = SolverMonolithic.JointTerms(
             implicit_pd=bool(terms.get("implicit_pd", True)),
             limits=bool(terms.get("limits", False)),
@@ -633,6 +637,37 @@ class FloatingHandScene:
             return None
         return wrist_palm_matrix(self.mount_frame, self.attach, self.targets_q[k, :6])
 
+    def root_target(self, k):
+        """Floating root target at the end of step ``k`` in Newton's FREE convention (coordinate layout).
+
+        Returns the joint-frame position and xyzw quaternion relative to the parent anchor, and the root
+        COM velocity and angular velocity in the anchor frame, from the palm path's step-to-step change.
+        """
+        root = self.layout["root_joint"]
+        parent, child = (_matrix(getattr(self.model, n).numpy()[root]) for n in ("joint_X_p", "joint_X_c"))
+        body = int(self.model.joint_child.numpy()[root])
+        com = self.model.body_com.numpy()[body].astype(np.float64)
+        previous = (
+            self.palm_target(k - 1)
+            if k > 0
+            else wrist_palm_matrix(self.mount_frame, self.attach, self._wrist_start(self.recipe))
+        )
+        current = self.palm_target(k)
+        coordinates = np.linalg.inv(parent) @ current @ child
+        velocity = (current[:3, :3] @ com + current[:3, 3] - previous[:3, :3] @ com - previous[:3, 3]) / self.dt
+        relative = current[:3, :3] @ previous[:3, :3].T
+        angle = np.arccos(np.clip((np.trace(relative) - 1) / 2, -1.0, 1.0))
+        axial = np.array(
+            [relative[2, 1] - relative[1, 2], relative[0, 2] - relative[2, 0], relative[1, 0] - relative[0, 1]]
+        )
+        omega = axial * (0.5 if angle < 1e-8 else angle / (2 * np.sin(angle))) / self.dt
+        anchor = parent[:3, :3]
+        from scipy.spatial.transform import Rotation
+
+        quaternion = Rotation.from_matrix(coordinates[:3, :3]).as_quat()
+        pose = np.r_[coordinates[:3, 3], quaternion if quaternion[3] >= 0 else -quaternion]
+        return pose, np.r_[anchor.T @ velocity, anchor.T @ omega]
+
     @property
     def phase(self):
         for name, (a, b) in self.bounds.items():
@@ -651,8 +686,10 @@ class FloatingHandScene:
         else:
             index = self._dof_index(self.names[6:])
             target_q[index], target_qd[index] = self.targets_q[k, 6:], self.targets_qd[k, 6:]
-            # Root targets (coordinate layout: frame position and xyzw quaternion) arrive with PR3.
-            raise NotImplementedError("Floating root pose targets need the P9d root drive (PR3)")
+            pose, rates = self.root_target(k)
+            root = self.layout["root_joint"]
+            target_q[int(self.model.joint_target_q_start.numpy()[root]) + np.arange(7)] = pose
+            target_qd[int(self.model.joint_qd_start.numpy()[root]) + np.arange(6)] = rates
         self.control.joint_target_q.assign(target_q)
         self.control.joint_target_qd.assign(target_qd)
 

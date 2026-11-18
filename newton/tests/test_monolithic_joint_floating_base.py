@@ -261,8 +261,6 @@ def test_rejections(test, device):
     for name, value in (
         ("joint_armature", 0.01),
         ("joint_damping", 0.1),
-        ("joint_target_ke", 10.0),
-        ("joint_target_kd", 1.0),
         ("joint_limit_ke", 10.0),
         ("joint_limit_kd", 1.0),
         ("joint_friction", 0.1),
@@ -274,14 +272,13 @@ def test_rejections(test, device):
             getattr(model, name).assign(values)
             with test.assertRaisesRegex(ValueError, f"Floating root joint has nonzero {name}"):
                 make_solver(model)
+    # Root drive gains need the implicit PD term (the 6D drive tests cover the enabled case).
     model = floating_chain(device)
-    run = make_solver(model)
-    state, control = run.create_state(dt=1e-3), run.create_control()
-    efforts = control.joint_f.numpy()
-    efforts[0] = 1.0
-    control.joint_f.assign(efforts)
-    with test.assertRaisesRegex(ValueError, "joint_f on a floating root"):
-        run.step(state, state, control, dt=1e-3)
+    gains = model.joint_target_ke.numpy()
+    gains[:3] = 10.0
+    model.joint_target_ke.assign(gains)
+    with test.assertRaisesRegex(ValueError, "Disabled joint term has nonzero parameters: joint_target_ke"):
+        make_solver(model)
     # Invalid Model root coordinates fail at construction, before any root pose is derived.
     model = floating_chain(device)
     coordinates = model.joint_q.numpy()

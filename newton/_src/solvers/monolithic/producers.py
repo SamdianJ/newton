@@ -277,6 +277,10 @@ class ArticulationProducer(_Producer):
         super().__init__("articulation", solver._layout.articulation_indices())
         obj = solver._objective
         self.energies = ((obj, "link_energy", None), (obj, "joint_energy", None))
+        if solver._floating.count:
+            # Root drive and wrench energy, only with floating roots (fixed-base sums keep their terms).
+            self.energies += ((solver._floating, "energy", None),)
+            self.energy_fields = (*self.energy_fields, "energy")
         self.owners = (obj, solver._kinematics, solver._joint_terms, solver._floating)
 
     def begin_step(self, solver, state_in):
@@ -321,6 +325,7 @@ class ArticulationProducer(_Producer):
             device=device,
         )
         solver._floating.begin_step(state_in, accepted, solver._root_steps(accepted), obj, dt)
+        solver._floating.begin_drive()
 
     def candidate(self, solver, accepted, trial, direction, alpha, dt):
         k = solver._kinematics
@@ -358,6 +363,8 @@ class ArticulationProducer(_Producer):
             roots=k.state_roots(state),
             root_steps=solver._root_steps(state) if k.floating_count else None,
         )
+        if k.floating_count:
+            solver._floating.drive_terms(solver._root_steps(state), obj, solver._problem.dt, build_tangent)
         wp.launch(
             _scatter_rows,
             k.count,

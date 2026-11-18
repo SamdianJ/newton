@@ -421,7 +421,7 @@ class SolverMonolithic(SolverBase):
             },
         )
         SolverBase.__init__(self, model)
-        self._floating = FloatingRoots(self._kinematics, model)
+        self._floating = FloatingRoots(self._kinematics, model, implicit_pd=self._joint_terms.implicit_pd)
         self._states = self._make_states()
         self._objective = ArticulationObjective(self._kinematics, parameters)
         self._joint_parameters_host = parameters.astype(self._numpy_dtype)
@@ -815,8 +815,7 @@ class SolverMonolithic(SolverBase):
             if input_status[index]:
                 raise ValueError(f"Invalid articulation control: {name}")
         self._joint_terms.snapshot_targets(control)
-        if self._floating.count and np.any(control.joint_f.numpy()[self._floating.dof_indices] != 0):
-            raise ValueError("joint_f on a floating root is not supported; root wrenches arrive with root drives")
+        self._floating.snapshot(control, obj)
         if input_status[3]:
             raise ValueError("Articulation requires finite forces and zero spatial torque")
         self._rigid.prepare(state_in, control, dt)
@@ -1029,6 +1028,7 @@ class SolverMonolithic(SolverBase):
         return (
             self._contact.conservative_energy
             and not self._rigid.has_torque
+            and not self._floating.has_torque
             and (self._cloth_contact is None or self._cloth_contact.mu == 0.0)
         )
 
