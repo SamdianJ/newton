@@ -486,6 +486,10 @@ class TestRunnerIdentity(unittest.TestCase):
             self.assertEqual(manifest["published_steps"], 2)
             self.assertEqual(len(manifest["source_sha"]), 40)
             self.assertEqual(manifest["recipe_sha256"], __import__("hashlib").sha256(recipe.read_bytes()).hexdigest())
+            # Each frame holds its own step's state (on CPU, Warp's .numpy() is a view of the live state).
+            _, _, frames = fc.load_run(out)
+            self.assertFalse(np.array_equal(frames["joint_q"][0], frames["joint_q"][1]))
+            self.assertFalse(np.array_equal(frames["body_q"][0], frames["body_q"][1]))
             criteria = fc.evaluate(out, fhs.load_recipe(recipe))
             self.assertEqual(criteria["published_steps"], 2)
             self.assertEqual(criteria["penetration_m"]["hand_table"], "NOT_APPLICABLE")

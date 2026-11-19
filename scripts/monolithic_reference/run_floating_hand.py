@@ -210,10 +210,12 @@ def main(argv=None):
                 {
                     "step": np.int32(step),
                     "status": np.int8(STATUS_CODE[label]),
-                    "body_q": scene.state.body_q.numpy(),
-                    "body_qd": scene.state.body_qd.numpy(),
-                    "joint_q": scene.state.joint_q.numpy(),
-                    "joint_qd": scene.state.joint_qd.numpy(),
+                    # Copies: on CPU .numpy() is a view of the live state, so every frame of a chunk
+                    # would otherwise hold the chunk's last step.
+                    "body_q": scene.state.body_q.numpy().copy(),
+                    "body_qd": scene.state.body_qd.numpy().copy(),
+                    "joint_q": scene.state.joint_q.numpy().copy(),
+                    "joint_qd": scene.state.joint_qd.numpy().copy(),
                     "contact_joint_force": forces.joint_force.astype(np.float64),
                     "contact_body_wrench": forces.body_wrench.astype(np.float64),
                     "object_pair_force": pair_force,
