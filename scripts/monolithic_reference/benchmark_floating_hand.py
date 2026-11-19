@@ -7,6 +7,11 @@
         --fixed-state scripts/monolithic_reference/fixtures/floating_hand_fixed_grasp_box_v1.json \\
         --mount wrist --device cuda:0 --passes 3 --instrumented segments,syncs --output <new directory>
 
+Self-collision follows the recipe (``--self-collision recipe``) or is off (``off``);
+``--self-collision-from <frozen recipe>`` copies that recipe's ``self_collision`` block into the
+fixed-state recipe (P9d PR4: the grasp baseline recipe has none). Contact and memory counts are read
+after each timed step stops its clock, so they do not enter ``solver_step``.
+
 The recipe is replayed untimed to the window start, the state is checkpointed,
 and the window runs once as the natural continuation (W0) and then ``--passes``
 times from the checkpoint (W1..). Timed passes synchronize the device around
@@ -49,7 +54,10 @@ def _sha(path):
 
 def _gpu():
     """Clock, power and throttle state, and other compute processes (None if nvidia-smi is unavailable)."""
-    fields = "pstate,clocks.sm,clocks.mem,temperature.gpu,power.draw,clocks_throttle_reasons.active,utilization.gpu"
+    fields = (
+        "pstate,clocks.sm,clocks.mem,temperature.gpu,power.draw,clocks_throttle_reasons.active,utilization.gpu,"
+        "memory.used"
+    )
     try:
         state = subprocess.check_output(
             ["nvidia-smi", f"--query-gpu={fields}", "--format=csv,noheader"], text=True, timeout=10
@@ -60,6 +68,48 @@ def _gpu():
     except (OSError, subprocess.SubprocessError) as failure:
         return {"error": str(failure)}
     return {"query": fields, "state": state, "compute_apps": [a for a in apps.splitlines() if a]}
+
+
+def _memory(device):
+    """Warp mempool use and device free memory [bytes]; fields Warp cannot report are NOT_AVAILABLE."""
+    out = {}
+    for name, query in (
+        ("mempool_current", wp.get_mempool_used_mem_current),
+        ("mempool_high", wp.get_mempool_used_mem_high),
+    ):
+        try:
+            out[name] = int(query(device))
+        except Exception as failure:  # The device may not support mempools; record why.
+            out[name] = f"NOT_AVAILABLE: {type(failure).__name__}: {failure}"
+    d = wp.get_device(device)
+    for name in ("free_memory", "total_memory"):
+        value = getattr(d, name, None)
+        out[name] = int(value) if value is not None else "NOT_AVAILABLE"
+    return out
+
+
+def _contact_counts(stats):
+    """Per-step contact and assembly counts from Stats (host values filled inside the step)."""
+    v = stats.variational or {}
+    spatial, pool = v.get("contact_spatial"), v.get("contact_pool")
+    pairs = v.get("actor_contact_pairs")
+    row = {
+        "triplet_count": int(stats.triplet_count),
+        "triplet_capacity": int(stats.triplet_capacity),
+        "matrix_nnz": int(stats.matrix_nnz),
+        "candidates": spatial.get("candidates", "NOT_AVAILABLE") if spatial else "NOT_AVAILABLE",
+        "capacity_dropped": spatial.get("capacity_dropped", "NOT_AVAILABLE") if spatial else "NOT_AVAILABLE",
+        "pool": {k: pool[k] for k in pool if isinstance(pool[k], (int, float, bool))} if pool else "NOT_AVAILABLE",
+    }
+    if pairs is None:
+        row["self_pairs"], row["self_pairs_active"] = "NOT_AVAILABLE", "NOT_AVAILABLE"
+    else:
+        self_records = [p for p in pairs if p.get("kind") == "A-self"]
+        row["self_pairs"] = len(self_records)
+        row["self_pairs_active"] = sum(
+            any(abs(x) > 0 for end in p.get("world_wrench", ()) for x in end) for p in self_records
+        )
+    return row
 
 
 def _graph_counters():
@@ -115,6 +165,7 @@ def _run_window(scene, window, device, *, timed=True):
             scene.step()
             outer = time.perf_counter() - outer
             stats = solver.last_stats
+            counts = _contact_counts(stats)
             forces = solver.get_contact_forces(scene.state) if not stats.rolled_back else None
             label = "HARD_FAILURE" if forces is None else publication(stats, forces, previous_generation=previous)
             rows.append(
@@ -127,6 +178,7 @@ def _run_window(scene, window, device, *, timed=True):
                     "line_search": int(stats.line_search_iterations),
                     "regularization_retries": int(stats.regularization_retries),
                     "publication": label,
+                    "contact": counts,
                 }
             )
             if label == "HARD_FAILURE":
@@ -155,7 +207,27 @@ def _summarize(rows):
         "workload": {k: sum(r[k] for r in rows) for k in ("newton", "pcg", "line_search", "regularization_retries")},
         "publication": dict(Counter(r["publication"] for r in rows)),
         "per_step_counts": [[r["newton"], r["pcg"]] for r in rows],
+        "contact": _summarize_contact(rows),
     }
+
+
+def _summarize_contact(rows):
+    """Min/median/max of each numeric per-step contact count; NOT_AVAILABLE when no step reported it."""
+    out = {}
+    for name in (
+        "triplet_count",
+        "triplet_capacity",
+        "matrix_nnz",
+        "candidates",
+        "capacity_dropped",
+        "self_pairs",
+        "self_pairs_active",
+    ):
+        values = [r["contact"][name] for r in rows if isinstance(r.get("contact", {}).get(name), (int, float))]
+        out[name] = (
+            {"min": min(values), "median": float(np.median(values)), "max": max(values)} if values else "NOT_AVAILABLE"
+        )
+    return out
 
 
 def _instrument_segments(scene, window, device):
@@ -264,20 +336,36 @@ def main(argv=None):
     parser.add_argument("--passes", type=int, default=3)
     parser.add_argument("--instrumented", default="none", help="comma list of segments,syncs or none")
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--self-collision", choices=("recipe", "off"), default="recipe")
+    parser.add_argument(
+        "--self-collision-from", type=Path, help="FROZEN recipe whose self_collision block the run uses (P9d PR4)"
+    )
     args = parser.parse_args(argv)
     instrumented = set() if args.instrumented == "none" else set(args.instrumented.split(","))
     if instrumented - {"segments", "syncs"} or args.passes < 1:
         raise ValueError(f"--instrumented must list segments/syncs or be none, got {args.instrumented!r}; passes >= 1")
     if Path(newton.__file__).resolve() != SOURCE / "newton/__init__.py":
         raise RuntimeError(f"Newton import {newton.__file__} does not belong to {SOURCE}")
-    if _git("status", "--porcelain", "--untracked-files=no"):
-        raise RuntimeError("Tracked changes in the worktree; commit before measuring")
     fixed = json.loads(args.fixed_state.read_text())
     if fixed.get("status") != "FROZEN":
         raise ValueError(f"{args.fixed_state}: status must be FROZEN, got {fixed.get('status')!r}")
     recipe_path = SOURCE / fixed["recipe"]
     recipe = load_recipe(recipe_path)
+    block_source = None
+    if args.self_collision_from is not None:
+        if args.self_collision == "off":
+            raise ValueError("--self-collision-from needs --self-collision recipe (it supplies the block to use)")
+        source = load_recipe(args.self_collision_from)
+        if source.get("status") != "FROZEN" or not source.get("self_collision"):
+            raise ValueError(f"{args.self_collision_from}: needs a FROZEN recipe with a self_collision block")
+        if recipe.get("self_collision") not in (None, source["self_collision"]):
+            raise ValueError(f"{recipe_path} already has a different self_collision block")
+        recipe = dict(recipe, self_collision=source["self_collision"])
+        block_source = {"path": str(args.self_collision_from), "sha256": _sha(args.self_collision_from)}
     window = tuple(fixed["window_steps"])
+    # Argument and recipe errors come first; a measurement then needs a clean tree.
+    if _git("status", "--porcelain", "--untracked-files=no"):
+        raise RuntimeError("Tracked changes in the worktree; commit before measuring")
     args.output.mkdir(parents=True, exist_ok=False)
     receipt = {
         "schema": "p9d-floating-hand-benchmark/v1",
@@ -292,22 +380,36 @@ def main(argv=None):
         "warp": wp.__version__,
         "timing": "wp.synchronize_device before and after solver.step; latency per step, not overlapped throughput",
         "passes": {},
+        "self_collision": {
+            "mode": args.self_collision,
+            "block": recipe.get("self_collision") if args.self_collision == "recipe" else None,
+            "block_source": block_source,
+        },
     }
     try:
+        started = time.perf_counter()
         scene = FloatingHandScene(
             recipe,
             device=args.device,
             precision=fixed["precision"],
             use_cuda_graph=fixed["use_cuda_graph"],
             mount=args.mount,
+            self_collision=args.self_collision,
         )
+        receipt["construction_s"] = time.perf_counter() - started
+        receipt["self_collision"]["report"] = list(scene.solver.self_collision_report)
+        receipt["self_collision"]["pairs"] = len(scene.solver._self_collision.pairs)
+        receipt["memory_after_construction"] = _memory(scene.model.device)
     except NotImplementedError as missing:
         receipt["status"], receipt["error"] = "NOT_APPLICABLE", str(missing)
         write_json(args.output / "receipt.json", receipt)
         return 1
     device = scene.model.device
     try:
+        started = time.perf_counter()
         replay = _run_window(scene, (0, window[0]), device, timed=False)
+        receipt["replay_s"] = time.perf_counter() - started
+        receipt["memory_after_replay"] = _memory(device)
     except NotImplementedError as missing:
         receipt["status"], receipt["error"] = "NOT_APPLICABLE", str(missing)
         write_json(args.output / "receipt.json", receipt)
@@ -339,6 +441,7 @@ def main(argv=None):
             entry["end_digest"] = _digest(scene.state)
             entry["gpu_after"], entry["graphs_after"] = _gpu(), _graph_counters()
             receipt["passes"][name] = entry
+    receipt["memory_at_end"] = _memory(device)
     w0 = receipt["passes"]["W0"]
     receipt["repeats_reproduce_W0"] = {
         name: entry["per_step_counts"] == w0["per_step_counts"] and entry["end_digest"] == w0["end_digest"]

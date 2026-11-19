@@ -666,5 +666,42 @@ class TestFloatingHandControl(unittest.TestCase):
         np.testing.assert_array_equal(targets[starts[root] : starts[root] + 7], pose.astype(np.float32))
 
 
+class TestBenchmarkArguments(unittest.TestCase):
+    def test_self_collision_from_errors(self):
+        """--self-collision-from needs the recipe mode and a FROZEN recipe with a self_collision block."""
+        import tempfile  # noqa: PLC0415
+        from pathlib import Path  # noqa: PLC0415
+
+        from scripts.monolithic_reference import benchmark_floating_hand as bench  # noqa: PLC0415
+
+        fixtures = Path(__file__).resolve().parents[2] / "scripts/monolithic_reference/fixtures"
+        base = [
+            "--fixed-state",
+            str(fixtures / "floating_hand_fixed_grasp_box_v1.json"),
+            "--mount",
+            "floating",
+            "--device",
+            "cpu",
+        ]
+        with tempfile.TemporaryDirectory() as folder:
+            for extra, message in (
+                (
+                    [
+                        "--self-collision",
+                        "off",
+                        "--self-collision-from",
+                        str(fixtures / "floating_hand_e1a_capsule_v1.json"),
+                    ],
+                    "needs --self-collision recipe",
+                ),
+                (
+                    ["--self-collision-from", str(fixtures / "floating_hand_wrist_box_baseline_v1.json")],
+                    "needs a FROZEN recipe with a self_collision block",
+                ),
+            ):
+                with self.subTest(message=message), self.assertRaisesRegex(ValueError, message):
+                    bench.main([*base, *extra, "--output", str(Path(folder) / "out")])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
