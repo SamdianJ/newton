@@ -6,11 +6,13 @@
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import numpy as np
 import warp as wp
 
 import newton
+from newton.tests import test_monolithic_contact_multitree as multitree
 from newton.tests.test_monolithic_contact_actor_pairs import native_batch, query
 from newton.tests.test_monolithic_contact_components import batch_matrix
 from newton.tests.test_monolithic_contact_multitree import contact_terms, set_q, trees_solver
@@ -18,11 +20,38 @@ from newton.tests.unittest_utils import add_function_test, get_test_devices
 
 H = 1e-3
 RADIUS = 0.02
+CUBE = 0.015
+SPACING = 4e-3  # the default self_collision box_sample_spacing
+
+
+def box_grid_samples(half, spacing):
+    """Independent P1Q3 samples of a box face grid: each face split into ceil(2 h / spacing) cells per
+    edge, each cell split along the diagonal from its (-u, -v) corner (the solver's split)."""
+    tris = []
+    for axis in range(3):
+        u, v = (a for a in range(3) if a != axis)
+        # Edges that are an exact multiple of the spacing (up to FP32 scale rounding) keep that many cells.
+        gu = np.linspace(-half[u], half[u], int(np.ceil(2 * half[u] / spacing * (1 - 1e-6))) + 1)
+        gv = np.linspace(-half[v], half[v], int(np.ceil(2 * half[v] / spacing * (1 - 1e-6))) + 1)
+        for sign in (-1, 1):
+            for i in range(len(gu) - 1):
+                for j in range(len(gv) - 1):
+                    for corners in (((0, 0), (1, 0), (1, 1)), ((0, 0), (1, 1), (0, 1))):
+                        tri = np.zeros((3, 3))
+                        tri[:, axis] = sign * half[axis]
+                        tri[:, u] = [gu[i + a] for a, _ in corners]
+                        tri[:, v] = [gv[j + b] for _, b in corners]
+                        tris.append(tri)
+    tri = np.asarray(tris)
+    bary = np.eye(3) / 2 + np.ones((3, 3)) / 6
+    area = np.linalg.norm(np.cross(tri[:, 1] - tri[:, 0], tri[:, 2] - tri[:, 0]), axis=1) / 2
+    return np.einsum("qn,fni->fqi", bary, tri).reshape(-1, 3), np.repeat(area / 3, 3)
 
 
 def two_branch_tree(device, *, gap=2e-3, rate=0.5, order=(0, 1), clear_flag=False, tip="sphere"):
-    """A hub on a world revolute with two revolute branches whose tips (spheres, or boxes of half
-    height ``RADIUS`` along y) face each other ``gap`` apart.
+    """A hub on a world revolute with two revolute branches whose tips face each other ``gap`` apart:
+    spheres, boxes of half height ``RADIUS`` along y, or (``"cross"``) cubes turned 45 degrees about
+    x and z so that two perpendicular edges face each other.
 
     ``order`` permutes the branch creation (labels stay with their geometry); ``rate`` [rad/s] turns
     the branches toward each other.
@@ -38,14 +67,15 @@ def two_branch_tree(device, *, gap=2e-3, rate=0.5, order=(0, 1), clear_flag=Fals
     return model
 
 
-def two_branch_builder(*, gap=2e-3, order=(0, 1), clear_flag=False, builder=None, tip="sphere"):
-    """The unfinalized two-branch tree (see ``two_branch_tree``) and its branch joints by name."""
+def two_branch_builder(*, gap=2e-3, order=(0, 1), clear_flag=False, builder=None, tip="sphere", third=False):
+    """The unfinalized two-branch tree (see ``two_branch_tree``) and its branch joints by name;
+    ``third`` adds a ``mid_arm`` branch whose small tip sphere is far from the others."""
     builder = builder or newton.ModelBuilder(gravity=(0.0, 0.0, 0.0))
     cfg = builder.ShapeConfig(density=0.0, margin=0.0, has_particle_collision=False)
     inertia = wp.diag(wp.vec3(1e-4, 1e-4, 1e-4))
     hub = builder.add_link(mass=0.5, inertia=inertia, label="hub")
     joints = [builder.add_joint_revolute(-1, hub, axis=(0, 0, 1), limit_ke=0.0, limit_kd=0.0, label="base")]
-    offset = RADIUS + gap / 2
+    offset = (CUBE * np.sqrt(2) if tip == "cross" else RADIUS) + gap / 2
     branches = {}
     for side in order:
         sign = 1.0 if side == 0 else -1.0
@@ -57,7 +87,11 @@ def two_branch_builder(*, gap=2e-3, order=(0, 1), clear_flag=False, builder=None
             else builder.ShapeConfig(density=0.0, margin=0.0, has_particle_collision=False, has_shape_collision=False)
         )
         tip_xform = wp.transform((0.1, 0.0, 0.0), wp.quat_identity())
-        if tip == "sphere":
+        if tip == "cross":
+            axis = wp.vec3(1.0, 0.0, 0.0) if side == 0 else wp.vec3(0.0, 0.0, 1.0)
+            tip_xform = wp.transform((0.1, 0.0, 0.0), wp.quat_from_axis_angle(axis, np.pi / 4))
+            builder.add_shape_box(link, xform=tip_xform, hx=CUBE, hy=CUBE, hz=CUBE, cfg=flags_cfg, label=f"{name}_tip")
+        elif tip == "sphere":
             builder.add_shape_sphere(link, xform=tip_xform, radius=RADIUS, cfg=flags_cfg, label=f"{name}_tip")
         else:
             builder.add_shape_box(
@@ -77,6 +111,23 @@ def two_branch_builder(*, gap=2e-3, order=(0, 1), clear_flag=False, builder=None
             )
         )
         branches[name] = joints[-1]
+    if third:
+        link = builder.add_link(mass=0.1, inertia=inertia, label="mid_arm")
+        builder.add_shape_sphere(
+            link, xform=wp.transform((0.1, 0.0, 0.0), wp.quat_identity()), radius=0.005, cfg=cfg, label="mid_tip"
+        )
+        joints.append(
+            builder.add_joint_revolute(
+                hub,
+                link,
+                parent_xform=wp.transform((0.0, 0.0, 0.1), wp.quat_identity()),
+                axis=(0, 0, 1),
+                limit_ke=0.0,
+                limit_kd=0.0,
+                label="mid_hinge",
+            )
+        )
+        branches["mid"] = joints[-1]
     builder.add_articulation(joints)
     return builder, branches
 
@@ -144,13 +195,16 @@ def test_energy_residual_consistency(test, device):
 
 def test_contact_terms_match_oracle(test, device):
     """Box tips turned into each other: E, r, the PSD tangent, both wrenches and residual differences
-    match the independent two-ended oracle (both directions at half weight), whose relative Jacobian
-    cancels the hub column; the native hub row is exactly zero."""
+    match the independent two-ended oracle (both directions at half weight, on the box face grid),
+    whose relative Jacobian cancels the hub column; the native hub row is exactly zero."""
+    grid = lambda half: box_grid_samples(half, SPACING)  # noqa: E731
     for precision in ("fp64", "fp32"):
-        with test.subTest(precision=precision):
+        with test.subTest(precision=precision), patch.object(multitree, "box_face_samples", grid):
             model = two_branch_tree(device, gap=5e-5, rate=0.0, tip="box")
             run = trees_solver(model, precision=precision, self_collision={})
             test.assertEqual(set(run._contact.actor_samples.pair_kinds.values()), {"A-self"})
+            # 30 x 40 x 24 mm boxes: 8, 10 and 6 cells per edge; 376 cells, 2256 samples per direction.
+            test.assertEqual(run._contact.actor_samples.count, 2 * 2256)
             state = run.create_state(dt=H)
             batch = native_batch(run)
             qn = state.joint_q.numpy().astype(float)
@@ -191,6 +245,35 @@ def test_contact_terms_match_oracle(test, device):
                     reference.append((expected[1] - expected[0]) / 2e-7)
                 np.testing.assert_allclose(native, reference, rtol=1e-6, atol=1e-4)
                 np.testing.assert_array_equal(np.asarray(native)[:, 0], 0.0)
+
+
+def test_box_grid_samples(test, device):
+    """The face grid covers the box surface exactly, with outward normals; a spacing beyond the box
+    keeps two triangles per face; same-tree box sources use it and other box sources do not."""
+    from newton._src.solvers.monolithic.contact_sampling import _surface_samples  # noqa: PLC0415
+
+    half = np.array([0.015, 0.02, 0.012])
+    for spacing, count in ((SPACING, 2256), (1.0, 36)):
+        points, normals, weights = _surface_samples(newton.GeoType.BOX, half, box_spacing=spacing)
+        test.assertEqual(len(points), count)
+        test.assertAlmostEqual(weights.sum(), 8 * (half[0] * half[1] + half[1] * half[2] + half[0] * half[2]))
+        axis = np.argmax(np.abs(points) / half, axis=1)
+        np.testing.assert_allclose(np.abs(points[np.arange(count), axis]), half[axis], rtol=1e-12)
+        np.testing.assert_allclose(normals[np.arange(count), axis], np.sign(points[np.arange(count), axis]))
+        expected, area = box_grid_samples(half, spacing)
+        np.testing.assert_allclose(np.sort(points, axis=0), np.sort(expected, axis=0), atol=1e-15)
+        np.testing.assert_allclose(np.sort(weights), np.sort(area), rtol=1e-12)
+    with test.assertRaisesRegex(ValueError, "spacing must be positive"):
+        _surface_samples(newton.GeoType.BOX, half, box_spacing=0.0)
+
+
+def test_crossed_box_edges(test, device):
+    """Two cube edges crossed by 2 mm hold no sample of the 12-triangle box (it reads a 4.6 mm gap);
+    the same-tree face grid finds the overlap at construction, and turning the cubes apart clears it."""
+    with test.assertRaisesRegex(ValueError, r"rest overlap.*left_tip.*right_tip"):
+        make_solver(two_branch_tree(device, gap=-2e-3, rate=0.0, tip="cross"))
+    run = make_solver(two_branch_tree(device, gap=2e-3, rate=0.0, tip="cross"))
+    test.assertEqual(run.self_collision_report, ())
 
 
 def test_rest_overlap_fails_everywhere(test, device):
@@ -238,6 +321,8 @@ def test_option_errors(test, device):
     model = two_branch_tree(device)
     for option, message in (
         ({"excluded": []}, "Unknown self_collision keys"),
+        ({"box_sample_spacing": 0.0}, "box_sample_spacing must be a positive finite length"),
+        ({"box_sample_spacing": "4mm"}, "box_sample_spacing must be a positive finite length"),
         ({"exclude": [["left_arm", "nowhere"]]}, "'nowhere' matches no body"),
         ({"exclude": [["left_arm", "hub"]]}, "has no same-tree Model contact pair"),
         ({"exclude": [["left_arm"]]}, "body label pairs"),
@@ -272,20 +357,26 @@ def test_label_order_and_cleared_flags(test, device):
 
 
 def test_checkpoint_identity(test, device):
-    """Self-collision on, off and with a different exclusion are different checkpoint identities."""
+    """Self-collision on, off, with another box spacing and with a different exclusion are different
+    checkpoint identities: each rejects the others' checkpoints and restores its own."""
+
+    def rejects(saver, loader):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "state.npz"
+            saver.save_checkpoint(saver.create_state(dt=H), path)
+            with test.assertRaisesRegex(ValueError, "Incompatible articulation state configuration"):
+                loader.load_checkpoint(loader.create_state(dt=H), path)
+            saver.load_checkpoint(saver.create_state(dt=H), path)
+
     model = two_branch_tree(device, rate=0.0)
     on = make_solver(model)
-    off = make_solver(model, self_collision=None)
-    test.assertNotEqual(on._kinematics.digest, off._kinematics.digest)
-    state = on.create_state(dt=H)
-    with tempfile.TemporaryDirectory() as folder:
-        path = Path(folder) / "on.npz"
-        on.save_checkpoint(state, path)
-        other = off.create_state(dt=H)
-        with test.assertRaisesRegex(ValueError, "Incompatible articulation state configuration"):
-            off.load_checkpoint(other, path)
-        restored = on.create_state(dt=H)
-        on.load_checkpoint(restored, path)
+    rejects(on, make_solver(model, self_collision=None))
+    rejects(on, make_solver(model, self_collision={"box_sample_spacing": 8e-3}))
+    # A third branch adds body pairs, so one exclusion leaves pairs behind.
+    model = two_branch_builder(third=True)[0].finalize(device=device)
+    every = make_solver(model)
+    test.assertEqual(len(every._self_collision.pairs), 3)
+    rejects(every, make_solver(model, self_collision={"exclude": [["left_arm", "mid_arm"]]}))
 
 
 class TestContactSelfCollision(unittest.TestCase):
@@ -296,6 +387,8 @@ for _test in (
     test_shared_columns_carry_no_self_force,
     test_energy_residual_consistency,
     test_contact_terms_match_oracle,
+    test_box_grid_samples,
+    test_crossed_box_edges,
     test_rest_overlap_fails_everywhere,
     test_precompression_report,
     test_option_errors,

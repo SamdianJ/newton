@@ -12,7 +12,11 @@ self-contact force on the root and shared ancestor rows is exactly zero.
 
 Rest overlap is checked in FP64 on the host, independent of the solver precision: every directed
 P1Q3 sample of every pair, g = phi_target - (margin_a + margin_b); g < -1e-6 m fails and names the
-bodies, shapes and depth, 0 <= g < normal_smoothing is reported as pre-compression.
+bodies, shapes and depth; -1e-6 m <= g < normal_smoothing is reported as pre-compression.
+
+Box sources of same-tree pairs are sampled on a face grid of ``box_sample_spacing`` (default 4 mm)
+instead of their 12 triangles: with 36 samples, two hand-sized boxes crossed edge to edge by 4 mm
+with no sample inside (an Allegro hand making a fist).
 """
 
 import numpy as np
@@ -22,6 +26,7 @@ from ...geometry import GeoType, ShapeFlags
 from .contact_sampling import _surface_samples
 
 OVERLAP_LIMIT_M = -1e-6
+DEFAULT_BOX_SAMPLE_SPACING_M = 4e-3
 # Self pairs need surfaces both directions can sample and fields the host can evaluate exactly.
 SUPPORTED_TYPES = (GeoType.SPHERE, GeoType.BOX, GeoType.CAPSULE)
 
@@ -59,14 +64,26 @@ class SelfCollision:
     def __init__(self, model, actors, option, *, normal_smoothing):
         self.model, self.enabled = model, option is not None
         self.pairs, self.excluded, self.report = frozenset(), (), []
+        self.box_spacing = None
         self.normal_smoothing = float(normal_smoothing)
         if option is None:
             return
         if not isinstance(option, dict):
             raise ValueError("self_collision must be None or a dict such as {'exclude': [['body_a', 'body_b']]}")
-        unknown = set(option) - {"exclude"}
+        unknown = set(option) - {"exclude", "box_sample_spacing"}
         if unknown:
-            raise ValueError(f"Unknown self_collision keys: {sorted(unknown)}; the only key is 'exclude'")
+            raise ValueError(
+                f"Unknown self_collision keys: {sorted(unknown)}; the keys are 'exclude' and 'box_sample_spacing'"
+            )
+        spacing = option.get("box_sample_spacing", DEFAULT_BOX_SAMPLE_SPACING_M)
+        if (
+            isinstance(spacing, bool)
+            or not isinstance(spacing, (int, float))
+            or not np.isfinite(spacing)
+            or spacing <= 0
+        ):
+            raise ValueError(f"self_collision box_sample_spacing must be a positive finite length [m], got {spacing!r}")
+        self.box_spacing = float(spacing)
         labels = list(model.body_label)
         body_owner = actors.maps["body_owner"]
         kinds = [a.kind for a in actors.actors]
@@ -130,16 +147,21 @@ class SelfCollision:
         for a, b in sorted(self.pairs):
             for s in (a, b):
                 if s not in self._samples:
-                    points = _surface_samples(int(types[s]), scales[s].astype(float), model.shape_source[s])[0]
+                    spacing = self.box_spacing if GeoType(int(types[s])) == GeoType.BOX else None
+                    points = _surface_samples(
+                        int(types[s]), scales[s].astype(float), model.shape_source[s], box_spacing=spacing
+                    )[0]
                     self._samples[s] = np.asarray(points, dtype=np.float64).reshape(-1, 3)
         self._kinematics = None
 
     @property
     def identity(self):
-        """Checkpoint identity: the resolved pairs and exclusions."""
+        """Checkpoint identity: the resolved pairs, exclusions and box sample spacing [nm]."""
         pairs = np.asarray(sorted(self.pairs), dtype=np.int32).reshape(-1, 2)
         excluded = np.asarray(self.excluded, dtype=np.int32).reshape(-1, 2)
-        return np.concatenate((pairs, np.full((1, 2), -1, dtype=np.int32), excluded))
+        spacing = np.full((1, 2), round(self.box_spacing * 1e9), dtype=np.int32)
+        separator = np.full((1, 2), -1, dtype=np.int32)
+        return np.concatenate((pairs, separator, excluded, separator, spacing))
 
     def bind(self, articulation_actors):
         """Build the FP64 kinematics used for every overlap check (independent of the solver precision).
@@ -179,7 +201,7 @@ class SelfCollision:
         return self._read_poses()
 
     def check(self, state=None):
-        """Fail on rest overlap (g < -1e-6 m); record pre-compression (0 <= g < normal_smoothing)."""
+        """Fail on rest overlap (g < -1e-6 m); record pre-compression (-1e-6 m <= g < normal_smoothing)."""
         if not self.enabled:
             return []
         model = self.model

@@ -114,8 +114,38 @@ def _capsule_samples(radius, half_height, bary):
     return np.concatenate(points), np.concatenate(normals), np.concatenate(areas), np.concatenate(triangles)
 
 
-def _surface_samples(geo, scale, mesh=None, *, _return_triangles=False):
-    """Return local P1Q3 points, outward normals and scaled surface weights."""
+def _box_grid_triangles(half_extents, spacing):
+    """Box surface split into a grid of at most ``spacing`` per edge, two outward-wound triangles per cell."""
+    h = np.asarray(half_extents, dtype=np.float64)[:3]
+    if not np.isfinite(spacing) or spacing <= 0:
+        raise ValueError(f"Box sample spacing must be positive and finite, got {spacing}")
+    # The relative slack keeps an edge of an exact multiple of the spacing (FP32 scales) at that many cells.
+    cells = np.maximum(1, np.ceil(2 * h / spacing * (1 - 1e-6))).astype(int)
+    tris = []
+    for axis in range(3):
+        u, v = (a for a in range(3) if a != axis)
+        gu = np.linspace(-h[u], h[u], cells[u] + 1)
+        gv = np.linspace(-h[v], h[v], cells[v] + 1)
+        for sign in (-1.0, 1.0):
+            # (e_u x e_v) . e_axis is +1 for axes 0 and 2 and -1 for axis 1.
+            flip = sign * (-1.0 if axis == 1 else 1.0) < 0
+            for i in range(len(gu) - 1):
+                for j in range(len(gv) - 1):
+                    c = np.zeros((4, 3))
+                    c[:, axis] = sign * h[axis]
+                    c[:, u] = (gu[i], gu[i + 1], gu[i + 1], gu[i])
+                    c[:, v] = (gv[j], gv[j], gv[j + 1], gv[j + 1])
+                    for tri in (c[[0, 1, 2]], c[[0, 2, 3]]):
+                        tris.append(tri[::-1] if flip else tri)
+    return np.asarray(tris)
+
+
+def _surface_samples(geo, scale, mesh=None, *, box_spacing=None, _return_triangles=False):
+    """Return local P1Q3 points, outward normals and scaled surface weights.
+
+    ``box_spacing`` [m] samples a box on a face grid of that spacing instead of its 12 triangles
+    (same-tree contact: two coarse boxes can cross edge to edge with no sample inside).
+    """
     bary = np.eye(3) * 0.5 + np.full((3, 3), 1 / 6)
     if geo == GeoType.CAPSULE:
         if not np.isfinite(scale).all() or scale[0] <= 0 or scale[1] < 0:
@@ -155,17 +185,20 @@ def _surface_samples(geo, scale, mesh=None, *, _return_triangles=False):
     else:
         if not np.isfinite(scale).all() or np.any(scale <= 0):
             raise ValueError("Invalid source shape scale")
-        if geo == GeoType.BOX:
-            mesh = Mesh.create_box(1.0, compute_inertia=False)
-        elif geo not in MESH_TYPES or not isinstance(mesh, Mesh):
-            raise ValueError("Unsupported contact source shape")
-        indices = np.asarray(mesh.indices)
-        vertices = np.asarray(mesh.vertices, dtype=np.float64)
-        if indices.size % 3 or vertices.ndim != 2 or vertices.shape[1] != 3 or not np.isfinite(vertices).all():
-            raise ValueError("Invalid source mesh topology")
-        if not np.issubdtype(indices.dtype, np.integer) or np.any(indices < 0) or np.any(indices >= len(vertices)):
-            raise ValueError("Invalid source mesh indices")
-        tri = (vertices * scale)[indices.reshape(-1, 3)]
+        if geo == GeoType.BOX and box_spacing is not None:
+            tri = _box_grid_triangles(scale, box_spacing)
+        else:
+            if geo == GeoType.BOX:
+                mesh = Mesh.create_box(1.0, compute_inertia=False)
+            elif geo not in MESH_TYPES or not isinstance(mesh, Mesh):
+                raise ValueError("Unsupported contact source shape")
+            indices = np.asarray(mesh.indices)
+            vertices = np.asarray(mesh.vertices, dtype=np.float64)
+            if indices.size % 3 or vertices.ndim != 2 or vertices.shape[1] != 3 or not np.isfinite(vertices).all():
+                raise ValueError("Invalid source mesh topology")
+            if not np.issubdtype(indices.dtype, np.integer) or np.any(indices < 0) or np.any(indices >= len(vertices)):
+                raise ValueError("Invalid source mesh indices")
+            tri = (vertices * scale)[indices.reshape(-1, 3)]
         cross = np.cross(tri[:, 1] - tri[:, 0], tri[:, 2] - tri[:, 0])
         area = np.linalg.norm(cross, axis=1) / 2
         if not len(area) or not np.isfinite(area).all() or np.any(area <= 0):
@@ -213,6 +246,7 @@ class ContactSamples:
         _expand_support=True,
         _materials=None,
         _self_pairs=frozenset(),
+        _self_box_spacing=None,
     ):
         if type(_expand_support) is not bool:
             raise ValueError("Contact support expansion mode must be boolean")
@@ -394,16 +428,18 @@ class ContactSamples:
             for source, target, enabled in ((a, b, dynamic[0]), (b, a, dynamic[1])):
                 if not enabled:
                     continue
-                if source not in surfaces:
-                    surfaces[source] = _surface_samples(
-                        types[source], scales[source].astype(float), model.shape_source[source]
+                # Box sources of same-tree pairs use the finer face grid; every other source is unchanged.
+                spacing = _self_box_spacing if self_pair and types[source] == GeoType.BOX else None
+                if (source, spacing) not in surfaces:
+                    surfaces[source, spacing] = _surface_samples(
+                        types[source], scales[source].astype(float), model.shape_source[source], box_spacing=spacing
                     )
                 if types[source] in MESH_TYPES:
                     mesh = model.shape_source[source]
                     check_convex(source, scales[source])
                     self.meshes[source] = (mesh, np.array(mesh.vertices, copy=True), np.array(mesh.indices, copy=True))
                 targets_used.add(target)
-                ps, ns, ws = surfaces[source]
+                ps, ns, ws = surfaces[source, spacing]
                 cols, sels = [], []
                 ends = [support.get(int(bodies[s]), ()) for s in (source, target)]
                 # Same-tree ends share the columns on their common ancestors' root path (a prefix of both

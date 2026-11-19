@@ -423,6 +423,7 @@ class ContactObjective:
         actors=None,
         _materials=None,
         _self_pairs=frozenset(),
+        _self_box_spacing=None,
     ):
         self._materials = _materials
         if dtype not in (wp.float64, wp.float32):
@@ -511,6 +512,7 @@ class ContactObjective:
                 _expand_support=False,
                 _materials=_materials,
                 _self_pairs=_self_pairs,
+                _self_box_spacing=_self_box_spacing,
             )
         )
         shapes = np.flatnonzero(v["shape_flags"] & int(ShapeFlags.COLLIDE_PARTICLES)).astype(np.int32)

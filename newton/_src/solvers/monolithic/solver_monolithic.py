@@ -144,7 +144,8 @@ class SolverMonolithic(SolverBase):
     Experimental ``self_collision`` (default ``None``) enables contact between bodies of one
     articulation tree: the Model's same-tree ``shape_contact_pairs`` with COLLIDE_SHAPES on both
     shapes, minus ``{"exclude": [[body_label_a, body_label_b], ...]}`` (a label matches a body's full
-    label or its last path segment and must be unique). Columns shared by both ends' common
+    label or its last path segment and must be unique). Box sources of these pairs are sampled on a
+    face grid of ``"box_sample_spacing"`` [m] (default 4e-3). Columns shared by both ends' common
     ancestors are dropped, so the self-contact force on those joint rows is zero; on the other joint
     rows ``contact_joint_force`` includes self-contact. Rest overlap (gap below -1e-6 m, FP64 on the
     host) fails at construction, ``create_state`` and ``reset_state``; smaller gaps below
@@ -356,6 +357,7 @@ class SolverMonolithic(SolverBase):
             dtype=self._dtype,
             _materials=self._materials,
             _self_pairs=self._self_collision.pairs,
+            _self_box_spacing=self._self_collision.box_spacing,
             **({} if contact_candidate_capacity is None else {"candidate_capacity": contact_candidate_capacity}),
         )
         if not isinstance(self._contact, _PooledContactObjective):
