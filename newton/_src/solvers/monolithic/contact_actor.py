@@ -12,7 +12,7 @@ from ...geometry import GeoType
 from ...geometry.sdf_texture import TextureSDFData
 from .articulation import _packed_column
 from .contact import _failure
-from .contact_geometry import _shape64
+from .contact_geometry import _shape64, _shape_hessian
 from .contact_roundoff import _abs_vector, analytic_geometry_magnitude, mesh_geometry_magnitude
 from .contact_smoothing import box_field
 from .rigid import _rotation_step
@@ -273,8 +273,9 @@ def _actor_geometry(
     if incremental:
         y = start_y[key] + slip
     d, g = _shape64(types[target], scales[target], y, sdf_indices[target], table)
+    hessian = _shape_hessian(types[target], scales[target], y)
     if types[target] == GeoType.BOX and box_smoothing > type(box_smoothing)(0.0):
-        d, g, _hessian = box_field(scales[target], y, box_smoothing)
+        d, g, hessian = box_field(scales[target], y, box_smoothing)
     out.uncertified[key] = 0
     if types[target] == GeoType.MESH and smooth_table.shape[0] > 0:
         index = sdf_indices[target]
@@ -282,9 +283,10 @@ def _actor_geometry(
         query = y
         if not table[index].scale_baked:
             query /= scales[target][0]
-        d, g, _unused_hessian = smooth_query(field, query)
+        d, g, hessian = smooth_query(field, query)
         if not table[index].scale_baked:
             d *= scales[target][0]
+            hessian /= scales[target][0]
         for axis in range(3):
             if query[axis] <= field.lower[axis] or query[axis] >= field.upper[axis]:
                 out.uncertified[key] = 1
@@ -296,6 +298,8 @@ def _actor_geometry(
     out.slip[key] = slip
     out.rounding[key] = wp.abs(g[0] * y[0]) + wp.abs(g[1] * y[1]) + wp.abs(g[2] * y[2])
     out.gradient[key] = g
+    if out.hessian.shape[0] > 0:
+        out.hessian[key] = hessian
     out.distance[key] = d
     out.rotation[key] = rotation
     out.soft_normal[key] = wp.transpose(rotation) * normal / length

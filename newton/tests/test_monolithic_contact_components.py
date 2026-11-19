@@ -5,14 +5,17 @@
 
 import unittest
 from types import SimpleNamespace
+from typing import Any
 
 import numpy as np
 import warp as wp
 
 import newton
+from newton._src.geometry.sdf_texture import TextureSDFData
 from newton._src.solvers.monolithic.bsr_reduction import _FixedScalarBsrReduction
 from newton._src.solvers.monolithic.contact import ContactObjective, ContactStatus
 from newton._src.solvers.monolithic.contact_batch import _ContactBatch
+from newton._src.solvers.monolithic.contact_geometry import _shape64, _shape_hessian
 from newton._src.solvers.monolithic.tet_assembly import (
     TetScatterBuffers,
     assemble_tet_residual_tangent,
@@ -23,7 +26,7 @@ from newton._src.solvers.monolithic.tet_precision import TetObjective
 from newton.tests.test_monolithic_linear_assembly import _dense_bsr
 from newton.tests.test_monolithic_tet_derivatives import _dense
 from newton.tests.unittest_utils import add_function_test, get_test_devices
-from scripts.monolithic_reference.contact_oracle import evaluate, penalty, rotation
+from scripts.monolithic_reference.contact_oracle import evaluate, geometry, penalty, rotation
 from scripts.monolithic_reference.tet_fixtures import build_model
 from scripts.monolithic_reference.tet_oracle import TetOracle
 
@@ -194,7 +197,14 @@ def test_oracle_and_actual_trials(test, device):
                 test.assertLessEqual(
                     np.linalg.norm(matrix - matrix.T), np.finfo(np.float32).eps * np.linalg.norm(matrix)
                 )
-                test.assertGreaterEqual(np.linalg.eigvalsh(matrix).min(), -1e-6 * np.linalg.norm(matrix))
+                # A curved target makes the tangent indefinite; it is never
+                # more so than the independent fitted tangent.
+                test.assertGreaterEqual(
+                    np.linalg.eigvalsh(matrix).min(),
+                    np.linalg.eigvalsh(oracle[3]).min() - 1e-6 * np.linalg.norm(matrix),
+                )
+                if kind != "sphere":
+                    test.assertGreaterEqual(np.linalg.eigvalsh(matrix).min(), -1e-6 * np.linalg.norm(matrix))
                 direction = rng.normal(size=oracle[1].size)
                 direction /= np.linalg.norm(direction)
                 free = np.flatnonzero(obj.mapping.numpy() >= 0)
@@ -250,6 +260,114 @@ def test_friction_radial_tangent(test, device):
                 test.assertLess(error / scale, 3e-5)
                 if abs(ratio) >= 1.0001 and axis is along:
                     test.assertLess(np.linalg.norm((matrix @ direction)[2:]) / scale, 1e-6)
+
+
+@wp.kernel
+def _field_probe(
+    geo: int,
+    scale: Any,
+    points: wp.array[Any],
+    table: wp.array[TextureSDFData],
+    gradients: wp.array[Any],
+    hessians: wp.array[Any],
+):
+    i = wp.tid()
+    _value, gradient = _shape64(geo, scale, points[i], 0, table)
+    gradients[i] = gradient
+    hessians[i] = _shape_hessian(geo, scale, points[i])
+
+
+def test_shape_hessian(test, device):
+    """Match the closed-form field Hessians with the gradient's central difference and the independent oracle."""
+    cases = (
+        ("sphere", newton.GeoType.SPHERE, [0.03, 0.03, 0.03], [[0.02, 0.01, 0.03], [-0.01, 0.02, -0.005]]),
+        (
+            "box",
+            newton.GeoType.BOX,
+            [0.02, 0.03, 0.01],
+            [
+                [0.025, 0.01, 0.002],  # outside one face
+                [0.01, 0.01, 0.002],  # interior
+                [0.025, 0.034, 0.002],  # outside an edge
+                [0.025, 0.034, 0.013],  # outside a corner
+                [-0.025, 0.034, -0.013],  # corner in a negative octant
+                [0.01, -0.0305, -0.0108],  # close to an edge in a negative octant
+            ],
+        ),
+    )
+    table = wp.empty(0, dtype=TextureSDFData, device=device)
+    for dtype, vector, matrix in ((np.float64, wp.vec3d, wp.mat33d), (np.float32, wp.vec3, wp.mat33)):
+        for kind, geo, extent, locations in cases:
+            with test.subTest(kind=kind, dtype=dtype.__name__):
+                # The oracle sees the coordinates the kernel sees.
+                scale, points = np.asarray(extent, dtype=dtype), np.asarray(locations, dtype=dtype)
+                h = 1e-7
+                offsets = np.concatenate((np.zeros((1, 3)), h * np.eye(3), -h * np.eye(3)))
+                samples = (points[:, None, :] + offsets[None, :, :].astype(dtype)).reshape(-1, 3)
+                gradients = wp.zeros(len(samples), dtype=vector, device=device)
+                hessians = wp.zeros(len(samples), dtype=matrix, device=device)
+                wp.launch(
+                    _field_probe,
+                    len(samples),
+                    [
+                        int(geo),
+                        vector(*scale),
+                        wp.array(samples, dtype=vector, device=device),
+                        table,
+                        gradients,
+                        hessians,
+                    ],
+                    device=device,
+                )
+                actual = hessians.numpy().reshape(len(points), 7, 3, 3)[:, 0]
+                expected = np.array([geometry(p.astype(float), kind, scale.astype(float))[2] for p in points])
+                size = max(1.0, np.abs(expected).max())
+                tolerance = 1e-10 if dtype == np.float64 else 1e-4
+                np.testing.assert_allclose(actual, expected, rtol=0, atol=tolerance * size)
+                test.assertGreater(np.abs(expected).max(), 10.0)
+                if dtype == np.float64:
+                    g = gradients.numpy().reshape(len(points), 7, 3)
+                    # Column j of the Hessian is the derivative of the gradient along axis j.
+                    difference = np.stack([(g[:, 1 + j] - g[:, 4 + j]) / (2 * h) for j in range(3)], axis=2)
+                    np.testing.assert_allclose(actual, difference, rtol=0, atol=1e-5 * size)
+
+
+def edge_fixture(device):
+    """Put the small tet face outside the top +x edge of the box, loaded through both of its planes."""
+    model, xn = fixture(device, "box")
+    xn[:, :2] *= 0.25
+    xn[:, 0] += 0.0205
+    xn[:3, 2] = 0.0005
+    return model, xn
+
+
+def test_curved_normal_tangent(test, device):
+    """Match the residual derivative on a curved target, where the normal force turns with the gradient."""
+    for kind in ("sphere", "box_edge"):
+        with test.subTest(kind=kind):
+            model, xn = edge_fixture(device) if kind == "box_edge" else fixture(device, "sphere")
+            batch = native(contact(model, mu=0.0))
+            q = np.zeros(2)
+            batch.begin_step(*state(model, xn, q))
+            x = xn + np.array([2e-6, -1e-6, 1e-6])
+            batch.evaluate(*state(model, x, q), dt=0.001)
+            test.assertEqual(int(batch.flags.numpy()[0]), ContactStatus.SUCCESS)
+            test.assertGreater(np.linalg.norm(residual(batch)[2:]), 0)
+            # Only the x block: the q rows also contain omitted FK geometry.
+            matrix = batch_matrix(batch)[2:, 2:]
+            test.assertLess(np.linalg.eigvalsh(matrix).min(), 0)
+            rng = np.random.default_rng(417)
+            h = 1e-9
+            for _ in range(4):
+                direction = rng.normal(size=x.size)
+                direction /= np.linalg.norm(direction)
+                values = []
+                for sign in (1, -1):
+                    batch.evaluate(*state(model, x + sign * h * direction.reshape(-1, 3), q), dt=0.001)
+                    test.assertEqual(int(batch.flags.numpy()[0]), ContactStatus.SUCCESS)
+                    values.append(residual(batch)[2:])
+                derivative = (values[0] - values[1]) / (2 * h)
+                test.assertLess(np.linalg.norm(matrix @ direction - derivative), 1e-6 * np.linalg.norm(derivative))
 
 
 def test_friction_normal_motion_limit(test, device):
@@ -499,6 +617,8 @@ class TestContactComponents(unittest.TestCase):
 
 for _device in get_test_devices():
     for _test in (
+        test_curved_normal_tangent,
+        test_shape_hessian,
         test_friction_normal_motion_limit,
         test_friction_radial_tangent,
         test_zero_smoothing,

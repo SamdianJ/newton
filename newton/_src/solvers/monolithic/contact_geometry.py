@@ -118,3 +118,34 @@ def _shape64(geo: int, scale: Any, point: Any, index: int, table: wp.array[Textu
         if not sdf.scale_baked:
             value *= scale[0]
     return value, gradient
+
+
+@wp.func
+def _shape_hessian(geo: int, scale: Any, point: Any):
+    """Return the derivative of the ``_shape64`` gradient for closed-form fields [1/m].
+
+    Planes, BOX faces and the BOX interior are flat. A texture SDF is
+    piecewise trilinear and gets no curvature here; smooth fields supply their
+    own Hessian.
+    """
+    hessian = wp.matrix(type(point[0])(0.0), shape=(3, 3))
+    if geo == GeoType.SPHERE:
+        length = wp.length(point)
+        if length > type(point[0])(0.0):
+            unit = point / length
+            hessian = (wp.identity(n=3, dtype=type(point[0])) - wp.outer(unit, unit)) / length
+    elif geo == GeoType.BOX:
+        d = type(point)(wp.abs(point[0]), wp.abs(point[1]), wp.abs(point[2])) - scale
+        outside = type(point)(
+            wp.max(d[0], type(point[0])(0.0)), wp.max(d[1], type(point[0])(0.0)), wp.max(d[2], type(point[0])(0.0))
+        )
+        length = wp.length(outside)
+        if length > type(point[0])(0.0):
+            gradient = outside / length
+            for a in range(3):
+                if point[a] < type(point[0])(0.0):
+                    gradient[a] = -gradient[a]
+                if d[a] > type(point[0])(0.0):
+                    hessian[a, a] = type(point[0])(1.0)
+            hessian = (hessian - wp.outer(gradient, gradient)) / length
+    return hessian
