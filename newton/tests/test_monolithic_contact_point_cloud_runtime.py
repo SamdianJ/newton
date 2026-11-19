@@ -6,11 +6,13 @@
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import numpy as np
 import warp as wp
 
 from newton._src.solvers.monolithic.cloth_contact_point_cloud import _finish_query, _query_points
+from newton._src.solvers.monolithic.solver_types import _StepFailure
 from newton.solvers.experimental.monolithic import SolverMonolithic
 from newton.tests.test_monolithic_contact_point_cloud import _candidate_oracle, _pairs, _scene
 from newton.tests.test_monolithic_material_state import snapshot
@@ -146,12 +148,148 @@ def test_candidate_overflow_rollback(test, device, *, precision, graph):
                 np.testing.assert_array_equal(snapshot(state)[key], value, err_msg=key)
 
 
+# Point-cloud pool records read by problem_coordinates; problem_summary reads pool.magnitude.
+_POOL_RECORDS = ("count", "support_offsets", "factor_columns", "rounding")
+
+
+def test_problem_graph_keys_bind_point_cloud_storage(test, device):
+    """problem_summary and problem_coordinates pass the point-cloud pool storage they read to the graph key."""
+    _, solver = _scene(device=device)
+    dt = 0.001
+    state = solver.create_state(dt=dt)
+    seen = {}
+    run = solver._graphs.run
+
+    def record(name, parameters, buffers, execute, **kwargs):
+        seen.setdefault(name, set()).update(buffer.ptr for buffer in buffers if buffer is not None)
+        return run(name, parameters, buffers, execute, **kwargs)
+
+    with mock.patch.object(solver._graphs, "run", record):
+        solver.step(state, state, solver.create_control(), dt=dt)
+    test.assertFalse(solver.last_stats.rolled_back, solver.last_stats)
+    pool = solver._cloth_contact.pool
+    named = {"magnitude": pool.magnitude, **{name: getattr(pool.records, name) for name in _POOL_RECORDS}}
+    test.assertTrue(all(array.size for array in named.values()))
+    for segment in ("problem_summary", "problem_coordinates"):
+        with test.subTest(segment=segment):
+            missing = sorted(name for name, array in named.items() if array.ptr not in seen[segment])
+            test.assertEqual(missing, [])
+
+
+def test_problem_graphs_recapture_after_pool_reallocation(test, device, *, precision):
+    """Same-layout replacements of the pool storage recapture the problem graphs; graph and eager stay equal."""
+    dt = 0.001
+    results = {}
+    for graph in (False, True):
+        _, solver = _scene(precision=precision, device=device, graph=graph)
+        state = solver.create_state(dt=dt)
+        solver.step(state, state, solver.create_control(), dt=dt)
+        pool = solver._cloth_contact.pool
+        captured = dict(solver._graphs.captures)
+        # Keep the old arrays alive so a stale replay reads them rather than freed memory.
+        stale = (pool.magnitude, *(getattr(pool.records, name) for name in _POOL_RECORDS))
+        pool.magnitude = wp.clone(pool.magnitude)
+        for name in _POOL_RECORDS:
+            setattr(pool.records, name, wp.clone(getattr(pool.records, name)))
+        # NaN in the old magnitude fails a stale problem_summary replay; a stale problem_coordinates
+        # replay is caught by the capture count below and by the graph-key test.
+        stale[0].fill_(float("nan"))
+        solver.step(state, state, solver.create_control(), dt=dt)
+        test.assertFalse(solver.last_stats.rolled_back, solver.last_stats)
+        if graph:
+            for name in ("problem_summary", "problem_coordinates"):
+                with test.subTest(segment=name):
+                    test.assertGreater(solver._graphs.captures[name], captured.get(name, 0))
+        results[graph] = snapshot(state)
+    for key, value in results[False].items():
+        np.testing.assert_array_equal(results[True][key], value, err_msg=key)
+
+
+def test_point_cloud_evaluation_reads_back_once(test, device):
+    """One point-cloud evaluation reads one packed status array back to the host."""
+    _, solver = _scene(device=device)
+    dt = 0.001
+    state = solver.create_state(dt=dt)
+    solver.step(state, state, solver.create_control(), dt=dt)
+    producer = next(p for p in solver._problem.producers if p.name == "cloth_contact")
+    array_type = type(state.particle_q)
+    original = array_type.numpy
+    reads = []
+
+    def counted(array):
+        reads.append(array.shape)
+        return original(array)
+
+    with mock.patch.object(array_type, "numpy", counted):
+        producer.evaluate(solver, state, dt, solver._complete_r, build_tangent=True)
+    test.assertEqual(len(reads), 1, reads)
+
+
+def test_point_cloud_status_selects_the_failure(test, device):
+    """Overflow or dropped contacts roll back as CONTACT_OVERFLOW; record flags reject as NONFINITE."""
+    _, solver = _scene(device=device)
+    dt = 0.001
+    state = solver.create_state(dt=dt)
+    solver.step(state, state, solver.create_control(), dt=dt)
+    producer = next(p for p in solver._problem.producers if p.name == "cloth_contact")
+    contact = producer.contact
+    for status, expected in (
+        ((1, 0, 0), solver.Status.CONTACT_OVERFLOW),
+        ((0, 1, 0), solver.Status.CONTACT_OVERFLOW),
+        ((0, 0, 1), solver.Status.NONFINITE),
+        # Overflow takes precedence over record flags.
+        ((1, 0, 1), solver.Status.CONTACT_OVERFLOW),
+        ((0, 0, 0), None),
+    ):
+
+        def evaluate(steps, dt, status=status):
+            contact.pool.status.assign(np.asarray(status, dtype=np.int32))
+
+        with test.subTest(status=status), mock.patch.object(contact, "evaluate", evaluate):
+            if expected is None:
+                producer.evaluate(solver, state, dt, solver._complete_r, build_tangent=True)
+                continue
+            with test.assertRaises(_StepFailure) as raised:
+                producer.evaluate(solver, state, dt, solver._complete_r, build_tangent=True)
+            test.assertEqual(raised.exception.status, expected)
+
+
+def test_dropped_contacts_roll_back(test, device):
+    """A support budget below the candidates' demand drops contacts and rolls the step back."""
+    _, solver = _scene(device=device, contact_options={"support_capacity": 1})
+    state = solver.create_state(dt=0.001)
+    before = snapshot(state)
+    solver.step(state, state, solver.create_control(), dt=0.001)
+    test.assertEqual(solver.last_stats.status, solver.Status.CONTACT_OVERFLOW)
+    test.assertTrue(solver.last_stats.rolled_back)
+    overflow, dropped, flags = (int(v) for v in solver._cloth_contact.pool.status.numpy())
+    test.assertEqual((overflow, flags), (0, 0))
+    test.assertGreater(dropped, 0)
+    for key, value in before.items():
+        np.testing.assert_array_equal(snapshot(state)[key], value, err_msg=key)
+
+
 class TestPointCloudRuntime(unittest.TestCase):
     pass
 
 
 devices = get_test_devices()
 add_function_test(TestPointCloudRuntime, "test_query_counter_limits", test_query_counter_limits, devices=devices)
+for _test in (
+    test_problem_graph_keys_bind_point_cloud_storage,
+    test_point_cloud_evaluation_reads_back_once,
+    test_point_cloud_status_selects_the_failure,
+    test_dropped_contacts_roll_back,
+):
+    add_function_test(TestPointCloudRuntime, _test.__name__, _test, devices=devices)
+for _precision in SolverMonolithic.Precision:
+    add_function_test(
+        TestPointCloudRuntime,
+        f"test_problem_graphs_recapture_after_pool_reallocation_{_precision.value}",
+        test_problem_graphs_recapture_after_pool_reallocation,
+        devices=[device for device in devices if device.is_cuda],
+        precision=_precision,
+    )
 for _precision in SolverMonolithic.Precision:
     for _graph in (False, True):
         for _test in (test_self_contact_lifecycle, test_candidate_overflow_rollback):

@@ -19,6 +19,7 @@ from . import convergence, iteration_device, state_checks
 from . import coupled_kernels as kernels
 from .actors import ActorTable, articulation_view
 from .articulation import ArticulationObjective, _TreeKinematics
+from .cable_contact import _CableContact
 from .cable_gauge import CableGauges
 from .cable_operator import CableOperator
 from .cable_system import CableBlock
@@ -123,6 +124,26 @@ class SolverMonolithic(SolverBase):
     discrete detection do not guarantee material-layer spacing or no crossing.
     This configuration is fixed for the solver lifetime and checkpoint identity.
 
+    Experimental ``cable_contact`` enables frictionless cable self and inter-cable
+    contact on centerline positions; the contact radius of each cable is its
+    ``CableInput.radius``. Its dictionary configures ``self``/``inter`` (bool,
+    default True, not both False), ``normal_stiffness`` (line stiffness [N/m^2],
+    default 1e5, not qualified for fast crossings; see the cable guide),
+    ``index_exclusion`` (int >= 3, default 3),
+    ``arc_exclusion_factor`` (default pi/2: a cable ignores itself within that
+    multiple of twice its radius in rest arc length), ``samples_per_edge`` (2 or
+    3, default 3), bounded ``candidate_capacity`` and ``support_capacity``, and
+    ``candidate_padding`` [m] (default the largest cable radius). Every rest edge
+    must be at most four times the smallest radius of the cables it can touch.
+    The penalty smoothing width is the shared ``normal_smoothing``. Detection is
+    discrete at each Newton refresh; fast crossings are not prevented, and a
+    segment stretched beyond 1.5 times its rest length fails the step as invalid
+    geometry. Zero padding and zero capacities are accepted (zero capacity
+    reports any contact as overflow). This configuration is fixed for the solver
+    lifetime and checkpoint identity. ``get_cable_contact_diagnostics`` returns
+    publication-bound counts, loads and overlaps; enabled checkpoints use schema
+    9 (10 together with ``cloth_contact``).
+
     Experimental ``alignment_policy="frozen"`` retains each sample's physical
     step-start orientation weight through Newton and candidate refreshes.
     ``alignment_smoothing`` is its dimensionless C2 transition width (zero is
@@ -186,6 +207,7 @@ class SolverMonolithic(SolverBase):
         cloth_inputs=(),
         cloth_contact=None,
         cable_inputs=(),
+        cable_contact=None,
     ):
         # Reject invalid options before building actors or allocating storage.
         options = MonolithicConfig(
@@ -362,6 +384,11 @@ class SolverMonolithic(SolverBase):
                 use_cuda_graph=use_cuda_graph,
             )
         )
+        self._cable_contact = (
+            None
+            if cable_contact is None
+            else _CableContact(self, cable_contact, smoothing=normal_smoothing, use_cuda_graph=use_cuda_graph)
+        )
         self._guard = min_det_f_guard
 
         # Checkpoint identity.
@@ -410,6 +437,8 @@ class SolverMonolithic(SolverBase):
             )
         if self._cloth_contact is not None:
             self._coupled_config["cloth_contact"] = self._cloth_contact.identity
+        if self._cable_contact is not None:
+            self._coupled_config["cable_contact"] = self._cable_contact.identity
         self._kinematics = self._make_kinematics(
             model,
             extra_config={
@@ -447,7 +476,8 @@ class SolverMonolithic(SolverBase):
             MonolithicLinearCapacities(
                 len(global_rows)
                 + self._contact.triplet_capacity
-                + (0 if self._cloth_contact is None else self._cloth_contact.pool.triplet_capacity),
+                + (0 if self._cloth_contact is None else self._cloth_contact.pool.triplet_capacity)
+                + (0 if self._cable_contact is None else self._cable_contact.pool.triplet_capacity),
                 len(internal_rows),
                 0,
                 self.linear_max_iterations,
@@ -463,6 +493,8 @@ class SolverMonolithic(SolverBase):
             material_operator=CableOperator(self._cables, layout.scalar_dof_count, dtype=self._dtype, device=device)
             if self._cables
             else None,
+            # Preconditioner (c): with cable contact the band factor keeps only template slots.
+            cable_contact=self._cable_contact is not None,
             dtype=self._dtype,
         )
         self._linear._set_fixed_triplet_pattern(
@@ -644,6 +676,7 @@ class SolverMonolithic(SolverBase):
             self._rigid,
             self._materials,
             cloth_contact=self._cloth_contact is not None,
+            cable_contact=self._cable_contact is not None,
         )
 
     def get_cloth_contact_diagnostics(self, state):
@@ -662,6 +695,40 @@ class SolverMonolithic(SolverBase):
             "self": {"candidates": int(values[3]), "active": int(values[4]), "compressive_load_N": float(values[5])},
             "particle_force_N": history.cloth_contact_particle_force.numpy().copy(),
             "configuration": dict(self._cloth_contact.config),
+            "protection": {"strategy": "DCD", "continuous_path_checked": False},
+        }
+
+    def get_cable_contact_diagnostics(self, state):
+        """Return experimental cable contact counts, compressive loads [N] and deepest overlaps [m].
+
+        ``candidates`` and ``active`` count sample-segment pairs (``active``: positive normal load; both
+        segments clamped at a convex vertex count). The compressive load sums the normal loads of all
+        pairs with sign, a sample-vertex pair subtracting its double count. ``max_overlap_m`` is the
+        largest overlap at a sample point, a lower bound of the segment-segment penetration at crossings.
+        """
+        self._states.validate(state)
+        if self._cable_contact is None:
+            return {"method": "off", "enabled": False}
+        history = state._monolithic_coupled
+        values = history.cable_contact_summary.numpy()
+
+        def channel(offset):
+            return {
+                "candidates": int(values[offset]),
+                "active": int(values[offset + 1]),
+                "compressive_load_N": float(values[offset + 2]),
+                "max_overlap_m": float(values[offset + 3]),
+            }
+
+        return {
+            "method": "cable-contact",
+            "enabled": True,
+            "force_valid": bool(history.force_valid.numpy()[0]),
+            "generation": int(history.force_generation.numpy()[0]),
+            "inter": channel(0),
+            "self": channel(4),
+            "particle_force_N": history.cable_contact_particle_force.numpy().copy(),
+            "configuration": dict(self._cable_contact.config),
             "protection": {"strategy": "DCD", "continuous_path_checked": False},
         }
 
@@ -836,6 +903,9 @@ class SolverMonolithic(SolverBase):
             "linear_postchecks": [],
             "configuration": self._kinematics.digest.hex(),
         }
+        cable_preconditioner = self._linear._cable_preconditioner
+        if cable_preconditioner is not None:
+            cable_preconditioner.step_shift_max.zero_()
         k, obj = self._kinematics, self._objective
         k.evaluate(k.gather_q(self._accepted))
         if not self._domain(self._accepted):
@@ -878,6 +948,9 @@ class SolverMonolithic(SolverBase):
                 self._variational.pop("actor_contact_pairs", None)
             if isinstance(self._variational.get("residual"), wp.array):
                 self._variational["residual"] = _diagnostic_snapshot(self._variational["residual"])
+            if cable_preconditioner is not None:
+                # Largest preconditioner-only shift of any cable factor in this step (one read per step).
+                self._variational["cable_used_shift_max"] = float(cable_preconditioner.step_shift_max.numpy()[0])
             self._variational["graphs"] = self._graphs.summary()
             if self._contact_pool:
                 self._variational["contact_graphs"] = {
@@ -1002,6 +1075,8 @@ class SolverMonolithic(SolverBase):
             self._contact.refresh(k.gather_q(state), state.particle_q, rigid_com=state._monolithic_coupled.rigid_com)
             if self._cloth_contact is not None:
                 self._cloth_contact.refresh(state.particle_q)
+            if self._cable_contact is not None:
+                self._cable_contact.refresh(state.particle_q)
         except ValueError as error:
             raise _StepFailure(self.Status.NONFINITE, str(error)) from error
 
@@ -1010,6 +1085,8 @@ class SolverMonolithic(SolverBase):
             self._contact.conservative_energy
             and not self._rigid.has_torque
             and (self._cloth_contact is None or self._cloth_contact.mu == 0.0)
+            # v1 cable contact is frictionless; keep the condition for when friction is added.
+            and (self._cable_contact is None or self._cable_contact.mu == 0.0)
         )
 
     def _trial_evaluation(self, dt, *, device_result=False):

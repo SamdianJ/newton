@@ -66,6 +66,7 @@ class MonolithicLinearWorkspace:
         contact_support=None,
         cable_row_order=None,
         material_operator=None,
+        cable_contact=False,
         dtype=wp.float32,
     ):
         if dtype not in ASSEMBLY_STRUCTS:
@@ -104,7 +105,14 @@ class MonolithicLinearWorkspace:
         # Element tangents applied outside the assembled matrix (cable_operator).
         self._material_operator = material_operator
         self._cable_preconditioner = (
-            CablePreconditioner(layout, cable_row_order, device=self.device, dtype=dtype, operator=material_operator)
+            CablePreconditioner(
+                layout,
+                cable_row_order,
+                device=self.device,
+                dtype=dtype,
+                operator=material_operator,
+                contact_template=cable_contact,
+            )
             if any(k == "cable" for k, *_ in layout.material_ranges)
             else None
         )

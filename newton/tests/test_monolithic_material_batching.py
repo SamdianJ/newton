@@ -250,7 +250,7 @@ def test_operator_and_band(test, device):
             preconditioner = linear._cable_preconditioner
             rows = preconditioner.rows.numpy()
             factors, scales, shifts = (
-                preconditioner.factor_values.numpy(),
+                preconditioner.dense_factors(),
                 linear.scale.numpy(),
                 preconditioner.used_shift.numpy(),
             )
@@ -269,10 +269,10 @@ def test_operator_and_band(test, device):
                 pin = preconditioner.gauge_rows.numpy()[actor]
                 if pin >= 0:
                     expected[np.flatnonzero(indices == pin)[0], np.flatnonzero(indices == pin)[0]] += 1
-                lower = np.zeros_like(expected)
+                # L L^T of the block cyclic reduction (L is triangular in its level order, not in band order).
+                lower = factors[actor]
                 for i in range(end - start):
                     for j in range(max(0, i - 10), i + 1):
-                        lower[i, j] = factors[start + i, i - j]
                         row, column = indices[i], indices[j]
                         scale_product = float(scales[row]) * float(scales[column])
                         expected_band[start + i, i - j] = scale_product * dense[row, column]

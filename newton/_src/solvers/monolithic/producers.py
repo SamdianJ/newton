@@ -45,6 +45,8 @@ class Producer(Protocol):
 
     def coordinates(self, solver: Any, state: Any, out: Any) -> None: ...
 
+    def graph_buffers(self, solver: Any) -> tuple: ...
+
     def assemble(self, solver: Any, assembly: Any, dt: float) -> None: ...
 
     def scale(self, solver: Any, diagonal: Any, coordinate: np.ndarray) -> None: ...
@@ -299,6 +301,10 @@ class _Producer:
 
     def scale(self, solver, diagonal, coordinate):
         """Write coordinate-policy unit scales for this producer's rows."""
+
+    def graph_buffers(self, solver):
+        """Every array ``magnitude`` and ``coordinates`` read beyond the problem's own; it joins the problem graph keys."""
+        return ()
 
 
 class ArticulationProducer(_Producer):
@@ -1005,6 +1011,9 @@ class ContactProducer(_Producer):
             device=solver.model.device,
         )
 
+    def graph_buffers(self, solver):
+        return solver._contact.buffers()
+
     def assemble(self, solver, assembly, dt):
         solver._contact.assemble_tangent(assembly)
 
@@ -1045,9 +1054,10 @@ class _ClothContactProducer(_Producer):
     def evaluate(self, solver, state, dt, residual, *, build_tangent):
         contact = self.contact
         contact.evaluate(solver._displacement(state), dt)
-        if int(contact.pool.candidates.overflow.numpy()[0]) or int(contact.pool.records.dropped.numpy()[0]):
+        overflow, dropped, flags = (int(value) for value in contact.pool.status.numpy())
+        if overflow or dropped:
             raise _StepFailure(solver.Status.CONTACT_OVERFLOW, "Incomplete cloth contact evaluation")
-        if int(contact.pool.records.flags.numpy()[0]):
+        if flags:
             raise _StepFailure(solver.Status.NONFINITE, "Invalid cloth contact records")
         wp.launch(_add_values, residual.size, [contact.pool.residual.result, residual], device=solver.model.device)
         reactions = self._reactions.bind(self._reaction_views())
@@ -1080,6 +1090,11 @@ class _ClothContactProducer(_Producer):
             device=solver.model.device,
         )
 
+    def graph_buffers(self, solver):
+        pool = self.contact.pool
+        records = pool.records
+        return (pool.magnitude, records.count, records.support_offsets, records.factor_columns, records.rounding)
+
     def assemble(self, solver, assembly, dt):
         self.contact.assemble(assembly)
 
@@ -1097,8 +1112,100 @@ class _ClothContactProducer(_Producer):
         )
 
 
+class _CableContactProducer(_Producer):
+    """Add cable self and inter-cable contact to the rows of the cable positions it touches."""
+
+    interaction = True
+    scale_policy = "none"
+    energy_fields = ("energy",)
+
+    def __init__(self, solver):
+        super().__init__("cable_contact", np.empty(0, dtype=np.int32))
+        self.contact = contact = solver._cable_contact
+        self.energies = ((contact, "energy", "absolute_energy"),)
+        self.checks = (
+            (contact, "flags", {}, "Invalid cable contact geometry"),
+            (contact, "summary_flags", {}, "Invalid cable contact diagnostics"),
+        )
+        self.assembly_checks = ((contact.pool.records, "flags", {}, "Invalid cable contact assembly"),)
+        self._materials = tuple(solver._cables)
+        # Contact acts on centerline positions only: reactions fill the position rows of ``raw``.
+        self._reactions = _DeviceRecords(
+            _reaction_type(solver._dtype),
+            self._reaction_views(),
+            [3 * len(block.ids) for block in self._materials],
+            device=solver.model.device,
+        )
+
+    def _reaction_views(self):
+        return [(block.ids, block.rows, block.raw, 0) for block in self._materials]
+
+    def begin_step(self, solver, state_in):
+        self.contact.begin_step(state_in)
+
+    def evaluate(self, solver, state, dt, residual, *, build_tangent):
+        contact = self.contact
+        contact.evaluate(solver._displacement(state), dt)
+        overflow, dropped, flags = (int(value) for value in contact.pool.status.numpy())
+        if overflow or dropped:
+            raise _StepFailure(solver.Status.CONTACT_OVERFLOW, "Incomplete cable contact evaluation")
+        if flags:
+            raise _StepFailure(solver.Status.NONFINITE, "Invalid cable contact records")
+        wp.launch(_add_values, residual.size, [contact.pool.residual.result, residual], device=solver.model.device)
+        reactions = self._reactions.bind(self._reaction_views())
+        wp.launch(
+            _contact_reaction,
+            self._reactions.jobs.size,
+            [reactions, self._reactions.jobs, contact.pool.residual.result, contact.pool.force.result, False],
+            device=solver.model.device,
+        )
+
+    def candidate(self, solver, accepted, trial, direction, alpha, dt):
+        """Read the trial positions supplied by the cable owners."""
+
+    def difference(self, solver, accepted, trial, out):
+        """Own no independent rows."""
+
+    def domain(self, solver, accepted, candidate, flags):
+        """Use discrete contact; continuous crossing paths are not guarded."""
+
+    def magnitude(self, solver, out):
+        values = self.contact.pool.magnitude
+        wp.launch(_add_absolute, values.size, [values, out], device=solver.model.device)
+
+    def coordinates(self, solver, state, out):
+        records = self.contact.pool.records
+        wp.launch(
+            _raise_coordinates,
+            records.rounding.size,
+            [records.count, records.support_offsets, records.factor_columns, records.rounding, out],
+            device=solver.model.device,
+        )
+
+    def graph_buffers(self, solver):
+        pool = self.contact.pool
+        records = pool.records
+        return (pool.magnitude, records.count, records.support_offsets, records.factor_columns, records.rounding)
+
+    def assemble(self, solver, assembly, dt):
+        self.contact.assemble(assembly)
+
+    def publish(self, solver, state):
+        contact, history = self.contact, state._monolithic_coupled
+        if contact.assembled_generation != contact.evaluation_generation:
+            raise ValueError("Cable contact forces require the final assembled evaluation")
+        wp.copy(scalar_view(history.cable_contact_particle_force), contact.pool.force.result)
+        wp.copy(history.cable_contact_summary, contact.summary)
+        wp.launch(
+            _add_values,
+            contact.pool.force.result.size,
+            [contact.pool.force.result, scalar_view(history.contact_particle_force)],
+            device=solver.model.device,
+        )
+
+
 def build_producers(solver):
-    """Order producers as articulation, rigid, tet, cloth, cable and contact."""
+    """Order producers as articulation, rigid, tet, cloth, cable, contact, cloth contact and cable contact."""
     layout = solver._layout
     producers = []
     if layout.q_dof_count:
@@ -1113,5 +1220,7 @@ def build_producers(solver):
     producers.append(ContactProducer(solver))
     if solver._cloth_contact is not None:
         producers.append(_ClothContactProducer(solver))
+    if solver._cable_contact is not None:
+        producers.append(_CableContactProducer(solver))
     validate_row_partition([p for p in producers if len(p.rows)], layout.scalar_dof_count)
     return producers
