@@ -340,6 +340,12 @@ def main(argv=None):
     parser.add_argument(
         "--self-collision-from", type=Path, help="FROZEN recipe whose self_collision block the run uses (P9d PR4)"
     )
+    parser.add_argument(
+        "--contact-factor-capacity",
+        type=int,
+        help="solver contact_factor_capacity for the run (bounds the contact pool; give the same value to both "
+        "self-collision modes so they compare at one pool size)",
+    )
     args = parser.parse_args(argv)
     instrumented = set() if args.instrumented == "none" else set(args.instrumented.split(","))
     if instrumented - {"segments", "syncs"} or args.passes < 1:
@@ -362,6 +368,10 @@ def main(argv=None):
             raise ValueError(f"{recipe_path} already has a different self_collision block")
         recipe = dict(recipe, self_collision=source["self_collision"])
         block_source = {"path": str(args.self_collision_from), "sha256": _sha(args.self_collision_from)}
+    if args.contact_factor_capacity is not None:
+        if args.contact_factor_capacity < 1:
+            raise ValueError(f"--contact-factor-capacity must be positive, got {args.contact_factor_capacity}")
+        recipe = {**recipe, "solver": {**recipe["solver"], "contact_factor_capacity": args.contact_factor_capacity}}
     window = tuple(fixed["window_steps"])
     # Argument and recipe errors come first; a measurement then needs a clean tree.
     if _git("status", "--porcelain", "--untracked-files=no"):

@@ -708,6 +708,7 @@ class TestBenchmarkArguments(unittest.TestCase):
                     ["--self-collision-from", str(fixtures / "floating_hand_wrist_box_baseline_v1.json")],
                     "needs a FROZEN recipe with a self_collision block",
                 ),
+                (["--contact-factor-capacity", "0"], "--contact-factor-capacity must be positive"),
             ):
                 with self.subTest(message=message), self.assertRaisesRegex(ValueError, message):
                     bench.main([*base, *extra, "--output", str(Path(folder) / "out")])
