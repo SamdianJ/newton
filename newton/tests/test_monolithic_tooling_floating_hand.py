@@ -476,11 +476,16 @@ class TestRunnerIdentity(unittest.TestCase):
                     "fp64",
                     "--max-steps",
                     "2",
+                    "--contact-factor-capacity",
+                    "600",
                     "--output",
                     str(out),
                 ]
             )
             manifest = json.loads((out / "manifest.json").read_text())
+            # The override reaches the solver and is recorded; the pool holds at most 600 / 3 supports.
+            self.assertEqual(manifest["arguments"]["contact_factor_capacity"], 600)
+            self.assertLessEqual(manifest["contact_pool"]["capacity"], 200)
             self.assertEqual(code, 2)  # PARTIAL never exits 0
             self.assertEqual(manifest["status"], "PARTIAL")
             self.assertEqual(manifest["published_steps"], 2)
@@ -490,6 +495,7 @@ class TestRunnerIdentity(unittest.TestCase):
             _, _, frames = fc.load_run(out)
             self.assertFalse(np.array_equal(frames["joint_q"][0], frames["joint_q"][1]))
             self.assertFalse(np.array_equal(frames["body_q"][0], frames["body_q"][1]))
+            self.assertEqual(frames["contact_pool_used"].shape, (2,))
             criteria = fc.evaluate(out, fhs.load_recipe(recipe))
             self.assertEqual(criteria["published_steps"], 2)
             self.assertEqual(criteria["penetration_m"]["hand_table"], "NOT_APPLICABLE")

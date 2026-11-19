@@ -110,6 +110,11 @@ def main(argv=None):
     parser.add_argument("--mount", choices=MOUNTS)
     parser.add_argument("--self-collision", choices=("recipe", "off"), default="recipe")
     parser.add_argument("--max-steps", type=int)
+    parser.add_argument(
+        "--contact-factor-capacity",
+        type=int,
+        help="override the recipe's solver contact_factor_capacity (bounds the contact pool; overflow rolls back)",
+    )
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args(argv)
     if Path(newton.__file__).resolve() != SOURCE / "newton/__init__.py":
@@ -119,6 +124,10 @@ def main(argv=None):
         raise ValueError(f"Scene argument {args.scene} differs from the recipe scene {recipe['scene']}")
     if args.max_steps is not None and args.max_steps < 1:
         raise ValueError(f"--max-steps must be positive, got {args.max_steps}")
+    if args.contact_factor_capacity is not None:
+        if args.contact_factor_capacity < 1:
+            raise ValueError(f"--contact-factor-capacity must be positive, got {args.contact_factor_capacity}")
+        recipe = {**recipe, "solver": {**recipe["solver"], "contact_factor_capacity": args.contact_factor_capacity}}
     args.output.mkdir(parents=True, exist_ok=False)
     (args.output / "dirty.patch").write_text(_git("diff", "--binary", "HEAD"))
     files = sorted((SOURCE / "newton/_src/solvers/monolithic").glob("*.py")) + sorted(
@@ -175,6 +184,11 @@ def main(argv=None):
             requested_steps=stop,
             dt_s=scene.dt,
             construction_seconds=time.perf_counter() - start,
+            contact_pool={
+                "capacity": int(scene.solver._contact.pool.capacity),
+                "triplet_capacity": int(scene.solver._contact.pool.triplet_capacity),
+                "static_samples": int(scene.solver._contact.count),
+            },
             object_pair_shapes=others,
         )
         write_json(args.output / "manifest.json", manifest)
@@ -205,6 +219,7 @@ def main(argv=None):
                     if mine in object_shapes and other in others:
                         pair_force[others.index(other)] += np.asarray(pair["world_wrench"][end][:3])
             target = scene.palm_target(step)
+            pool = (stats.variational or {}).get("contact_pool", {})
             recorded += 1
             frames.append(
                 {
@@ -224,6 +239,9 @@ def main(argv=None):
                     "linear_iterations": np.int32(stats.linear_iterations),
                     "line_search_iterations": np.int32(stats.line_search_iterations),
                     "regularization_retries": np.int32(stats.regularization_retries),
+                    # Last evaluation's pool use (support entries, triplets); overflow is a rollback.
+                    "contact_pool_used": np.int64(pool.get("used", 0)),
+                    "contact_pool_triplets": np.int64(pool.get("triplet_count", 0)),
                 }
             )
             if len(frames) == CHUNK:
