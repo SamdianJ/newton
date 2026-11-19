@@ -11,19 +11,23 @@ import numpy as np
 import warp as wp
 
 import newton
+from newton.tests.test_monolithic_contact_actor_pairs import native_batch, query
+from newton.tests.test_monolithic_contact_components import batch_matrix
+from newton.tests.test_monolithic_contact_multitree import contact_terms, set_q, trees_solver
 from newton.tests.unittest_utils import add_function_test, get_test_devices
 
 H = 1e-3
 RADIUS = 0.02
 
 
-def two_branch_tree(device, *, gap=2e-3, rate=0.5, order=(0, 1), clear_flag=False):
-    """A hub on a world revolute with two revolute branches whose tip spheres face each other ``gap`` apart.
+def two_branch_tree(device, *, gap=2e-3, rate=0.5, order=(0, 1), clear_flag=False, tip="sphere"):
+    """A hub on a world revolute with two revolute branches whose tips (spheres, or boxes of half
+    height ``RADIUS`` along y) face each other ``gap`` apart.
 
     ``order`` permutes the branch creation (labels stay with their geometry); ``rate`` [rad/s] turns
     the branches toward each other.
     """
-    builder, branches = two_branch_builder(gap=gap, order=order, clear_flag=clear_flag)
+    builder, branches = two_branch_builder(gap=gap, order=order, clear_flag=clear_flag, tip=tip)
     model = builder.finalize(device=device)
     rates = model.joint_qd.numpy()
     starts = model.joint_qd_start.numpy()
@@ -34,7 +38,7 @@ def two_branch_tree(device, *, gap=2e-3, rate=0.5, order=(0, 1), clear_flag=Fals
     return model
 
 
-def two_branch_builder(*, gap=2e-3, order=(0, 1), clear_flag=False, builder=None):
+def two_branch_builder(*, gap=2e-3, order=(0, 1), clear_flag=False, builder=None, tip="sphere"):
     """The unfinalized two-branch tree (see ``two_branch_tree``) and its branch joints by name."""
     builder = builder or newton.ModelBuilder(gravity=(0.0, 0.0, 0.0))
     cfg = builder.ShapeConfig(density=0.0, margin=0.0, has_particle_collision=False)
@@ -52,13 +56,13 @@ def two_branch_builder(*, gap=2e-3, order=(0, 1), clear_flag=False, builder=None
             if not (clear_flag and side == 1)
             else builder.ShapeConfig(density=0.0, margin=0.0, has_particle_collision=False, has_shape_collision=False)
         )
-        builder.add_shape_sphere(
-            link,
-            xform=wp.transform((0.1, 0.0, 0.0), wp.quat_identity()),
-            radius=RADIUS,
-            cfg=flags_cfg,
-            label=f"{name}_tip",
-        )
+        tip_xform = wp.transform((0.1, 0.0, 0.0), wp.quat_identity())
+        if tip == "sphere":
+            builder.add_shape_sphere(link, xform=tip_xform, radius=RADIUS, cfg=flags_cfg, label=f"{name}_tip")
+        else:
+            builder.add_shape_box(
+                link, xform=tip_xform, hx=0.015, hy=RADIUS, hz=0.012, cfg=flags_cfg, label=f"{name}_tip"
+            )
         joints.append(
             builder.add_joint_revolute(
                 hub,
@@ -136,6 +140,57 @@ def test_energy_residual_consistency(test, device):
         _, residual, _ = run._evaluate(run._accepted, H, build_tangent=False)
         slope = (energies[0] - energies[1]) / (2 * eps)
         test.assertAlmostEqual(slope, float(residual @ (direction * 1e-4)), delta=1e-6 * (1 + abs(slope)))
+
+
+def test_contact_terms_match_oracle(test, device):
+    """Box tips turned into each other: E, r, the PSD tangent, both wrenches and residual differences
+    match the independent two-ended oracle (both directions at half weight), whose relative Jacobian
+    cancels the hub column; the native hub row is exactly zero."""
+    for precision in ("fp64", "fp32"):
+        with test.subTest(precision=precision):
+            model = two_branch_tree(device, gap=5e-5, rate=0.0, tip="box")
+            run = trees_solver(model, precision=precision, self_collision={})
+            test.assertEqual(set(run._contact.actor_samples.pair_kinds.values()), {"A-self"})
+            state = run.create_state(dt=H)
+            batch = native_batch(run)
+            qn = state.joint_q.numpy().astype(float)
+            query(batch, run, state, start=True)
+            # The hub turns too; the branches close about 0.2 mm each (the tips start 0.05 mm apart).
+            q = qn + np.array([0.01, -2e-3, 2e-3])
+            set_q(run, state, q)
+            q = state.joint_q.numpy().astype(float)
+            query(batch, run, state)
+            energy, residual, matrix, forces = contact_terms(run.model, q, qn)
+            rows = np.asarray(run._actors.maps["joint_dof_to_global"])
+            actual = batch_matrix(batch)[np.ix_(rows, rows)]
+            native_residual = batch.pool.residual.result.numpy()[rows]
+            tol = 1e-3 if precision == "fp32" else 1e-8
+            test.assertEqual(int(batch.flags.numpy()[0]), 0)
+            test.assertGreater(abs(residual[1]), 1e-4, "the tips are not in contact")
+            test.assertEqual(float(native_residual[0]), 0.0)
+            np.testing.assert_array_equal(actual[0], 0.0)
+            np.testing.assert_array_equal(actual[:, 0], 0.0)
+            np.testing.assert_allclose(batch.pool.energy.result.numpy()[:2], energy, rtol=tol, atol=tol * 1e-4)
+            np.testing.assert_allclose(native_residual, residual, rtol=tol, atol=tol)
+            np.testing.assert_allclose(actual, matrix, rtol=max(tol, 1e-5), atol=max(tol, 1e-5))
+            scale = max(1, np.linalg.norm(matrix))
+            np.testing.assert_allclose(actual, actual.T, rtol=1e-6, atol=1e-6 * scale)
+            test.assertGreaterEqual(np.linalg.eigvalsh(actual).min(), -1e-6 * scale)
+            actual_forces = batch.pool.force.result.numpy()[: 6 * run.model.body_count].reshape(-1, 6)
+            np.testing.assert_allclose(actual_forces, forces, rtol=tol, atol=tol)
+            if precision == "fp64":
+                native, reference = [], []
+                for direction in np.eye(3):
+                    values, expected = [], []
+                    for sign in (-1, 1):
+                        set_q(run, state, q + sign * 1e-7 * direction)
+                        query(batch, run, state)
+                        values.append(batch.pool.residual.result.numpy()[rows].copy())
+                        expected.append(contact_terms(run.model, state.joint_q.numpy().astype(float), qn)[1])
+                    native.append((values[1] - values[0]) / 2e-7)
+                    reference.append((expected[1] - expected[0]) / 2e-7)
+                np.testing.assert_allclose(native, reference, rtol=1e-6, atol=1e-4)
+                np.testing.assert_array_equal(np.asarray(native)[:, 0], 0.0)
 
 
 def test_rest_overlap_fails_everywhere(test, device):
@@ -240,6 +295,7 @@ class TestContactSelfCollision(unittest.TestCase):
 for _test in (
     test_shared_columns_carry_no_self_force,
     test_energy_residual_consistency,
+    test_contact_terms_match_oracle,
     test_rest_overlap_fails_everywhere,
     test_precompression_report,
     test_option_errors,
