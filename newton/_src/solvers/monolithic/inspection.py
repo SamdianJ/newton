@@ -129,7 +129,7 @@ _FIELDS = {
         "state",
         "joint_force",
         "joint",
-        "published contact generalized force per joint DoF",
+        "published contact generalized force per joint DoF; with self_collision it includes same-tree (A-self) contact on the DoFs not shared by the two bodies (their common ancestors' DoFs carry none)",
         "state._monolithic_coupled.contact_joint_force",
         "force_valid == 1",
     ),

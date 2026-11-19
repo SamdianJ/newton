@@ -192,10 +192,28 @@ def _checked_contact_capacity(count, support, triplets, base=0):
         raise ValueError("Actor contact capacity exceeds int32")
 
 
+def _shared_prefix(a, b):
+    """Number of leading (column, entry) supports whose columns coincide."""
+    n = 0
+    while n < min(len(a), len(b)) and a[n][0] == b[n][0]:
+        n += 1
+    return n
+
+
 class ContactSamples:
     """Freeze Model-selected directed keys without rebuilding collision filters."""
 
-    def __init__(self, model, actors, *, radius, base_triplet_count, _expand_support=True, _materials=None):
+    def __init__(
+        self,
+        model,
+        actors,
+        *,
+        radius,
+        base_triplet_count,
+        _expand_support=True,
+        _materials=None,
+        _self_pairs=frozenset(),
+    ):
         if type(_expand_support) is not bool:
             raise ValueError("Contact support expansion mode must be boolean")
         self.model = model
@@ -326,7 +344,8 @@ class ContactSamples:
         )
         for a, b in ordered:
             mechanical_pair = bodies[a] in tree_support and bodies[b] in tree_support
-            if owner[a] == owner[b]:
+            self_pair = tuple(sorted((a, b))) in _self_pairs
+            if owner[a] == owner[b] and not self_pair:
                 continue
             collide = flags[a] & int(ShapeFlags.COLLIDE_SHAPES) and flags[b] & int(ShapeFlags.COLLIDE_SHAPES)
             if not collide and not (mechanical_pair or a in self.rigid_shapes or b in self.rigid_shapes):
@@ -343,7 +362,9 @@ class ContactSamples:
             if not any(dynamic):
                 continue
             kind = (
-                "A-A"
+                "A-self"
+                if self_pair
+                else "A-A"
                 if mechanical_pair
                 else "A-static"
                 if not all(dynamic) and a not in self.rigid_shapes and b not in self.rigid_shapes
@@ -384,8 +405,12 @@ class ContactSamples:
                 targets_used.add(target)
                 ps, ns, ws = surfaces[source]
                 cols, sels = [], []
-                for end, s in enumerate((source, target)):
-                    for col, j in support.get(int(bodies[s]), ()):
+                ends = [support.get(int(bodies[s]), ()) for s in (source, target)]
+                # Same-tree ends share the columns on their common ancestors' root path (a prefix of both
+                # sorted supports); those DoFs move both ends rigidly, so they carry no self-contact column.
+                shared = _shared_prefix(ends[0], ends[1]) if self_pair else 0
+                for end, columns in enumerate(ends):
+                    for col, j in columns[shared:]:
                         cols.append(col)
                         sels.append((end, j))
                 for index, (p, n, w) in enumerate(zip(ps, ns, ws, strict=True)):

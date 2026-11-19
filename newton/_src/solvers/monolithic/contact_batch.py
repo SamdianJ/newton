@@ -329,6 +329,22 @@ def _project_contact_chunk(
     candidates.rounding[i] = geometry.rounding[i]
     r = local_r[i]
     k = int(0)
+    # Both ends on one tree (a self pair) share the columns on their common root path, a prefix of
+    # both bodies' sorted supports: those DoFs move both ends rigidly, so skip them. Bodies of
+    # different trees or actors share no column (shared = 0).
+    shared = int(0)
+    if not legacy and source >= 0 and target >= 0:
+        body_a, body_b = bodies[source], bodies[target]
+        if body_a >= 0 and body_b >= 0 and body_a != body_b:
+            size_a = support.offsets[body_a + 1] - support.offsets[body_a]
+            size_b = support.offsets[body_b + 1] - support.offsets[body_b]
+            while (
+                shared < size_a
+                and shared < size_b
+                and support.columns[support.offsets[body_a] + shared]
+                == support.columns[support.offsets[body_b] + shared]
+            ):
+                shared += 1
     for end in range(2):
         tet = source < 0 and end == 0
         if legacy:
@@ -370,7 +386,7 @@ def _project_contact_chunk(
                 shape, sign = source, type(point[0])(1.0)
             body = bodies[shape]
             if body >= 0:
-                for index in range(support.offsets[body], support.offsets[body + 1]):
+                for index in range(support.offsets[body] + shared, support.offsets[body + 1]):
                     column = _point_column(
                         body, support.local[index], point, support.kinds, support.indices, com, jt, jw, rigid_com
                     )
@@ -574,7 +590,13 @@ class _ContactBatch:
             elif source < 0:
                 k += 3 * int(np.count_nonzero(particles[triangles[face]] >= 0))
             else:
-                k += len(body_support.get(int(bodies[source]), ()))
+                ends = [body_support.get(int(bodies[s]), ()) for s in (source, target)]
+                k += len(ends[0])
+                # Same-tree (self) pairs drop the columns shared on their common root path.
+                shared = 0
+                while shared < min(len(ends[0]), len(ends[1])) and ends[0][shared][0] == ends[1][shared][0]:
+                    shared += 1
+                k -= 2 * shared
             demands.append(k)
         if capacity is None:
             capacity = sum(max(1, k) for k in demands)

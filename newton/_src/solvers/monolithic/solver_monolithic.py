@@ -44,6 +44,7 @@ from .problem import _MonolithicProblem
 from .producers import build_producers
 from .rigid import RigidObjective
 from .segment_graph import _SegmentGraphCache
+from .self_collision import SelfCollision
 from .solver_types import (
     CableInput,
     ClothInput,
@@ -140,6 +141,16 @@ class SolverMonolithic(SolverBase):
     precision's rounding magnitude for that row. Rows are not pooled into a
     norm, so small local loads are resolved regardless of model size.
 
+    Experimental ``self_collision`` (default ``None``) enables contact between bodies of one
+    articulation tree: the Model's same-tree ``shape_contact_pairs`` with COLLIDE_SHAPES on both
+    shapes, minus ``{"exclude": [[body_label_a, body_label_b], ...]}`` (a label matches a body's full
+    label or its last path segment and must be unique). Columns shared by both ends' common
+    ancestors are dropped, so the self-contact force on those joint rows is zero; on the other joint
+    rows ``contact_joint_force`` includes self-contact. Rest overlap (gap below -1e-6 m, FP64 on the
+    host) fails at construction, ``create_state`` and ``reset_state``; smaller gaps below
+    ``normal_smoothing`` are reported in ``self_collision_report``. The resolved pairs enter the
+    checkpoint identity.
+
     Stopped publication retains all physical/state gates except the residual goal.
     ``last_accepted`` requires an accepted Newton update; ``current_iterate``
     also permits the initialized predictor when no update was accepted. Neither
@@ -187,6 +198,7 @@ class SolverMonolithic(SolverBase):
         cloth_inputs=(),
         cloth_contact=None,
         cable_inputs=(),
+        self_collision=None,
     ):
         # Reject invalid options before building actors or allocating storage.
         options = MonolithicConfig(
@@ -319,6 +331,7 @@ class SolverMonolithic(SolverBase):
         global_rows = np.concatenate(global_rows).astype(np.int32)
         global_columns = np.concatenate(global_columns).astype(np.int32)
 
+        self._self_collision = SelfCollision(model, self._actors, self_collision, normal_smoothing=normal_smoothing)
         # Spatial contact over every Model-selected pair; it owns no rows.
         mapping = np.full(model.particle_count, -1, dtype=np.int32)
         dynamic = model.particle_inv_mass.numpy() > 0
@@ -342,6 +355,7 @@ class SolverMonolithic(SolverBase):
             alignment_smoothing=alignment_smoothing,
             dtype=self._dtype,
             _materials=self._materials,
+            _self_pairs=self._self_collision.pairs,
             **({} if contact_candidate_capacity is None else {"candidate_capacity": contact_candidate_capacity}),
         )
         if not isinstance(self._contact, _PooledContactObjective):
@@ -411,6 +425,8 @@ class SolverMonolithic(SolverBase):
             )
         if self._cloth_contact is not None:
             self._coupled_config["cloth_contact"] = self._cloth_contact.identity
+        if self._self_collision.enabled:
+            self._coupled_config["self_collision"] = self._self_collision.identity
         self._kinematics = self._make_kinematics(
             model,
             extra_config={
@@ -422,6 +438,8 @@ class SolverMonolithic(SolverBase):
         )
         SolverBase.__init__(self, model)
         self._floating = FloatingRoots(self._kinematics, model, implicit_pd=self._joint_terms.implicit_pd)
+        self._self_collision.bind(self._articulation_actors)
+        self._self_collision.check()
         self._states = self._make_states()
         self._objective = ArticulationObjective(self._kinematics, parameters)
         self._joint_parameters_host = parameters.astype(self._numpy_dtype)
@@ -678,13 +696,21 @@ class SolverMonolithic(SolverBase):
 
     def create_state(self, *, dt, source=None):
         """Initialize full integration history with positive dt, optionally from ordinary model state."""
-        return self._states.create(dt=dt, source=source)
+        state = self._states.create(dt=dt, source=source)
+        self._self_collision.check(state)
+        return state
+
+    @property
+    def self_collision_report(self):
+        """Self-collision pairs pre-compressed (0 <= gap < normal_smoothing) at the last overlap check."""
+        return tuple(dict(row) for row in self._self_collision.report)
 
     def reset_state(self, state, *, dt):
         """Reinitialize history at current coordinates and clear published contact forces."""
         backup = self._states._copy_unchecked(state)
         try:
             self._states.reset(state, dt=dt)
+            self._self_collision.check(state)
         except Exception:
             state.assign(backup)
             raise
