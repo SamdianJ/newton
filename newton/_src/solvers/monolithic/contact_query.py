@@ -227,8 +227,9 @@ def _compact_candidates(
 class _ContactQuery:
     """Query supplied patch/target envelopes without asserting their physical coverage.
 
-    Faces are unique (source shape or -1 for tet, face) pairs in canonical order;
-    bounds passed to update follow ``faces`` and ``targets``. Directed permissions
+    Faces are unique (source key, face) pairs in canonical order. A source key is a
+    permission key only: the source shape, -1 for tet, or shape_count + shape for a
+    box's same-tree face grid; bounds passed to update follow ``faces`` and ``targets``. Directed permissions
     come from the sampling owner, including particle flags and shape pair filters.
     Each patch retains all three P1Q3 slots. Candidate capacity drops individual
     whole identities; downstream contact resource admission is still required.

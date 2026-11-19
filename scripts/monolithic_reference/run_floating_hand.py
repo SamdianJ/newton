@@ -239,9 +239,10 @@ def main(argv=None):
                     "linear_iterations": np.int32(stats.linear_iterations),
                     "line_search_iterations": np.int32(stats.line_search_iterations),
                     "regularization_retries": np.int32(stats.regularization_retries),
-                    # Last evaluation's pool use (support entries, triplets); overflow is a rollback.
-                    "contact_pool_used": np.int64(pool.get("used", 0)),
-                    "contact_pool_triplets": np.int64(pool.get("triplet_count", 0)),
+                    # The step's last evaluation's pool use (support entries, triplets), -1 when not
+                    # reported; not the step's peak. Overflow at any evaluation rolls the step back.
+                    "contact_pool_used": np.int64(pool.get("used", -1)),
+                    "contact_pool_triplets": np.int64(pool.get("triplet_count", -1)),
                 }
             )
             if len(frames) == CHUNK:

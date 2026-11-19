@@ -115,6 +115,7 @@ def _capsule_samples(radius, half_height, bary):
 
 
 BOX_TRIANGLES = 12
+MAX_BOX_GRID_TRIANGLES = 1_000_000
 
 
 def _box_grid_triangles(half_extents, spacing):
@@ -124,6 +125,12 @@ def _box_grid_triangles(half_extents, spacing):
         raise ValueError(f"Box sample spacing must be positive and finite, got {spacing}")
     # The relative slack keeps an edge of an exact multiple of the spacing (FP32 scales) at that many cells.
     cells = np.maximum(1, np.ceil(2 * h / spacing * (1 - 1e-6))).astype(int)
+    count = 4 * (cells[0] * cells[1] + cells[1] * cells[2] + cells[0] * cells[2])
+    if count > MAX_BOX_GRID_TRIANGLES:
+        raise ValueError(
+            f"Box of half extents {h.tolist()} m at box_sample_spacing {spacing} m needs {count} triangles "
+            f"(limit {MAX_BOX_GRID_TRIANGLES}); use a larger spacing"
+        )
     tris = []
     for axis in range(3):
         u, v = (a for a in range(3) if a != axis)
@@ -262,6 +269,9 @@ class ContactSamples:
         self.support_size = 0
         self.fields = {}
         self.pair_kinds = {}
+        shape_types = model.shape_type.numpy()
+        if _self_box_spacing is None and any(shape_types[s] == GeoType.BOX for p in _self_pairs for s in p):
+            raise ValueError("Same-tree box pairs need a box sample spacing (the rest check samples the face grid)")
         # Box sources with face-grid samples (same-tree pairs) -> spacing. Their grid faces are numbered
         # after the box's 12 triangles, so a box that is also an ordinary source keeps faces 0-11.
         self.grid_sources = {}

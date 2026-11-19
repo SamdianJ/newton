@@ -266,20 +266,32 @@ def test_box_grid_samples(test, device):
         np.testing.assert_allclose(np.abs(points[np.arange(count), axis]), half[axis], rtol=1e-12)
         np.testing.assert_allclose(normals[np.arange(count), axis], np.sign(points[np.arange(count), axis]))
         expected, area = box_grid_samples(half, spacing)
-        np.testing.assert_allclose(np.sort(points, axis=0), np.sort(expected, axis=0), atol=1e-15)
-        np.testing.assert_allclose(np.sort(weights), np.sort(area), rtol=1e-12)
+        # Sort whole points by coordinates rounded below the generators' last-bit differences.
+        order, reference = np.lexsort(np.round(points, 12).T), np.lexsort(np.round(expected, 12).T)
+        np.testing.assert_allclose(points[order], expected[reference], atol=1e-15)
+        np.testing.assert_allclose(weights[order], area[reference], rtol=1e-12)
     with test.assertRaisesRegex(ValueError, "spacing must be positive"):
         _surface_samples(newton.GeoType.BOX, half, box_spacing=0.0)
+    with test.assertRaisesRegex(ValueError, "needs 12000000 triangles"):
+        _surface_samples(newton.GeoType.BOX, np.array([1.0, 1.0, 1.0]), box_spacing=2e-3)
+    # The sampler refuses same-tree box pairs without a spacing (the rest check would sample a grid).
+    from newton._src.solvers.monolithic.contact_sampling import ContactSamples  # noqa: PLC0415
+
+    run = make_solver(two_branch_tree(device, tip="box"))
+    with test.assertRaisesRegex(ValueError, "need a box sample spacing"):
+        ContactSamples(run.model, run._actors, radius=0.0, base_triplet_count=0, _self_pairs=run._self_collision.pairs)
 
 
 def test_box_grid_faces_in_steps(test, device):
     """A box tip that is the source of a self pair (face grid) and of a static pair (12 triangles)
     keeps the two face numberings apart: static faces 0-11, grid faces after them. The spatial sweep
-    bounds every face and the closing tips step to contact."""
+    bounds every face, and both pairs carry force while the tips close (the static box sits 0.3 mm
+    into the left tip's top face)."""
     builder, branches = two_branch_builder(tip="box")
     cfg = builder.ShapeConfig(density=0.0, margin=0.0, has_particle_collision=False)
+    top = 0.012 + 0.005 - 3e-4
     builder.add_shape_box(
-        -1, xform=wp.transform((0.1, 0.0, 0.04), wp.quat_identity()), hx=0.01, hy=0.01, hz=0.005, cfg=cfg
+        -1, xform=wp.transform((0.1, 0.03, top), wp.quat_identity()), hx=0.01, hy=0.01, hz=0.005, cfg=cfg
     )
     model = builder.finalize(device=device)
     rates = model.joint_qd.numpy()
@@ -294,12 +306,14 @@ def test_box_grid_faces_in_steps(test, device):
     test.assertTrue(np.all(keys[self_pair, 2] >= 12))
     test.assertTrue(np.all(keys[~self_pair, 2] < 12))
     state, control = run.create_state(dt=H), run.create_control()
-    touched = False
+    loaded = set()
     for _ in range(60):
         run.step(state, state, control, dt=H)
         test.assertTrue(run.last_stats.converged, run.last_stats.failure_reason)
-        touched |= bool(np.abs(run.get_contact_forces(state).joint_force[1:]).max() > 0)
-    test.assertTrue(touched, "the tips never touched")
+        for pair in run.last_stats.variational["actor_contact_pairs"]:
+            if np.abs(pair["world_wrench"][0][:3]).max() > 0:
+                loaded.add(pair["kind"])
+    test.assertEqual(loaded, {"A-self", "A-static"})
 
 
 def test_crossed_box_edges(test, device):
@@ -423,6 +437,10 @@ def test_shared_columns_by_tree_shape(test, device):
         checked.add(tuple(sorted((labels[a], labels[b]))))
     test.assertEqual(checked, pairs)
     test.assertEqual(samples.support_size, sum(3 * len(c) for c in samples.supports))
+    # The pool's demand drops the same shared columns: its widest record and its budget match the samples.
+    widths = [len(c) for c in samples.supports]
+    test.assertEqual(run._contact.pool.max_support, max(widths))
+    test.assertEqual(run._contact.pool.capacity, sum(max(1, k) for k in widths))
 
 
 def test_rest_overlap_fails_everywhere(test, device):
@@ -472,6 +490,8 @@ def test_option_errors(test, device):
         ({"excluded": []}, "Unknown self_collision keys"),
         ({"box_sample_spacing": 0.0}, "box_sample_spacing must be a positive finite length"),
         ({"box_sample_spacing": "4mm"}, "box_sample_spacing must be a positive finite length"),
+        ({"box_sample_spacing": 3.0}, r"box_sample_spacing must lie in \[1e-05, 1\.0\] m"),
+        ({"box_sample_spacing": 1e-6}, r"box_sample_spacing must lie in \[1e-05, 1\.0\] m"),
         ({"exclude": [["left_arm", "nowhere"]]}, "'nowhere' matches no body"),
         ({"exclude": [["left_arm", "hub"]]}, "has no same-tree Model contact pair"),
         ({"exclude": [["left_arm"]]}, "body label pairs"),

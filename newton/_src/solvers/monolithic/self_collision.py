@@ -29,6 +29,8 @@ from .contact_sampling import _surface_samples
 
 OVERLAP_LIMIT_M = -1e-6
 DEFAULT_BOX_SAMPLE_SPACING_M = 4e-3
+# The identity stores the spacing in nm (int32); a box larger than the spacing allows fails by size.
+MIN_BOX_SAMPLE_SPACING_M, MAX_BOX_SAMPLE_SPACING_M = 1e-5, 1.0
 # Self pairs need surfaces both directions can sample and fields the host can evaluate exactly.
 SUPPORTED_TYPES = (GeoType.SPHERE, GeoType.BOX, GeoType.CAPSULE)
 
@@ -85,6 +87,11 @@ class SelfCollision:
             or spacing <= 0
         ):
             raise ValueError(f"self_collision box_sample_spacing must be a positive finite length [m], got {spacing!r}")
+        if not MIN_BOX_SAMPLE_SPACING_M <= spacing <= MAX_BOX_SAMPLE_SPACING_M:
+            raise ValueError(
+                f"self_collision box_sample_spacing must lie in [{MIN_BOX_SAMPLE_SPACING_M}, "
+                f"{MAX_BOX_SAMPLE_SPACING_M}] m, got {spacing!r}"
+            )
         self.box_spacing = float(spacing)
         labels = list(model.body_label)
         body_owner = actors.maps["body_owner"]
