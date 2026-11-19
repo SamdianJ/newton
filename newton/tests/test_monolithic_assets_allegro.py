@@ -112,8 +112,19 @@ class TestAllegroAsset(unittest.TestCase):
             solver({})
         run = solver({"exclude": [["palm_link", "link_13.0"]]})
         self.assertEqual(len(run._self_collision.pairs), 189)
-        # PR0 survey: 463 296 directed samples over 190 pairs; the excluded box-box pair had 2 x 36.
-        self.assertEqual(run._contact.actor_samples.count, 463296 - 72)
+        # Each direction samples its source: a 12 mm sphere 1984 triangles x 3, a box its face grid of at
+        # most 4 mm cells, 2 triangles x 3 per cell (2 x 3 per face pair and axis pair below).
+        types, scales = model.shape_type.numpy(), model.shape_scale.numpy()
+
+        def samples(shape):
+            if types[shape] == newton.GeoType.SPHERE:
+                return 1984 * 3
+            n = np.ceil(2 * scales[shape].astype(float) / 4e-3 * (1 - 1e-6)).astype(int)
+            return 12 * (n[0] * n[1] + n[1] * n[2] + n[0] * n[2])
+
+        expected = sum(samples(a) + samples(b) for a, b in run._self_collision.pairs)
+        self.assertEqual(expected, 1214088)
+        self.assertEqual(run._contact.actor_samples.count, expected)
 
     def test_bad_mount(self):
         with self.assertRaisesRegex(ValueError, "mount must be one of"):
