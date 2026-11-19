@@ -32,7 +32,8 @@
     "publish_policy": "current_iterate",
     "alignment_policy": "mask",
     "newton_max_iterations": 10,
-    "linear_max_iterations": 200
+    "linear_max_iterations": 200,
+    "contact_factor_capacity": 600000
   },
   "joint_terms": {
     "implicit_pd": true,
@@ -67,5 +68,6 @@
     "finger_effort_limit_Nm": 0.7,
     "finger_effort_note": "0.7 N m (Allegro V4 nominal maximum joint torque, user decision 2026-11-16); the URDF value 15 N m drove about 20 N per fingertip into a 0.1 kg object"
   },
+  "contact_capacity_note": "contact_factor_capacity 600000 (support budget 200000; the E3 self-collision peak was 8552 at P9d PR4) bounds the contact pool, which by default holds every static sample and does not fit a 12 GB GPU with 4 mm self-collision grids; overflow rolls the step back. User decision 2026-11-19 (P9d PR4).",
   "contact_note": "contact_stiffness 1e9 for rigid objects (user decision 2026-11-16); production Franka uses 1e7 for its soft cube"
 }
