@@ -5,10 +5,11 @@
 
 ``SolverMonolithic(self_collision={"exclude": [[label_a, label_b], ...]})`` turns on contact between
 shapes of different bodies of one articulation tree. The pairs are the Model's ``shape_contact_pairs``
-whose shapes lie on two bodies of the same tree, both with COLLIDE_SHAPES, minus excluded body pairs.
-Each pair becomes an ``A-self`` actor contact; the shared columns on the root path of both bodies'
-lowest common ancestor are dropped (an ancestor DoF moves both ends rigidly and changes no gap), so the
-self-contact force on the root and shared ancestor rows is exactly zero.
+whose shapes lie on two bodies of the same tree, both with COLLIDE_SHAPES, minus excluded body pairs
+and pairs of welded bodies (equal joint supports, which no force can move apart). Each pair becomes
+an ``A-self`` actor contact; the shared columns on the root path of both bodies' lowest common
+ancestor are dropped (an ancestor DoF moves both ends rigidly and changes no gap), so the self-contact
+force on the root and shared ancestor rows is exactly zero.
 
 Rest overlap is checked in FP64 on the host, independent of the solver precision: every directed
 P1Q3 sample of every pair, g = phi_target - (margin_a + margin_b); g < -1e-6 m fails and names the
@@ -23,6 +24,7 @@ import numpy as np
 import warp as wp
 
 from ...geometry import GeoType, ShapeFlags
+from .actors import articulation_support
 from .contact_sampling import _surface_samples
 
 OVERLAP_LIMIT_M = -1e-6
@@ -110,6 +112,7 @@ class SelfCollision:
         owner = actors.maps["shape_owner"]
         pairs = model.shape_contact_pairs.numpy() if model.shape_contact_pair_count else np.zeros((0, 2), int)
         collide = int(ShapeFlags.COLLIDE_SHAPES)
+        support = articulation_support(model, [a for a in actors.actors if a.kind == "articulation"])
         candidates, body_pairs = set(), set()
         for a, b in (tuple(sorted(map(int, p))) for p in pairs):
             ba, bb = int(bodies[a]), int(bodies[b])
@@ -121,6 +124,10 @@ class SelfCollision:
             key = tuple(sorted((ba, bb)))
             body_pairs.add(key)
             if key in excluded:
+                continue
+            # Bodies welded together (equal DoF supports, e.g. FIXED siblings) cannot move relative to
+            # each other: no self-contact force can act, so the pair is neither sampled nor checked.
+            if [c for c, _ in support[ba][1]] == [c for c, _ in support[bb][1]]:
                 continue
             for s in (a, b):
                 if GeoType(int(types[s])) not in SUPPORTED_TYPES:

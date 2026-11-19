@@ -15,6 +15,7 @@ from .contact import _freeze_orientation, _geometry_type, _law, _reset_flags, _r
 from .contact_actor import _absolute_matrix, _actor_geometry, _center, _point_column, _point_column_magnitude
 from .contact_pool import _ContactPool, _ContactRows
 from .contact_roundoff import _abs_vector
+from .contact_sampling import _shared_prefix
 from .segment_graph import _SegmentGraphCache
 
 
@@ -592,11 +593,10 @@ class _ContactBatch:
             else:
                 ends = [body_support.get(int(bodies[s]), ()) for s in (source, target)]
                 k += len(ends[0])
-                # Same-tree (self) pairs drop the columns shared on their common root path.
-                shared = 0
-                while shared < min(len(ends[0]), len(ends[1])) and ends[0][shared][0] == ends[1][shared][0]:
-                    shared += 1
-                k -= 2 * shared
+                # Same-tree (self) pairs drop the columns shared on their common root path; like the
+                # projection kernel, only between two different bodies.
+                if bodies[source] != bodies[target]:
+                    k -= 2 * _shared_prefix(ends[0], ends[1])
             demands.append(k)
         if capacity is None:
             capacity = sum(max(1, k) for k in demands)

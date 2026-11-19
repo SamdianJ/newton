@@ -48,15 +48,15 @@ def box_grid_samples(half, spacing):
     return np.einsum("qn,fni->fqi", bary, tri).reshape(-1, 3), np.repeat(area / 3, 3)
 
 
-def two_branch_tree(device, *, gap=2e-3, rate=0.5, order=(0, 1), clear_flag=False, tip="sphere"):
+def two_branch_tree(device, *, gap=2e-3, rate=0.5, order=(0, 1), clear_flag=False, tip="sphere", root="revolute"):
     """A hub on a world revolute with two revolute branches whose tips face each other ``gap`` apart:
     spheres, boxes of half height ``RADIUS`` along y, or (``"cross"``) cubes turned 45 degrees about
     x and z so that two perpendicular edges face each other.
 
     ``order`` permutes the branch creation (labels stay with their geometry); ``rate`` [rad/s] turns
-    the branches toward each other.
+    the branches toward each other. ``root="free"`` makes the hub a floating (FREE) root.
     """
-    builder, branches = two_branch_builder(gap=gap, order=order, clear_flag=clear_flag, tip=tip)
+    builder, branches = two_branch_builder(gap=gap, order=order, clear_flag=clear_flag, tip=tip, root=root)
     model = builder.finalize(device=device)
     rates = model.joint_qd.numpy()
     starts = model.joint_qd_start.numpy()
@@ -67,14 +67,19 @@ def two_branch_tree(device, *, gap=2e-3, rate=0.5, order=(0, 1), clear_flag=Fals
     return model
 
 
-def two_branch_builder(*, gap=2e-3, order=(0, 1), clear_flag=False, builder=None, tip="sphere", third=False):
+def two_branch_builder(
+    *, gap=2e-3, order=(0, 1), clear_flag=False, builder=None, tip="sphere", third=False, root="revolute"
+):
     """The unfinalized two-branch tree (see ``two_branch_tree``) and its branch joints by name;
     ``third`` adds a ``mid_arm`` branch whose small tip sphere is far from the others."""
     builder = builder or newton.ModelBuilder(gravity=(0.0, 0.0, 0.0))
     cfg = builder.ShapeConfig(density=0.0, margin=0.0, has_particle_collision=False)
     inertia = wp.diag(wp.vec3(1e-4, 1e-4, 1e-4))
     hub = builder.add_link(mass=0.5, inertia=inertia, label="hub")
-    joints = [builder.add_joint_revolute(-1, hub, axis=(0, 0, 1), limit_ke=0.0, limit_kd=0.0, label="base")]
+    if root == "free":
+        joints = [builder.add_joint_free(hub, label="base")]
+    else:
+        joints = [builder.add_joint_revolute(-1, hub, axis=(0, 0, 1), limit_ke=0.0, limit_kd=0.0, label="base")]
     offset = (CUBE * np.sqrt(2) if tip == "cross" else RADIUS) + gap / 2
     branches = {}
     for side in order:
@@ -267,6 +272,36 @@ def test_box_grid_samples(test, device):
         _surface_samples(newton.GeoType.BOX, half, box_spacing=0.0)
 
 
+def test_box_grid_faces_in_steps(test, device):
+    """A box tip that is the source of a self pair (face grid) and of a static pair (12 triangles)
+    keeps the two face numberings apart: static faces 0-11, grid faces after them. The spatial sweep
+    bounds every face and the closing tips step to contact."""
+    builder, branches = two_branch_builder(tip="box")
+    cfg = builder.ShapeConfig(density=0.0, margin=0.0, has_particle_collision=False)
+    builder.add_shape_box(
+        -1, xform=wp.transform((0.1, 0.0, 0.04), wp.quat_identity()), hx=0.01, hy=0.01, hz=0.005, cfg=cfg
+    )
+    model = builder.finalize(device=device)
+    rates = model.joint_qd.numpy()
+    starts = model.joint_qd_start.numpy()
+    rates[starts[branches["left"]]], rates[starts[branches["right"]]] = -0.5, 0.5
+    model.joint_qd.assign(rates)
+    run = make_solver(model)
+    samples = run._contact.actor_samples
+    test.assertEqual(set(samples.pair_kinds.values()), {"A-self", "A-static"})
+    keys = np.asarray(samples.keys)
+    self_pair = np.isin(keys[:, 1], [0, 1])
+    test.assertTrue(np.all(keys[self_pair, 2] >= 12))
+    test.assertTrue(np.all(keys[~self_pair, 2] < 12))
+    state, control = run.create_state(dt=H), run.create_control()
+    touched = False
+    for _ in range(60):
+        run.step(state, state, control, dt=H)
+        test.assertTrue(run.last_stats.converged, run.last_stats.failure_reason)
+        touched |= bool(np.abs(run.get_contact_forces(state).joint_force[1:]).max() > 0)
+    test.assertTrue(touched, "the tips never touched")
+
+
 def test_crossed_box_edges(test, device):
     """Two cube edges crossed by 2 mm hold no sample of the 12-triangle box (it reads a 4.6 mm gap);
     the same-tree face grid finds the overlap at construction, and turning the cubes apart clears it."""
@@ -274,6 +309,120 @@ def test_crossed_box_edges(test, device):
         make_solver(two_branch_tree(device, gap=-2e-3, rate=0.0, tip="cross"))
     run = make_solver(two_branch_tree(device, gap=2e-3, rate=0.0, tip="cross"))
     test.assertEqual(run.self_collision_report, ())
+
+
+def test_floating_root(test, device):
+    """With a FREE hub the six root rows are the shared prefix: their self-contact force is exactly zero
+    while the branches push apart. The rest check reads the floating root pose from the state: moving and
+    turning the whole tree leaves the gap unchanged, and a branch overlap still fails."""
+    for precision in ("fp64", "fp32"):
+        with test.subTest(precision=precision):
+            run = make_solver(two_branch_tree(device, root="free"), precision)
+            state, control = run.create_state(dt=H), run.create_control()
+            touched = False
+            for _ in range(60):
+                run.step(state, state, control, dt=H)
+                test.assertTrue(run.last_stats.converged, run.last_stats.failure_reason)
+                forces = run.get_contact_forces(state).joint_force
+                np.testing.assert_array_equal(forces[:6], 0.0)
+                if np.abs(forces[6:]).max() > 0:
+                    touched = True
+                    test.assertLess(forces[6] * forces[7], 0.0)
+            test.assertTrue(touched, "the tips never touched")
+    model = two_branch_tree(device, gap=5e-5, rate=0.0, root="free")
+    run = make_solver(model, normal_smoothing=1e-4)
+    at_model = run.self_collision_report[0]["gap_m"]
+    source = model.state()
+    q = source.joint_q.numpy()
+    axis = np.array([1.0, 1.0, 0.0]) / np.sqrt(2.0)
+    q[:3] = (0.3, -0.2, 0.5)
+    q[3:7] = (*(np.sin(0.35) * axis), np.cos(0.35))
+    source.joint_q.assign(q)
+    state = run.create_state(dt=H, source=source)
+    np.testing.assert_allclose(state._monolithic_coupled.floating_com.numpy()[0][:2], (0.3, -0.2), atol=0.05)
+    test.assertAlmostEqual(run.self_collision_report[0]["gap_m"], at_model, delta=1e-12)
+    branch = model.joint_q_start.numpy()[1]
+    q[branch] = -0.06
+    source.joint_q.assign(q)
+    with test.assertRaisesRegex(ValueError, "rest overlap"):
+        run.create_state(dt=H, source=source)
+    coordinates = state.joint_q.numpy()
+    coordinates[branch] = -0.06
+    state.joint_q.assign(coordinates)
+    with test.assertRaisesRegex(ValueError, "rest overlap"):
+        run.reset_state(state, dt=H)
+
+
+def branchy_tree(device):
+    """hub (world revolute) -> upper -> {fore_a, fore_b}, plus FIXED siblings weld_a, weld_b on the hub
+    whose spheres overlap. Pairs: an ancestor-descendant pair (hub, fore_a), an LCA below the root
+    (fore_a, fore_b) and the welded pair."""
+    builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0))
+    cfg = builder.ShapeConfig(density=0.0, margin=0.0, has_particle_collision=False)
+    inertia = wp.diag(wp.vec3(1e-4, 1e-4, 1e-4))
+    bodies = {}
+
+    def link(name, parent, offset, *, fixed=False, at=(0.0, 0.0, 0.0)):
+        body = builder.add_link(mass=0.1, inertia=inertia, label=name)
+        builder.add_shape_sphere(body, xform=wp.transform(at, wp.quat_identity()), radius=0.01, cfg=cfg)
+        xform = wp.transform(offset, wp.quat_identity())
+        if fixed:
+            joint = builder.add_joint_fixed(parent, body, parent_xform=xform)
+        else:
+            joint = builder.add_joint_revolute(
+                parent, body, parent_xform=xform, axis=(0, 0, 1), limit_ke=0.0, limit_kd=0.0
+            )
+        bodies[name] = body
+        return joint
+
+    joints = [link("hub", -1, (0.0, 0.0, 0.0))]
+    joints.append(link("upper", bodies["hub"], (0.0, 0.0, 0.2)))
+    joints.append(link("fore_a", bodies["upper"], (0.1, 0.0, 0.0)))
+    joints.append(link("fore_b", bodies["upper"], (-0.1, 0.0, 0.0)))
+    joints.append(link("weld_a", bodies["hub"], (0.0, 0.3, 0.0), fixed=True))
+    joints.append(link("weld_b", bodies["hub"], (0.0, 0.3, 0.0), fixed=True, at=(0.005, 0.0, 0.0)))
+    builder.add_articulation(joints)
+    return builder.finalize(device=device), bodies
+
+
+def test_shared_columns_by_tree_shape(test, device):
+    """Each self sample carries exactly the DoFs below the two bodies' lowest common ancestor (walked
+    independently up joint_parent), for an ancestor-descendant pair, an LCA below the root and sibling
+    branches; welded siblings, overlapping at rest, are no pair and construct."""
+    from newton._src.solvers.monolithic.contact_sampling import ContactSamples  # noqa: PLC0415
+
+    model, bodies = branchy_tree(device)
+    run = make_solver(model)
+    labels = {b: n for n, b in bodies.items()}
+    shape_body = model.shape_body.numpy()
+    pairs = {tuple(sorted((labels[shape_body[a]], labels[shape_body[b]]))) for a, b in run._self_collision.pairs}
+    test.assertIn(("fore_a", "hub"), pairs)
+    test.assertIn(("fore_a", "fore_b"), pairs)
+    test.assertNotIn(("weld_a", "weld_b"), pairs)
+    parent = dict(zip(model.joint_child.numpy().tolist(), model.joint_parent.numpy().tolist(), strict=True))
+    qd_start = model.joint_qd_start.numpy()
+    joint_of = {int(c): j for j, c in enumerate(model.joint_child.numpy())}
+
+    def path(body):
+        rows = set()
+        while body >= 0:
+            j = joint_of[body]
+            rows.update(range(int(qd_start[j]), int(qd_start[j + 1])))
+            body = parent[body]
+        return rows
+
+    samples = ContactSamples(
+        model, run._actors, radius=0.0, base_triplet_count=0, _self_pairs=run._self_collision.pairs
+    )
+    rows = np.asarray(run._actors.maps["joint_dof_to_global"])
+    checked = set()
+    for (source, target, _, _), columns in zip(samples.keys, samples.supports, strict=True):
+        a, b = int(shape_body[source]), int(shape_body[target])
+        expected = {int(rows[d]) for d in path(a) ^ path(b)}
+        test.assertEqual(set(columns), expected, (labels[a], labels[b]))
+        checked.add(tuple(sorted((labels[a], labels[b]))))
+    test.assertEqual(checked, pairs)
+    test.assertEqual(samples.support_size, sum(3 * len(c) for c in samples.supports))
 
 
 def test_rest_overlap_fails_everywhere(test, device):
@@ -326,6 +475,8 @@ def test_option_errors(test, device):
         ({"exclude": [["left_arm", "nowhere"]]}, "'nowhere' matches no body"),
         ({"exclude": [["left_arm", "hub"]]}, "has no same-tree Model contact pair"),
         ({"exclude": [["left_arm"]]}, "body label pairs"),
+        ({"exclude": [["left_arm", "left_arm"]]}, "is not a pair of bodies of one tree"),
+        ({"exclude": [["left_arm", 3]]}, "labels must be strings"),
         ([], "must be None or a dict"),
     ):
         with test.subTest(message=message):
@@ -339,6 +490,11 @@ def test_option_errors(test, device):
     builder.add_articulation([builder.add_joint_revolute(-1, other, axis=(0, 0, 1), limit_ke=0.0, limit_kd=0.0)])
     with test.assertRaisesRegex(ValueError, "'hub' matches 2 bodies"):
         make_solver(builder.finalize(device=device), self_collision={"exclude": [["hub", "left_arm"]]})
+    builder, _ = two_branch_builder()
+    other = builder.add_link(mass=0.1, inertia=wp.diag(wp.vec3(1e-4)), label="other")
+    builder.add_articulation([builder.add_joint_revolute(-1, other, axis=(0, 0, 1), limit_ke=0.0, limit_kd=0.0)])
+    with test.assertRaisesRegex(ValueError, "is not a pair of bodies of one tree"):
+        make_solver(builder.finalize(device=device), self_collision={"exclude": [["other", "left_arm"]]})
 
 
 def test_label_order_and_cleared_flags(test, device):
@@ -387,8 +543,11 @@ for _test in (
     test_shared_columns_carry_no_self_force,
     test_energy_residual_consistency,
     test_contact_terms_match_oracle,
+    test_floating_root,
+    test_shared_columns_by_tree_shape,
     test_box_grid_samples,
     test_crossed_box_edges,
+    test_box_grid_faces_in_steps,
     test_rest_overlap_fails_everywhere,
     test_precompression_report,
     test_option_errors,

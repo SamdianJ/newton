@@ -15,7 +15,7 @@ from .aabb import _CandidateBounds
 from .cable import _transport
 from .contact_pool import _CONTACT_WORKERS, _merge_contact_keys
 from .contact_query import _ContactQuery
-from .contact_sampling import _surface_samples
+from .contact_sampling import BOX_TRIANGLES, _surface_samples
 from .contact_sweep import _ArticulationSweep, _length_upper, _product_upper, _sum_upper
 
 
@@ -322,6 +322,13 @@ class _ContactSpatial:
                 raise ValueError("Invalid native spatial contact start")
         fields = [getattr(batch.all_samples, n).numpy() for n in ("sources", "targets", "faces", "slots")]
         sources, targets, faces, _slots = fields
+        # Face-grid faces of a box (same-tree pairs) meet only that pair's targets, its 12 triangles only
+        # the others': give the grid faces their own permission key, shape_count + shape.
+        grid = c.actor_samples.grid_sources if c.actor_samples is not None else {}
+        virtual = m.shape_count
+        if grid:
+            sources = np.where((faces >= BOX_TRIANGLES) & np.isin(sources, list(grid)), sources + virtual, sources)
+            fields[0] = sources
         material = c._materials is not None
         slots_per_patch = 1 if material else 3
         sample_stride = int(max(_slots, default=0)) + 1
@@ -361,7 +368,8 @@ class _ContactSpatial:
         surface = {}
         bound_triangles = c.triangles.numpy().tolist()
         face_reach, face_material = [], []
-        for source, ordinal in unique_faces:
+        for key, ordinal in unique_faces:
+            source = key - virtual if key >= virtual else key
             face = ordinal // sample_stride if material else ordinal
             source_shapes.append(max(-1, source))
             face_material.append(face if source == -3 else -1)
@@ -382,6 +390,13 @@ class _ContactSpatial:
                     p, _, _, tri = _surface_samples(
                         types[source], scales[source].astype(float), m.shape_source[source], _return_triangles=True
                     )
+                    spacing = c.actor_samples.grid_sources.get(source)
+                    if spacing is not None:
+                        # Face-grid faces follow the box's 12 triangles (see ContactSamples.grid_sources).
+                        grid, _, _, grid_tri = _surface_samples(
+                            types[source], scales[source].astype(float), box_spacing=spacing, _return_triangles=True
+                        )
+                        p, tri = np.concatenate((p, grid)), np.concatenate((tri, grid_tri))
                     surface[source] = (p.reshape(-1, 3, 3), tri)
                 p, tri = surface[source]
                 # Include both chord vertices and the actual native projected

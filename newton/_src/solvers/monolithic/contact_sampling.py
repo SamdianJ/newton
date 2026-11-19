@@ -114,6 +114,9 @@ def _capsule_samples(radius, half_height, bary):
     return np.concatenate(points), np.concatenate(normals), np.concatenate(areas), np.concatenate(triangles)
 
 
+BOX_TRIANGLES = 12
+
+
 def _box_grid_triangles(half_extents, spacing):
     """Box surface split into a grid of at most ``spacing`` per edge, two outward-wound triangles per cell."""
     h = np.asarray(half_extents, dtype=np.float64)[:3]
@@ -259,6 +262,9 @@ class ContactSamples:
         self.support_size = 0
         self.fields = {}
         self.pair_kinds = {}
+        # Box sources with face-grid samples (same-tree pairs) -> spacing. Their grid faces are numbered
+        # after the box's 12 triangles, so a box that is also an ordinary source keeps faces 0-11.
+        self.grid_sources = {}
         self.keys, self.supports, self.selectors = [], [], []
         self.body_kind = np.full(model.body_count, -1, dtype=np.int32)
         self.body_local = np.full(model.body_count, -1, dtype=np.int32)
@@ -440,6 +446,10 @@ class ContactSamples:
                     self.meshes[source] = (mesh, np.array(mesh.vertices, copy=True), np.array(mesh.indices, copy=True))
                 targets_used.add(target)
                 ps, ns, ws = surfaces[source, spacing]
+                first_face = 0
+                if spacing is not None:
+                    self.grid_sources[source] = spacing
+                    first_face = BOX_TRIANGLES
                 cols, sels = [], []
                 ends = [support.get(int(bodies[s]), ()) for s in (source, target)]
                 # Same-tree ends share the columns on their common ancestors' root path (a prefix of both
@@ -453,7 +463,7 @@ class ContactSamples:
                     append(
                         source,
                         target,
-                        index // 3,
+                        first_face + index // 3,
                         index % 3,
                         p,
                         n,
