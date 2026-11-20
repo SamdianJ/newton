@@ -406,6 +406,14 @@ def _pool_types(dtype):
 
 
 @wp.kernel
+def _pack_status(candidates: Any, records: Any, status: wp.array[int]):
+    # Candidate overflow, dropped contacts and record flags, read back once per evaluation.
+    status[0] = candidates.overflow[0]
+    status[1] = records.dropped[0]
+    status[2] = records.flags[0]
+
+
+@wp.kernel
 def _begin_pool(candidates: Any, records: Any, identity_flags: wp.array[int]):
     records.flags[0] = identity_flags[0]
     if candidates.overflow[0] < 0 or candidates.overflow[0] > 2147483647 - wp.max(candidates.count[0], 0):
@@ -450,7 +458,9 @@ def _validate_contacts(candidates: Any, records: Any, row_count: int, force_row_
     zero = candidates.weights.dtype(0)
     for component in range(3):
         weight = candidates.weights[i, component]
-        if not wp.isfinite(weight) or weight < zero:
+        # Only the normal curvature is a square; a curved target makes the
+        # tangential weights signed.
+        if not wp.isfinite(weight) or (component == 0 and weight < zero):
             wp.atomic_or(records.flags, 0, 4)
         maximum = candidates.weights.dtype(0)
         for j in range(k):
@@ -463,7 +473,7 @@ def _validate_contacts(candidates: Any, records: Any, row_count: int, force_row_
         bound = (weight * maximum) * maximum
         if not wp.isfinite(bound):
             wp.atomic_or(records.flags, 0, 4)
-        nonzero = nonzero or (weight > zero and maximum != zero)
+        nonzero = nonzero or (weight != zero and maximum != zero)
     for j in range(f):
         force_row = candidates.force_rows[i, j] + 0
         force_value = candidates.forces[i, j] + candidates.forces.dtype(0)
@@ -518,9 +528,9 @@ def _reserve_contacts(
             return
     components = int(0)
     for axis in range(3):
-        if candidates.weights[i, axis] > candidates.weights.dtype(0):
+        if candidates.weights[i, axis] != candidates.weights.dtype(0):
             components += 1
-    # Keep zero products within positive factors, omitting zero-weight factors.
+    # Keep zero products within weighted factors, omitting zero-weight factors.
     demands[index] = wp.vec4i(1, k, components * k * k, candidates.force_counts[i])
 
 
@@ -635,7 +645,7 @@ def _write_contact_triplets(records: Any, workers: int):
         remaining = local // (k * k)
         component = int(0)
         for axis in range(3):
-            if records.factor_weights[3 * lo + axis] > records.factor_weights.dtype(0):
+            if records.factor_weights[3 * lo + axis] != records.factor_weights.dtype(0):
                 if remaining == 0:
                     component = axis
                 remaining -= 1
@@ -897,6 +907,7 @@ class _ContactPool:
         )
         byte_count += 24 * b + 16 * p + (4 + native_bytes) * m
         byte_count += row_count * native_bytes
+        byte_count += 12  # packed status
         if batch_capacity is not None:
             byte_count += 8 * m + 4 * b + 32
         for rows, size in ((1, m), (4, 4 * n), (row_count, r), (force_row_count, f * n)):
@@ -923,6 +934,11 @@ class _ContactPool:
         self.energy = _ContactRows(4, 4 * n, identity_count, 1, dtype, self.device)
         self.residual = _ContactRows(row_count, r, identity_count, k, dtype, self.device)
         self.magnitude = wp.zeros(row_count, dtype=dtype, device=self.device)
+        # Candidate overflow, dropped contacts and record flags of the last evaluation, as written
+        # after a failed evaluation clears its outputs; callers read this one array. A batched
+        # evaluation reports the overflow staged with its last batch: producers that stage
+        # overflow per batch must carry earlier batches' overflow into it.
+        self.status = wp.zeros(3, dtype=wp.int32, device=self.device)
         self.force = _ContactRows(force_row_count, f * n, identity_count, f, dtype, self.device)
         self.graphs = _SegmentGraphCache(self.device, enabled=use_cuda_graph and self.device.is_cuda)
         self.payload_bytes = byte_count
@@ -945,7 +961,7 @@ class _ContactPool:
             for name in spec
         ]
         buffers.extend((self._active, self._selected, self._demands, self._prefix, self._zero_rows, self._zero_values))
-        buffers.append(self.magnitude)
+        buffers.extend((self.magnitude, self.status))
         for owner in (self._identity, self.energy, self.residual, self.force):
             buffers.extend(owner.buffers())
         if self._stream is not None:
@@ -960,6 +976,13 @@ class _ContactPool:
             or not self.magnitude.is_contiguous
         ):
             raise ValueError("Invalid contact magnitude storage")
+        if (
+            self.status.shape != (3,)
+            or self.status.dtype != wp.int32
+            or self.status.device != self.device
+            or not self.status.is_contiguous
+        ):
+            raise ValueError("Invalid contact status storage")
         for struct, spec in zip((self.candidates, self.records), self._specs, strict=True):
             for name, (shape, dtype) in spec.items():
                 array = getattr(struct, name)
@@ -1133,6 +1156,7 @@ class _ContactPool:
             if values.size:
                 workers = min(values.size, self.energy.BLOCK_SIZE)
                 wp.launch(_clear_failed_pool, workers, [values.flatten(), out.flags, workers], device=self.device)
+        wp.launch(_pack_status, 1, [self.candidates, out, self.status], device=self.device)
 
     def begin(self):
         """Reset one evaluation; retain only bounded batch x support staging."""

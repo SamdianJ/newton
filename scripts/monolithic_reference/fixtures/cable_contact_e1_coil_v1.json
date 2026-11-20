@@ -1,0 +1,50 @@
+{
+  "schema_version": 1,
+  "units": "SI",
+  "dt_s": 0.002,
+  "gravity_m_s2": [
+    0.0,
+    0.0,
+    -9.81
+  ],
+  "material": {
+    "radius_m": 0.002,
+    "young_modulus_Pa": 2000000.0,
+    "poisson_ratio": 0.3,
+    "density_kg_m3": 1200.0
+  },
+  "scene": "E1",
+  "kind": "coil",
+  "duration_s": 3.94,
+  "ground": {
+    "type": "plane",
+    "height_m": 0.0
+  },
+  "cables": [
+    {
+      "vertices": 128,
+      "segment_length_m": 0.007
+    }
+  ],
+  "coil": {
+    "bottom_clearance_m": 0.01,
+    "stop_height_m": 0.05,
+    "lower_speed_m_s": 0.3,
+    "ramp_s": 0.1
+  },
+  "perturbation": {
+    "velocity_m_s": 0.005,
+    "waves": 2.0
+  },
+  "solver": {
+    "contact_stiffness": 10000000.0,
+    "friction_coefficient": 0.5,
+    "friction_velocity_scale": 0.01,
+    "normal_smoothing": 0.0001,
+    "newton_max_iterations": 20,
+    "line_search_max_iterations": 8,
+    "linear_max_iterations": 300,
+    "mass_mode": "lumped",
+    "publish_policy": "current_iterate"
+  }
+}

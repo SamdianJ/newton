@@ -77,6 +77,7 @@ class _MonolithicProblem:
                 "evaluate",
                 "magnitude",
                 "coordinates",
+                "graph_buffers",
                 "assemble",
                 "domain",
                 "publish",
@@ -311,6 +312,10 @@ class _MonolithicProblem:
     def linearize(self, iteration):
         return self.solver._assemble(iteration, device_result=True)[1]
 
+    def _interaction_buffers(self):
+        """Storage the interaction producers' ``magnitude`` and ``coordinates`` read inside problem graphs."""
+        return [buffer for producer in self.producers for buffer in producer.graph_buffers(self.solver)]
+
     def coordinates(self):
         solver = self.solver
 
@@ -321,7 +326,7 @@ class _MonolithicProblem:
         solver._graphs.run(
             "problem_coordinates",
             (),
-            [*self._buffers(solver._accepted), solver._coordinates, *solver._contact.buffers()],
+            [*self._buffers(solver._accepted), solver._coordinates, *self._interaction_buffers()],
             execute,
         )
 
@@ -576,7 +581,7 @@ class _MonolithicProblem:
         result_buffers.extend(values for pair in self.energies for values in pair if values is not None)
         result_buffers.extend(flags for flags, _, _ in self.checks)
         solver._graphs.run(
-            "problem_summary", parameters, [*buffers, *result_buffers, *solver._contact.buffers()], summarize
+            "problem_summary", parameters, [*buffers, *result_buffers, *self._interaction_buffers()], summarize
         )
         flags = self.flags.numpy()
         for index, (source, statuses, message) in enumerate(self.checks, 1):

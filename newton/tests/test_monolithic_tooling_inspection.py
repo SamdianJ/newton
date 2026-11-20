@@ -21,6 +21,7 @@ from newton._src.solvers.monolithic.convergence import Unit
 from newton._src.solvers.monolithic.solver_types import _StepFailure
 from newton.examples.softbody.monolithic_recording import serial
 from newton.solvers.experimental.monolithic import SolverMonolithic
+from newton.tests.test_monolithic_cable_contact import cable_contact_solver, cloth_and_cable_solver, strands
 from newton.tests.test_monolithic_contact_point_cloud import _scene as point_cloud_scene
 from newton.tests.test_monolithic_material_state import scene
 from newton.tests.test_monolithic_solver_actor_contacts import CASE, contact_scene, contact_solver, contact_state
@@ -503,6 +504,38 @@ def test_point_cloud_contact_capture(test, device):
             test.assertIn("cloth_contact_particle_force", meaning)
 
 
+def test_cable_contact_capture(test, device):
+    """Cable contact forces are inside contact_particle_force, alone or added to cloth contact; never in the records."""
+    for precision in precisions():
+        native = SolverMonolithic.Precision[precision.upper()]
+        with test.subTest(precision=precision, cloth=False):
+            run, state = cable_contact_solver(*strands(), config={"self": False}, device=device, precision=native)
+            run.step(state, state, run.create_control(), dt=0.001)
+            test.assertFalse(run.last_stats.rolled_back, run.last_stats)
+            result = inspection.capture(run, state)
+            test.assertIn("cable_contact", result["schema"]["producers"])
+            cable = state._monolithic_coupled.cable_contact_particle_force.numpy()
+            test.assertGreater(np.linalg.norm(cable), 0)
+            # No shape contact in this scene, so the published particle force is the cable force alone.
+            np.testing.assert_array_equal(result["arrays"]["contact_particle_force"].reshape(-1), cable.reshape(-1))
+            test.assertEqual(result["arrays"]["contact_identity"].size, 0)
+            meaning = result["schema"]["fields"]["contact_particle_force"]["meaning"]
+            test.assertIn("cable_contact_particle_force", meaning)
+            test.assertNotIn("cable_contact_particle_force", result["arrays"])
+        with test.subTest(precision=precision, cloth=True):
+            run, state = cloth_and_cable_solver(device=device, precision=native)
+            run.step(state, state, run.create_control(), dt=0.001)
+            test.assertFalse(run.last_stats.rolled_back, run.last_stats)
+            result = inspection.capture(run, state)
+            test.assertTrue({"cloth_contact", "cable_contact"} <= set(result["schema"]["producers"]))
+            history = state._monolithic_coupled
+            cloth, cable = history.cloth_contact_particle_force.numpy(), history.cable_contact_particle_force.numpy()
+            # Published as shape contact (none here), then cloth, then cable contact.
+            np.testing.assert_array_equal(
+                result["arrays"]["contact_particle_force"].reshape(-1), (cloth + cable).reshape(-1)
+            )
+
+
 def test_guards(test, device):
     """Reject foreign states, unknown fields, graph capture and existing output, and stay off the step path."""
     for precision in precisions():
@@ -543,6 +576,7 @@ for function in (
     test_det_f_uses_solver_arithmetic,
     test_material_contact_codes,
     test_point_cloud_contact_capture,
+    test_cable_contact_capture,
     test_guards,
 ):
     add_function_test(TestToolingInspection, function.__name__, function, devices=get_test_devices())

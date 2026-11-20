@@ -77,14 +77,17 @@ def test_factor_modes(test, device):
             for a, d in ((offsets, int), (columns, int), (values, dtype), (weights, dtype), (row_actor, int))
         ]
         blocked = wp.zeros(3, dtype=int, device=device)
-        for kind in ("interleaved", "empty", "zero_count", "positive", "zero_weight"):
+        for kind in ("interleaved", "empty", "zero_count", "positive", "zero_weight", "negative_weight"):
             host_offsets = np.zeros_like(offsets) if kind == "empty" else offsets
             host_values = values.copy()
             host_weights = weights.copy()
-            if kind in ("positive", "zero_weight"):
+            if kind in ("positive", "zero_weight", "negative_weight"):
                 host_values[5] += native(0.5)
             if kind == "zero_weight":
                 host_weights[4] = 0
+            if kind == "negative_weight":
+                # A curved contact target gives a negative tangential weight; it still couples its rows.
+                host_weights[4] = -1
             active = 0 if kind == "zero_count" else 6
             count.fill_(active)
             arrays[0].assign(host_offsets)
@@ -92,7 +95,7 @@ def test_factor_modes(test, device):
             arrays[3].assign(host_weights)
             expected = np.zeros(3, dtype=np.int32)
             for factor in range(active):
-                if host_weights[factor] > 0:
+                if host_weights[factor] != 0:
                     part = slice(host_offsets[factor], host_offsets[factor + 1])
                     for actor in range(3):
                         if host_values[part][row_actor[columns[part]] == actor].sum() != 0:

@@ -321,7 +321,7 @@ def _project_contact_chunk(
     elif wp.abs(n[2]) < wp.abs(n[0]):
         axis = type(point)(0.0, 0.0, 1.0)
     t = tangent[i]
-    if weights[i, 1] > type(weights[0, 0])(0.0) and wp.length(t) == type(weights[0, 0])(0.0):
+    if weights[i, 1] != type(weights[0, 0])(0.0) and wp.length(t) == type(weights[0, 0])(0.0):
         t = wp.normalize(wp.cross(n, axis))
     transverse = wp.cross(n, t)
     candidates.weights[i, 0] = weights[i, 0]
@@ -678,6 +678,7 @@ class _ContactBatch:
         geometry.rounding = wp.zeros(count, dtype=self.dtype, device=self.device)
         geometry.uncertified = wp.zeros(count, dtype=int, device=self.device)
         geometry.rotation = wp.zeros(count if rotation else 0, dtype=self.matrix, device=self.device)
+        geometry.hessian = wp.zeros(count if rotation else 0, dtype=self.matrix, device=self.device)
         geometry.jacobian_q = wp.empty((count, 0), dtype=self.vector, device=self.device)
         return geometry
 

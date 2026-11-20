@@ -1,0 +1,1 @@
+Add experimental frictionless cable self and inter-cable contact to the unified monolithic solver, with discrete sample-polyline detection, a parallel cable band preconditioner, publication-bound diagnostics and transactional checkpoint support.

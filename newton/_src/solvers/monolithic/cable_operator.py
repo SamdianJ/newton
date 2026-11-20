@@ -188,6 +188,10 @@ class _Cable:
         self.bend_rows_host = np.array(
             [np.r_[local[3 * k : 3 * k + 9], local[3 * nv + k : 3 * nv + k + 2]] for k in range(ni)], dtype=np.int32
         ).reshape(ni, 11)
+        # Each edge's {x_a, x_{a+1}, theta_e}: the stencil shape contact couples on one edge.
+        self.edge_rows_host = np.array(
+            [np.r_[local[3 * e : 3 * e + 6], local[3 * nv + e]] for e in range(ne)], dtype=np.int32
+        ).reshape(ne, 7)
         self.stretch_rows = wp.array(self.stretch_rows_host, dtype=int, device=device)
         self.bend_rows = wp.array(self.bend_rows_host, dtype=int, device=device)
         self.stretch_out = wp.zeros((ne, 6), dtype=dtype, device=device)

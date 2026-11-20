@@ -230,7 +230,11 @@ def test_smooth_contact(test, device):
         np.testing.assert_allclose(residual(batch), oracle[1], atol=1e-12)
         matrix = batch_matrix(batch)
         np.testing.assert_allclose(matrix, oracle[3], rtol=2e-5, atol=2e-4)
-        test.assertGreaterEqual(np.linalg.eigvalsh(matrix).min(), -1e-6 * np.linalg.norm(matrix))
+        # The field is curved, so the tangent is indefinite; it is never more
+        # so than the independent fitted tangent.
+        test.assertGreaterEqual(
+            np.linalg.eigvalsh(matrix).min(), np.linalg.eigvalsh(oracle[3]).min() - 1e-6 * np.linalg.norm(matrix)
+        )
         direction = np.random.default_rng(187).normal(size=14)
         direction /= np.linalg.norm(direction)
         repeated_e, repeated_r = [], []

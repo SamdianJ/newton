@@ -1,0 +1,46 @@
+{
+  "schema_version": 1,
+  "units": "SI",
+  "dt_s": 0.002,
+  "gravity_m_s2": [
+    0.0,
+    0.0,
+    -9.81
+  ],
+  "material": {
+    "radius_m": 0.002,
+    "young_modulus_Pa": 2000000.0,
+    "poisson_ratio": 0.3,
+    "density_kg_m3": 1200.0
+  },
+  "scene": "E1-1024",
+  "kind": "helix-pile",
+  "duration_s": 1.0,
+  "ground": {
+    "type": "plane",
+    "height_m": 0.0
+  },
+  "cables": [
+    {
+      "vertices": 1024,
+      "segment_length_m": 0.007
+    }
+  ],
+  "helix": {
+    "radius_m": 0.04,
+    "pitch_m": 0.0045,
+    "bottom_clearance_m": 0.005
+  },
+  "purpose": "performance only: natural-helix cable settling onto the table; not an acceptance E2E",
+  "solver": {
+    "contact_stiffness": 10000000.0,
+    "friction_coefficient": 0.5,
+    "friction_velocity_scale": 0.01,
+    "normal_smoothing": 0.0001,
+    "newton_max_iterations": 20,
+    "line_search_max_iterations": 8,
+    "linear_max_iterations": 300,
+    "mass_mode": "lumped",
+    "publish_policy": "current_iterate"
+  }
+}

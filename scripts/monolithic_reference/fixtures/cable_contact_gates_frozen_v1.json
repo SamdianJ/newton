@@ -1,0 +1,58 @@
+{
+  "schema_version": 1,
+  "status": "frozen",
+  "description": "P9c E2E gates and offline criteria definitions (cable_contact_criteria). Frozen by the user on 2026-11-13 after the contact-off PR0 baselines (results dev/monolithic/test/results/P9c/PR-00/baseline-504b3aa6-20261113 and baseline-35e79030-20261113/E4); never loosened to obtain PASS. E2 was re-frozen on 2026-11-13 with a 34 mm winding orbit and replaced on 2026-11-14 by the natural-helix stack (cable_contact_e2_stack_v1.json; baseline dev/monolithic/test/results/P9c/PR-00/baseline-90f28414-20261114/E2), because the winding stopped on 79-83% of steps even with contact off.",
+  "exclusion": {
+    "index_span": 3,
+    "arc_factor": 1.5707963267948966,
+    "rule": "same cable and (|i - j| <= index_span or rest-arc gap between the two segments < arc_factor * (rA + rB)); different cables are never excluded. Segment-pair form of the solver's sample-to-segment rule, slightly wider than it."
+  },
+  "penetration": {
+    "scenes": [
+      "E1",
+      "E2",
+      "E3",
+      "E4"
+    ],
+    "peak_max_radius_fraction": 0.2,
+    "definition": "p = rA + rB - d, d the exact FP64 segment-segment distance of a non-excluded pair; per pair divided by (rA + rB) / 2; the gate is the maximum over all pairs and all published frames. p99 is the 99th percentile over frames of the per-frame maximum (diagnostic)."
+  },
+  "hard_failure_max": 0,
+  "energy": {
+    "scenes": [
+      "E1"
+    ],
+    "max_rise_fraction_of_gravity_drop": 0.01,
+    "definition": "E = kinetic (lumped mass, published velocity) + elastic (FP64 DER, cable_oracle) + gravity + normal penalty energy of cable-ground ring64 samples (no orientation weight) + cable-cable normal penalty energy (PR1 oracle, frozen method parameters; zero when contact is off); friction excluded. W = work of the prescribed vertices and angles, from the FP64 elastic gradient, trapezoid rule over each step. Gate: max over t1 <= t2 of (E - W)(t2) - (E - W)(t1) <= fraction * (gravity energy(0) - gravity energy(T))."
+  },
+  "fp32_baseline": {
+    "definition": "Contact off: E1-E4 FP32 CUDA graph full length with HARD_FAILURE = 0 and the E1 energy gate passing. STOPPED_ACCEPTED is reported separately and compared with FP64; many FP32-only Stopped steps go to the user as R1 evidence."
+  },
+  "crossing": {
+    "min_sine": 0.17364817766693033,
+    "definition": "Diagnostic. Between consecutive frames, a non-excluded pair whose line-line signed distance changes sign while both unclamped closest points lie inside both segments in both frames, the segments are at least 10 degrees apart, and the pair is closer than rA + rB in either frame."
+  },
+  "link": {
+    "closure_m": 10.0,
+    "tolerance_turns": 0.5,
+    "definition": "Diagnostic for E3: |Tw + Wr - applied end rotation| in turns; Tw from material angles and reference twist, Wr the Gauss writhe of the cable closed by a planar rectangle closure_m beyond the clamps."
+  },
+  "rest": {
+    "window_s": 0.5,
+    "definition": "Diagnostic: maximum free-vertex speed over the final window."
+  },
+  "frozen": {
+    "date": "2026-11-13 (E1, E3, E4, performance recipes); 2026-11-14 (E2)",
+    "source_commit": "504b3aa6 (E1, E3, E4 and the performance recipes); E2 replaced by the natural-helix stack, user 2026-11-14 (cylinder winding stopped 79-83% of steps even with contact off)",
+    "recipes_sha256": {
+      "cable_contact_e1_coil_v1.json": "c2f396dcef832582ab61fe7e7265f546f173ad8eed237f0da474f9d0b41cedee",
+      "cable_contact_e2_stack_v1.json": "d7bee19f7eb63ba32139b65adae7978ad769ee57c53a24f6f1034de258912b3e",
+      "cable_contact_e3_plectoneme_v1.json": "8524c344d42f585e703d0594aca98b1769a7ab9cbc0c295d2d492b8f76eae030",
+      "cable_contact_e4_cross_v1.json": "cb14ed5c3bac27e487aaf46ca1783d91468629609f4f6de54bd6caddfeda22e7",
+      "cable_contact_e1_coil1024_v1.json": "5967d334885ab70eeb1710e4d1559efd3d0d8cc4cabd896b61b99b5ebb1112b1",
+      "cable_contact_fixed1024_v1.json": "08ae5e578954e9c0dc55938f948b8290aa23d33bea0f8a42a617c0c5b4e92f1d",
+      "cable_contact_fixed1024_g0_v1.json": "4b0d73d92f04f7c4ad68b11f1bd5bc91dd08f838fb73e92060bcee3665143ca6"
+    },
+    "performance_budget": "fixed state cable_contact_fixed1024_g0_v1.json, FP32 CUDA graph: per-Newton wall time with cable contact <= 1.25 x the contact-off baseline 63.8 ms (35e79030), PCG count changes included"
+  }
+}

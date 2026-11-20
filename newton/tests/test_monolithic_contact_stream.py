@@ -107,6 +107,8 @@ def test_stream_overflow(test, device):
             test.assertEqual(int(pool.records.requested.numpy()[0]), 8)
             test.assertEqual(int(pool.records.dropped.numpy()[0]), 4 - int(mask.sum()))
             test.assertLessEqual(int(pool.records.used.numpy()[0]), capacity)
+            # The packed status of the last batch's staging overflow, dropped count and flags.
+            test.assertEqual(tuple(int(v) for v in pool.status.numpy()), (0, 4 - int(mask.sum()), 0))
 
 
 @patch("newton._src.solvers.monolithic.contact_pool._CONTACT_WORKERS", 7)
@@ -133,6 +135,8 @@ def test_stream_invalid_late_batch(test, device):
                 append_payload(pool, data, indices)
             pool.finish()
             test.assertNotEqual(int(pool.records.flags.numpy()[0]), 0, name)
+            status = tuple(int(v) for v in pool.status.numpy())
+            test.assertEqual(status, (0, 0, int(pool.records.flags.numpy()[0])), name)
             for field in (
                 "accepted",
                 "count",

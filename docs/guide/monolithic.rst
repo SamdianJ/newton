@@ -214,7 +214,9 @@ both precisions (see :doc:`monolithic_cable`).
 The precision-tagged state uses schema 4, or schema 6 with materials, including
 actor ownership, layout identity and native rigid continuation fields. Multiple
 articulations use schema 7, including their topology and source mappings in the
-configuration identity. Cross-layout and cross-precision
+configuration identity. Enabled contact schemas supersede these: schema 8 with
+cloth contact, 9 with cable contact and 10 with both (see
+:doc:`monolithic_cloth` and :doc:`monolithic_cable`). Cross-layout and cross-precision
 checkpoint loads are rejected. The configuration identity covers every option
 that changes the solution, the resolved contact resources and the physical,
 material and SDF digests; PCG mode and CUDA graph use are excluded. CPU and

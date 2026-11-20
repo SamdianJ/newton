@@ -319,7 +319,9 @@ def contact_payload(dtype):
     data["weights"][3] = 1
     data["columns"][4, :2] = [1, 3]
     data["residual"][4, :2] = [0.5, -0.75]
-    data["weights"][4] = [2, 1, 0]
+    # A curved target gives a negative tangential weight; only the normal
+    # curvature is a square.
+    data["weights"][4] = [2, -1, 0]
     data["factors"][4, :, :2] = [[1, 2], [0.5, -1], [0, 0]]
     data["force_counts"][0] = data["force_counts"][4] = 2
     data["force_rows"][[0, 4], :2] = [0, 1]
@@ -398,7 +400,7 @@ def check_admitted(test, pool, data, *, stable_order=True):
                 np.add.at(expected_b[columns[a]], columns, values[a])
         supports += k
         forces += f
-        triplets += int(np.count_nonzero(data["weights"][i] > 0)) * k * k
+        triplets += int(np.count_nonzero(data["weights"][i])) * k * k
     test.assertEqual(int(record.support_count.numpy()[0]), supports)
     test.assertEqual(int(record.factor_count.numpy()[0]), 3 * n)
     test.assertEqual(int(record.triplet_count.numpy()[0]), triplets)
@@ -896,6 +898,45 @@ def _zero_weight_b_policy(test, device, dtype, native):
     test.assertEqual(int(record.factor_count.numpy()[0]), 9)
 
 
+def packed_status(pool):
+    """The values ``pool.status`` packs, read separately."""
+    return (
+        int(pool.candidates.overflow.numpy()[0]),
+        int(pool.records.dropped.numpy()[0]),
+        int(pool.records.flags.numpy()[0]),
+    )
+
+
+def test_pool_packed_status(test, device):
+    """The packed status is (candidate overflow, dropped, record flags) after complete, dropping and failed runs."""
+    for capacity in (15, 1, 0):
+        pool = _ContactPool(4, 2, 5, capacity, 3, 64, wp.float64, device, use_cuda_graph=device.is_cuda)
+        data = contact_payload(np.float64)
+        data["overflow"] = [2]
+        assign_contacts(pool, data)
+        pool.evaluate()
+        status = tuple(int(v) for v in pool.status.numpy())
+        with test.subTest(capacity=capacity, run="admitted"):
+            mask = check_admitted(test, pool, data)
+            test.assertEqual(status, packed_status(pool))
+            # Contact 3 is all zero and never requests budget.
+            test.assertEqual(status, (2, 4 - int(mask.sum()), 0))
+            test.assertEqual(status[1], {15: 0, 1: 3, 0: 4}[capacity])
+        # A failed evaluation clears its dropped count and reports its flags.
+        data["residual"][4, 0] = np.nan
+        assign_contacts(pool, data)
+        pool.evaluate()
+        status = tuple(int(v) for v in pool.status.numpy())
+        with test.subTest(capacity=capacity, run="failed"):
+            test.assertEqual(status, packed_status(pool))
+            test.assertEqual(status[:2], (2, 0))
+            test.assertNotEqual(status[2], 0)
+    empty = _ContactPool(4, 2, 0, 0, 3, 64, wp.float64, device, use_cuda_graph=device.is_cuda)
+    empty.candidates.overflow.fill_(5)
+    empty.evaluate()
+    test.assertEqual(tuple(int(v) for v in empty.status.numpy()), (5, 0, 0))
+
+
 class TestContactPool(unittest.TestCase):
     pass
 
@@ -920,6 +961,7 @@ for _device in get_test_devices():
         test_pool_native_energy_bits,
         test_pool_invalid_scratch,
         test_pool_zero_weight_b_policy,
+        test_pool_packed_status,
     ):
         add_function_test(TestContactPool, _test.__name__, _test, devices=[_device])
     if _device.is_cuda:
