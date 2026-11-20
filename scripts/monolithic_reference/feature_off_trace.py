@@ -171,6 +171,27 @@ def _cable_contact(device, precision, graph):
     return scene.solver, scene.state, scene.step
 
 
+def _cable_contact_recipe(name):
+    """P9c cable-contact recipe (frozen method configuration) from t = 0: cable self and inter contact."""
+
+    def build(device, precision, graph):
+        from scripts.monolithic_reference.cable_contact_scenes import CableContactScene  # noqa: PLC0415
+
+        recipe = json.loads((FIXTURES / name).read_text())
+        config = json.loads((FIXTURES / "cable_contact_method_frozen_v1.json").read_text())
+        scene = CableContactScene(
+            recipe,
+            device=device,
+            precision=precision,
+            use_cuda_graph=graph,
+            method="cable-contact",
+            method_config=config,
+        )
+        return scene.solver, scene.state, scene.step
+
+    return build
+
+
 SCENES = {
     "quick-sharpa-close": (_quick("sharpa-close"), "quick-windows"),
     "quick-sharpa-lift": (_quick("sharpa-lift"), "quick-windows"),
@@ -183,6 +204,8 @@ SCENES = {
     "cloth-stack-e5": (_cloth_e5, "default"),
     "cable-cantilever": (_cable_cantilever, "default"),
     "cable-bend-twist": (_cable_contact, "default"),
+    "cable-contact-e1": (_cable_contact_recipe("cable_contact_e1_coil_v1.json"), "default"),
+    "cable-contact-e4": (_cable_contact_recipe("cable_contact_e4_cross_v1.json"), "default"),
 }
 
 
