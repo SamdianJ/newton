@@ -186,7 +186,7 @@ def test_schema_versions(test, device):
 
     from newton.solvers.experimental.monolithic import SolverMonolithic  # noqa: PLC0415
 
-    for cable_contact, cloth, version in ((None, False, 106), ({}, False, 109), ({}, True, 110)):
+    for cable_contact, cloth, version in ((None, False, 106), (None, True, 108), ({}, False, 109), ({}, True, 110)):
         with test.subTest(version=version):
             model = floating_chain(device, edit=lambda builder, cloth=cloth: materials(builder, cloth))
             options = {"cable_inputs": [cable_input(c, model.particle_q.numpy()) for c in added["cables"]]}
@@ -201,6 +201,10 @@ def test_schema_versions(test, device):
                 options["cloth_contact"] = {"radius": 0.02, "normal_stiffness": 1e3, "candidate_capacity": 64}
             run = make_solver(model, mass_mode="lumped", **options)
             test.assertEqual(int(run.create_state(dt=H)._monolithic_coupled.schema_version.numpy()[0]), version)
+            fields = run._states.schema
+            test.assertIn("floating_com", fields)
+            test.assertEqual("cloth_contact_summary" in fields, cloth)
+            test.assertEqual("cable_contact_summary" in fields, cable_contact is not None)
 
 
 def test_coexists_with_fixed_trees_and_rigid_bodies(test, device):

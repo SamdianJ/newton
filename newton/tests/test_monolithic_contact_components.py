@@ -305,6 +305,8 @@ def test_shape_hessian(test, device):
                 [-0.011, 0.002, -0.0201],  # just beyond the other seam
             ],
         ),
+        # Zero half height is a sphere, also on its equator.
+        ("capsule", newton.GeoType.CAPSULE, [0.01, 0.0, 0.0], [[0.012, 0.004, 0.0], [0.006, -0.003, 0.009]]),
     )
     table = wp.empty(0, dtype=TextureSDFData, device=device)
     for dtype, vector, matrix in ((np.float64, wp.vec3d, wp.mat33d), (np.float32, wp.vec3, wp.mat33)):

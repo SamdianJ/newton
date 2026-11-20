@@ -316,6 +316,31 @@ def test_box_grid_faces_in_steps(test, device):
     test.assertEqual(loaded, {"A-self", "A-static"})
 
 
+def test_edge_contact_linear_solves(test, device):
+    """Crossed cube tips closing edge on edge: the field's curvature near box edges makes the tangent
+    indefinite, yet every step converges and every linear solve succeeds without regularization retries
+    (no non-positive curvature; CUDA runs the production PCG). Measured: 150/150 SUCCESS, 0 retries in both precisions on CPU and CUDA."""
+    options = {"pcg_mode": "production"} if wp.get_device(device).is_cuda else {}
+    for precision in ("fp64", "fp32"):
+        with test.subTest(precision=precision):
+            run = make_solver(two_branch_tree(device, tip="cross", gap=2e-3, rate=0.5), precision, **options)
+            state, control = run.create_state(dt=H), run.create_control()
+            loaded, solves = 0.0, 0
+            for _ in range(150):
+                run.step(state, state, control, dt=H)
+                stats = run.last_stats
+                test.assertTrue(stats.converged, stats.failure_reason)
+                # Every linear solve succeeds (no NON_POSITIVE_CURVATURE or other PCG failure) without retries.
+                # A step converged at its predictor has no linear solve.
+                attempts = stats.variational.get("linear_direction_attempts", [])
+                solves += len(attempts)
+                test.assertLessEqual({a["status"] for a in attempts}, {"SUCCESS"}, attempts)
+                test.assertEqual(stats.regularization_retries, 0)
+                loaded = max(loaded, float(np.abs(run.get_contact_forces(state).joint_force).max()))
+            test.assertGreater(loaded, 0.0, "the edges never touched")
+            test.assertGreater(solves, 0)
+
+
 def test_crossed_box_edges(test, device):
     """Two cube edges crossed by 2 mm hold no sample of the 12-triangle box (it reads a 4.6 mm gap);
     the same-tree face grid finds the overlap at construction, and turning the cubes apart clears it."""
@@ -567,6 +592,7 @@ for _test in (
     test_shared_columns_by_tree_shape,
     test_box_grid_samples,
     test_crossed_box_edges,
+    test_edge_contact_linear_solves,
     test_box_grid_faces_in_steps,
     test_rest_overlap_fails_everywhere,
     test_precompression_report,

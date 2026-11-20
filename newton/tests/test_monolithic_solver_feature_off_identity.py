@@ -22,7 +22,8 @@ from newton.tests.unittest_utils import add_function_test, get_test_devices
 
 # Captured on 7f733beb (P9d PR0 close, solver tree of trunk d50ead9b); recaptured on trunk 11fa4b1d
 # (P9c cable contact, S-002) at P9d checkpoint S: every earlier value was unchanged, and the cable-contact
-# scene was added there.
+# scene was added there. The trunk checkout had P9d's scene scripts, fixtures and asset index copied in
+# (it has no Allegro scene); its solver tree was the trunk's (dev/monolithic/P9d/SYNC-11fa4b1d.md).
 REFERENCE_SHA = "11fa4b1d"
 
 

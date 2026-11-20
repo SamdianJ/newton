@@ -149,7 +149,7 @@ def _shape_hessian(geo: int, scale: Any, point: Any):
         hessian = wp.matrix(zero, shape=(3, 3))
     elif geo == GeoType.CAPSULE:
         # Beside the segment the field is a cylinder (no curvature along z); beyond a cap, a sphere.
-        # At |z| = h exactly the side branch applies, as in the field's clamp.
+        # At |z| = h the cap's one-sided limit applies, so a capsule of zero half height is a sphere.
         hessian = wp.matrix(zero, shape=(3, 3))
         axial = wp.clamp(point[2], -scale[1], scale[1])
         offset = type(point)(point[0], point[1], point[2] - axial)
@@ -157,7 +157,7 @@ def _shape_hessian(geo: int, scale: Any, point: Any):
         if length > zero:
             unit = offset / length
             mask = wp.identity(n=3, dtype=type(point[0]))
-            if wp.abs(point[2]) <= scale[1]:
+            if wp.abs(point[2]) < scale[1]:
                 mask[2, 2] = zero
             hessian = (mask - wp.outer(unit, unit)) / length
     elif geo == GeoType.SPHERE:
