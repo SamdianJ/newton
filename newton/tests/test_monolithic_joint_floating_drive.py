@@ -12,7 +12,7 @@ import warp as wp
 import newton
 from newton._src.solvers.monolithic.floating import _drive_terms
 from newton.tests.test_monolithic_joint_floating_base import floating_chain, make_solver, root_offsets, rotation_matrix
-from newton.tests.unittest_utils import add_function_test, get_test_devices
+from newton.tests.unittest_utils import add_function_test, get_cuda_test_devices, get_test_devices
 from scripts.monolithic_reference.actor_contract_oracle import rotation
 
 H = 1e-3
@@ -275,6 +275,46 @@ def test_converges_from_far_rotations(test, device):
                 samples = [*errors[::100], errors[-1]]
                 test.assertTrue(all(b < a for a, b in itertools.pairwise(samples)), samples)
                 test.assertLess(errors[-1], 2e-3 * np.radians(degrees), samples)
+
+
+def test_problem_graphs_recapture_after_root_storage_replacement(test, device):
+    """Same-layout replacements of the root drive's storage recapture the problem graphs: the owners graph
+    reads the new arrays (the old ones hold NaN, so a stale replay fails), and graph and eager stay equal."""
+    names = ("params", "error_t", "error_r", "target_v", "target_w")
+    for precision, _numpy_dtype, _dtype in PRECISIONS:
+        results = {}
+        for graph in (False, True):
+            with test.subTest(precision=precision, graph=graph):
+                model = driven_chain(device, fixed_child=True)
+                run = make_solver(
+                    model, precision, use_cuda_graph=graph, pcg_mode="production", **_drive_terms_options()
+                )
+                state, control = run.create_state(dt=H), run.create_control()
+                _set_root_target(control, model, np.radians(30.0) * np.array([0.0, 0.6, 0.8]))
+                for _ in range(3):
+                    run.step(state, state, control, dt=H)
+                captured = dict(run._graphs.captures)
+                roots = run._floating
+                stale = [getattr(roots, name) for name in names]
+                for name in names:
+                    setattr(roots, name, wp.clone(getattr(roots, name)))
+                for array in stale:
+                    values = array.numpy()
+                    values[...] = np.nan
+                    array.assign(values)
+                for _ in range(3):
+                    run.step(state, state, control, dt=H)
+                    test.assertTrue(run.last_stats.converged, run.last_stats.failure_reason)
+                if graph:
+                    test.assertGreater(run._graphs.captures["problem_owners"], captured.get("problem_owners", 0))
+                history = state._monolithic_coupled
+                results[graph] = (
+                    history.floating_com.numpy(),
+                    history.floating_rotation.numpy(),
+                    state.joint_q.numpy(),
+                )
+        for eager, graphed in zip(results[False], results[True], strict=True):
+            np.testing.assert_array_equal(graphed, eager)
 
 
 def test_root_wrench_matches_rigid_body(test, device):
@@ -545,6 +585,12 @@ for _test in (
     test_drive_rejections,
 ):
     add_function_test(TestJointFloatingDrive, _test.__name__, _test, devices=get_test_devices())
+add_function_test(
+    TestJointFloatingDrive,
+    test_problem_graphs_recapture_after_root_storage_replacement.__name__,
+    test_problem_graphs_recapture_after_root_storage_replacement,
+    devices=get_cuda_test_devices(),
+)
 
 
 if __name__ == "__main__":
