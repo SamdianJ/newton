@@ -8,10 +8,12 @@ Experimental implicit articulation, rigid, tet, cloth and cable solver with P1Q3
 
 .. experimental::
 
-The solver advances one world with at most one articulation, at most one
-connected tet body, FREE rigid actors and cloth/cable inputs through one step
-pipeline, with C-IE contact, ArmijoOrResNorm acceptance, spatial contact
-candidates, scaled PCG and transactional publication.
+The solver advances one world with independent articulations (fixed or
+floating roots), at most one connected tet body, FREE rigid actors and
+cloth/cable inputs through one step pipeline, with C-IE contact, ArmijoOrResNorm
+acceptance, spatial contact candidates, scaled PCG and transactional
+publication. Floating bases, capsule and convex-mesh shapes and opt-in
+same-tree self-collision are described in :doc:`../guide/monolithic`.
 
 State and migration
 -------------------

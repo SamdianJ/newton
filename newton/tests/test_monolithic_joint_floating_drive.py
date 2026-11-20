@@ -318,6 +318,8 @@ def test_problem_graphs_recapture_after_root_storage_replacement(test, device):
                     test.assertTrue(run.last_stats.converged, run.last_stats.failure_reason)
                 if graph:
                     test.assertGreater(run._graphs.captures["problem_owners"], captured.get("problem_owners", 0))
+                # The graphs write the new saturation array; the replaced one keeps its sentinel.
+                test.assertTrue((stale[names.index("saturation")].numpy() == -1).all())
                 history = state._monolithic_coupled
                 results[graph] = (
                     history.floating_com.numpy(),
@@ -342,6 +344,33 @@ def test_saturation_diagnostics(test, device):
             (report,) = run.last_stats.variational["floating_root_saturation"]
             test.assertEqual(report["root"], model.joint_label[root_offsets(model)[0]])
             test.assertEqual((report["force_limited"], report["torque_limited"]), expected)
+
+    # The bit describes the published state: rebuild its translational drive from the published root
+    # increment, the step's start error and target rate, and compare with limits 10% below and above the
+    # unlimited value (the first iterate's |u| differs from the published one).
+    def published_drive(force):
+        model = driven_chain(device, fixed_child=True, force=force)
+        run = make_solver(model, **_drive_terms_options())
+        state, control = run.create_state(dt=H), run.create_control()
+        _set_root_target(control, model, np.zeros(3), offset=(0.01, 0.0, 0.0))
+        start = state._monolithic_coupled.floating_com.numpy()[0].astype(np.float64)
+        run.step(state, state, control, dt=H)
+        test.assertTrue(run.last_stats.converged, run.last_stats.failure_reason)
+        roots = run._floating
+        kt, dt = roots.params.numpy()[0, :2].astype(np.float64)
+        dc = state._monolithic_coupled.floating_com.numpy()[0].astype(np.float64) - start
+        u = kt * (roots.error_t.numpy()[0] + dc) + dt * (dc / H - roots.target_v.numpy()[0])
+        return np.linalg.norm(u), run.last_stats.variational["floating_root_saturation"][0]["force_limited"]
+
+    free, limited = published_drive(1e6)
+    test.assertFalse(limited)
+    bits = []
+    for factor in (0.9, 1.1):
+        size, limited = published_drive(factor * free)
+        test.assertEqual(limited, size >= factor * free, (factor, size, free))
+        bits.append(limited)
+    test.assertEqual(bits, [True, False])
+
     from newton.tests.test_monolithic_solver_floating_base import _fixed_base_chain  # noqa: PLC0415
 
     fixed = make_solver(_fixed_base_chain(device))

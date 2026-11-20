@@ -289,18 +289,22 @@ three linear and three angular DoFs must use ``POSITION_VELOCITY`` with equal
 ``target_ke``, ``target_kd`` and effort limit within each triple; zero gains
 leave the root undriven. Targets use the coordinate layout: ``joint_target_q``
 holds the root joint frame's position and xyzw quaternion in its parent anchor
-frame, ``joint_target_qd`` its six rates. ``control.joint_f`` on the root is a
+frame (a driven root's target quaternion must be unit within 1e-5, otherwise
+``step`` raises), and ``joint_target_qd`` the target COM linear and angular
+velocity in the parent anchor frame, the convention of ``joint_qd``. ``control.joint_f`` on the root is a
 world COM wrench [N, N·m] applied once; a root torque makes energy acceptance
 heuristic. Unsupported, with an error that names the joint: FREE joints below
-the root or several per tree, kinematic floating roots, BALL, D6 and DISTANCE
-joints, and root armature, damping, friction or limits. Each published step
+the root or several per tree, kinematic floating roots, and BALL, D6 and
+DISTANCE joints. Root armature, damping, friction and limits must be zero and
+fail construction otherwise. Each published step
 reports ``Stats.variational["floating_root_saturation"]``: per root, whether its
 force and torque limits clip the drive.
 
 **Capsules and convex meshes.** CAPSULE shapes (axis along local z,
 ``scale = (radius, half_height)``) are exact segment-distance fields with
 their curvature, sampled as a cylinder band and two hemispherical caps.
-CONVEX_MESH shapes follow the mesh path (CUDA and a C2 SDF).
+CONVEX_MESH shapes follow the mesh path (CUDA and a C2 SDF); their mesh must be
+convex, which construction checks.
 
 **Self-collision.** ``SolverMonolithic(self_collision={"exclude": [[a, b], ...]})``
 enables contact between bodies of one articulation tree; the default ``None``
@@ -309,8 +313,10 @@ whose shapes lie on two bodies of one tree with ``COLLIDE_SHAPES`` on both,
 minus excluded body pairs (a label matches a body's full label or its last path
 segment and must be unique) and pairs of bodies welded together. Build the
 articulation with ``enable_self_collisions=True``; Newton filters parent-child
-pairs. Same-tree shapes must be spheres, boxes or capsules. Each pair samples
-both surfaces at half area; box sources are sampled on a face grid of
+pairs. Same-tree shapes must be spheres, boxes or capsules. A pair of two
+moving bodies samples both surfaces at half area; a body without degrees of
+freedom (the base link of a fixed-base tree) is only a target, and the other
+surface is sampled at full area. Box sources are sampled on a face grid of
 ``"box_sample_spacing"`` [m] (default 4e-3) because the 12-triangle sampling
 misses edge-to-edge crossings. The columns shared by both bodies' common
 ancestors are dropped, so self-contact force on the root and shared ancestor
@@ -318,8 +324,10 @@ rows is exactly zero; ``contact_joint_force`` includes self-contact on the
 other rows. Rest overlap (a gap below -1e-6 m, checked in FP64 on the host)
 fails at construction, ``create_state`` and ``reset_state`` and names the
 bodies, shapes and depth; smaller gaps below ``normal_smoothing`` are listed in
-``self_collision_report``. Restarting from a state with loaded self contact is
-rejected by this check. The resolved pairs, exclusions and spacing enter the
+``self_collision_report``. Because a loaded penalty contact sits slightly inside
+the surface, ``create_state(source=...)`` and ``reset_state`` reject a state with
+self contact deeper than 1e-6 m; ``load_checkpoint`` does not run this check, so
+continue such a run from a checkpoint. The resolved pairs, exclusions and spacing enter the
 checkpoint identity. ``Stats.variational["self_collision"]`` counts the pairs
 and the pairs carrying force. Self-collision adds every pair's samples to the
 static contact set: set ``contact_factor_capacity`` (see above), and expect a
