@@ -199,8 +199,8 @@ def test_energy_residual_consistency(test, device):
 
 
 def test_contact_terms_match_oracle(test, device):
-    """Box tips turned into each other: E, r, the PSD tangent, both wrenches and residual differences
-    match the independent two-ended oracle (both directions at half weight, on the box face grid),
+    """Box tips turned into each other: E, r, the tangent (with the field's normal curvature), both
+    wrenches and residual differences match the independent two-ended oracle (both directions at half weight, on the box face grid),
     whose relative Jacobian cancels the hub column; the native hub row is exactly zero."""
     grid = lambda half: box_grid_samples(half, SPACING)  # noqa: E731
     for precision in ("fp64", "fp32"):
@@ -233,8 +233,8 @@ def test_contact_terms_match_oracle(test, device):
             np.testing.assert_allclose(native_residual, residual, rtol=tol, atol=tol)
             np.testing.assert_allclose(actual, matrix, rtol=max(tol, 1e-5), atol=max(tol, 1e-5))
             scale = max(1, np.linalg.norm(matrix))
+            # Symmetric; not PSD in general: the curvature term is indefinite near box edges.
             np.testing.assert_allclose(actual, actual.T, rtol=1e-6, atol=1e-6 * scale)
-            test.assertGreaterEqual(np.linalg.eigvalsh(actual).min(), -1e-6 * scale)
             actual_forces = batch.pool.force.result.numpy()[: 6 * run.model.body_count].reshape(-1, 6)
             np.testing.assert_allclose(actual_forces, forces, rtol=tol, atol=tol)
             if precision == "fp64":

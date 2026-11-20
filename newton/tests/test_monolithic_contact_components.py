@@ -294,6 +294,17 @@ def test_shape_hessian(test, device):
                 [0.01, -0.0305, -0.0108],  # close to an edge in a negative octant
             ],
         ),
+        (
+            "capsule",
+            newton.GeoType.CAPSULE,
+            [0.01, 0.02, 0.0],
+            [
+                [0.012, 0.004, 0.01],  # beside the segment: no axial curvature
+                [0.006, -0.003, 0.028],  # beyond a cap: spherical
+                [0.011, 0.0, 0.0199],  # just inside the seam
+                [-0.011, 0.002, -0.0201],  # just beyond the other seam
+            ],
+        ),
     )
     table = wp.empty(0, dtype=TextureSDFData, device=device)
     for dtype, vector, matrix in ((np.float64, wp.vec3d, wp.mat33d), (np.float32, wp.vec3, wp.mat33)):
@@ -330,6 +341,22 @@ def test_shape_hessian(test, device):
                     # Column j of the Hessian is the derivative of the gradient along axis j.
                     difference = np.stack([(g[:, 1 + j] - g[:, 4 + j]) / (2 * h) for j in range(3)], axis=2)
                     np.testing.assert_allclose(actual, difference, rtol=0, atol=1e-5 * size)
+    # A type without a Hessian branch is NaN, not silently flat (like the field itself).
+    hessians = wp.zeros(1, dtype=wp.mat33d, device=device)
+    wp.launch(
+        _field_probe,
+        1,
+        [
+            int(newton.GeoType.CYLINDER),
+            wp.vec3d(0.01, 0.02, 0.0),
+            wp.array([[0.02, 0.0, 0.0]], dtype=wp.vec3d, device=device),
+            table,
+            wp.zeros(1, dtype=wp.vec3d, device=device),
+            hessians,
+        ],
+        device=device,
+    )
+    test.assertTrue(np.isnan(hessians.numpy()).all())
 
 
 def edge_fixture(device):

@@ -140,15 +140,34 @@ def _shape_hessian(geo: int, scale: Any, point: Any):
 
     Planes, BOX faces and the BOX interior are flat. A texture SDF is
     piecewise trilinear and gets no curvature here; smooth fields supply their
-    own Hessian.
+    own Hessian. A type without a branch returns NaN, like ``_shape64``,
+    instead of silently acting as a flat shape.
     """
-    hessian = wp.matrix(type(point[0])(0.0), shape=(3, 3))
-    if geo == GeoType.SPHERE:
+    zero = type(point[0])(0.0)
+    hessian = wp.matrix(type(point[0])(wp.nan), shape=(3, 3))
+    if geo == GeoType.PLANE or geo == GeoType.MESH or geo == GeoType.CONVEX_MESH:
+        hessian = wp.matrix(zero, shape=(3, 3))
+    elif geo == GeoType.CAPSULE:
+        # Beside the segment the field is a cylinder (no curvature along z); beyond a cap, a sphere.
+        # At |z| = h exactly the side branch applies, as in the field's clamp.
+        hessian = wp.matrix(zero, shape=(3, 3))
+        axial = wp.clamp(point[2], -scale[1], scale[1])
+        offset = type(point)(point[0], point[1], point[2] - axial)
+        length = wp.length(offset)
+        if length > zero:
+            unit = offset / length
+            mask = wp.identity(n=3, dtype=type(point[0]))
+            if wp.abs(point[2]) <= scale[1]:
+                mask[2, 2] = zero
+            hessian = (mask - wp.outer(unit, unit)) / length
+    elif geo == GeoType.SPHERE:
+        hessian = wp.matrix(zero, shape=(3, 3))
         length = wp.length(point)
         if length > type(point[0])(0.0):
             unit = point / length
             hessian = (wp.identity(n=3, dtype=type(point[0])) - wp.outer(unit, unit)) / length
     elif geo == GeoType.BOX:
+        hessian = wp.matrix(zero, shape=(3, 3))
         d = type(point)(wp.abs(point[0]), wp.abs(point[1]), wp.abs(point[2])) - scale
         outside = type(point)(
             wp.max(d[0], type(point[0])(0.0)), wp.max(d[1], type(point[0])(0.0)), wp.max(d[2], type(point[0])(0.0))

@@ -160,6 +160,47 @@ def test_schema_versions(test, device):
     fixed = make_solver(_fixed_base_chain(device))
     test.assertEqual(int(fixed.create_state(dt=H)._monolithic_coupled.schema_version.numpy()[0]), 4)
     test.assertNotIn("floating_com", fixed._states.schema)
+    # With materials (cables, cloth) and their contacts: 6, 9 and 10 plus 100.
+    from newton.tests.test_monolithic_cable_contact import DENSITY, cable_input, strands  # noqa: PLC0415
+
+    points, chains = strands()
+    added = {}
+
+    def materials(builder, cloth):
+        start = builder.particle_count
+        mass = np.zeros(len(points))
+        for chain in chains:
+            half = np.linalg.norm(np.diff(points[list(chain)], axis=0), axis=1) * DENSITY / 2
+            mass[list(chain)[:-1]] += half
+            mass[list(chain)[1:]] += half
+        for point, value in zip(points, mass, strict=True):
+            builder.add_particle(
+                tuple(np.asarray(point) + np.array([0.0, 0.0, 2.0])), (0.0, 0.0, 0.0), mass=float(value)
+            )
+        added["cables"] = [[start + i for i in chain] for chain in chains]
+        if cloth:
+            first, added["face"] = builder.particle_count, builder.tri_count
+            for x, y in ((0.0, 0.05), (0.03, 0.05), (0.0, 0.08)):
+                builder.add_particle(wp.vec3(x, y, 2.0), wp.vec3(0.0), 0.00015)
+            builder.add_triangle(first, first + 1, first + 2, tri_ke=2, tri_ka=3, tri_kd=0)
+
+    from newton.solvers.experimental.monolithic import SolverMonolithic  # noqa: PLC0415
+
+    for cable_contact, cloth, version in ((None, False, 106), ({}, False, 109), ({}, True, 110)):
+        with test.subTest(version=version):
+            model = floating_chain(device, edit=lambda builder, cloth=cloth: materials(builder, cloth))
+            options = {"cable_inputs": [cable_input(c, model.particle_q.numpy()) for c in added["cables"]]}
+            if cable_contact is not None:
+                options["cable_contact"] = cable_contact
+            if cloth:
+                options["cloth_inputs"] = [
+                    SolverMonolithic.ClothInput(
+                        triangle_ids=(added["face"],), bending=(0.01, 0.01), thickness=0.01, surface_density=1
+                    )
+                ]
+                options["cloth_contact"] = {"radius": 0.02, "normal_stiffness": 1e3, "candidate_capacity": 64}
+            run = make_solver(model, mass_mode="lumped", **options)
+            test.assertEqual(int(run.create_state(dt=H)._monolithic_coupled.schema_version.numpy()[0]), version)
 
 
 def test_coexists_with_fixed_trees_and_rigid_bodies(test, device):
