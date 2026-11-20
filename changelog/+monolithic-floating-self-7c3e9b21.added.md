@@ -1,0 +1,1 @@
+Add experimental floating-base articulations to the Monolithic solver, with a 6D root pose drive truncated at its effort limits and root COM wrenches, CAPSULE and CONVEX_MESH contact shapes, and opt-in same-tree self-collision with body-pair exclusions, rest-overlap checks and per-step diagnostics.
