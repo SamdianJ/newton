@@ -172,6 +172,29 @@ def test_shared_columns_carry_no_self_force(test, device):
             test.assertTrue(touched, "the tips never touched")
 
 
+def test_self_collision_diagnostics(test, device):
+    """Stats.variational["self_collision"] counts the resolved pairs and the A-self pairs carrying force in
+    the published state; a rolled-back step (contact pool overflow) publishes neither diagnostic."""
+    run = make_solver(two_branch_tree(device))
+    state, control = run.create_state(dt=H), run.create_control()
+    seen = set()
+    for _ in range(60):
+        run.step(state, state, control, dt=H)
+        summary = run.last_stats.variational["self_collision"]
+        test.assertEqual(summary["pairs"], 1)
+        seen.add(summary["active_pairs"])
+    test.assertEqual(seen, {0, 1})
+    tiny = make_solver(two_branch_tree(device, gap=-0.0, rate=0.5), contact_factor_capacity=3)
+    state = tiny.create_state(dt=H)
+    for _ in range(60):
+        tiny.step(state, state, control, dt=H)
+        if tiny.last_stats.rolled_back:
+            break
+    test.assertTrue(tiny.last_stats.rolled_back, "the pool never overflowed")
+    test.assertNotIn("self_collision", tiny.last_stats.variational)
+    test.assertNotIn("actor_contact_pairs", tiny.last_stats.variational)
+
+
 def test_energy_residual_consistency(test, device):
     """With zero friction the contact is a potential: its energy's slope along a trial is residual . d,
     including along the shared hub DoF (zero) and the branch DoFs."""
@@ -587,6 +610,7 @@ class TestContactSelfCollision(unittest.TestCase):
 for _test in (
     test_shared_columns_carry_no_self_force,
     test_energy_residual_consistency,
+    test_self_collision_diagnostics,
     test_contact_terms_match_oracle,
     test_floating_root,
     test_shared_columns_by_tree_shape,

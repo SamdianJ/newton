@@ -171,7 +171,16 @@ class SolverMonolithic(SolverBase):
     rows ``contact_joint_force`` includes self-contact. Rest overlap (gap below -1e-6 m, FP64 on the
     host) fails at construction, ``create_state`` and ``reset_state``; smaller gaps below
     ``normal_smoothing`` are reported in ``self_collision_report``. The resolved pairs enter the
-    checkpoint identity.
+    checkpoint identity. Self pairs add their samples to the static contact set; set
+    ``contact_factor_capacity`` so the contact pool stays bounded.
+
+    A FREE root with descendant links makes a floating tree (six root rows: world COM and left
+    rotation increments). With ``JointTerms(implicit_pd=True)`` and POSITION_VELOCITY root DoFs
+    whose gains and effort limits are equal within the linear and the angular triple, the root
+    follows a 6D pose target in the coordinate layout through a PD law truncated at the effort
+    limit; ``control.joint_f`` on the root is a world COM wrench. ``Stats.variational`` reports
+    ``floating_root_saturation`` (per root, whether the force and torque limits clip the drive)
+    and, with self-collision, ``self_collision`` (pairs and pairs carrying force).
 
     Stopped publication retains all physical/state gates except the residual goal.
     ``last_accepted`` requires an accepted Newton update; ``current_iterate``
@@ -978,6 +987,7 @@ class SolverMonolithic(SolverBase):
                 self._states.validate(self._accepted)
                 state_out.assign(self._accepted)
                 self._metrics.update(self._joint_force_metrics(state_out))
+                self._publish_diagnostics()
                 published = True
         except _StepFailure as error:
             status, failure = error.status, str(error)
@@ -987,7 +997,8 @@ class SolverMonolithic(SolverBase):
         finally:
             if not published:
                 self._restore(state_out)
-                self._variational.pop("actor_contact_pairs", None)
+                for key in ("actor_contact_pairs", "floating_root_saturation", "self_collision"):
+                    self._variational.pop(key, None)
             if isinstance(self._variational.get("residual"), wp.array):
                 self._variational["residual"] = _diagnostic_snapshot(self._variational["residual"])
             if cable_preconditioner is not None:
@@ -1373,6 +1384,22 @@ class SolverMonolithic(SolverBase):
 
     def _domain(self, state):
         return self._problem.domain(self._accepted, state)
+
+    def _publish_diagnostics(self):
+        """Step diagnostics of the published state, from the final evaluation (no per-iteration reads).
+
+        ``floating_root_saturation``: per floating root, whether the drive's force and torque limits
+        clip it (one read, only with floating roots). ``self_collision``: the resolved self pairs and
+        the A-self pairs carrying force, from ``actor_contact_pairs`` (no device read).
+        """
+        if self._floating.count:
+            self._variational["floating_root_saturation"] = self._floating.saturation_report()
+        if self._self_collision.enabled:
+            pairs = self._variational.get("actor_contact_pairs") or ()
+            active = sum(
+                1 for p in pairs if p.get("kind") == "A-self" and any(any(v) for v in p.get("world_wrench", ()))
+            )
+            self._variational["self_collision"] = {"pairs": len(self._self_collision.pairs), "active_pairs": active}
 
     def _joint_force_metrics(self, state):
         """Bind scalar force diagnostics to the successfully published state."""

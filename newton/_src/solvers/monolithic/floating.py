@@ -128,6 +128,9 @@ _NONFINITE_TARGET_QD = wp.constant(2)
 _NONFINITE_JOINT_F = wp.constant(4)
 _NONUNIT_TARGET = wp.constant(8)
 _ROOT_TORQUE = wp.constant(16)
+# Root drive saturation bits: the translational or rotational drive is clipped at its limit.
+_FORCE_LIMITED = wp.constant(1)
+_TORQUE_LIMITED = wp.constant(2)
 
 
 @wp.kernel
@@ -229,9 +232,11 @@ def _drive_terms(
     residual: wp.array[Any],
     absolute: wp.array[Any],
     tangent: wp.array[Any],
+    saturation: wp.array[int],
 ):
     h = scalar_value(h_arg)
     f = wp.tid()
+    limited = int(0)
     zero = type(h)(0.0)
     dc = steps[f]
     phi = _quat_log(rotation_steps[f])
@@ -243,6 +248,8 @@ def _drive_terms(
     a = params[f, 0] + params[f, 1] / h
     if a > zero:
         u = params[f, 0] * (error_t[f] + dc) + params[f, 1] * (dc / h - target_v[f])
+        if wp.length(u) >= params[f, 2]:
+            limited = limited | _FORCE_LIMITED
         ee, g, hh = _huber(u, a, params[f, 2])
         e += ee
         gt = gt + g
@@ -251,6 +258,8 @@ def _drive_terms(
     a = params[f, 3] + params[f, 4] / h
     if a > zero:
         u = params[f, 3] * (error_r[f] + phi) + params[f, 4] * (phi / h - target_w[f])
+        if wp.length(u) >= params[f, 5]:
+            limited = limited | _TORQUE_LIMITED
         ee, g, hh = _huber(u, a, params[f, 5])
         jinv = _left_jacobian_inverse(phi)
         left = wp.transpose(jinv) * g
@@ -259,6 +268,7 @@ def _drive_terms(
         ar = ar + abs3(left)
         hr = wp.transpose(jinv) * hh * jinv
     energy[f] = e
+    saturation[f] = limited
     for k in range(3):
         residual[rows[f, k]] = residual[rows[f, k]] + gt[k]
         residual[rows[f, k + 3]] = residual[rows[f, k + 3]] + gr[k]
@@ -337,6 +347,8 @@ class FloatingRoots:
         for name in ("force", "torque", "error_t", "error_r", "target_v", "target_w"):
             setattr(self, name, wp.zeros(self.count, dtype=self.vector, device=self.device))
         self.energy = wp.zeros(self.count, dtype=self.dtype, device=self.device)
+        # Drive limits active at the last evaluation (bits _FORCE_LIMITED, _TORQUE_LIMITED).
+        self.saturation = wp.zeros(self.count, dtype=int, device=self.device)
         self.status = wp.zeros(self.count, dtype=int, device=self.device)
         self.has_torque = False
 
@@ -476,8 +488,25 @@ class FloatingRoots:
                 objective.residual,
                 objective.absolute,
                 objective.tangent.flatten(),
+                self.saturation,
             ],
             device=self.device,
+        )
+
+    def saturation_report(self):
+        """Per root: whether the drive's force and torque limits clip it at the last evaluation (one read)."""
+        if not self.count:
+            return ()
+        bits = self.saturation.numpy()
+        labels = getattr(self.model, "joint_label", None) or ()
+        names = [labels[j] if j < len(labels) and labels[j] else str(j) for j in (int(x) for x in self.joint_indices)]
+        return tuple(
+            {
+                "root": names[f],
+                "force_limited": bool(bits[f] & int(_FORCE_LIMITED)),
+                "torque_limited": bool(bits[f] & int(_TORQUE_LIMITED)),
+            }
+            for f in range(self.count)
         )
 
     def bind_rows(self, local_rows):

@@ -46,6 +46,7 @@ class _Drive:
         residual = wp.zeros(6, dtype=self.dtype, device=self.device)
         absolute = wp.zeros(6, dtype=self.dtype, device=self.device)
         tangent = wp.zeros(36, dtype=self.dtype, device=self.device)
+        saturation = wp.full(1, -1, dtype=int, device=self.device)
         wp.launch(
             _drive_terms,
             1,
@@ -62,9 +63,11 @@ class _Drive:
                 residual,
                 absolute,
                 tangent,
+                saturation,
             ],
             device=self.device,
         )
+        self.saturation = int(saturation.numpy()[0])
         return (
             float(energy.numpy()[0]),
             residual.numpy().astype(np.float64),
@@ -160,6 +163,13 @@ def test_truncation_is_c1_and_bounded(test, device):
     for scale in (2.0, 10.0):
         _, residual, _ = drive(scale * x0, identity)
         test.assertAlmostEqual(float(np.linalg.norm(residual[:3])), limit, places=9)
+        # Force-limit bit set; the rotational drive (k_r = d_r = 0) never saturates.
+        test.assertEqual(drive.saturation, 1)
+    drive(0.5 * x0, identity)
+    test.assertEqual(drive.saturation, 0)
+    torque = _Drive(device, wp.float64, (0.0, 0.0, 1.0, 2.0, 0.0, 0.1), *([(0.0, 0.0, 0.0)] * 6))
+    torque(np.zeros(3), np.array([np.sin(0.2), 0.0, 0.0, np.cos(0.2)]))  # 0.4 rad: |u_r| = 0.8 >= 0.1
+    test.assertEqual(torque.saturation, 2)
 
 
 def test_left_jacobian_branches(test, device):
@@ -280,7 +290,7 @@ def test_converges_from_far_rotations(test, device):
 def test_problem_graphs_recapture_after_root_storage_replacement(test, device):
     """Same-layout replacements of the root drive's storage recapture the problem graphs: the owners graph
     reads the new arrays (the old ones hold NaN, so a stale replay fails), and graph and eager stay equal."""
-    names = ("params", "error_t", "error_r", "target_v", "target_w")
+    names = ("params", "error_t", "error_r", "target_v", "target_w", "saturation")
     for precision, _numpy_dtype, _dtype in PRECISIONS:
         results = {}
         for graph in (False, True):
@@ -300,7 +310,8 @@ def test_problem_graphs_recapture_after_root_storage_replacement(test, device):
                     setattr(roots, name, wp.clone(getattr(roots, name)))
                 for array in stale:
                     values = array.numpy()
-                    values[...] = np.nan
+                    # Inputs poison a stale replay; the saturation output (int) gets a sentinel.
+                    values[...] = np.nan if np.issubdtype(values.dtype, np.floating) else -1
                     array.assign(values)
                 for _ in range(3):
                     run.step(state, state, control, dt=H)
@@ -315,6 +326,28 @@ def test_problem_graphs_recapture_after_root_storage_replacement(test, device):
                 )
         for eager, graphed in zip(results[False], results[True], strict=True):
             np.testing.assert_array_equal(graphed, eager)
+
+
+def test_saturation_diagnostics(test, device):
+    """Stats.variational["floating_root_saturation"] names each root and says whether its force and torque
+    limits clip the published state's drive; fixed-base solvers report nothing."""
+    for force, torque, expected in ((1e6, 1e6, (False, False)), (1e-3, 1e6, (True, False)), (1e6, 1e-6, (False, True))):
+        with test.subTest(force=force, torque=torque):
+            model = driven_chain(device, fixed_child=True, force=force, torque=torque)
+            run = make_solver(model, **_drive_terms_options())
+            state, control = run.create_state(dt=H), run.create_control()
+            _set_root_target(control, model, np.radians(30.0) * np.array([0.0, 0.6, 0.8]), offset=(0.01, 0.0, 0.0))
+            run.step(state, state, control, dt=H)
+            test.assertTrue(run.last_stats.converged, run.last_stats.failure_reason)
+            (report,) = run.last_stats.variational["floating_root_saturation"]
+            test.assertEqual(report["root"], model.joint_label[root_offsets(model)[0]])
+            test.assertEqual((report["force_limited"], report["torque_limited"]), expected)
+    from newton.tests.test_monolithic_solver_floating_base import _fixed_base_chain  # noqa: PLC0415
+
+    fixed = make_solver(_fixed_base_chain(device))
+    state = fixed.create_state(dt=H)
+    fixed.step(state, state, fixed.create_control(), dt=H)
+    test.assertNotIn("floating_root_saturation", fixed.last_stats.variational)
 
 
 def test_root_wrench_matches_rigid_body(test, device):
@@ -578,6 +611,7 @@ for _test in (
     test_left_jacobian_branches,
     test_converges_from_far_rotations,
     test_root_wrench_matches_rigid_body,
+    test_saturation_diagnostics,
     test_conservative_energy_truth_table,
     test_target_conventions,
     test_tangent_entries_in_packed_trees,
