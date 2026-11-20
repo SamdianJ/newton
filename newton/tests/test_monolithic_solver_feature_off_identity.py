@@ -20,7 +20,10 @@ import warp as wp
 
 from newton.tests.unittest_utils import add_function_test, get_test_devices
 
-REFERENCE_SHA = "7f733beb"  # P9d PR0 close; solver tree identical to trunk d50ead9b
+# Captured on 7f733beb (P9d PR0 close, solver tree of trunk d50ead9b); recaptured on trunk 11fa4b1d
+# (P9c cable contact, S-002) at P9d checkpoint S: every earlier value was unchanged, and the cable-contact
+# scene was added there.
+REFERENCE_SHA = "11fa4b1d"
 
 
 def _hash(value):
@@ -91,6 +94,13 @@ def _fixtures(device="cpu"):
 
         return MaterialScene("cable-bend-twist", device=device).solver
 
+    def cable_contact():
+        from scripts.monolithic_reference.cable_contact_scenes import CableContactScene  # noqa: PLC0415
+
+        recipe = _json.loads((fixtures / "cable_contact_e4_cross_v1.json").read_text())
+        config = _json.loads((fixtures / "cable_contact_method_frozen_v1.json").read_text())
+        return CableContactScene(recipe, device=device, method="cable-contact", method_config=config).solver
+
     def allegro_wrist():
         from scripts.monolithic_reference.floating_hand_scenes import FloatingHandScene, load_recipe  # noqa: PLC0415
 
@@ -104,6 +114,7 @@ def _fixtures(device="cpu"):
         "cloth-point-cloud": cloth_point_cloud,
         "cable-cantilever": cable,
         "cable-sphere": cable_sphere,
+        "cable-contact-e4": cable_contact,
         "allegro-wrist-box": allegro_wrist,
     }
 
@@ -111,6 +122,23 @@ def _fixtures(device="cpu"):
 # Captured on REFERENCE_SHA with capture(); see the module docstring.
 EXPECTED = {
     "cpu": {
+        "cable-contact-e4": {
+            "contact_count": 37248,
+            "contact_triplet_capacity": 5475456,
+            "digest": "a08d54806447e198bbeeb52630051ab871cadd77a7099ba70b96c18d5d571ff0",
+            "layout": "2f29926ddc9628ed021dc8b06d0de6cd066d666772dab7440e951c80b0ec5cf5",
+            "pair_kinds": ["cable-shape"],
+            "producers": [
+                "CableProducer",
+                "CableProducer",
+                "CableProducer",
+                "ContactProducer",
+                "_CableContactProducer",
+            ],
+            "samples": "cdc279c4b625c2181ca387b664f5a493b0676f71079a5e1d9de2293a85d5e433",
+            "schema": "9e8d3f3573a77ee328a8327daf8e8484a86ccab8fa80f8c86548c74889aa78f8",
+            "schema_version": 9,
+        },
         "allegro-wrist-box": {
             "contact_count": 49632,
             "contact_triplet_capacity": 30921984,
@@ -190,6 +218,23 @@ EXPECTED = {
         },
     },
     "cuda:0": {
+        "cable-contact-e4": {
+            "contact_count": 37248,
+            "contact_triplet_capacity": 5475456,
+            "digest": "a08d54806447e198bbeeb52630051ab871cadd77a7099ba70b96c18d5d571ff0",
+            "layout": "2f29926ddc9628ed021dc8b06d0de6cd066d666772dab7440e951c80b0ec5cf5",
+            "pair_kinds": ["cable-shape"],
+            "producers": [
+                "CableProducer",
+                "CableProducer",
+                "CableProducer",
+                "ContactProducer",
+                "_CableContactProducer",
+            ],
+            "samples": "cdc279c4b625c2181ca387b664f5a493b0676f71079a5e1d9de2293a85d5e433",
+            "schema": "9e8d3f3573a77ee328a8327daf8e8484a86ccab8fa80f8c86548c74889aa78f8",
+            "schema_version": 9,
+        },
         "allegro-wrist-box": {
             "contact_count": 49632,
             "contact_triplet_capacity": 30921984,
