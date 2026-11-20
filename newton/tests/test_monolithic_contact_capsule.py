@@ -260,6 +260,60 @@ def test_dense_capsule_contact(test, device):
             test.assertLess(np.linalg.norm(matrix - b) / scale, 1e-5)
 
 
+def test_curved_target_tangent(test, device):
+    """A rigid box pressed into a static capsule, beside the segment and on a cap, frictionless: the
+    translation block of the contact tangent is the central difference of the residual, column by
+    column. Its transverse columns come only from the field's normal curvature (FP64)."""
+    from newton.solvers.experimental.monolithic import SolverMonolithic  # noqa: PLC0415
+    from newton.tests.test_monolithic_contact_actor_pairs import native_batch, query  # noqa: PLC0415
+    from newton.tests.test_monolithic_contact_components import batch_matrix  # noqa: PLC0415
+
+    half = 0.004
+    for where, center in (
+        ("side", (RADIUS + half - 2e-4, 0.001, 0.01)),
+        ("cap", (0.002, 0.001, HALF + RADIUS + half - 2e-4)),
+    ):
+        with test.subTest(where=where):
+            builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0))
+            cfg = builder.ShapeConfig(density=0.0, margin=0.0, has_particle_collision=False)
+            builder.add_shape_capsule(body=-1, radius=RADIUS, half_height=HALF, cfg=cfg)
+            _free(builder, lambda b, body, c: b.add_shape_box(body, hx=half, hy=half, hz=half, cfg=c), center)
+            model = builder.finalize(device=device)
+            run = SolverMonolithic(
+                model,
+                friction_velocity_scale=0.01,
+                friction_coefficient=0.0,
+                contact_stiffness=1e7,
+                normal_smoothing=1e-4,
+                precision="fp64",
+            )
+            state = run.create_state(dt=1e-3)
+            batch = native_batch(run)
+            query(batch, run, state, start=True)
+            query(batch, run, state)
+            rows = run._rigid.actors[0].dof_start + np.arange(3)
+            block = batch_matrix(batch)[np.ix_(rows, rows)]
+            history = state._monolithic_coupled
+            com = history.rigid_com.numpy().astype(np.float64)
+            h = 1e-8
+            columns = []
+            for axis in range(3):
+                values = []
+                for sign in (1, -1):
+                    shifted = com.copy()
+                    shifted[0, axis] += sign * h
+                    history.rigid_com.assign(shifted)
+                    query(batch, run, state)
+                    values.append(batch.pool.residual.result.numpy()[rows].copy())
+                history.rigid_com.assign(com)
+                columns.append((values[0] - values[1]) / (2 * h))
+            derivative = np.stack(columns, axis=1)
+            np.testing.assert_allclose(block, derivative, rtol=0, atol=1e-5 * np.abs(derivative).max())
+            # y is a curved transverse direction both beside the segment and on the cap (contact along +x / +z).
+            test.assertGreater(abs(derivative[1, 1]), 1e-4 * np.abs(derivative).max())
+            np.testing.assert_allclose(block[:, 1], derivative[:, 1], rtol=0, atol=1e-4 * abs(derivative[1, 1]))
+
+
 def test_capsule_rejected_as_material_target(test, device):
     """Cloth and cable particles may not contact a capsule (PRD 2.9); the error names the shape type."""
     from newton.solvers.experimental.monolithic import SolverMonolithic  # noqa: PLC0415
@@ -317,6 +371,7 @@ for _device in get_test_devices():
         test_surface_samples,
         test_resting_pairs,
         test_dense_capsule_contact,
+        test_curved_target_tangent,
         test_capsule_rejected_as_material_target,
     ):
         add_function_test(TestContactCapsule, _test.__name__, _test, devices=[_device])
