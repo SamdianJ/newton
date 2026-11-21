@@ -6,6 +6,7 @@
 import math
 import os
 import tempfile
+import warnings
 from dataclasses import replace
 from pathlib import Path
 from types import MappingProxyType, SimpleNamespace
@@ -394,6 +395,14 @@ class SolverMonolithic(SolverBase):
         if not isinstance(self._contact, _PooledContactObjective):
             raise ValueError("Monolithic contact requires the pooled contact objective")
         capacity = 3 * self._contact.count if contact_factor_capacity is None else contact_factor_capacity
+        if self._self_collision.enabled and contact_factor_capacity is None:
+            warnings.warn(
+                f"self_collision adds {self._contact.count} static contact samples and contact_factor_capacity is "
+                "unset, so the contact pool and the linear workspace hold every sample; set contact_factor_capacity "
+                "to bound them (overflow rolls the step back)",
+                RuntimeWarning,
+                stacklevel=2,
+            )
         # A contact-free scene keeps an empty pool so every scene evaluates contact alike.
         self._contact_pool = True
         self._contact_spatial = isinstance(self._contact, _SpatialContactObjective)

@@ -249,6 +249,14 @@ def main(argv=None):
                     # limit clips it (empty without floating roots), and A-self pairs carrying force (-1 off).
                     "root_force_limited": np.array([r["force_limited"] for r in saturation], dtype=bool),
                     "root_torque_limited": np.array([r["torque_limited"] for r in saturation], dtype=bool),
+                    # Cumulative CUDA graph captures of the solver segments (0 without graphs).
+                    "graph_captures": np.int64(
+                        sum(
+                            v.get("captures", 0)
+                            for v in ((stats.variational or {}).get("graphs", {}).get("segments", {}) or {}).values()
+                            if isinstance(v, dict)
+                        )
+                    ),
                     "self_active_pairs": np.int32(
                         (stats.variational or {}).get("self_collision", {}).get("active_pairs", -1)
                     ),
@@ -265,7 +273,13 @@ def main(argv=None):
         if last is not None:
             # The last recorded (published) state (K16: no full checkpoint, only the last state).
             np.savez_compressed(args.output / "final_state.npz", **last)
+        changed = sorted(
+            name
+            for name, digest in manifest["source_files_sha256"].items()
+            if hashlib.sha256((SOURCE / name).read_bytes()).hexdigest() != digest
+        )
         manifest.update(
+            source_files_changed_during_run=changed,
             rollout_seconds=time.perf_counter() - rollout,
             published_steps=recorded,
             memory=_memory(scene.model.device),

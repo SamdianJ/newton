@@ -538,6 +538,20 @@ def test_precompression_report(test, device):
     test.assertTrue(0.0 <= report[0]["gap_m"] < 1e-4, report)
 
 
+def test_unbounded_pool_warning(test, device):
+    """Self-collision without contact_factor_capacity warns that the pool holds every sample; a bound
+    or self-collision off does not."""
+    import warnings  # noqa: PLC0415
+
+    model = two_branch_tree(device, rate=0.0)
+    with test.assertWarnsRegex(RuntimeWarning, "contact_factor_capacity is unset"):
+        make_solver(model)
+    for options in ({"contact_factor_capacity": 3000}, {"self_collision": None}):
+        with test.subTest(options=options), warnings.catch_warnings():
+            warnings.simplefilter("error", RuntimeWarning)
+            make_solver(model, **options)
+
+
 def test_option_errors(test, device):
     """Unknown keys, unknown, ambiguous or cross-tree labels, missing pairs and no pairs fail by name."""
     model = two_branch_tree(device)
@@ -629,6 +643,7 @@ for _test in (
     test_precompression_report,
     test_option_errors,
     test_label_order_and_cleared_flags,
+    test_unbounded_pool_warning,
     test_checkpoint_identity,
 ):
     add_function_test(TestContactSelfCollision, _test.__name__, _test, devices=get_test_devices())

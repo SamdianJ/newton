@@ -207,6 +207,76 @@ def test_schema_versions(test, device):
             test.assertEqual("cable_contact_summary" in fields, cable_contact is not None)
 
 
+def _cloth_triangle(builder, center, z):
+    """A falling cloth triangle (lumped mass of area x density / 3 per node) above ``center``."""
+    first, face = builder.particle_count, builder.tri_count
+    for dx, dy in ((-0.01, -0.01), (0.01, -0.01), (0.0, 0.01)):
+        builder.add_particle(wp.vec3(center[0] + dx, center[1] + dy, z), wp.vec3(0.0, 0.0, -0.5), 2e-4 / 3)
+    builder.add_triangle(first, first + 1, first + 2, tri_ke=2, tri_ka=3, tri_kd=0)
+    return face
+
+
+def test_particle_contact_with_floating_trees(test, device):
+    """Cloth particles land on a floating root's box, and on a tip of a floating self-collision tree: every
+    step converges, the cloth stops at the surface and its contact force reaches the root rows (only
+    self-contact leaves them at zero)."""
+    from newton.solvers.experimental.monolithic import SolverMonolithic  # noqa: PLC0415
+    from newton.tests.test_monolithic_contact_self_collision import two_branch_builder  # noqa: PLC0415
+
+    def floating_box():
+        builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0))
+        pose = wp.transform((0.0, 0.0, 0.3), wp.quat_identity())
+        root = builder.add_link(mass=1.0, inertia=wp.diag(wp.vec3(1e-3)), xform=pose, label="root")
+        builder.add_shape_box(root, hx=0.05, hy=0.05, hz=0.01, cfg=builder.ShapeConfig(density=0.0, margin=0.0))
+        child = builder.add_link(mass=0.2, inertia=wp.diag(wp.vec3(1e-4)), label="child")
+        joints = [builder.add_joint_free(root, parent_xform=pose, label="free")]
+        joints.append(
+            builder.add_joint_revolute(
+                root,
+                child,
+                parent_xform=wp.transform((0.1, 0.0, 0.0), wp.quat_identity()),
+                axis=(0, 0, 1),
+                limit_ke=0.0,
+                limit_kd=0.0,
+            )
+        )
+        builder.add_articulation(joints)
+        return builder, _cloth_triangle(builder, (0.0, 0.0), 0.314), 0.31, None
+
+    def floating_self_tree():
+        builder, _ = two_branch_builder(root="free", tip="box", gap=2e-3)
+        for shape in range(builder.shape_count):
+            builder.shape_flags[shape] |= int(newton.ShapeFlags.COLLIDE_PARTICLES)
+        return builder, _cloth_triangle(builder, (0.1, 0.021), 0.016), 0.012, {}
+
+    for name, build in (("floating box", floating_box), ("floating self-collision tree", floating_self_tree)):
+        with test.subTest(scene=name):
+            builder, face, top, self_collision = build()
+            run = SolverMonolithic(
+                builder.finalize(device=device),
+                cloth_inputs=[
+                    SolverMonolithic.ClothInput(
+                        triangle_ids=(face,), bending=(0.01, 0.01), thickness=0.001, surface_density=1
+                    )
+                ],
+                friction_velocity_scale=0.01,
+                mass_mode="lumped",
+                contact_stiffness=1e5,
+                self_collision=self_collision,
+            )
+            state, control = run.create_state(dt=H), run.create_control()
+            lowest, root_force = np.inf, 0.0
+            for _ in range(120):
+                run.step(state, state, control, dt=H)
+                test.assertTrue(run.last_stats.converged, run.last_stats.failure_reason)
+                lowest = min(lowest, float(state.particle_q.numpy()[:, 2].min()))
+                root_force = max(root_force, float(np.abs(run.get_contact_forces(state).joint_force[:6]).max()))
+            # Measured: 0.74 mm below the box top at k = 1e5 (FP64 CPU), then the cloth rebounds.
+            test.assertGreater(lowest, top - 2e-3)
+            test.assertLess(lowest, top + 1e-3, "the cloth never reached the surface")
+            test.assertGreater(root_force, 0.0)
+
+
 def test_coexists_with_fixed_trees_and_rigid_bodies(test, device):
     """A floating tree, a fixed-base tree and a FREE rigid body step together; the rigid body falls freely."""
     labels = {}
@@ -386,6 +456,7 @@ for _test in (
     test_checkpoint_continuation,
     test_schema_versions,
     test_coexists_with_fixed_trees_and_rigid_bodies,
+    test_particle_contact_with_floating_trees,
     test_predicted_point_outside_domain_restarts_from_step_start,
     test_zero_gravity_conserves_linear_momentum,
     test_floating_chain_contact,

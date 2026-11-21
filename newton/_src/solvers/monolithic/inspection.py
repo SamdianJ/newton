@@ -131,7 +131,7 @@ _FIELDS = {
         "state",
         "joint_force",
         "joint",
-        "published contact generalized force per joint DoF; with self_collision it includes same-tree (A-self) contact on the DoFs not shared by the two bodies (their common ancestors' DoFs carry none)",
+        "published contact generalized force per joint DoF; with self_collision it includes same-tree (A-self) contact on the DoFs not shared by the two bodies (their common ancestors' DoFs carry none); a floating root's six rows are world-frame [force 3 at the root centre of mass, torque 3 about it] (the root unknowns are the world COM increment and the left rotation increment), unlike that root's joint_qd rows, which are in its parent joint frame",
         "state._monolithic_coupled.contact_joint_force",
         "force_valid == 1",
     ),

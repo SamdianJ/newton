@@ -549,6 +549,7 @@ class TestRunnerIdentity(unittest.TestCase):
 
     def test_floating_run_records_roots(self):
         """A floating-mount run records one saturation entry per root and saves the native root pose."""
+        import json  # noqa: PLC0415
         import tempfile  # noqa: PLC0415
         from pathlib import Path  # noqa: PLC0415
 
@@ -567,6 +568,11 @@ class TestRunnerIdentity(unittest.TestCase):
             self.assertEqual(main(argv), 2)
             _, _, frames = fc.load_run(out)
             self.assertEqual(frames["root_force_limited"].shape, (2, 1))
+            manifest = json.loads((out / "manifest.json").read_text())
+            self.assertEqual(manifest["source_files_changed_during_run"], [])
+            criteria = fc.evaluate(out, fhs.load_recipe(recipe))
+            self.assertEqual(len(criteria["diagnostics"]["root_force_limited_fraction"]), 1)
+            self.assertEqual(criteria["diagnostics"]["graph_captures"], 0)
             self.assertEqual(frames["root_torque_limited"].shape, (2, 1))
             final = np.load(out / "final_state.npz")
             self.assertEqual(final["floating_com"].shape, (1, 3))
@@ -948,6 +954,9 @@ class TestGateVerdict(unittest.TestCase):
         self.assertEqual(
             len(fc.acceptance_problems({**good, "git_status": " M x.py"}, recipe, gates_sha256=frozen_gates)), 1
         )
+        changed = {**good, "source_files_changed_during_run": ["newton/_src/solvers/monolithic/contact.py"]}
+        (problem,) = fc.acceptance_problems(changed, recipe, gates_sha256=frozen_gates)
+        self.assertIn("changed during the run", problem)
         negative = {**good, "arguments": {**good["arguments"], "self_collision": "off"}}
         self.assertEqual(fc.negative_problems(good, negative, recipe), [])
         # An omitted mount is the recipe's mount.

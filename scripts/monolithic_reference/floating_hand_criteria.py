@@ -368,6 +368,17 @@ def evaluate(run_dir, recipe, *, settle_s=0.05, grasp_window=500, stride=1):
             "max_abs": float(np.max(np.abs(values))),
             "all_zero": bool(np.all(values == 0)),
         }
+    # Diagnostics (no gate): drive saturation per root, active self pairs and graph captures.
+    diagnostics = {}
+    for name in ("root_force_limited", "root_torque_limited"):
+        if name in frames and frames[name].ndim == 2 and frames[name].shape[1]:
+            diagnostics[f"{name}_fraction"] = frames[name].mean(axis=0).astype(float).tolist()
+    if "self_active_pairs" in frames and np.max(frames["self_active_pairs"]) >= 0:
+        active = frames["self_active_pairs"]
+        diagnostics["self_active_pairs"] = {"max": int(active.max()), "mean": float(active.mean())}
+    if "graph_captures" in frames:
+        diagnostics["graph_captures"] = int(frames["graph_captures"][-1])
+    out["diagnostics"] = diagnostics
     out["solver"] = {
         name: {"mean": float(np.mean(frames[name])), "max": int(np.max(frames[name]))}
         for name in ("newton_iterations", "linear_iterations", "line_search_iterations", "regularization_retries")
@@ -564,6 +575,8 @@ def acceptance_problems(manifest, recipe, *, gates_sha256, evaluator=None):
         problems.append(f"device {args.get('device')!r} is not CUDA")
     if not args.get("use_cuda_graph"):
         problems.append("the production CUDA graph is off")
+    if manifest.get("source_files_changed_during_run"):
+        problems.append(f"source files changed during the run: {manifest['source_files_changed_during_run']}")
     if manifest.get("git_status") is None:
         problems.append("the manifest records no git status")
     elif manifest.get("git_status"):

@@ -564,6 +564,7 @@ def test_self_collision_capture(test, device):
             test.assertEqual(float(joint[0]), 0.0)
             test.assertGreater(np.abs(joint[1:]).max(), 0.0)
             test.assertIn("A-self", fields["contact_joint_force"]["meaning"])
+            test.assertIn("floating root's six rows are world-frame", fields["contact_joint_force"]["meaning"])
 
 
 def test_guards(test, device):
