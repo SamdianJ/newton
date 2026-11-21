@@ -475,10 +475,49 @@ SCENE_GATE_KEYS = frozenset(
 )
 
 
-def acceptance_problems(manifest, recipe):
-    """Why a run is not an acceptance run (gates: FP32 CUDA production graph, the recipe as frozen)."""
+# The frozen acceptance recipe of each E scene, and the frozen gates, in the repository.
+FROZEN_RECIPES = {
+    "E1a": "floating_hand_e1a_capsule_v1.json",
+    "E1b": "floating_hand_e1b_convex_v1.json",
+    "E2": "floating_chain_e2_v1.json",
+    "E3": "floating_hand_e3_fist_v1.json",
+}
+FROZEN_GATES = "floating_hand_gates_frozen_v1.json"
+_FIXTURES = "scripts/monolithic_reference/fixtures/"
+
+
+def committed_sha256(name, commit):
+    """sha256 of a fixture as committed at ``commit`` (None when it is not in that commit)."""
+    import hashlib  # noqa: PLC0415
+    import subprocess  # noqa: PLC0415
+    from pathlib import Path  # noqa: PLC0415
+
+    source = Path(__file__).resolve().parents[2]
+    try:
+        data = subprocess.run(
+            ["git", "show", f"{commit}:{_FIXTURES}{name}"], cwd=source, capture_output=True, check=True
+        ).stdout
+    except (subprocess.CalledProcessError, OSError):
+        return None
+    return hashlib.sha256(data).hexdigest()
+
+
+def acceptance_problems(manifest, recipe, *, gates_sha256=None):
+    """Why a run is not an acceptance run (gates: FP32 CUDA production graph, the recipe as frozen).
+
+    The recipe must be the committed frozen fixture of its scene at the run's source commit, and the
+    gates (``gates_sha256``, when judged) the committed frozen gates.
+    """
     args = manifest.get("arguments", {})
     problems = []
+    scene, commit = recipe.get("scene"), manifest.get("source_sha")
+    frozen = FROZEN_RECIPES.get(scene)
+    if frozen is None:
+        problems.append(f"scene {scene!r} has no frozen acceptance recipe")
+    elif manifest.get("recipe_sha256") != committed_sha256(frozen, commit):
+        problems.append(f"the recipe is not {frozen} as committed at {commit}")
+    if gates_sha256 is not None and gates_sha256 != committed_sha256(FROZEN_GATES, commit):
+        problems.append(f"the gates file is not {FROZEN_GATES} as committed at {commit}")
     if args.get("mount") not in (None, recipe.get("mount")):
         problems.append(f"mount {args.get('mount')!r} is not the recipe mount {recipe.get('mount')!r}")
     if args.get("self_collision") != "recipe":
@@ -491,15 +530,26 @@ def acceptance_problems(manifest, recipe):
         problems.append(f"device {args.get('device')!r} is not CUDA")
     if not args.get("use_cuda_graph"):
         problems.append("the production CUDA graph is off")
-    if manifest.get("git_status"):
+    if manifest.get("git_status") is None:
+        problems.append("the manifest records no git status")
+    elif manifest.get("git_status"):
         problems.append("the worktree had uncommitted changes")
     return problems
 
 
-def negative_problems(manifest, negative):
-    """Why a run is not this run's E3 negative control (same recipe and build, self-collision off)."""
-    a, b = manifest.get("arguments", {}), negative.get("arguments", {})
+def negative_problems(manifest, negative, recipe=None):
+    """Why a run is not this run's E3 negative control (same recipe and build, self-collision off).
+
+    An omitted mount means the recipe's mount.
+    """
+    a, b = dict(manifest.get("arguments", {})), dict(negative.get("arguments", {}))
+    default = (recipe or {}).get("mount")
+    for args in (a, b):
+        if args.get("mount") is None:
+            args["mount"] = default
     problems = []
+    if negative.get("git_status") is None or negative.get("git_status"):
+        problems.append("negative run worktree had uncommitted changes or no recorded git status")
     if b.get("self_collision") != "off":
         problems.append(f"negative run self_collision {b.get('self_collision')!r} is not 'off'")
     if negative.get("status") != "COMPLETE":
@@ -527,6 +577,9 @@ def gate_verdict(criteria, gates, scene, *, negative=None, negative_issues=(), c
     if scene not in gates["scenes"]:
         raise ValueError(f"No frozen gates for scene {scene!r}")
     common, own = gates["common"], gates["scenes"][scene]
+    unknown_common = set(common) - {"hard_failures_max", "stopped_fraction_max", "penetration_max_m"}
+    if unknown_common:
+        raise ValueError(f"Frozen common gates have keys gate_verdict does not judge: {sorted(unknown_common)}")
     unknown = set(own) - SCENE_GATE_KEYS
     if unknown:
         raise ValueError(f"Frozen gates for {scene} have keys gate_verdict does not judge: {sorted(unknown)}")
@@ -680,14 +733,19 @@ def main(argv=None):
         negative, issues = None, ()
         if args.negative is not None:
             negative = json.loads((args.negative / "criteria.json").read_text())
-            issues = negative_problems(manifest, json.loads((args.negative / "manifest.json").read_text()))
+            negative_manifest = json.loads((args.negative / "manifest.json").read_text())
+            issues = negative_problems(manifest, negative_manifest, recipe)
+            if negative.get("stride") != 1 or negative.get("source_sha") != negative_manifest.get("source_sha"):
+                issues = [*issues, "negative criteria are not a stride-1 evaluation of its own run"]
         verdict = gate_verdict(
             result,
             gates,
             recipe["scene"],
             negative=negative,
             negative_issues=issues,
-            configuration_issues=acceptance_problems(manifest, recipe),
+            configuration_issues=acceptance_problems(
+                manifest, recipe, gates_sha256=hashlib.sha256(args.gates.read_bytes()).hexdigest()
+            ),
         )
         run_args = manifest.get("arguments", {})
         verdict["run"] = {

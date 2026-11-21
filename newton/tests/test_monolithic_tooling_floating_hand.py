@@ -522,6 +522,8 @@ class TestRunnerIdentity(unittest.TestCase):
             self.assertEqual({c["name"]: c["result"] for c in verdict["checks"]}["run_complete"], "FAIL")
             self.assertEqual(verdict["run"]["source_sha"], manifest["source_sha"])
             self.assertIn("precision 'fp64' is not fp32 (FP64 runs are diagnostic)", verdict["configuration_issues"])
+            with self.assertRaisesRegex(ValueError, "--negative needs --gates"):
+                fc.main([str(out), "--negative", str(out)])
             # The run as its own negative control: PARTIAL, so its provenance fails.
             self.assertEqual(fc.main([str(out), "--gates", str(gates), "--negative", str(out)]), 1)
             checks = {c["name"]: c for c in json.loads((out / "verdict.json").read_text())["checks"]}
@@ -864,11 +866,19 @@ class TestGateVerdict(unittest.TestCase):
 
     def test_run_provenance(self):
         """acceptance_problems names every non-acceptance setting; negative_problems every mismatch."""
-        recipe = {"mount": "floating"}
+        import subprocess  # noqa: PLC0415
+        from pathlib import Path  # noqa: PLC0415
+
+        root = Path(__file__).resolve().parents[2]
+        head = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=root, text=True).strip()
+        recipe = {"mount": "floating", "scene": "E3"}
+        frozen_recipe = fc.committed_sha256(fc.FROZEN_RECIPES["E3"], head)
+        frozen_gates = fc.committed_sha256(fc.FROZEN_GATES, head)
+        self.assertIsNotNone(frozen_recipe)
         good = {
-            "source_sha": "a" * 40,
+            "source_sha": head,
             "git_status": "",
-            "recipe_sha256": "r",
+            "recipe_sha256": frozen_recipe,
             "status": "COMPLETE",
             "arguments": {
                 "mount": None,
@@ -879,7 +889,17 @@ class TestGateVerdict(unittest.TestCase):
                 "use_cuda_graph": True,
             },
         }
-        self.assertEqual(fc.acceptance_problems(good, recipe), [])
+        self.assertEqual(fc.acceptance_problems(good, recipe, gates_sha256=frozen_gates), [])
+        # A recipe or gates file other than the committed frozen one is not an acceptance basis.
+        (problem,) = fc.acceptance_problems({**good, "recipe_sha256": "0" * 64}, recipe)
+        self.assertIn("floating_hand_e3_fist_v1.json as committed", problem)
+        (problem,) = fc.acceptance_problems(good, recipe, gates_sha256="0" * 64)
+        self.assertIn("floating_hand_gates_frozen_v1.json as committed", problem)
+        (problem,) = fc.acceptance_problems(good, {**recipe, "scene": "B1"})
+        self.assertIn("no frozen acceptance recipe", problem)
+        self.assertIn(
+            "no git status", fc.acceptance_problems({k: v for k, v in good.items() if k != "git_status"}, recipe)[0]
+        )
         for change, word in (
             ({"mount": "wrist"}, "mount"),
             ({"self_collision": "off"}, "self_collision"),
@@ -893,16 +913,20 @@ class TestGateVerdict(unittest.TestCase):
                 self.assertIn(word, problem)
         self.assertEqual(len(fc.acceptance_problems({**good, "git_status": " M x.py"}, recipe)), 1)
         negative = {**good, "arguments": {**good["arguments"], "self_collision": "off"}}
-        self.assertEqual(fc.negative_problems(good, negative), [])
+        self.assertEqual(fc.negative_problems(good, negative, recipe), [])
+        # An omitted mount is the recipe's mount.
+        explicit = {**negative, "arguments": {**negative["arguments"], "mount": "floating"}}
+        self.assertEqual(fc.negative_problems(good, explicit, recipe), [])
         for change, word in (
             ({"recipe_sha256": "other"}, "recipe_sha256"),
             ({"source_sha": "b" * 40}, "source_sha"),
             ({"status": "PARTIAL"}, "status"),
             ({"arguments": {**negative["arguments"], "self_collision": "recipe"}}, "self_collision"),
             ({"arguments": {**negative["arguments"], "precision": "fp64"}}, "precision"),
+            ({"git_status": " M x.py"}, "uncommitted"),
         ):
             with self.subTest(word=word):
-                problems = fc.negative_problems(good, {**negative, **change})
+                problems = fc.negative_problems(good, {**negative, **change}, recipe)
                 self.assertEqual(len(problems), 1)
                 self.assertIn(word, problems[0])
         gates, measured = self.gates(), {"penetration_m": {"self": {"max": 0.02}}}
