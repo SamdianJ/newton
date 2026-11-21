@@ -186,13 +186,16 @@ def test_self_collision_diagnostics(test, device):
         seen.add(summary["active_pairs"])
     test.assertEqual(seen, {0, 1})
     # A floating hub publishes floating_root_saturation on every published step; the rollback drops it too.
-    tiny = make_solver(two_branch_tree(device, gap=0.0, rate=0.5, root="free"), contact_factor_capacity=3)
+    tiny = make_solver(two_branch_tree(device, gap=2e-3, rate=0.5, root="free"), contact_factor_capacity=3)
     state, control = tiny.create_state(dt=H), tiny.create_control()
+    published = 0
     for _ in range(60):
         tiny.step(state, state, control, dt=H)
         if tiny.last_stats.rolled_back:
             break
         test.assertIn("floating_root_saturation", tiny.last_stats.variational)
+        published += 1
+    test.assertGreater(published, 0, "the pool overflowed on the first step")
     test.assertTrue(tiny.last_stats.rolled_back, "the pool never overflowed")
     test.assertNotIn("self_collision", tiny.last_stats.variational)
     test.assertNotIn("floating_root_saturation", tiny.last_stats.variational)

@@ -520,9 +520,44 @@ class TestRunnerIdentity(unittest.TestCase):
             verdict = json.loads((out / "verdict.json").read_text())
             self.assertEqual(verdict["verdict"], "FAIL")
             self.assertEqual({c["name"]: c["result"] for c in verdict["checks"]}["run_complete"], "FAIL")
+            self.assertEqual(verdict["run"]["source_sha"], manifest["source_sha"])
+            self.assertIn("precision 'fp64' is not fp32 (FP64 runs are diagnostic)", verdict["configuration_issues"])
+            # The run as its own negative control: PARTIAL, so its provenance fails.
+            self.assertEqual(fc.main([str(out), "--gates", str(gates), "--negative", str(out)]), 1)
+            checks = {c["name"]: c for c in json.loads((out / "verdict.json").read_text())["checks"]}
+            self.assertEqual(checks["negative_control.provenance"]["result"], "FAIL")
+            self.assertIn(
+                "negative run status 'PARTIAL' is not COMPLETE", checks["negative_control.provenance"]["value"]
+            )
             edited.write_bytes(recipe.read_bytes() + b" ")
             with self.assertRaisesRegex(ValueError, "changed since the run"):
                 fc.main([str(out)])
+
+    def test_floating_run_records_roots(self):
+        """A floating-mount run records one saturation entry per root and saves the native root pose."""
+        import tempfile  # noqa: PLC0415
+        from pathlib import Path  # noqa: PLC0415
+
+        from scripts.monolithic_reference import floating_hand_scenes as fhs  # noqa: PLC0415
+        from scripts.monolithic_reference.run_floating_hand import main  # noqa: PLC0415
+
+        if not fhs.ALLEGRO.is_dir():
+            self.skipTest("Allegro asset not present")
+        recipe = (
+            Path(__file__).resolve().parents[2] / "scripts/monolithic_reference/fixtures/floating_hand_e3_fist_v1.json"
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / "run"
+            argv = ["E3", "--recipe", str(recipe), "--mount", "floating", "--self-collision", "off"]
+            argv += ["--device", "cpu", "--precision", "fp64", "--max-steps", "2", "--output", str(out)]
+            self.assertEqual(main(argv), 2)
+            _, _, frames = fc.load_run(out)
+            self.assertEqual(frames["root_force_limited"].shape, (2, 1))
+            self.assertEqual(frames["root_torque_limited"].shape, (2, 1))
+            final = np.load(out / "final_state.npz")
+            self.assertEqual(final["floating_com"].shape, (1, 3))
+            self.assertEqual(final["floating_rotation"].shape, (1, 4))
+            np.testing.assert_array_equal(final["joint_q"], frames["joint_q"][-1])
 
 
 class TestPinnedGeometry(unittest.TestCase):
@@ -772,6 +807,7 @@ class TestGateVerdict(unittest.TestCase):
         }
         grasp = {
             "window_steps": 500,
+            "table_pairs": 1,
             "window_complete": True,
             "weight_N": 0.981,
             "max_ground_force_N": 0.01,
@@ -779,19 +815,100 @@ class TestGateVerdict(unittest.TestCase):
             "object_min_edge_m": 0.04,
             "lift_ratio_min": 0.9,
         }
-        tracking = {"position_max_m": 0.001, "angle_max_rad": 0.01, "from_step": 50}
+        tracking = {"position_max_m": 0.001, "angle_max_rad": 0.01, "from_step": 50, "from_s": 0.05}
         ok = self.criteria(penetration_m=penetration, grasp=grasp, root_tracking=tracking)
         self.assertEqual(fc.gate_verdict(ok, gates, "E1a")["verdict"], "PASS")
         for change, name in (
             ({"weight_N": None}, "grasp.ground_force_N"),
+            ({"max_ground_force_N": 0.06}, "grasp.ground_force_N"),
+            ({"min_com_rise_m": 0.009}, "grasp.min_com_rise_m"),
             ({"window_complete": False}, "grasp.window_complete"),
+            ({"table_pairs": 0}, "grasp.table_pairs"),
             ({"lift_ratio_min": 0.5}, "grasp.lift_ratio"),
         ):
             with self.subTest(name=name):
                 bad = self.criteria(penetration_m=penetration, grasp={**grasp, **change}, root_tracking=tracking)
                 self.assertEqual(self.results(fc.gate_verdict(bad, gates, "E1a"))[name], "FAIL")
+        for change, name in (
+            ({"root_tracking": {**tracking, "position_max_m": 0.0051}}, "root_tracking.position_m"),
+            ({"root_tracking": {**tracking, "angle_max_rad": 0.04}}, "root_tracking.angle_rad"),
+            ({"root_tracking": {**tracking, "from_s": 0.051}}, "root_tracking.from_s"),
+            ({"penetration_m": {**penetration, "hand_object": {"max": 0.0021}}}, "penetration.hand_object"),
+            ({"penetration_m": {**penetration, "hand_table": "NOT_APPLICABLE"}}, "penetration.hand_table"),
+            ({"stopped_fraction": 0.011}, "stopped_fraction"),
+        ):
+            with self.subTest(name=name):
+                bad = self.criteria(
+                    **{"penetration_m": penetration, "grasp": grasp, "root_tracking": tracking, **change}
+                )
+                verdict = fc.gate_verdict(bad, gates, "E1a")
+                self.assertEqual(self.results(verdict)[name], "FAIL")
+                self.assertEqual([c["name"] for c in verdict["checks"]].count(name), 1)
+        # A value equal to its limit passes.
+        edge = self.criteria(
+            penetration_m={**penetration, "self": {"max": 0.0008}},
+            grasp={**grasp, "lift_ratio_min": 0.8},
+            root_tracking={**tracking, "position_max_m": 0.005},
+        )
+        self.assertEqual(fc.gate_verdict(edge, gates, "E1a")["verdict"], "PASS")
+        # Every gate passes, but a configuration issue makes the run diagnostic, not acceptance.
+        diagnostic = fc.gate_verdict(ok, gates, "E1a", configuration_issues=["precision 'fp64' is not fp32"])
+        self.assertEqual(diagnostic["verdict"], "DIAGNOSTIC")
         with self.assertRaisesRegex(ValueError, "No frozen gates"):
             fc.gate_verdict(ok, gates, "E9")
+        with self.assertRaisesRegex(ValueError, "has no negative control"):
+            fc.gate_verdict(ok, gates, "E1a", negative={"penetration_m": {}})
+        unknown = {**gates, "scenes": {**gates["scenes"], "E1a": {**gates["scenes"]["E1a"], "new_gate": 1}}}
+        with self.assertRaisesRegex(ValueError, "does not judge"):
+            fc.gate_verdict(ok, unknown, "E1a")
+
+    def test_run_provenance(self):
+        """acceptance_problems names every non-acceptance setting; negative_problems every mismatch."""
+        recipe = {"mount": "floating"}
+        good = {
+            "source_sha": "a" * 40,
+            "git_status": "",
+            "recipe_sha256": "r",
+            "status": "COMPLETE",
+            "arguments": {
+                "mount": None,
+                "self_collision": "recipe",
+                "contact_factor_capacity": None,
+                "precision": "fp32",
+                "device": "cuda:0",
+                "use_cuda_graph": True,
+            },
+        }
+        self.assertEqual(fc.acceptance_problems(good, recipe), [])
+        for change, word in (
+            ({"mount": "wrist"}, "mount"),
+            ({"self_collision": "off"}, "self_collision"),
+            ({"contact_factor_capacity": 1500000}, "contact_factor_capacity"),
+            ({"precision": "fp64"}, "precision"),
+            ({"device": "cpu"}, "device"),
+            ({"use_cuda_graph": False}, "graph"),
+        ):
+            with self.subTest(word=word):
+                (problem,) = fc.acceptance_problems({**good, "arguments": {**good["arguments"], **change}}, recipe)
+                self.assertIn(word, problem)
+        self.assertEqual(len(fc.acceptance_problems({**good, "git_status": " M x.py"}, recipe)), 1)
+        negative = {**good, "arguments": {**good["arguments"], "self_collision": "off"}}
+        self.assertEqual(fc.negative_problems(good, negative), [])
+        for change, word in (
+            ({"recipe_sha256": "other"}, "recipe_sha256"),
+            ({"source_sha": "b" * 40}, "source_sha"),
+            ({"status": "PARTIAL"}, "status"),
+            ({"arguments": {**negative["arguments"], "self_collision": "recipe"}}, "self_collision"),
+            ({"arguments": {**negative["arguments"], "precision": "fp64"}}, "precision"),
+        ):
+            with self.subTest(word=word):
+                problems = fc.negative_problems(good, {**negative, **change})
+                self.assertEqual(len(problems), 1)
+                self.assertIn(word, problems[0])
+        gates, measured = self.gates(), {"penetration_m": {"self": {"max": 0.02}}}
+        verdict = fc.gate_verdict(self.criteria(), gates, "E3", negative=measured, negative_issues=["source_sha"])
+        self.assertEqual(self.results(verdict)["negative_control.provenance"], "FAIL")
+        self.assertEqual(verdict["verdict"], "FAIL")
 
 
 class TestBenchmarkArguments(unittest.TestCase):

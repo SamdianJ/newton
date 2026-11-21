@@ -336,6 +336,7 @@ def evaluate(run_dir, recipe, *, settle_s=0.05, grasp_window=500, stride=1):
             "position_max_m": max(pos_err, default=0.0),
             "angle_max_rad": max(ang_err, default=0.0),
             "from_step": first,
+            "from_s": first * dt,
         }
     if obj is not None:
         z0 = body_q[0, obj, 2]
@@ -348,6 +349,8 @@ def evaluate(run_dir, recipe, *, settle_s=0.05, grasp_window=500, stride=1):
         rise = body_q[:, obj, 2] - z0
         out["grasp"] = {
             "window_steps": int(min(grasp_window, published)),
+            # Object-table pairs that feed the support force; none would read as zero support.
+            "table_pairs": len(table),
             "window_complete": published == manifest.get("planned_steps") and published >= grasp_window,
             "weight_N": weight,
             "max_ground_force_N": float(np.max(np.abs(support[window]))),
@@ -458,17 +461,77 @@ def missing_categories(criteria, gates, scene):
     return [name for name in gates["required_categories"].get(scene, []) if not isinstance(measured.get(name), dict)]
 
 
-def gate_verdict(criteria, gates, scene, *, negative=None):
+# Scene gate keys gate_verdict judges; any other key in the frozen file is an error, not a silent pass.
+SCENE_GATE_KEYS = frozenset(
+    {
+        "self_penetration_max_m",
+        "root_tracking",
+        "grasp",
+        "free_flight_momentum_drift_ratio_max",
+        "energy_gain_ratio_max",
+        "root_rows_contact_force_all_zero",
+        "negative_control",
+    }
+)
+
+
+def acceptance_problems(manifest, recipe):
+    """Why a run is not an acceptance run (gates: FP32 CUDA production graph, the recipe as frozen)."""
+    args = manifest.get("arguments", {})
+    problems = []
+    if args.get("mount") not in (None, recipe.get("mount")):
+        problems.append(f"mount {args.get('mount')!r} is not the recipe mount {recipe.get('mount')!r}")
+    if args.get("self_collision") != "recipe":
+        problems.append(f"self_collision {args.get('self_collision')!r} is not 'recipe'")
+    if args.get("contact_factor_capacity") is not None:
+        problems.append(f"contact_factor_capacity overridden to {args.get('contact_factor_capacity')}")
+    if args.get("precision") != "fp32":
+        problems.append(f"precision {args.get('precision')!r} is not fp32 (FP64 runs are diagnostic)")
+    if not str(args.get("device", "")).startswith("cuda"):
+        problems.append(f"device {args.get('device')!r} is not CUDA")
+    if not args.get("use_cuda_graph"):
+        problems.append("the production CUDA graph is off")
+    if manifest.get("git_status"):
+        problems.append("the worktree had uncommitted changes")
+    return problems
+
+
+def negative_problems(manifest, negative):
+    """Why a run is not this run's E3 negative control (same recipe and build, self-collision off)."""
+    a, b = manifest.get("arguments", {}), negative.get("arguments", {})
+    problems = []
+    if b.get("self_collision") != "off":
+        problems.append(f"negative run self_collision {b.get('self_collision')!r} is not 'off'")
+    if negative.get("status") != "COMPLETE":
+        problems.append(f"negative run status {negative.get('status')!r} is not COMPLETE")
+    for key in ("recipe_sha256", "source_sha"):
+        if negative.get(key) != manifest.get(key):
+            problems.append(f"negative run {key} differs")
+    for key in ("mount", "precision", "device", "use_cuda_graph", "contact_factor_capacity"):
+        if b.get(key) != a.get(key):
+            problems.append(f"negative run {key} {b.get(key)!r} differs from {a.get(key)!r}")
+    return problems
+
+
+def gate_verdict(criteria, gates, scene, *, negative=None, negative_issues=(), configuration_issues=()):
     """Judge one run's criteria against the frozen gates: every check PASS, FAIL or NOT_RUN.
 
-    A frozen hard gate whose value is missing or None is a FAIL, never skipped; required penetration
-    categories go through ``missing_categories``. ``negative`` is the E3 self-collision-off run's
-    criteria (the negative control), NOT_RUN when not given. The verdict is FAIL if any check fails,
-    NOT_RUN if any is not run, else PASS.
+    A frozen hard gate whose value or limit is missing or None is a FAIL, never skipped; required
+    penetration categories go through ``missing_categories``. ``negative`` is the E3
+    self-collision-off run's criteria (the negative control), NOT_RUN when not given and FAIL when
+    ``negative_issues`` (from ``negative_problems``) is not empty. The verdict is FAIL if any check
+    fails, NOT_RUN if any is not run, DIAGNOSTIC if every gate passes but ``configuration_issues``
+    (from ``acceptance_problems``) says the run is not an acceptance run, else PASS. The performance
+    budgets of the gates file are judged by the performance protocol, not here.
     """
     if scene not in gates["scenes"]:
         raise ValueError(f"No frozen gates for scene {scene!r}")
     common, own = gates["common"], gates["scenes"][scene]
+    unknown = set(own) - SCENE_GATE_KEYS
+    if unknown:
+        raise ValueError(f"Frozen gates for {scene} have keys gate_verdict does not judge: {sorted(unknown)}")
+    if negative is not None and "negative_control" not in own:
+        raise ValueError(f"Scene {scene} has no negative control; do not pass one")
     checks = []
 
     def check(name, value, limit, op):
@@ -502,13 +565,15 @@ def gate_verdict(criteria, gates, scene, *, negative=None):
     check("frames_checked", criteria.get("frames_checked"), published, "==")
     check("hard_failures", get("counts", "HARD_FAILURE"), common["hard_failures_max"], "<=")
     check("stopped_fraction", criteria.get("stopped_fraction"), common["stopped_fraction_max"], "<=")
-    for name in missing_categories(criteria, gates, scene):
-        check(f"penetration.{name}", None, common["penetration_max_m"].get(name), "<=")
+    missing = missing_categories(criteria, gates, scene)
+    for name in missing:
+        limit = own["self_penetration_max_m"] if name == "self" else common["penetration_max_m"].get(name)
+        check(f"penetration.{name}", None, limit, "<=")
     for name, limit in common["penetration_max_m"].items():
         measured = get("penetration_m", name)
         if isinstance(measured, dict):
             check(f"penetration.{name}", measured.get("max"), limit, "<=")
-    if "self_penetration_max_m" in own:
+    if "self_penetration_max_m" in own and "self" not in missing:
         self_value = get("penetration_m", "self")
         check(
             "penetration.self",
@@ -518,12 +583,15 @@ def gate_verdict(criteria, gates, scene, *, negative=None):
         )
     if "root_tracking" in own:
         tracking = own["root_tracking"]
+        from_s = get("root_tracking", "from_s")
+        check("root_tracking.from_s", None if from_s is None else round(from_s, 9), round(tracking["from_s"], 9), "==")
         check("root_tracking.position_m", get("root_tracking", "position_max_m"), tracking["position_max_m"], "<=")
         check("root_tracking.angle_rad", get("root_tracking", "angle_max_rad"), tracking["angle_max_rad"], "<=")
     if "grasp" in own:
         grasp = own["grasp"]
         check("grasp.window_complete", get("grasp", "window_complete"), True, "==")
         check("grasp.window_steps", get("grasp", "window_steps"), grasp["window_steps"], "==")
+        check("grasp.table_pairs", get("grasp", "table_pairs"), 1, ">=")
         weight = get("grasp", "weight_N")
         check(
             "grasp.ground_force_N",
@@ -559,9 +627,18 @@ def gate_verdict(criteria, gates, scene, *, negative=None):
         else:
             value = negative.get("penetration_m", {}).get("self")
             check("negative_control.self", value.get("max") if isinstance(value, dict) else None, limit, ">")
+            check("negative_control.provenance", list(negative_issues), [], "==")
     results = {item["result"] for item in checks}
     verdict = "FAIL" if "FAIL" in results else "NOT_RUN" if "NOT_RUN" in results else "PASS"
-    return {"scene": scene, "verdict": verdict, "checks": checks}
+    if verdict == "PASS" and configuration_issues:
+        verdict = "DIAGNOSTIC"
+    return {
+        "scene": scene,
+        "verdict": verdict,
+        "checks": checks,
+        "configuration_issues": list(configuration_issues),
+        "performance": "judged by the performance protocol, not by gate_verdict",
+    }
 
 
 def main(argv=None):
@@ -585,18 +662,43 @@ def main(argv=None):
     if digest != manifest["recipe_sha256"]:
         raise ValueError(f"{recipe_path} changed since the run (sha256 {digest}, run used {manifest['recipe_sha256']})")
     recipe = load_recipe(recipe_path)
-    result = evaluate(args.run_dir, recipe, stride=args.stride)
-    result["stride"] = args.stride
-    (args.run_dir / "criteria.json").write_text(json.dumps(result, indent=2) + "\n")
-    print(json.dumps(result, indent=2))
+    gates, settle = None, {}
     if args.gates is not None:
         gates = json.loads(args.gates.read_text())
         if gates.get("status") != "FROZEN":
             raise ValueError(f"{args.gates}: gates must be FROZEN, got {gates.get('status')!r}")
-        negative = None
+        tracking = gates["scenes"].get(recipe["scene"], {}).get("root_tracking")
+        if tracking is not None:
+            settle = {"settle_s": tracking["from_s"]}
+    elif args.negative is not None:
+        raise ValueError("--negative needs --gates")
+    result = evaluate(args.run_dir, recipe, stride=args.stride, **settle)
+    result["stride"] = args.stride
+    (args.run_dir / "criteria.json").write_text(json.dumps(result, indent=2) + "\n")
+    print(json.dumps(result, indent=2))
+    if gates is not None:
+        negative, issues = None, ()
         if args.negative is not None:
             negative = json.loads((args.negative / "criteria.json").read_text())
-        verdict = gate_verdict(result, gates, recipe["scene"], negative=negative)
+            issues = negative_problems(manifest, json.loads((args.negative / "manifest.json").read_text()))
+        verdict = gate_verdict(
+            result,
+            gates,
+            recipe["scene"],
+            negative=negative,
+            negative_issues=issues,
+            configuration_issues=acceptance_problems(manifest, recipe),
+        )
+        run_args = manifest.get("arguments", {})
+        verdict["run"] = {
+            "source_sha": manifest.get("source_sha"),
+            "git_status": manifest.get("git_status"),
+            "recipe_sha256": manifest.get("recipe_sha256"),
+            **{
+                k: run_args.get(k)
+                for k in ("mount", "self_collision", "contact_factor_capacity", "precision", "device", "use_cuda_graph")
+            },
+        }
         verdict["gates_sha256"] = hashlib.sha256(args.gates.read_bytes()).hexdigest()
         (args.run_dir / "verdict.json").write_text(json.dumps(verdict, indent=2) + "\n")
         print(json.dumps({"verdict": verdict["verdict"]}))

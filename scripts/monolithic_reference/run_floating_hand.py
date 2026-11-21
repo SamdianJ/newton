@@ -154,6 +154,7 @@ def main(argv=None):
     counts = dict.fromkeys(STATUS_CODE, 0)
     recorded, planned = 0, None
     stopped, frames, chunks, error = [], [], [], None
+    last = None
 
     def flush():
         if frames:
@@ -253,23 +254,17 @@ def main(argv=None):
                     ),
                 }
             )
+            history = scene.state._monolithic_coupled
+            last = {"step": np.int32(step), **{k: frames[-1][k] for k in ("body_q", "body_qd", "joint_q", "joint_qd")}}
+            if hasattr(history, "floating_com"):
+                last["floating_com"] = history.floating_com.numpy().copy()
+                last["floating_rotation"] = history.floating_rotation.numpy().copy()
             if len(frames) == CHUNK:
                 flush()
         flush()
-        if recorded:
-            # The final published state (K16: no full checkpoint, only the last state).
-            final = {
-                "step": np.int32(scene.steps - 1),
-                **{
-                    name: getattr(scene.state, name).numpy().copy()
-                    for name in ("body_q", "body_qd", "joint_q", "joint_qd")
-                },
-            }
-            history = scene.state._monolithic_coupled
-            if hasattr(history, "floating_com"):
-                final["floating_com"] = history.floating_com.numpy().copy()
-                final["floating_rotation"] = history.floating_rotation.numpy().copy()
-            np.savez_compressed(args.output / "final_state.npz", **final)
+        if last is not None:
+            # The last recorded (published) state (K16: no full checkpoint, only the last state).
+            np.savez_compressed(args.output / "final_state.npz", **last)
         manifest.update(
             rollout_seconds=time.perf_counter() - rollout,
             published_steps=recorded,
