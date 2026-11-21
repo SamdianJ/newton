@@ -526,8 +526,20 @@ class TestRunnerIdentity(unittest.TestCase):
                 fc.main([str(out), "--negative", str(out)])
             # The run as its own negative control: PARTIAL, so its provenance fails.
             self.assertEqual(fc.main([str(out), "--gates", str(gates), "--negative", str(out)]), 1)
-            checks = {c["name"]: c for c in json.loads((out / "verdict.json").read_text())["checks"]}
+            verdict = json.loads((out / "verdict.json").read_text())
+            checks = {c["name"]: c for c in verdict["checks"]}
             self.assertEqual(checks["negative_control.provenance"]["result"], "FAIL")
+            self.assertIn(
+                "negative criteria are not a complete stride-1",
+                " ".join(checks["negative_control.provenance"]["value"]),
+            )
+            self.assertEqual(set(verdict["evaluator"]), {"head", "git_status"})
+            # A modified copy of the gates that still says FROZEN is not the committed gates.
+            loose = Path(tmp) / "gates.json"
+            loose.write_text(gates.read_text().replace('"stopped_fraction_max": 0.01', '"stopped_fraction_max": 0.5'))
+            fc.main([str(out), "--gates", str(loose)])
+            issues = json.loads((out / "verdict.json").read_text())["configuration_issues"]
+            self.assertTrue(any("gates file is not" in issue for issue in issues), issues)
             self.assertIn(
                 "negative run status 'PARTIAL' is not COMPLETE", checks["negative_control.provenance"]["value"]
             )
@@ -863,6 +875,9 @@ class TestGateVerdict(unittest.TestCase):
         unknown = {**gates, "scenes": {**gates["scenes"], "E1a": {**gates["scenes"]["E1a"], "new_gate": 1}}}
         with self.assertRaisesRegex(ValueError, "does not judge"):
             fc.gate_verdict(ok, unknown, "E1a")
+        extra = {**gates, "common": {**gates["common"], "new_common": 1}}
+        with self.assertRaisesRegex(ValueError, "common gates have keys"):
+            fc.gate_verdict(ok, extra, "E1a")
 
     def test_run_provenance(self):
         """acceptance_problems names every non-acceptance setting; negative_problems every mismatch."""
@@ -889,16 +904,33 @@ class TestGateVerdict(unittest.TestCase):
                 "use_cuda_graph": True,
             },
         }
-        self.assertEqual(fc.acceptance_problems(good, recipe, gates_sha256=frozen_gates), [])
+        clean = {"head": head, "git_status": ""}
+        self.assertEqual(fc.acceptance_problems(good, recipe, gates_sha256=frozen_gates, evaluator=clean), [])
+        # The evaluator must be a clean checkout of the run's commit.
+        for evaluator, word in (
+            ({"head": "f" * 40, "git_status": ""}, "evaluator checkout is at"),
+            ({"head": head, "git_status": " M x.py"}, "evaluator checkout has uncommitted"),
+        ):
+            with self.subTest(word=word):
+                (problem,) = fc.acceptance_problems(good, recipe, gates_sha256=frozen_gates, evaluator=evaluator)
+                self.assertIn(word, problem)
+        # An unknown or malformed commit is named, not read as a mismatch.
+        (problem,) = fc.acceptance_problems({**good, "source_sha": "nonsense"}, recipe, gates_sha256=frozen_gates)
+        self.assertIn("not a 40-character commit id", problem)
+        (problem,) = fc.acceptance_problems({**good, "source_sha": "0" * 40}, recipe, gates_sha256=frozen_gates)
+        self.assertIn("cannot read", problem)
         # A recipe or gates file other than the committed frozen one is not an acceptance basis.
-        (problem,) = fc.acceptance_problems({**good, "recipe_sha256": "0" * 64}, recipe)
+        (problem,) = fc.acceptance_problems({**good, "recipe_sha256": "0" * 64}, recipe, gates_sha256=frozen_gates)
         self.assertIn("floating_hand_e3_fist_v1.json as committed", problem)
         (problem,) = fc.acceptance_problems(good, recipe, gates_sha256="0" * 64)
         self.assertIn("floating_hand_gates_frozen_v1.json as committed", problem)
-        (problem,) = fc.acceptance_problems(good, {**recipe, "scene": "B1"})
+        (problem,) = fc.acceptance_problems(good, {**recipe, "scene": "B1"}, gates_sha256=frozen_gates)
         self.assertIn("no frozen acceptance recipe", problem)
         self.assertIn(
-            "no git status", fc.acceptance_problems({k: v for k, v in good.items() if k != "git_status"}, recipe)[0]
+            "no git status",
+            fc.acceptance_problems(
+                {k: v for k, v in good.items() if k != "git_status"}, recipe, gates_sha256=frozen_gates
+            )[0],
         )
         for change, word in (
             ({"mount": "wrist"}, "mount"),
@@ -909,9 +941,13 @@ class TestGateVerdict(unittest.TestCase):
             ({"use_cuda_graph": False}, "graph"),
         ):
             with self.subTest(word=word):
-                (problem,) = fc.acceptance_problems({**good, "arguments": {**good["arguments"], **change}}, recipe)
+                (problem,) = fc.acceptance_problems(
+                    {**good, "arguments": {**good["arguments"], **change}}, recipe, gates_sha256=frozen_gates
+                )
                 self.assertIn(word, problem)
-        self.assertEqual(len(fc.acceptance_problems({**good, "git_status": " M x.py"}, recipe)), 1)
+        self.assertEqual(
+            len(fc.acceptance_problems({**good, "git_status": " M x.py"}, recipe, gates_sha256=frozen_gates)), 1
+        )
         negative = {**good, "arguments": {**good["arguments"], "self_collision": "off"}}
         self.assertEqual(fc.negative_problems(good, negative, recipe), [])
         # An omitted mount is the recipe's mount.

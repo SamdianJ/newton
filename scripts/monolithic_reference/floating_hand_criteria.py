@@ -486,38 +486,72 @@ FROZEN_GATES = "floating_hand_gates_frozen_v1.json"
 _FIXTURES = "scripts/monolithic_reference/fixtures/"
 
 
-def committed_sha256(name, commit):
-    """sha256 of a fixture as committed at ``commit`` (None when it is not in that commit)."""
-    import hashlib  # noqa: PLC0415
+def _git(*command):
     import subprocess  # noqa: PLC0415
     from pathlib import Path  # noqa: PLC0415
 
-    source = Path(__file__).resolve().parents[2]
+    return subprocess.run(
+        ["git", *command], cwd=Path(__file__).resolve().parents[2], capture_output=True, check=True
+    ).stdout
+
+
+def committed_fixture(name, commit):
+    """(sha256, JSON) of a fixture as committed at ``commit``; raises naming the commit and file."""
+    import hashlib  # noqa: PLC0415
+    import json  # noqa: PLC0415
+    import re  # noqa: PLC0415
+    import subprocess  # noqa: PLC0415
+
+    if not isinstance(commit, str) or not re.fullmatch(r"[0-9a-f]{40}", commit):
+        raise ValueError(f"source_sha {commit!r} is not a 40-character commit id")
     try:
-        data = subprocess.run(
-            ["git", "show", f"{commit}:{_FIXTURES}{name}"], cwd=source, capture_output=True, check=True
-        ).stdout
-    except (subprocess.CalledProcessError, OSError):
-        return None
-    return hashlib.sha256(data).hexdigest()
+        data = _git("show", f"{commit}:{_FIXTURES}{name}")
+    except (subprocess.CalledProcessError, OSError) as error:
+        raise ValueError(f"cannot read {_FIXTURES}{name} at {commit}: {error}") from error
+    return hashlib.sha256(data).hexdigest(), json.loads(data)
 
 
-def acceptance_problems(manifest, recipe, *, gates_sha256=None):
+def committed_sha256(name, commit):
+    return committed_fixture(name, commit)[0]
+
+
+def evaluator_identity():
+    """HEAD and git status of the checkout whose criteria code judges the run."""
+    return {
+        "head": _git("rev-parse", "HEAD").decode().strip(),
+        "git_status": _git("status", "--porcelain").decode(),
+    }
+
+
+def acceptance_problems(manifest, recipe, *, gates_sha256, evaluator=None):
     """Why a run is not an acceptance run (gates: FP32 CUDA production graph, the recipe as frozen).
 
-    The recipe must be the committed frozen fixture of its scene at the run's source commit, and the
-    gates (``gates_sha256``, when judged) the committed frozen gates.
+    The recipe must be the committed frozen fixture of its scene at the run's source commit (with
+    status FROZEN there), the gates (``gates_sha256``) the committed frozen gates, and the evaluator
+    (``evaluator``, from ``evaluator_identity``) a clean checkout of the run's commit.
     """
     args = manifest.get("arguments", {})
     problems = []
     scene, commit = recipe.get("scene"), manifest.get("source_sha")
     frozen = FROZEN_RECIPES.get(scene)
-    if frozen is None:
-        problems.append(f"scene {scene!r} has no frozen acceptance recipe")
-    elif manifest.get("recipe_sha256") != committed_sha256(frozen, commit):
-        problems.append(f"the recipe is not {frozen} as committed at {commit}")
-    if gates_sha256 is not None and gates_sha256 != committed_sha256(FROZEN_GATES, commit):
-        problems.append(f"the gates file is not {FROZEN_GATES} as committed at {commit}")
+    try:
+        if frozen is None:
+            problems.append(f"scene {scene!r} has no frozen acceptance recipe")
+        else:
+            digest, committed = committed_fixture(frozen, commit)
+            if manifest.get("recipe_sha256") != digest:
+                problems.append(f"the recipe is not {frozen} as committed at {commit}")
+            if committed.get("status") != "FROZEN":
+                problems.append(f"{frozen} at {commit} has status {committed.get('status')!r}, not FROZEN")
+        if gates_sha256 != committed_sha256(FROZEN_GATES, commit):
+            problems.append(f"the gates file is not {FROZEN_GATES} as committed at {commit}")
+    except ValueError as error:
+        problems.append(str(error))
+    if evaluator is not None:
+        if evaluator.get("head") != commit:
+            problems.append(f"the evaluator checkout is at {evaluator.get('head')}, not the run's {commit}")
+        if evaluator.get("git_status"):
+            problems.append("the evaluator checkout has uncommitted changes")
     if args.get("mount") not in (None, recipe.get("mount")):
         problems.append(f"mount {args.get('mount')!r} is not the recipe mount {recipe.get('mount')!r}")
     if args.get("self_collision") != "recipe":
@@ -730,13 +764,19 @@ def main(argv=None):
     (args.run_dir / "criteria.json").write_text(json.dumps(result, indent=2) + "\n")
     print(json.dumps(result, indent=2))
     if gates is not None:
+        evaluator = evaluator_identity()
         negative, issues = None, ()
         if args.negative is not None:
             negative = json.loads((args.negative / "criteria.json").read_text())
             negative_manifest = json.loads((args.negative / "manifest.json").read_text())
             issues = negative_problems(manifest, negative_manifest, recipe)
-            if negative.get("stride") != 1 or negative.get("source_sha") != negative_manifest.get("source_sha"):
-                issues = [*issues, "negative criteria are not a stride-1 evaluation of its own run"]
+            if (
+                negative.get("stride") != 1
+                or negative.get("source_sha") != negative_manifest.get("source_sha")
+                or negative.get("status") != "COMPLETE"
+                or negative.get("published_steps") != negative_manifest.get("published_steps")
+            ):
+                issues = [*issues, "negative criteria are not a complete stride-1 evaluation of its own run"]
         verdict = gate_verdict(
             result,
             gates,
@@ -744,7 +784,7 @@ def main(argv=None):
             negative=negative,
             negative_issues=issues,
             configuration_issues=acceptance_problems(
-                manifest, recipe, gates_sha256=hashlib.sha256(args.gates.read_bytes()).hexdigest()
+                manifest, recipe, gates_sha256=hashlib.sha256(args.gates.read_bytes()).hexdigest(), evaluator=evaluator
             ),
         )
         run_args = manifest.get("arguments", {})
@@ -758,6 +798,7 @@ def main(argv=None):
             },
         }
         verdict["gates_sha256"] = hashlib.sha256(args.gates.read_bytes()).hexdigest()
+        verdict["evaluator"] = evaluator
         (args.run_dir / "verdict.json").write_text(json.dumps(verdict, indent=2) + "\n")
         print(json.dumps({"verdict": verdict["verdict"]}))
         return 0 if verdict["verdict"] == "PASS" else 1
