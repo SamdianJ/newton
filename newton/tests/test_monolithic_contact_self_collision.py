@@ -174,7 +174,8 @@ def test_shared_columns_carry_no_self_force(test, device):
 
 def test_self_collision_diagnostics(test, device):
     """Stats.variational["self_collision"] counts the resolved pairs and the A-self pairs carrying force in
-    the published state; a rolled-back step (contact pool overflow) publishes neither diagnostic."""
+    the published state; a rolled-back step (contact pool overflow) publishes neither it nor
+    floating_root_saturation."""
     run = make_solver(two_branch_tree(device))
     state, control = run.create_state(dt=H), run.create_control()
     seen = set()
@@ -184,14 +185,17 @@ def test_self_collision_diagnostics(test, device):
         test.assertEqual(summary["pairs"], 1)
         seen.add(summary["active_pairs"])
     test.assertEqual(seen, {0, 1})
-    tiny = make_solver(two_branch_tree(device, gap=-0.0, rate=0.5), contact_factor_capacity=3)
-    state = tiny.create_state(dt=H)
+    # A floating hub publishes floating_root_saturation on every published step; the rollback drops it too.
+    tiny = make_solver(two_branch_tree(device, gap=0.0, rate=0.5, root="free"), contact_factor_capacity=3)
+    state, control = tiny.create_state(dt=H), tiny.create_control()
     for _ in range(60):
         tiny.step(state, state, control, dt=H)
         if tiny.last_stats.rolled_back:
             break
+        test.assertIn("floating_root_saturation", tiny.last_stats.variational)
     test.assertTrue(tiny.last_stats.rolled_back, "the pool never overflowed")
     test.assertNotIn("self_collision", tiny.last_stats.variational)
+    test.assertNotIn("floating_root_saturation", tiny.last_stats.variational)
     test.assertNotIn("actor_contact_pairs", tiny.last_stats.variational)
 
 

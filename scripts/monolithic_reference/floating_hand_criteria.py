@@ -458,6 +458,112 @@ def missing_categories(criteria, gates, scene):
     return [name for name in gates["required_categories"].get(scene, []) if not isinstance(measured.get(name), dict)]
 
 
+def gate_verdict(criteria, gates, scene, *, negative=None):
+    """Judge one run's criteria against the frozen gates: every check PASS, FAIL or NOT_RUN.
+
+    A frozen hard gate whose value is missing or None is a FAIL, never skipped; required penetration
+    categories go through ``missing_categories``. ``negative`` is the E3 self-collision-off run's
+    criteria (the negative control), NOT_RUN when not given. The verdict is FAIL if any check fails,
+    NOT_RUN if any is not run, else PASS.
+    """
+    if scene not in gates["scenes"]:
+        raise ValueError(f"No frozen gates for scene {scene!r}")
+    common, own = gates["common"], gates["scenes"][scene]
+    checks = []
+
+    def check(name, value, limit, op):
+        # A missing value or limit (e.g. no object weight) cannot pass.
+        if value is None or limit is None:
+            result = "FAIL"
+        elif op == "<=":
+            result = "PASS" if value <= limit else "FAIL"
+        elif op == ">=":
+            result = "PASS" if value >= limit else "FAIL"
+        elif op == ">":
+            result = "PASS" if value > limit else "FAIL"
+        elif op == "==":
+            result = "PASS" if value == limit else "FAIL"
+        else:
+            raise ValueError(f"Unknown gate comparison {op!r}")
+        checks.append({"name": name, "value": value, "limit": limit, "op": op, "result": result})
+
+    def get(*path):
+        value = criteria
+        for key in path:
+            if not isinstance(value, dict) or key not in value:
+                return None
+            value = value[key]
+        return value
+
+    published = criteria.get("published_steps")
+    check("run_complete", criteria.get("status"), "COMPLETE", "==")
+    check("published_steps", published, criteria.get("planned_steps"), "==")
+    check("stride", criteria.get("stride"), 1, "==")
+    check("frames_checked", criteria.get("frames_checked"), published, "==")
+    check("hard_failures", get("counts", "HARD_FAILURE"), common["hard_failures_max"], "<=")
+    check("stopped_fraction", criteria.get("stopped_fraction"), common["stopped_fraction_max"], "<=")
+    for name in missing_categories(criteria, gates, scene):
+        check(f"penetration.{name}", None, common["penetration_max_m"].get(name), "<=")
+    for name, limit in common["penetration_max_m"].items():
+        measured = get("penetration_m", name)
+        if isinstance(measured, dict):
+            check(f"penetration.{name}", measured.get("max"), limit, "<=")
+    if "self_penetration_max_m" in own:
+        self_value = get("penetration_m", "self")
+        check(
+            "penetration.self",
+            self_value.get("max") if isinstance(self_value, dict) else None,
+            own["self_penetration_max_m"],
+            "<=",
+        )
+    if "root_tracking" in own:
+        tracking = own["root_tracking"]
+        check("root_tracking.position_m", get("root_tracking", "position_max_m"), tracking["position_max_m"], "<=")
+        check("root_tracking.angle_rad", get("root_tracking", "angle_max_rad"), tracking["angle_max_rad"], "<=")
+    if "grasp" in own:
+        grasp = own["grasp"]
+        check("grasp.window_complete", get("grasp", "window_complete"), True, "==")
+        check("grasp.window_steps", get("grasp", "window_steps"), grasp["window_steps"], "==")
+        weight = get("grasp", "weight_N")
+        check(
+            "grasp.ground_force_N",
+            get("grasp", "max_ground_force_N"),
+            None if weight is None else grasp["ground_weight_fraction_max"] * weight,
+            "<=",
+        )
+        edge = get("grasp", "object_min_edge_m")
+        check(
+            "grasp.min_com_rise_m",
+            get("grasp", "min_com_rise_m"),
+            None if edge is None else grasp["com_rise_min_edge_fraction"] * edge,
+            ">=",
+        )
+        check("grasp.lift_ratio", get("grasp", "lift_ratio_min"), grasp["lift_ratio_min"], ">=")
+    if "free_flight_momentum_drift_ratio_max" in own:
+        check(
+            "chain.momentum_drift_ratio",
+            get("chain", "momentum_drift_ratio_max"),
+            own["free_flight_momentum_drift_ratio_max"],
+            "<=",
+        )
+    if "energy_gain_ratio_max" in own:
+        check("chain.energy_gain_ratio", get("chain", "energy_gain_ratio"), own["energy_gain_ratio_max"], "<=")
+    if own.get("root_rows_contact_force_all_zero"):
+        check("root_rows_contact_force_all_zero", get("root_rows_contact_force", "all_zero"), True, "==")
+    if "negative_control" in own:
+        limit = own["self_penetration_max_m"]
+        if negative is None:
+            checks.append(
+                {"name": "negative_control.self", "value": None, "limit": limit, "op": ">", "result": "NOT_RUN"}
+            )
+        else:
+            value = negative.get("penetration_m", {}).get("self")
+            check("negative_control.self", value.get("max") if isinstance(value, dict) else None, limit, ">")
+    results = {item["result"] for item in checks}
+    verdict = "FAIL" if "FAIL" in results else "NOT_RUN" if "NOT_RUN" in results else "PASS"
+    return {"scene": scene, "verdict": verdict, "checks": checks}
+
+
 def main(argv=None):
     import argparse  # noqa: PLC0415
     import json  # noqa: PLC0415
@@ -466,6 +572,8 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description="Evaluate one run_floating_hand output directory in FP64.")
     parser.add_argument("run_dir", type=Path)
     parser.add_argument("--stride", type=int, default=1, help="evaluate every n-th frame (diagnostic runs only)")
+    parser.add_argument("--gates", type=Path, help="frozen gates JSON: also write verdict.json (PASS/FAIL/NOT_RUN)")
+    parser.add_argument("--negative", type=Path, help="E3: the self-collision-off run directory (negative control)")
     args = parser.parse_args(argv)
     import hashlib  # noqa: PLC0415
 
@@ -481,7 +589,20 @@ def main(argv=None):
     result["stride"] = args.stride
     (args.run_dir / "criteria.json").write_text(json.dumps(result, indent=2) + "\n")
     print(json.dumps(result, indent=2))
+    if args.gates is not None:
+        gates = json.loads(args.gates.read_text())
+        if gates.get("status") != "FROZEN":
+            raise ValueError(f"{args.gates}: gates must be FROZEN, got {gates.get('status')!r}")
+        negative = None
+        if args.negative is not None:
+            negative = json.loads((args.negative / "criteria.json").read_text())
+        verdict = gate_verdict(result, gates, recipe["scene"], negative=negative)
+        verdict["gates_sha256"] = hashlib.sha256(args.gates.read_bytes()).hexdigest()
+        (args.run_dir / "verdict.json").write_text(json.dumps(verdict, indent=2) + "\n")
+        print(json.dumps({"verdict": verdict["verdict"]}))
+        return 0 if verdict["verdict"] == "PASS" else 1
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

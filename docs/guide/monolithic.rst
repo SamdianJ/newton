@@ -279,8 +279,8 @@ Floating bases, capsules and self-collision
 **Floating bases.** A FREE joint as the first joint of a tree with descendant
 links makes a floating tree. The root contributes six rows to the tree block: the
 world COM increment and the left rotation increment of the root body. The
-solver keeps the root's native world COM and rotation; ``joint_q`` and
-``body_q`` are synchronized FP32 displays, and the root velocity is the COM
+solver keeps the root's native world COM and rotation; ``joint_q`` (in the
+solver precision) and the FP32 ``body_q`` are synchronized from them, and the root velocity is the COM
 linear and angular velocity in the parent joint frame, as for FREE rigid actors.
 With ``JointTerms(implicit_pd=True)`` the root is driven to a 6D pose target: the
 translational and rotational errors each pass through a PD law whose energy is

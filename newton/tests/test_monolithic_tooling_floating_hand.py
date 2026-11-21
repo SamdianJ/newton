@@ -496,6 +496,14 @@ class TestRunnerIdentity(unittest.TestCase):
             self.assertFalse(np.array_equal(frames["joint_q"][0], frames["joint_q"][1]))
             self.assertFalse(np.array_equal(frames["body_q"][0], frames["body_q"][1]))
             self.assertEqual(frames["contact_pool_used"].shape, (2,))
+            # Wrist mount, self-collision off: no root saturation entries, no self pairs (-1).
+            self.assertEqual(frames["root_force_limited"].shape, (2, 0))
+            np.testing.assert_array_equal(frames["self_active_pairs"], [-1, -1])
+            # The final state is the last published frame.
+            final = np.load(out / "final_state.npz")
+            self.assertEqual(int(final["step"]), int(frames["step"][-1]))
+            np.testing.assert_array_equal(final["joint_q"], frames["joint_q"][-1])
+            np.testing.assert_array_equal(final["body_q"], frames["body_q"][-1])
             criteria = fc.evaluate(out, fhs.load_recipe(recipe))
             self.assertEqual(criteria["published_steps"], 2)
             self.assertEqual(criteria["penetration_m"]["hand_table"], "NOT_APPLICABLE")
@@ -506,6 +514,12 @@ class TestRunnerIdentity(unittest.TestCase):
             (out / "manifest.json").write_text(json.dumps(manifest))
             fc.main([str(out)])
             self.assertTrue((out / "criteria.json").is_file())
+            # With the frozen gates the CLI also writes a verdict; a partial run fails (exit status 1).
+            gates = recipe.parent / "floating_hand_gates_frozen_v1.json"
+            self.assertEqual(fc.main([str(out), "--gates", str(gates)]), 1)
+            verdict = json.loads((out / "verdict.json").read_text())
+            self.assertEqual(verdict["verdict"], "FAIL")
+            self.assertEqual({c["name"]: c["result"] for c in verdict["checks"]}["run_complete"], "FAIL")
             edited.write_bytes(recipe.read_bytes() + b" ")
             with self.assertRaisesRegex(ValueError, "changed since the run"):
                 fc.main([str(out)])
@@ -674,6 +688,110 @@ class TestFloatingHandControl(unittest.TestCase):
         root = scene.layout["root_joint"]
         pose, _ = scene.root_target(step)
         np.testing.assert_array_equal(targets[starts[root] : starts[root] + 7], pose.astype(np.float32))
+
+
+class TestGateVerdict(unittest.TestCase):
+    """gate_verdict judges criteria against the frozen gates; a missing hard-gate value is a FAIL."""
+
+    @staticmethod
+    def gates():
+        import json  # noqa: PLC0415
+        from pathlib import Path  # noqa: PLC0415
+
+        path = Path(__file__).resolve().parents[2] / "scripts/monolithic_reference/fixtures"
+        return json.loads((path / "floating_hand_gates_frozen_v1.json").read_text())
+
+    @staticmethod
+    def criteria(**overrides):
+        base = {
+            "status": "COMPLETE",
+            "planned_steps": 2000,
+            "published_steps": 2000,
+            "frames_checked": 2000,
+            "stride": 1,
+            "counts": {"CONVERGED": 2000, "STOPPED_ACCEPTED": 0, "HARD_FAILURE": 0},
+            "stopped_fraction": 0.0,
+            "penetration_m": {
+                "hand_object": "NOT_APPLICABLE",
+                "object_table": "NOT_APPLICABLE",
+                "hand_table": "NOT_APPLICABLE",
+                "dynamic_table": "NOT_APPLICABLE",
+                "self": {"max": 0.0005, "p99": 0.0004},
+            },
+            "root_rows_contact_force": {"max_abs": 0.0, "all_zero": True},
+        }
+        base.update(overrides)
+        return base
+
+    def results(self, verdict):
+        return {item["name"]: item["result"] for item in verdict["checks"]}
+
+    def test_e3(self):
+        gates, negative = self.gates(), {"penetration_m": {"self": {"max": 0.02}}}
+        verdict = fc.gate_verdict(self.criteria(), gates, "E3", negative=negative)
+        self.assertEqual(verdict["verdict"], "PASS", verdict)
+        self.assertEqual(fc.gate_verdict(self.criteria(), gates, "E3")["verdict"], "NOT_RUN")
+        weak = {"penetration_m": {"self": {"max": 0.0001}}}
+        self.assertEqual(
+            self.results(fc.gate_verdict(self.criteria(), gates, "E3", negative=weak))["negative_control.self"], "FAIL"
+        )
+        for overrides, name in (
+            ({"root_rows_contact_force": {"max_abs": 1e-9, "all_zero": False}}, "root_rows_contact_force_all_zero"),
+            ({"penetration_m": {"self": {"max": 0.00316, "p99": 0.0029}}}, "penetration.self"),
+            ({"penetration_m": {"self": "NOT_APPLICABLE"}}, "penetration.self"),
+            ({"stride": 2}, "stride"),
+            ({"status": "PARTIAL", "published_steps": 1200, "frames_checked": 1200}, "run_complete"),
+            ({"frames_checked": 1999}, "frames_checked"),
+            ({"counts": {"HARD_FAILURE": 1}}, "hard_failures"),
+        ):
+            with self.subTest(name=name, overrides=overrides):
+                verdict = fc.gate_verdict(self.criteria(**overrides), gates, "E3", negative=negative)
+                self.assertEqual(verdict["verdict"], "FAIL")
+                self.assertEqual(self.results(verdict)[name], "FAIL")
+
+    def test_e2_none_is_fail(self):
+        gates = self.gates()
+        chain = {"momentum_drift_ratio_max": 1e-5, "energy_gain_ratio": 1e-3}
+        penetration = {"dynamic_table": {"max": 0.001, "p99": 0.001}}
+        ok = self.criteria(chain=chain, penetration_m=penetration)
+        self.assertEqual(fc.gate_verdict(ok, gates, "E2")["verdict"], "PASS")
+        missing = self.criteria(chain={**chain, "energy_gain_ratio": None}, penetration_m=penetration)
+        verdict = fc.gate_verdict(missing, gates, "E2")
+        self.assertEqual(verdict["verdict"], "FAIL")
+        self.assertEqual(self.results(verdict)["chain.energy_gain_ratio"], "FAIL")
+        self.assertEqual(fc.gate_verdict(self.criteria(chain=chain), gates, "E2")["verdict"], "FAIL")
+
+    def test_e1a_grasp(self):
+        gates = self.gates()
+        measured = {"max": 0.001, "p99": 0.0008}
+        penetration = {
+            "hand_object": measured,
+            "object_table": measured,
+            "hand_table": measured,
+            "self": {"max": 0.0005, "p99": 0.0004},
+        }
+        grasp = {
+            "window_steps": 500,
+            "window_complete": True,
+            "weight_N": 0.981,
+            "max_ground_force_N": 0.01,
+            "min_com_rise_m": 0.09,
+            "object_min_edge_m": 0.04,
+            "lift_ratio_min": 0.9,
+        }
+        tracking = {"position_max_m": 0.001, "angle_max_rad": 0.01, "from_step": 50}
+        ok = self.criteria(penetration_m=penetration, grasp=grasp, root_tracking=tracking)
+        self.assertEqual(fc.gate_verdict(ok, gates, "E1a")["verdict"], "PASS")
+        for change, name in (
+            ({"weight_N": None}, "grasp.ground_force_N"),
+            ({"window_complete": False}, "grasp.window_complete"),
+            ({"lift_ratio_min": 0.5}, "grasp.lift_ratio"),
+        ):
+            with self.subTest(name=name):
+                bad = self.criteria(penetration_m=penetration, grasp={**grasp, **change}, root_tracking=tracking)
+                self.assertEqual(self.results(fc.gate_verdict(bad, gates, "E1a"))[name], "FAIL")
+        with self.assertRaisesRegex(ValueError, "No frozen gates"):
+            fc.gate_verdict(ok, gates, "E9")
 
 
 class TestBenchmarkArguments(unittest.TestCase):

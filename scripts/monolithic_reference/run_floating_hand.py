@@ -220,6 +220,7 @@ def main(argv=None):
                         pair_force[others.index(other)] += np.asarray(pair["world_wrench"][end][:3])
             target = scene.palm_target(step)
             pool = (stats.variational or {}).get("contact_pool", {})
+            saturation = (stats.variational or {}).get("floating_root_saturation", ())
             recorded += 1
             frames.append(
                 {
@@ -243,11 +244,32 @@ def main(argv=None):
                     # reported; not the step's peak. Overflow at any evaluation rolls the step back.
                     "contact_pool_used": np.int64(pool.get("used", -1)),
                     "contact_pool_triplets": np.int64(pool.get("triplet_count", -1)),
+                    # Published-step diagnostics: per floating root whether the drive's force / torque
+                    # limit clips it (empty without floating roots), and A-self pairs carrying force (-1 off).
+                    "root_force_limited": np.array([r["force_limited"] for r in saturation], dtype=bool),
+                    "root_torque_limited": np.array([r["torque_limited"] for r in saturation], dtype=bool),
+                    "self_active_pairs": np.int32(
+                        (stats.variational or {}).get("self_collision", {}).get("active_pairs", -1)
+                    ),
                 }
             )
             if len(frames) == CHUNK:
                 flush()
         flush()
+        if recorded:
+            # The final published state (K16: no full checkpoint, only the last state).
+            final = {
+                "step": np.int32(scene.steps - 1),
+                **{
+                    name: getattr(scene.state, name).numpy().copy()
+                    for name in ("body_q", "body_qd", "joint_q", "joint_qd")
+                },
+            }
+            history = scene.state._monolithic_coupled
+            if hasattr(history, "floating_com"):
+                final["floating_com"] = history.floating_com.numpy().copy()
+                final["floating_rotation"] = history.floating_rotation.numpy().copy()
+            np.savez_compressed(args.output / "final_state.npz", **final)
         manifest.update(
             rollout_seconds=time.perf_counter() - rollout,
             published_steps=recorded,
