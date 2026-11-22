@@ -6,6 +6,7 @@
 import math
 import os
 import tempfile
+import warnings
 from dataclasses import replace
 from pathlib import Path
 from types import MappingProxyType, SimpleNamespace
@@ -30,6 +31,7 @@ from .contact_forces import MonolithicContactForces
 from .contact_pipeline import _PooledContactObjective, _SpatialContactObjective
 from .contact_pipeline import _SpatialContactObjective as ContactObjective
 from .coupled_state import CoupledState
+from .floating import FloatingRoots
 from .iteration import iterate, measure
 from .joint_parameters import JointParameters
 from .linear import MonolithicLinearWorkspace
@@ -44,6 +46,7 @@ from .problem import _MonolithicProblem
 from .producers import build_producers
 from .rigid import RigidObjective
 from .segment_graph import _SegmentGraphCache
+from .self_collision import SelfCollision
 from .solver_types import (
     CableInput,
     ClothInput,
@@ -160,6 +163,26 @@ class SolverMonolithic(SolverBase):
     precision's rounding magnitude for that row. Rows are not pooled into a
     norm, so small local loads are resolved regardless of model size.
 
+    Experimental ``self_collision`` (default ``None``) enables contact between bodies of one
+    articulation tree: the Model's same-tree ``shape_contact_pairs`` with COLLIDE_SHAPES on both
+    shapes, minus ``{"exclude": [[body_label_a, body_label_b], ...]}`` (a label matches a body's full
+    label or its last path segment and must be unique). Box sources of these pairs are sampled on a
+    face grid of ``"box_sample_spacing"`` [m] (default 4e-3). Columns shared by both ends' common
+    ancestors are dropped, so the self-contact force on those joint rows is zero; on the other joint
+    rows ``contact_joint_force`` includes self-contact. Rest overlap (gap below -1e-6 m, FP64 on the
+    host) fails at construction, ``create_state`` and ``reset_state``; smaller gaps below
+    ``normal_smoothing`` are reported in ``self_collision_report``. The resolved pairs enter the
+    checkpoint identity. Self pairs add their samples to the static contact set; set
+    ``contact_factor_capacity`` so the contact pool stays bounded.
+
+    A FREE root with descendant links makes a floating tree (six root rows: world COM and left
+    rotation increments). With ``JointTerms(implicit_pd=True)`` and POSITION_VELOCITY root DoFs
+    whose gains and effort limits are equal within the linear and the angular triple, the root
+    follows a 6D pose target in the coordinate layout through a PD law truncated at the effort
+    limit; ``control.joint_f`` on the root is a world COM wrench. ``Stats.variational`` reports
+    ``floating_root_saturation`` (per root, whether the force and torque limits clip the drive)
+    and, with self-collision, ``self_collision`` (pairs and pairs carrying force).
+
     Stopped publication retains all physical/state gates except the residual goal.
     ``last_accepted`` requires an accepted Newton update; ``current_iterate``
     also permits the initialized predictor when no update was accepted. Neither
@@ -208,6 +231,7 @@ class SolverMonolithic(SolverBase):
         cloth_contact=None,
         cable_inputs=(),
         cable_contact=None,
+        self_collision=None,
     ):
         # Reject invalid options before building actors or allocating storage.
         options = MonolithicConfig(
@@ -340,6 +364,7 @@ class SolverMonolithic(SolverBase):
         global_rows = np.concatenate(global_rows).astype(np.int32)
         global_columns = np.concatenate(global_columns).astype(np.int32)
 
+        self._self_collision = SelfCollision(model, self._actors, self_collision, normal_smoothing=normal_smoothing)
         # Spatial contact over every Model-selected pair; it owns no rows.
         mapping = np.full(model.particle_count, -1, dtype=np.int32)
         dynamic = model.particle_inv_mass.numpy() > 0
@@ -363,11 +388,21 @@ class SolverMonolithic(SolverBase):
             alignment_smoothing=alignment_smoothing,
             dtype=self._dtype,
             _materials=self._materials,
+            _self_pairs=self._self_collision.pairs,
+            _self_box_spacing=self._self_collision.box_spacing,
             **({} if contact_candidate_capacity is None else {"candidate_capacity": contact_candidate_capacity}),
         )
         if not isinstance(self._contact, _PooledContactObjective):
             raise ValueError("Monolithic contact requires the pooled contact objective")
         capacity = 3 * self._contact.count if contact_factor_capacity is None else contact_factor_capacity
+        if self._self_collision.enabled and contact_factor_capacity is None:
+            warnings.warn(
+                f"self_collision adds {self._contact.count} static contact samples and contact_factor_capacity is "
+                "unset, so the contact pool and the linear workspace hold every sample; set contact_factor_capacity "
+                "to bound them (overflow rolls the step back)",
+                RuntimeWarning,
+                stacklevel=2,
+            )
         # A contact-free scene keeps an empty pool so every scene evaluates contact alike.
         self._contact_pool = True
         self._contact_spatial = isinstance(self._contact, _SpatialContactObjective)
@@ -439,6 +474,8 @@ class SolverMonolithic(SolverBase):
             self._coupled_config["cloth_contact"] = self._cloth_contact.identity
         if self._cable_contact is not None:
             self._coupled_config["cable_contact"] = self._cable_contact.identity
+        if self._self_collision.enabled:
+            self._coupled_config["self_collision"] = self._self_collision.identity
         self._kinematics = self._make_kinematics(
             model,
             extra_config={
@@ -449,6 +486,9 @@ class SolverMonolithic(SolverBase):
             },
         )
         SolverBase.__init__(self, model)
+        self._floating = FloatingRoots(self._kinematics, model, implicit_pd=self._joint_terms.implicit_pd)
+        self._self_collision.bind(self._articulation_actors)
+        self._self_collision.check()
         self._states = self._make_states()
         self._objective = ArticulationObjective(self._kinematics, parameters)
         self._joint_parameters_host = parameters.astype(self._numpy_dtype)
@@ -540,6 +580,7 @@ class SolverMonolithic(SolverBase):
             wp.zeros(theta_count, dtype=self._dtype, device=device),
             self._objective.step,
             *self._rigid.external_steps,
+            *self._floating.external_steps,
         )
         self._cable_torque = wp.zeros_like(self._cable_target_theta)
         fixed_theta = np.zeros(theta_count, dtype=np.int32)
@@ -551,6 +592,7 @@ class SolverMonolithic(SolverBase):
         self._material_control_status = wp.zeros(4, dtype=int, device=device)
         self._out_backup = None
         self._dt = None
+        self._floating.bind_rows(self._linear.q_rows.numpy())
         self._producers = build_producers(self)
         coordinate = [p for p in self._producers if p.scale_policy == "coordinate"]
         scale, mask = np.ones(n, dtype=self._numpy_dtype), np.zeros(n, dtype=np.int32)
@@ -561,8 +603,14 @@ class SolverMonolithic(SolverBase):
         self._coordinate_scale = wp.array(scale, dtype=self._dtype, device=device)
         self._coordinate_mask = wp.array(mask, dtype=wp.int32, device=device)
         k = self._kinematics
-        revolute = k.types.numpy()[k.dof_joint.numpy()] == int(JointType.REVOLUTE)
-        units = np.where(revolute, convergence.Unit.TORQUE, convergence.Unit.FORCE)
+        dof_types = k.types.numpy()[k.dof_joint.numpy()]
+        # Floating-root rows 3-5 are rotations, like revolute rows.
+        root_rotation = (dof_types == int(JointType.FREE)) & (
+            np.arange(k.count) - k.starts.numpy()[k.dof_joint.numpy()] >= 3
+        )
+        units = np.where(
+            (dof_types == int(JointType.REVOLUTE)) | root_rotation, convergence.Unit.TORQUE, convergence.Unit.FORCE
+        )
         self._criterion = convergence.Criterion(
             convergence.row_groups(layout, units), self._config.convergence, dtype=self._dtype, device=device
         )
@@ -677,6 +725,7 @@ class SolverMonolithic(SolverBase):
             self._materials,
             cloth_contact=self._cloth_contact is not None,
             cable_contact=self._cable_contact is not None,
+            floating=self._floating,
         )
 
     def get_cloth_contact_diagnostics(self, state):
@@ -734,13 +783,21 @@ class SolverMonolithic(SolverBase):
 
     def create_state(self, *, dt, source=None):
         """Initialize full integration history with positive dt, optionally from ordinary model state."""
-        return self._states.create(dt=dt, source=source)
+        state = self._states.create(dt=dt, source=source)
+        self._self_collision.check(state)
+        return state
+
+    @property
+    def self_collision_report(self):
+        """Self-collision pairs pre-compressed (0 <= gap < normal_smoothing) at the last overlap check."""
+        return tuple(dict(row) for row in self._self_collision.report)
 
     def reset_state(self, state, *, dt):
         """Reinitialize history at current coordinates and clear published contact forces."""
         backup = self._states._copy_unchecked(state)
         try:
             self._states.reset(state, dt=dt)
+            self._self_collision.check(state)
         except Exception:
             state.assign(backup)
             raise
@@ -871,6 +928,7 @@ class SolverMonolithic(SolverBase):
             if input_status[index]:
                 raise ValueError(f"Invalid articulation control: {name}")
         self._joint_terms.snapshot_targets(control)
+        self._floating.snapshot(control, obj)
         if input_status[3]:
             raise ValueError("Articulation requires finite forces and zero spatial torque")
         self._rigid.prepare(state_in, control, dt)
@@ -888,6 +946,7 @@ class SolverMonolithic(SolverBase):
             for increment in self._steps[id(state)]:
                 increment.zero_()
             self._steps[id(state)][4].fill_(wp.quat_identity(self._dtype))
+            self._steps[id(state)][6].fill_(wp.quat_identity(self._dtype))
         self._prepare_step(state_in, state_out, dt)
         self._step_generation += 1
         self._metrics = {
@@ -907,9 +966,10 @@ class SolverMonolithic(SolverBase):
         if cable_preconditioner is not None:
             cable_preconditioner.step_shift_max.zero_()
         k, obj = self._kinematics, self._objective
-        k.evaluate(k.gather_q(self._accepted))
+        k.evaluate_state(self._accepted)
         if not self._domain(self._accepted):
-            if self._rigid.count:
+            # Native poses (rigid actors, floating roots) fall back to the whole step start.
+            if self._rigid.count or self._floating.count:
                 self._accepted.assign(self._original)
                 for target, source in zip(
                     self._steps[id(self._accepted)], self._steps[id(self._original)], strict=True
@@ -936,6 +996,7 @@ class SolverMonolithic(SolverBase):
                 self._states.validate(self._accepted)
                 state_out.assign(self._accepted)
                 self._metrics.update(self._joint_force_metrics(state_out))
+                self._publish_diagnostics()
                 published = True
         except _StepFailure as error:
             status, failure = error.status, str(error)
@@ -945,7 +1006,8 @@ class SolverMonolithic(SolverBase):
         finally:
             if not published:
                 self._restore(state_out)
-                self._variational.pop("actor_contact_pairs", None)
+                for key in ("actor_contact_pairs", "floating_root_saturation", "self_collision"):
+                    self._variational.pop(key, None)
             if isinstance(self._variational.get("residual"), wp.array):
                 self._variational["residual"] = _diagnostic_snapshot(self._variational["residual"])
             if cable_preconditioner is not None:
@@ -1072,7 +1134,12 @@ class SolverMonolithic(SolverBase):
         """Refresh before the current E/r/B/baseline, including the budget's final check."""
         state, k = self._accepted, self._kinematics
         try:
-            self._contact.refresh(k.gather_q(state), state.particle_q, rigid_com=state._monolithic_coupled.rigid_com)
+            self._contact.refresh(
+                k.gather_q(state),
+                state.particle_q,
+                rigid_com=state._monolithic_coupled.rigid_com,
+                **({"roots": k.state_roots(state)} if k.floating_count else {}),
+            )
             if self._cloth_contact is not None:
                 self._cloth_contact.refresh(state.particle_q)
             if self._cable_contact is not None:
@@ -1084,6 +1151,7 @@ class SolverMonolithic(SolverBase):
         return (
             self._contact.conservative_energy
             and not self._rigid.has_torque
+            and not self._floating.has_torque
             and (self._cloth_contact is None or self._cloth_contact.mu == 0.0)
             # v1 cable contact is frictionless; keep the condition for when friction is added.
             and (self._cable_contact is None or self._cable_contact.mu == 0.0)
@@ -1149,8 +1217,15 @@ class SolverMonolithic(SolverBase):
         """Return the native rigid COM and rotation increments of a state."""
         steps = self._steps.get(id(state))
         if steps is not None:
-            return steps[3:]
+            return steps[3:5]
         return self._rigid.derive_steps(state)
+
+    def _root_steps(self, state):
+        """Return the native floating-root COM and rotation increments of a state."""
+        steps = self._steps.get(id(state))
+        if steps is not None:
+            return steps[5:7]
+        return self._floating.derive_steps(state)
 
     def _contact_steps(self, state):
         """Return the particle, link and rigid increments contact forms its slip from.
@@ -1318,6 +1393,22 @@ class SolverMonolithic(SolverBase):
 
     def _domain(self, state):
         return self._problem.domain(self._accepted, state)
+
+    def _publish_diagnostics(self):
+        """Step diagnostics of the published state, from the final evaluation (no per-iteration reads).
+
+        ``floating_root_saturation``: per floating root, whether the drive's force and torque limits
+        clip it (one read, only with floating roots). ``self_collision``: the resolved self pairs and
+        the A-self pairs carrying force, from ``actor_contact_pairs`` (no device read).
+        """
+        if self._floating.count:
+            self._variational["floating_root_saturation"] = self._floating.saturation_report()
+        if self._self_collision.enabled:
+            pairs = self._variational.get("actor_contact_pairs") or ()
+            active = sum(
+                1 for p in pairs if p.get("kind") == "A-self" and any(any(v) for v in p.get("world_wrench", ()))
+            )
+            self._variational["self_collision"] = {"pairs": len(self._self_collision.pairs), "active_pairs": active}
 
     def _joint_force_metrics(self, state):
         """Bind scalar force diagnostics to the successfully published state."""

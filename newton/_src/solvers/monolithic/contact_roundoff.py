@@ -52,6 +52,24 @@ def analytic_geometry_magnitude(geo: int, scale: Any, y: Any, point_magnitude: A
             return type(phi)(wp.inf), type(y)(wp.inf)
         _n, _length, gradient, alength = _unit_magnitude(y, point_magnitude)
         value = alength + wp.abs(phi)
+    elif geo == GeoType.CAPSULE:
+        # Sphere branch on y' = y - clamp(y_z) e_z. Inside the axial span y'_z is exactly zero;
+        # beyond it the subtraction of the half height rounds once.
+        axial = wp.clamp(y[2], -scale[1], scale[1])
+        offset = type(y)(y[0], y[1], y[2] - axial)
+        if wp.length(offset) == type(phi)(0.0):
+            return type(phi)(wp.inf), type(y)(wp.inf)
+        offset_magnitude = type(y)(point_magnitude[0], point_magnitude[1], type(phi)(0.0))
+        if axial != y[2]:
+            offset_magnitude[2] = point_magnitude[2] + wp.abs(y[2]) + wp.abs(scale[1])
+        elif wp.abs(y[2]) >= scale[1] - point_magnitude[2]:
+            # A point perturbation of size eps * point_magnitude can cross a cap seam and switch the
+            # gradient's axial part on; the value is unaffected (its axial normal component is zero).
+            # point_magnitude carries no eps, so this covers nearly every in-span point: a conservative
+            # axial bound of relative order one for capsules.
+            offset_magnitude[2] = point_magnitude[2]
+        _n, _length, gradient, alength = _unit_magnitude(offset, offset_magnitude)
+        value = alength + wp.abs(phi)
     elif geo == GeoType.BOX and ell > type(ell)(0.0):
         planes = wp.vector(type(ell)(0.0), length=6)
         z = wp.vector(type(ell)(0.0), length=6)

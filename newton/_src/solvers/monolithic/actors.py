@@ -106,14 +106,25 @@ def _checked_dof_count(counts):
     return total
 
 
+def _joint_name(model, joint):
+    labels = getattr(model, "joint_label", None)
+    label = labels[joint] if labels is not None and joint < len(labels) else None
+    return f"{label!r} (index {joint})" if label else f"index {joint}"
+
+
 def _joint_layout(model):
     """Validate Model prefixes before distinguishing scalar joints from FREE coordinates."""
     types = model.joint_type.numpy()
-    if (
-        types.shape != (model.joint_count,)
-        or not np.isin(types, [JointType.FIXED, JointType.REVOLUTE, JointType.PRISMATIC, JointType.FREE]).all()
-    ):
-        raise ValueError("Monolithic supports only FIXED, REVOLUTE, PRISMATIC and single-body FREE joints")
+    if types.shape != (model.joint_count,):
+        raise ValueError("Invalid joint_type")
+    supported = [JointType.FIXED, JointType.REVOLUTE, JointType.PRISMATIC, JointType.FREE]
+    unsupported = np.flatnonzero(~np.isin(types, supported))
+    if unsupported.size:
+        joint = int(unsupported[0])
+        raise ValueError(
+            f"Joint {_joint_name(model, joint)} is {JointType(int(types[joint])).name}; Monolithic supports only "
+            "FIXED, REVOLUTE and PRISMATIC joints, and FREE as a single rigid body or the world root of a tree"
+        )
     free, moving = types == JointType.FREE, types != JointType.FIXED
     widths = np.where(free, 7, moving.astype(int))
     speeds = np.where(free, 6, moving.astype(int))
@@ -256,6 +267,8 @@ class ActorTable:
                 seen.add(child)
                 owned.add(child)
                 bodies.append(child)
+                if types[j] == JointType.FREE and flags[child] == BodyFlags.KINEMATIC:
+                    raise ValueError(f"FREE joint {_joint_name(model, j)} moves a kinematic body; unsupported")
                 if types[j] != JointType.FIXED or parent in movable:
                     movable.add(child)
                 if flags[child] == BodyFlags.KINEMATIC and child in movable:
@@ -263,9 +276,14 @@ class ActorTable:
             if roots != 1:
                 raise ValueError("Each actor requires one world root")
             free = types[list(joints)] == JointType.FREE
-            if free.any() and (len(joints) != 1 or parents[start] != -1):
-                raise ValueError("FREE requires a single-body world-root actor; floating bases are unsupported")
-            kind = "rigid" if free.any() else "articulation"
+            if free[1:].any():
+                joint = joints[1 + int(np.flatnonzero(free[1:])[0])]
+                raise ValueError(
+                    f"FREE joint {_joint_name(model, joint)} is not the world root of its tree; only a tree's "
+                    "first joint, with world parent, may be FREE (one floating base per tree)"
+                )
+            # A FREE single body is a rigid actor; a FREE root with descendants is a floating-base tree.
+            kind = "rigid" if free[0] and len(joints) == 1 else "articulation"
             if kind == "rigid":
                 mass = float(masses[bodies[0]])
                 inertia = inertias[bodies[0]]
@@ -287,7 +305,7 @@ class ActorTable:
             actors.append(
                 Actor(
                     kind,
-                    int(start) if free.any() else source,
+                    int(start) if kind == "rigid" else source,
                     tuple(sorted(bodies)),
                     joints,
                     coords,

@@ -8,7 +8,7 @@ from pathlib import Path
 
 import numpy as np
 
-from .actor_contract_oracle import rigid_terms, rotation, sphere_samples
+from .actor_contract_oracle import capsule_samples, rigid_terms, rotation, sphere_samples
 from .articulation_oracle import skew, transform
 from .contact_oracle import local
 
@@ -116,10 +116,10 @@ def fixture_terms(model, actors, state, start, *, mu=0.5, width=1e-4):
         old = body_pose(int(bodies[target]), start) @ shape_local[target]
         rt = current[:3, :3]
         y, yn = rt.T @ (point - current[:3, 3]), old[:3, :3].T @ (old_point - old[:3, 3])
-        kind = {3: "sphere", 7: "box", 1: "plane"}.get(int(kinds[target]))
+        kind = {3: "sphere", 4: "capsule", 7: "box", 1: "plane"}.get(int(kinds[target]))
         # GeoType values are verified by the caller's analytic fixture.
         if kind is None:
-            raise ValueError("Oracle requires an analytic sphere/box/plane target")
+            raise ValueError("Oracle requires an analytic sphere/capsule/box/plane target")
         e, r, _, b = local(y, yn, kind, scales[target], offset=offset, stiffness=1e7 * weight, width=width, mu=mu)
         j = rt.T @ (js - point_jacobian(int(bodies[target]), point, state))
         energy += e
@@ -159,7 +159,13 @@ def fixture_terms(model, actors, state, start, *, mu=0.5, width=1e-4):
         for source, target in ((a, b), (b, a)):
             if bodies[source] < 0:
                 continue
-            ps, weights = box_face_samples(scales[source])
+            source_kind = int(kinds[source])
+            if source_kind == 4:
+                ps, weights = capsule_samples(float(scales[source][0]), float(scales[source][1]))
+            elif source_kind == 3:
+                ps, weights = sphere_samples(float(scales[source][0]))
+            else:
+                ps, weights = box_face_samples(scales[source])
             current = body_pose(int(bodies[source]), state) @ shape_local[source]
             old = body_pose(int(bodies[source]), start) @ shape_local[source]
             for p, weight in zip(ps, weights, strict=True):

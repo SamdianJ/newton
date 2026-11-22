@@ -12,13 +12,32 @@ from ...sim import JointTargetMode, JointType, Model
 from .actors import _joint_layout
 
 
+def _floating_roots(model: Model, joints) -> np.ndarray:
+    """Return the FREE world-root joints among ``joints``: the floating bases of their trees."""
+    joints = np.asarray(joints, dtype=np.int32)
+    types, parents = model.joint_type.numpy()[joints], model.joint_parent.numpy()[joints]
+    return joints[(types == JointType.FREE) & (parents == -1)]
+
+
 def _validate_joint_coordinate_layout(model: Model, actor=None) -> np.ndarray:
-    """Return mechanical DOF-to-Model coordinates, keeping FREE outside scalar terms."""
+    """Return mechanical DOF-to-Model coordinates, keeping FREE outside scalar terms.
+
+    Within an actor view a FREE world root is a floating base; its six DOFs have no scalar
+    coordinate and map to -1 (its pose is native solver state).
+    """
     types, starts, _, _ = _joint_layout(model)
     joints = np.arange(model.joint_count) if actor is None else np.asarray(actor.joint_indices, dtype=np.int32)
-    if not np.isin(types[joints], [JointType.FIXED, JointType.REVOLUTE, JointType.PRISMATIC]).all():
+    roots = set() if actor is None else set(_floating_roots(model, joints).tolist())
+    scalar = [j for j in joints if j not in roots]
+    if not np.isin(types[scalar], [JointType.FIXED, JointType.REVOLUTE, JointType.PRISMATIC]).all():
         raise ValueError("Monolithic supports only FIXED, REVOLUTE and PRISMATIC joints")
-    return starts[joints[types[joints] != JointType.FIXED]].astype(np.int32)
+    coordinates = []
+    for j in joints:
+        if j in roots:
+            coordinates.extend((-1,) * 6)
+        elif types[j] != JointType.FIXED:
+            coordinates.append(starts[j])
+    return np.asarray(coordinates, dtype=np.int32)
 
 
 @wp.kernel(enable_backward=False)
@@ -72,6 +91,12 @@ class JointParameters:
                 raise ValueError("Joint term switches must be bool")
         coordinates = _validate_joint_coordinate_layout(model, actor)
         dofs = tuple(range(model.joint_dof_count)) if actor is None else actor.dof_indices
+        # Rows of floating-root DOFs carry no scalar joint terms; their 6D drive is FloatingRoots'.
+        joints = () if actor is None else actor.joint_indices
+        roots = _floating_roots(model, joints)
+        qd_starts = model.joint_qd_start.numpy()
+        root_dofs = {d for j in roots for d in range(int(qd_starts[j]), int(qd_starts[j]) + 6)}
+        root_rows = np.array([d in root_dofs for d in dofs], dtype=bool)
         self.model, self.device, self.count = model, model.device, len(dofs)
         self.dof_map = wp.array(dofs, dtype=int, device=model.device)
         self.implicit_pd = implicit_pd
@@ -103,12 +128,31 @@ class JointParameters:
                 raise ValueError(f"{name} must be positive finite per-DOF values")
             return result
 
+        if root_rows.any():
+            names = (
+                "joint_limit_ke",
+                "joint_limit_kd",
+                "joint_friction",
+                "joint_armature",
+                "joint_damping",
+            )
+            for name in names:
+                values = getattr(model, name).numpy()[list(dofs)][root_rows]
+                if np.any(values != 0):
+                    raise ValueError(
+                        f"Floating root joint has nonzero {name}; a floating base supports only its 6D pose drive "
+                        "(target_ke/target_kd/effort_limit) and joint_f"
+                    )
         parameters = np.zeros((nq, 10), dtype=np.float32)
         parameters[:, 7] = scale(limit_width, limits, "limit_width")
         parameters[:, 9] = scale(friction_velocity_scale, friction, "friction_velocity_scale")
         driven = np.zeros(nq, dtype=np.int32)
         if implicit_pd:
             kp, kd = read("joint_target_ke"), read("joint_target_kd")
+            # A root's gains drive its 6D pose term (validated there, by joint name), never the scalar PD
+            # rows; joint_f on a driven root is a separate external wrench, so the duplicate-joint_f rule
+            # does not apply.
+            kp, kd = np.where(root_rows, 0, kp), np.where(root_rows, 0, kd)
             if np.any(kp < 0) or np.any(kd < 0):
                 raise ValueError("PD gains must be nonnegative")
             driven = ((kp > 0) | (kd > 0)).astype(np.int32)
@@ -120,6 +164,7 @@ class JointParameters:
             ):
                 raise ValueError("Invalid joint_target_mode")
             mode = modes.numpy()[list(dofs)]
+            mode[root_rows] = int(JointTargetMode.NONE)
             if np.any(mode[driven != 0] != int(JointTargetMode.POSITION_VELOCITY)) or np.any(
                 ~np.isin(
                     mode[driven == 0], [JointTargetMode.NONE, JointTargetMode.EFFORT, JointTargetMode.POSITION_VELOCITY]
@@ -153,7 +198,18 @@ class JointParameters:
             model.device,
         ):
             raise ValueError("Invalid joint_target_q_start")
-        target_ids = coordinates if actor is None else actor.target_indices
+        if actor is None:
+            target_ids = coordinates
+        else:
+            # One target per DOF: a scalar joint's own entry; a floating root's six DOFs read the first six
+            # entries of its pose target, which are validated for finiteness only.
+            types, target_starts = model.joint_type.numpy(), starts.numpy()
+            target_ids = []
+            for j in actor.joint_indices:
+                if j in set(roots.tolist()):
+                    target_ids.extend(int(target_starts[j]) + k for k in range(6))
+                elif types[j] != JointType.FIXED:
+                    target_ids.append(int(target_starts[j]))
         self.target_map = wp.array(target_ids, dtype=int, device=model.device)
         self.params = wp.array(parameters, dtype=float, device=model.device)
         self.driven = wp.array(driven, dtype=int, device=model.device)

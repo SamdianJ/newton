@@ -205,14 +205,23 @@ class TestActorLayout(unittest.TestCase):
                 _checked_dof_count(counts)
 
     def test_floating_tree(self):
-        """Reject a FREE root with descendant links until coupled floating-base dynamics exist."""
+        """A FREE root with descendant links is a floating-base articulation; a FREE below the root is not."""
         builder = newton.ModelBuilder()
         inertia = wp.diag(wp.vec3(0.01))
         first = builder.add_link(mass=1, inertia=inertia)
         second = builder.add_link(mass=1, inertia=inertia)
         builder.add_articulation([builder.add_joint_free(first), builder.add_joint_revolute(first, second)])
         add_contact_free_tet(builder)
-        with self.assertRaises(ValueError):
+        arm = ActorTable.from_model(builder.finalize(device="cpu")).actors[0]
+        self.assertEqual((arm.kind, arm.dof_count, arm.state_count), ("articulation", 7, 8))
+        builder = newton.ModelBuilder()
+        first = builder.add_link(mass=1, inertia=inertia)
+        second = builder.add_link(mass=1, inertia=inertia)
+        builder.add_articulation(
+            [builder.add_joint_revolute(-1, first), builder.add_joint_free(second, parent=first, label="inner")]
+        )
+        add_contact_free_tet(builder)
+        with self.assertRaisesRegex(ValueError, "FREE joint 'inner'.*not the world root"):
             ActorTable.from_model(builder.finalize(device="cpu"))
 
 

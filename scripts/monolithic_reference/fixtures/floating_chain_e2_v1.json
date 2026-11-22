@@ -1,0 +1,69 @@
+{
+  "schema": "p9d-floating-hand/v1",
+  "status": "FROZEN",
+  "approval": "Values confirmed by the user on 2026-11-16 (P9d PRD section 2 items 6-8 and the PR0 recipe questions); frozen at P9d PR0.",
+  "stage": "P9d PR0",
+  "scene": "E2",
+  "dt_s": 0.001,
+  "phases_s": {
+    "flight": 0.3,
+    "settle": 1.2
+  },
+  "gravity": [
+    0.0,
+    0.0,
+    -9.81
+  ],
+  "table": {
+    "kind": "plane",
+    "z": 0.0
+  },
+  "solver": {
+    "friction_velocity_scale": 0.01,
+    "contact_stiffness": 1000000000.0,
+    "friction_coefficient": 0.5,
+    "normal_smoothing": 0.0001,
+    "publish_policy": "current_iterate",
+    "alignment_policy": "mask",
+    "newton_max_iterations": 10,
+    "linear_max_iterations": 200
+  },
+  "joint_terms": {
+    "implicit_pd": true,
+    "limits": false
+  },
+  "chain": {
+    "position": [
+      0.0,
+      0.0,
+      0.3
+    ],
+    "quaternion_xyzw": [
+      0.0,
+      0.0,
+      0.0,
+      1.0
+    ],
+    "root_half_extents": [
+      0.03,
+      0.02,
+      0.015
+    ],
+    "link_radius": 0.01,
+    "link_half_height": 0.03,
+    "joint_gap_m": 0.002,
+    "density_kg_m3": 500.0,
+    "spring_ke": 2.0,
+    "linear_velocity": [
+      0.3,
+      0.0,
+      1.0
+    ],
+    "angular_velocity": [
+      2.0,
+      5.0,
+      1.0
+    ]
+  },
+  "contact_note": "contact_stiffness 1e9 for rigid objects (user decision 2026-11-16); production Franka uses 1e7 for its soft cube"
+}

@@ -1,0 +1,91 @@
+{
+  "version": 1,
+  "status": "FROZEN",
+  "approval": "Values confirmed by the user on 2026-11-16 (P9d PRD section 2 items 6-7 and section 6); frozen at P9d PR0 before any E2E run. Penetration follows physical_gates_v2 (5% of the smallest object dimension, 40 mm); self-penetration is 5% of the smallest Allegro link dimension (16.4 mm). Measured offline in FP64 by floating_hand_criteria on every published frame.",
+  "acceptance": "FP32 CUDA production graph; FP64 runs are diagnostic and reported separately",
+  "common": {
+    "hard_failures_max": 0,
+    "stopped_fraction_max": 0.01,
+    "penetration_max_m": {
+      "hand_object": 0.002,
+      "object_table": 0.002,
+      "hand_table": 0.002,
+      "dynamic_table": 0.002
+    }
+  },
+  "scenes": {
+    "E1a": {
+      "self_penetration_max_m": 0.0008,
+      "root_tracking": {
+        "from_s": 0.05,
+        "position_max_m": 0.005,
+        "angle_max_rad": 0.03490658503988659
+      },
+      "grasp": {
+        "window_steps": 500,
+        "ground_weight_fraction_max": 0.05,
+        "com_rise_min_edge_fraction": 0.25,
+        "lift_ratio_min": 0.8
+      }
+    },
+    "E1b": {
+      "self_penetration_max_m": 0.0008,
+      "root_tracking": {
+        "from_s": 0.05,
+        "position_max_m": 0.005,
+        "angle_max_rad": 0.03490658503988659
+      },
+      "grasp": {
+        "window_steps": 500,
+        "ground_weight_fraction_max": 0.05,
+        "com_rise_min_edge_fraction": 0.25,
+        "lift_ratio_min": 0.8
+      }
+    },
+    "E2": {
+      "free_flight_momentum_drift_ratio_max": 0.001,
+      "energy_gain_ratio_max": 0.01
+    },
+    "E3": {
+      "self_penetration_max_m": 0.0008,
+      "root_rows_contact_force_all_zero": true,
+      "negative_control": "the same recipe with --self-collision off must exceed self_penetration_max_m"
+    }
+  },
+  "performance": {
+    "self_collision_off_step_median_increase_max": 0.1,
+    "metric": "median solver.step time per step on floating_hand_fixed_grasp_box_v1.json, floating root versus 6-joint wrist (user 2026-11-16, P9d plan K17); 0- and 1-Newton step medians and Newton/PCG counts reported separately",
+    "self_collision_on": {
+      "inactive_step_median_increase_max": 0.45,
+      "active_step_median_increase_max": 1.4,
+      "metric": "median solver.step time per step, floating mount, self-collision on (E3 recipe block) versus off, both with contact_factor_capacity 600000; inactive: floating_hand_fixed_grasp_box_v1.json window [2600, 2800) (no self pair active); active: floating_hand_fixed_fist_self_v1.json window [1100, 1300) (self contact on every step; off is the no-contact floor)",
+      "measured": "P9d PR4 (K5): inactive +36.0% at 2c65c212, active +118% at e5803d3c (FP32 CUDA graph, 6 off + 5 on samples each)"
+    }
+  },
+  "required_categories": {
+    "note": "Penetration categories that must carry a measured value; NOT_APPLICABLE in any of them is a FAIL (user approval 2026-11-16, P9d PR0 review round 2).",
+    "E1a": [
+      "hand_object",
+      "object_table",
+      "hand_table",
+      "self"
+    ],
+    "E1b": [
+      "hand_object",
+      "object_table",
+      "hand_table",
+      "self"
+    ],
+    "E2": [
+      "dynamic_table"
+    ],
+    "E3": [
+      "self"
+    ]
+  },
+  "amendments": [
+    "2026-11-16 (K17): performance key renamed to self_collision_off_step_median_increase_max with its metric; value 0.10 unchanged.",
+    "2026-11-16 (PR0 review round 2, user approved): common.penetration_max_m.dynamic_table = 0.002 m (E2 ground contact had no category); required_categories added. No existing value changed.",
+    "2026-11-21 (K5, user approved after the PR4 measurement): performance.self_collision_on set: inactive self pairs <= +0.45, active self contact <= +1.40 (measured +36.0% and +118% with margin). No existing value changed."
+  ]
+}

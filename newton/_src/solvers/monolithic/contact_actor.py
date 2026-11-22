@@ -15,7 +15,7 @@ from .contact import _failure
 from .contact_geometry import _shape64, _shape_hessian
 from .contact_roundoff import _abs_vector, analytic_geometry_magnitude, mesh_geometry_magnitude
 from .contact_smoothing import box_field
-from .rigid import _rotation_step
+from .rigid_pose import _rotation_step
 from .smooth_sdf import smooth_query
 
 
@@ -277,7 +277,8 @@ def _actor_geometry(
     if types[target] == GeoType.BOX and box_smoothing > type(box_smoothing)(0.0):
         d, g, hessian = box_field(scales[target], y, box_smoothing)
     out.uncertified[key] = 0
-    if types[target] == GeoType.MESH and smooth_table.shape[0] > 0:
+    mesh = types[target] == GeoType.MESH or types[target] == GeoType.CONVEX_MESH
+    if mesh and smooth_table.shape[0] > 0:
         index = sdf_indices[target]
         field = smooth_table[index]
         query = y
@@ -317,7 +318,7 @@ def _actor_geometry(
         if incremental:
             point_magnitude = _abs_vector(start_y[key]) + slip_magnitude + _abs_vector(y)
         ad, ag = analytic_geometry_magnitude(types[target], scales[target], y, point_magnitude, d, g, box_smoothing)
-        if types[target] == GeoType.MESH and smooth_table.shape[0] > 0:
+        if mesh and smooth_table.shape[0] > 0:
             index = sdf_indices[target]
             field_point, field_magnitude = y, point_magnitude
             if not table[index].scale_baked:
@@ -378,7 +379,7 @@ def _actor_geometry(
 def _validate_actor_targets(contact, samples):
     """Apply the actor target SDF contract before either storage path is allocated."""
     for shape in samples.targets_used:
-        if contact.values["shape_type"][shape] == GeoType.MESH:
+        if contact.values["shape_type"][shape] in (GeoType.MESH, GeoType.CONVEX_MESH):
             index = int(contact.values["_shape_sdf_index"][shape])
             if (
                 contact.model.device.is_cpu

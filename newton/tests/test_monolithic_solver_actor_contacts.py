@@ -24,7 +24,7 @@ from newton.tests.unittest_utils import add_function_test, get_test_devices
 CASE = Path(__file__).resolve().parents[2] / "scripts/monolithic_reference/fixtures/actor_contact_short_v2.json"
 
 
-def contact_scene(device, kind="chain", *, before=False, mesh=False):
+def contact_scene(device, kind="chain", *, before=False, mesh=False, capsule=False):
     """Construct supported A+R+T inputs with explicitly enabled pair-specific collision."""
     case = json.loads(CASE.read_text())
     builder = newton.ModelBuilder(gravity=case["gravity"])
@@ -38,7 +38,17 @@ def contact_scene(device, kind="chain", *, before=False, mesh=False):
 
     def add_shape(body, name, *, particles=False):
         cfg = builder.ShapeConfig(density=0, margin=case["shape_margin"], has_particle_collision=particles)
-        if mesh and name == "rigid_0":
+        if capsule and name == "rigid_0":
+            # Same x extent as the box (radius = half width), axis along y, so the preloads are unchanged.
+            radius = dimensions[0] / 2
+            shapes[name] = builder.add_shape_capsule(
+                body,
+                xform=wp.transform((0.0, 0.0, 0.0), wp.quat_from_axis_angle(wp.vec3(1.0, 0.0, 0.0), -np.pi / 2)),
+                radius=radius,
+                half_height=dimensions[1] / 2 - radius,
+                cfg=cfg,
+            )
+        elif mesh and name == "rigid_0":
             source = newton.Mesh.create_box(*dimensions / 2, compute_inertia=False)
             if wp.get_device(device).is_cuda:
                 source.build_sdf(

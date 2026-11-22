@@ -81,14 +81,28 @@ def _mesh64(sdf: TextureSDFData, point: Any):
 
 @wp.func
 def _shape64(geo: int, scale: Any, point: Any, index: int, table: wp.array[TextureSDFData]):
-    value = point[2]
-    gradient = type(point)(0.0, 0.0, 1.0)
-    if geo == GeoType.SPHERE:
+    # A type without a branch is NaN, so a loaded sample fails as NONFINITE
+    # instead of silently acting as another shape.
+    value = type(point[0])(wp.nan)
+    gradient = type(point)(type(point[0])(wp.nan))
+    if geo == GeoType.PLANE:
+        value = point[2]
+        gradient = type(point)(0.0, 0.0, 1.0)
+    elif geo == GeoType.SPHERE:
         length = wp.length(point)
         value = length - scale[0]
         gradient = type(point)(0.0)
         if length > type(point[0])(0.0):
             gradient = point / length
+    elif geo == GeoType.CAPSULE:
+        # Distance to the segment z in [-h, h] (scale = radius, half_height), minus the radius.
+        axial = wp.clamp(point[2], -scale[1], scale[1])
+        offset = type(point)(point[0], point[1], point[2] - axial)
+        length = wp.length(offset)
+        value = length - scale[0]
+        gradient = type(point)(0.0)
+        if length > type(point[0])(0.0):
+            gradient = offset / length
     elif geo == GeoType.BOX:
         d = type(point)(wp.abs(point[0]), wp.abs(point[1]), wp.abs(point[2])) - scale
         outside = type(point)(
@@ -109,7 +123,7 @@ def _shape64(geo: int, scale: Any, point: Any, index: int, table: wp.array[Textu
         for a in range(3):
             if point[a] < type(point[0])(0.0):
                 gradient[a] = -gradient[a]
-    elif geo == GeoType.MESH:
+    elif geo == GeoType.MESH or geo == GeoType.CONVEX_MESH:
         sdf = table[index]
         query = point
         if not sdf.scale_baked:
@@ -126,15 +140,34 @@ def _shape_hessian(geo: int, scale: Any, point: Any):
 
     Planes, BOX faces and the BOX interior are flat. A texture SDF is
     piecewise trilinear and gets no curvature here; smooth fields supply their
-    own Hessian.
+    own Hessian. A type without a branch returns NaN, like ``_shape64``,
+    instead of silently acting as a flat shape.
     """
-    hessian = wp.matrix(type(point[0])(0.0), shape=(3, 3))
-    if geo == GeoType.SPHERE:
+    zero = type(point[0])(0.0)
+    hessian = wp.matrix(type(point[0])(wp.nan), shape=(3, 3))
+    if geo == GeoType.PLANE or geo == GeoType.MESH or geo == GeoType.CONVEX_MESH:
+        hessian = wp.matrix(zero, shape=(3, 3))
+    elif geo == GeoType.CAPSULE:
+        # Beside the segment the field is a cylinder (no curvature along z); beyond a cap, a sphere.
+        # At |z| = h the cap's one-sided limit applies, so a capsule of zero half height is a sphere.
+        hessian = wp.matrix(zero, shape=(3, 3))
+        axial = wp.clamp(point[2], -scale[1], scale[1])
+        offset = type(point)(point[0], point[1], point[2] - axial)
+        length = wp.length(offset)
+        if length > zero:
+            unit = offset / length
+            mask = wp.identity(n=3, dtype=type(point[0]))
+            if wp.abs(point[2]) < scale[1]:
+                mask[2, 2] = zero
+            hessian = (mask - wp.outer(unit, unit)) / length
+    elif geo == GeoType.SPHERE:
+        hessian = wp.matrix(zero, shape=(3, 3))
         length = wp.length(point)
         if length > type(point[0])(0.0):
             unit = point / length
             hessian = (wp.identity(n=3, dtype=type(point[0])) - wp.outer(unit, unit)) / length
     elif geo == GeoType.BOX:
+        hessian = wp.matrix(zero, shape=(3, 3))
         d = type(point)(wp.abs(point[0]), wp.abs(point[1]), wp.abs(point[2])) - scale
         outside = type(point)(
             wp.max(d[0], type(point[0])(0.0)), wp.max(d[1], type(point[0])(0.0)), wp.max(d[2], type(point[0])(0.0))

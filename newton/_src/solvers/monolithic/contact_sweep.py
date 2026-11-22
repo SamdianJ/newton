@@ -53,6 +53,12 @@ def _ancestor_displacement(
     radii: wp.array[wp.float64],
     q0: wp.array[Any],
     q1: wp.array[Any],
+    joint_floating: wp.array[int],
+    com_length: wp.array[wp.float64],
+    root_com0: wp.array[Any],
+    root_rotation0: wp.array[Any],
+    root_com1: wp.array[Any],
+    root_rotation1: wp.array[Any],
     displacement: wp.array[wp.float64],
     numerical: wp.array[wp.float64],
     unit_roundoff: wp.float64,
@@ -85,6 +91,49 @@ def _ancestor_displacement(
         # factor-two propagation allowance through quaternion normalization.
         operations = _sum_upper(_product_upper(wp.float64(2.0), operations), wp.float64(512.0))
         kind = types[joint]
+        if kind == JointType.FREE:
+            # Floating root: points move by the COM step plus a rotation about the COM, whose
+            # chord is <= min(theta, 2) * rho with rho bounding the points about the root COM.
+            f = joint_floating[joint]
+            if f < 0 or f >= root_com0.shape[0]:
+                valid = False
+                break
+            rho = _sum_upper(tail, com_length[joint])
+            c0, c1 = root_com0[f], root_com1[f]
+            r0, r1 = root_rotation0[f], root_rotation1[f]
+            step2, reach2 = wp.float64(0.0), wp.float64(0.0)
+            for k in range(3):
+                d = wp.float64(c1[k]) - wp.float64(c0[k])
+                step2 = _sum_upper(step2, _product_upper(d, d))
+                reach2 = _sum_upper(
+                    reach2,
+                    wp.max(
+                        _product_upper(wp.float64(c0[k]), wp.float64(c0[k])),
+                        _product_upper(wp.float64(c1[k]), wp.float64(c1[k])),
+                    ),
+                )
+            # Relative rotation r1 r0^-1 of unit quaternions, angle 2 atan2(|v|, |w|).
+            w0 = wp.float64(r0[3])
+            w1 = wp.float64(r1[3])
+            v0 = wp.vec3d(wp.float64(r0[0]), wp.float64(r0[1]), wp.float64(r0[2]))
+            v1 = wp.vec3d(wp.float64(r1[0]), wp.float64(r1[1]), wp.float64(r1[2]))
+            rw = w1 * w0 + wp.dot(v1, v0)
+            rv = w0 * v1 - w1 * v0 - wp.cross(v1, v0)
+            # A few ulps of the FP64 composition and atan2, rounded outward.
+            theta = _sum_upper(
+                _product_upper(wp.float64(2.0), wp.atan2(wp.length(rv), wp.abs(rw))), wp.float64(64.0) * unit_roundoff
+            )
+            if not wp.isfinite(step2 + reach2 + theta) or not wp.isfinite(rho):
+                valid = False
+                break
+            distance = _sum_upper(
+                distance, _sum_upper(_next_upper(wp.sqrt(step2)), _product_upper(wp.min(theta, wp.float64(2.0)), rho))
+            )
+            # Native positions carry the absolute COM magnitude; any root rotation is <= pi.
+            tail = _sum_upper(_next_upper(wp.sqrt(reach2)), rho)
+            angle = _sum_upper(angle, wp.float64(3.141592653589794))
+            cursor = parents[joint]
+            continue
         tail = _sum_upper(a, radius)
         if kind == JointType.REVOLUTE or kind == JointType.PRISMATIC:
             index = starts[joint]
@@ -190,6 +239,14 @@ class _ArticulationSweep:
         self.parent_length = wp.array(_length_upper(kinematics.xp.numpy()[:, :3]), dtype=wp.float64, device=self.device)
         self.child_length = wp.array(_length_upper(kinematics.xc.numpy()[:, :3]), dtype=wp.float64, device=self.device)
         self.axis_length = wp.array(lengths, dtype=wp.float64, device=self.device)
+        joint_floating = np.full(kinematics.joints, -1, dtype=np.int32)
+        root_joints = kinematics.root_joints.numpy()
+        joint_floating[root_joints] = np.arange(len(root_joints))
+        com_length = np.zeros(kinematics.joints)
+        children = kinematics.children.numpy()
+        com_length[root_joints] = _length_upper(kinematics.local_com.numpy()[children[root_joints]])
+        self.joint_floating = wp.array(joint_floating, dtype=int, device=self.device)
+        self.com_length = wp.array(com_length, dtype=wp.float64, device=self.device)
         self.radii = wp.array(value.astype(np.float64), dtype=wp.float64, device=self.device)
         self.displacement = wp.zeros(kinematics.bodies, dtype=wp.float64, device=self.device)
         self.numerical = wp.zeros_like(self.displacement)
@@ -201,6 +258,8 @@ class _ArticulationSweep:
                 "parent_length",
                 "child_length",
                 "axis_length",
+                "joint_floating",
+                "com_length",
                 "radii",
                 "displacement",
                 "numerical",
@@ -208,7 +267,7 @@ class _ArticulationSweep:
             )
         }
         self._borrowed = {name: getattr(kinematics, name) for name in ("parents", "types", "starts")}
-        self.payload_bytes = 28 * kinematics.bodies + 24 * kinematics.joints + 4
+        self.payload_bytes = 28 * kinematics.bodies + 36 * kinematics.joints + 4
 
     def buffers(self):
         return tuple(self._owned.values())
@@ -222,10 +281,17 @@ class _ArticulationSweep:
             if any(getattr(source, name) is not original for name, original in fields.items()):
                 raise ValueError("Articulation sweep storage changed")
 
-    def update(self, q0, q1):
-        """Overwrite fixed scalar scratch; callers must reject nonzero status."""
+    def update(self, q0, q1, roots0=None, roots1=None):
+        """Overwrite fixed scalar scratch; callers must reject nonzero status.
+
+        ``roots0``/``roots1`` are the native floating-root COM and rotation arrays at both ends.
+        """
         self.validate_storage()
         k = self.kinematics
+        if (roots0 is None or roots1 is None) != (not k.floating_count):
+            raise ValueError("Articulation sweep requires both native floating-root poses")
+        if roots0 is None:
+            roots0 = roots1 = k._empty_roots
         if any(
             (q.shape, q.dtype, q.device) != ((k.count,), k.dtype, self.device) or not q.is_contiguous for q in (q0, q1)
         ):
@@ -251,6 +317,10 @@ class _ArticulationSweep:
                 self.radii,
                 q0,
                 q1,
+                self.joint_floating,
+                self.com_length,
+                *roots0,
+                *roots1,
                 self.displacement,
                 self.numerical,
                 wp.float64(np.finfo(k.numpy_dtype).eps / 2),

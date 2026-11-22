@@ -481,6 +481,8 @@ class ContactObjective:
         base_triplet_count=0,
         actors=None,
         _materials=None,
+        _self_pairs=frozenset(),
+        _self_box_spacing=None,
     ):
         self._materials = _materials
         if dtype not in (wp.float64, wp.float32):
@@ -568,21 +570,30 @@ class ContactObjective:
                 base_triplet_count=base_triplet_count,
                 _expand_support=False,
                 _materials=_materials,
+                _self_pairs=_self_pairs,
+                _self_box_spacing=_self_box_spacing,
             )
         )
         shapes = np.flatnonzero(v["shape_flags"] & int(ShapeFlags.COLLIDE_PARTICLES)).astype(np.int32)
         if self.actor_samples is not None:
             shapes = shapes[~np.isin(shapes, self.actor_samples.rigid_shapes)]
             shapes = np.asarray(_canonical_shapes(actors, shapes), dtype=np.int32)
-        if not np.isin(
-            v["shape_type"][shapes], [int(GeoType.PLANE), int(GeoType.SPHERE), int(GeoType.BOX), int(GeoType.MESH)]
-        ).all():
+        # These shapes are particle targets only for tet surface triangles; without them (or with
+        # materials, which use actor sampling) the set is never queried, so its types do not matter.
+        particle_targets = _materials is None and len(v["tri_indices"]) > 0
+        if (
+            particle_targets
+            and not np.isin(
+                v["shape_type"][shapes], [int(GeoType.PLANE), int(GeoType.SPHERE), int(GeoType.BOX), int(GeoType.MESH)]
+            ).all()
+        ):
             raise ValueError("Unsupported contact shape")
         if _materials is not None:
             shapes = np.empty(0, dtype=np.int32)
         table = model._texture_sdf_data
         descriptors = table.numpy() if table is not None else None
-        for i in shapes:
+        # Validate only shapes tet triangles actually query; elsewhere the set is never evaluated.
+        for i in shapes if particle_targets else ():
             geo, scale = v["shape_type"][i], v["shape_scale"][i]
             if not np.isfinite(scale).all() or not np.isfinite(v["shape_margin"][i]) or v["shape_margin"][i] < 0:
                 raise ValueError("Invalid shape scale or margin")
@@ -590,7 +601,7 @@ class ContactObjective:
                 raise ValueError("Only infinite planes are supported")
             if (geo == GeoType.SPHERE and scale[0] <= 0) or (geo == GeoType.BOX and np.any(scale <= 0)):
                 raise ValueError("Analytic shape size must be positive")
-            if geo == GeoType.MESH:
+            if geo == GeoType.MESH:  # CONVEX_MESH is not a particle target (rejected by the whitelist)
                 index = int(v["_shape_sdf_index"][i])
                 if model.device.is_cpu or descriptors is None or index < 0 or index >= len(descriptors):
                     raise ValueError("Mesh contact requires an existing CUDA texture SDF")
@@ -742,9 +753,11 @@ class ContactObjective:
             from .contact_actor import _validate_actor_targets  # noqa: PLC0415
 
             _validate_actor_targets(self, samples)
-        targets = shapes if samples is None else np.union1d(shapes, np.asarray(samples.targets_used, dtype=np.int32))
+        # Only queried shapes are targets: particle-flagged shapes without tet triangles are never evaluated.
+        queried = shapes if particle_targets else np.empty(0, dtype=np.int32)
+        targets = queried if samples is None else np.union1d(queried, np.asarray(samples.targets_used, dtype=np.int32))
         if alignment_policy == "frozen":
-            for target in targets[v["shape_type"][targets] == GeoType.MESH]:
+            for target in targets[np.isin(v["shape_type"][targets], [int(GeoType.MESH), int(GeoType.CONVEX_MESH)])]:
                 index = int(v["_shape_sdf_index"][target])
                 if smooth_sdf is None or smooth_sdf.fields[index].representation != "c2-bspline":
                     raise ValueError("Frozen mesh orientation requires bound C2 SDF")

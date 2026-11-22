@@ -536,6 +536,37 @@ def test_cable_contact_capture(test, device):
             )
 
 
+def test_self_collision_capture(test, device):
+    """A published self contact is exported as an A-self pair with equal and opposite wrenches; the joint
+    force matches the published one, its shared (hub) row is zero, and the meaning text names A-self."""
+    from newton.tests.test_monolithic_contact_self_collision import H, make_solver, two_branch_tree  # noqa: PLC0415
+
+    for precision in precisions():
+        with test.subTest(precision=precision):
+            run = make_solver(two_branch_tree(device), precision)
+            state, control = run.create_state(dt=H), run.create_control()
+            for _ in range(60):
+                run.step(state, state, control, dt=H)
+                test.assertFalse(run.last_stats.rolled_back, run.last_stats)
+                if run.last_stats.variational["self_collision"]["active_pairs"]:
+                    break
+            test.assertEqual(run.last_stats.variational["self_collision"]["active_pairs"], 1)
+            result = inspection.capture(run, state)
+            arrays, fields = result["arrays"], result["schema"]["fields"]
+            pairs = run.last_stats.variational["actor_contact_pairs"]
+            (index,) = [i for i, pair in enumerate(pairs) if pair["kind"] == "A-self"]
+            test.assertEqual({int(arrays["pair_source"][index]), int(arrays["pair_target"][index])}, {0, 1})
+            wrench = arrays["pair_wrench"][index]
+            np.testing.assert_array_equal(wrench, np.asarray(pairs[index]["world_wrench"]))
+            np.testing.assert_allclose(wrench[0], -wrench[1], rtol=0, atol=1e-12 * np.abs(wrench).max())
+            joint = arrays["contact_joint_force"].reshape(-1)
+            np.testing.assert_array_equal(joint, run.get_contact_forces(state).joint_force.reshape(-1))
+            test.assertEqual(float(joint[0]), 0.0)
+            test.assertGreater(np.abs(joint[1:]).max(), 0.0)
+            test.assertIn("A-self", fields["contact_joint_force"]["meaning"])
+            test.assertIn("floating root's six rows are world-frame", fields["contact_joint_force"]["meaning"])
+
+
 def test_guards(test, device):
     """Reject foreign states, unknown fields, graph capture and existing output, and stay off the step path."""
     for precision in precisions():
@@ -577,6 +608,7 @@ for function in (
     test_material_contact_codes,
     test_point_cloud_contact_capture,
     test_cable_contact_capture,
+    test_self_collision_capture,
     test_guards,
 ):
     add_function_test(TestToolingInspection, function.__name__, function, devices=get_test_devices())

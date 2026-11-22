@@ -15,7 +15,7 @@ from .aabb import _CandidateBounds
 from .cable import _transport
 from .contact_pool import _CONTACT_WORKERS, _merge_contact_keys
 from .contact_query import _ContactQuery
-from .contact_sampling import _surface_samples
+from .contact_sampling import BOX_TRIANGLES, _surface_samples
 from .contact_sweep import _ArticulationSweep, _length_upper, _product_upper, _sum_upper
 
 
@@ -299,7 +299,9 @@ class _ContactSpatial:
     The solver lifecycle owner controls refresh/freeze and rollback.
     """
 
-    def __init__(self, batch, kinematics, q0, x0, poses0, *, rigid_com=None, rigid_rotation=None, capacity):
+    def __init__(
+        self, batch, kinematics, q0, x0, poses0, *, rigid_com=None, rigid_rotation=None, capacity, roots0=None
+    ):
         c, m, k = batch.contact, batch.contact.model, kinematics
         if k.model is not m or k.dtype != c.dtype or k.count != c.nq or k.bodies != c.body_count:
             raise ValueError("Invalid spatial contact model")
@@ -320,6 +322,13 @@ class _ContactSpatial:
                 raise ValueError("Invalid native spatial contact start")
         fields = [getattr(batch.all_samples, n).numpy() for n in ("sources", "targets", "faces", "slots")]
         sources, targets, faces, _slots = fields
+        # Face-grid faces of a box (same-tree pairs) meet only that pair's targets, its 12 triangles only
+        # the others': give the grid faces their own permission key, shape_count + shape.
+        grid = c.actor_samples.grid_sources if c.actor_samples is not None else {}
+        virtual = m.shape_count
+        if grid:
+            sources = np.where((faces >= BOX_TRIANGLES) & np.isin(sources, list(grid)), sources + virtual, sources)
+            fields[0] = sources
         material = c._materials is not None
         slots_per_patch = 1 if material else 3
         sample_stride = int(max(_slots, default=0)) + 1
@@ -346,6 +355,10 @@ class _ContactSpatial:
         self.original = wp.array(order.astype(np.uint64), dtype=wp.uint64, device=self.device)
         self.q0, self.x0, self.poses0 = wp.clone(q0), wp.clone(x0), wp.clone(poses0)
         self.com0 = wp.clone(rigid_com)
+        if (roots0 is None) != (not k.floating_count):
+            raise ValueError("Spatial contact requires exactly the native floating-root start poses")
+        # Floating-root start poses; their sweep runs from here to the current roots.
+        self.root_com0, self.root_rotation0 = (wp.clone(a) for a in (roots0 or k._empty_roots))
         self.status, self.count = (wp.zeros(1, dtype=int, device=self.device) for _ in range(2))
         self.packet = wp.zeros(5, dtype=wp.int64, device=self.device)
         self.mode_counts = None
@@ -355,7 +368,8 @@ class _ContactSpatial:
         surface = {}
         bound_triangles = c.triangles.numpy().tolist()
         face_reach, face_material = [], []
-        for source, ordinal in unique_faces:
+        for key, ordinal in unique_faces:
+            source = key - virtual if key >= virtual else key
             face = ordinal // sample_stride if material else ordinal
             source_shapes.append(max(-1, source))
             face_material.append(face if source == -3 else -1)
@@ -376,6 +390,13 @@ class _ContactSpatial:
                     p, _, _, tri = _surface_samples(
                         types[source], scales[source].astype(float), m.shape_source[source], _return_triangles=True
                     )
+                    spacing = c.actor_samples.grid_sources.get(source)
+                    if spacing is not None:
+                        # Face-grid faces follow the box's 12 triangles (see ContactSamples.grid_sources).
+                        grid, _, _, grid_tri = _surface_samples(
+                            types[source], scales[source].astype(float), box_spacing=spacing, _return_triangles=True
+                        )
+                        p, tri = np.concatenate((p, grid)), np.concatenate((tri, grid_tri))
                     surface[source] = (p.reshape(-1, 3, 3), tri)
                 p, tri = surface[source]
                 # Include both chord vertices and the actual native projected
@@ -393,7 +414,7 @@ class _ContactSpatial:
         if c.smooth_sdf is not None:
             descriptors, sdf_indices = c.table.numpy(), c.sdf_indices.numpy()
             for ordinal, target in enumerate(unique_targets):
-                if types[target] != GeoType.MESH:
+                if types[target] not in (GeoType.MESH, GeoType.CONVEX_MESH):
                     continue
                 index = int(sdf_indices[target])
                 field = c.smooth_sdf.fields[index]
@@ -469,7 +490,7 @@ class _ContactSpatial:
         reach = [float(gaps[targets == target].max()) + c.parameters[3] for target in unique_targets]
         geometry("target", unique_targets, np.zeros(len(unique_targets), np.int32), target_lo, target_hi, reach)
         self.sweep = _ArticulationSweep(k, arm_radii)
-        self._bounds(q0, x0, self.com0)
+        self._bounds(q0, x0, self.com0, self._roots(None))
         if self.status.numpy()[0] or self.sweep.status.numpy()[0]:
             raise ValueError("Invalid initial contact envelopes")
         query_faces = unique_faces
@@ -492,7 +513,7 @@ class _ContactSpatial:
             material
             and bool(unique_faces)
             and len(unique_targets) == 1
-            and types[unique_targets[0]] in (GeoType.SPHERE, GeoType.MESH)
+            and types[unique_targets[0]] in (GeoType.SPHERE, GeoType.MESH)  # cloth never targets CONVEX_MESH
             and bodies[unique_targets[0]] == -1
             and sample_stride == 6
             and len(unique_faces) % 6 == 0
@@ -533,11 +554,21 @@ class _ContactSpatial:
         self.query.validate_storage()
         self.sweep.validate_storage()
 
-    def begin_step(self, q, x, poses, *, rigid_com=None):
+    def _roots(self, roots):
+        """Return current floating-root poses, defaulting to the start (None without roots)."""
+        if not self.kinematics.floating_count:
+            return None
+        return (self.root_com0, self.root_rotation0) if roots is None else roots
+
+    def begin_step(self, q, x, poses, *, rigid_com=None, roots=None):
         """Overwrite fixed physical-start snapshots; never reset them on Newton refresh."""
         self.validate_storage()
         com = self.com0 if rigid_com is None else rigid_com
         pairs = ((q, self.q0), (x, self.x0), (poses, self.poses0), (com, self.com0))
+        if self.kinematics.floating_count:
+            if roots is None:
+                raise ValueError("Spatial contact requires the native floating-root start poses")
+            pairs += ((roots[0], self.root_com0), (roots[1], self.root_rotation0))
         for source, target in pairs:
             if (
                 not isinstance(source, wp.array)
@@ -557,9 +588,10 @@ class _ContactSpatial:
         self.status.zero_()
         self.mode_counts = None
 
-    def _bounds(self, q, x, com):
+    def _bounds(self, q, x, com, roots):
         self.status.zero_()
-        self.sweep.update(self.q0, q)
+        roots0 = None if roots is None else (self.root_com0, self.root_rotation0)
+        self.sweep.update(self.q0, q, roots0, roots)
         surface = self.batch.material_surface
         if surface is not None:
             wp.launch(
@@ -609,16 +641,21 @@ class _ContactSpatial:
                 device=self.device,
             )
 
-    def update(self, q, x, *, rigid_com=None):
+    def update(self, q, x, *, rigid_com=None, roots=None):
         """Overwrite query and selection in a single capturable device chain."""
-        self._query(q, x, rigid_com=rigid_com)
+        self._query(q, x, rigid_com=rigid_com, roots=roots)
         self._order(self.capacity)
 
-    def _query(self, q, x, *, rigid_com=None):
+    def _query(self, q, x, *, rigid_com=None, roots=None):
         self.validate_storage()
         self.mode_counts = None
         com = self.com0 if rigid_com is None else rigid_com
-        for a, original in ((q, self.q0), (x, self.x0), (com, self.com0)):
+        if self.kinematics.floating_count and roots is None:
+            raise ValueError("Spatial contact query requires the current native floating-root poses")
+        checked = ((q, self.q0), (x, self.x0), (com, self.com0))
+        if roots is not None:
+            checked += ((roots[0], self.root_com0), (roots[1], self.root_rotation0))
+        for a, original in checked:
             if (
                 not isinstance(a, wp.array)
                 or (a.dtype, a.shape, a.device) != (original.dtype, original.shape, self.device)
@@ -631,7 +668,7 @@ class _ContactSpatial:
                 if b is not a
             ):
                 raise ValueError("Spatial contact input aliases output")
-        self._bounds(q, x, com)
+        self._bounds(q, x, com, roots)
         # Only the mapped contact identities need ordering; sorting query keys first is redundant.
         if self._cloth_target_prefix.size:
             query = self.query

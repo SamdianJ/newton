@@ -1,0 +1,468 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 The Newton Developers
+# SPDX-License-Identifier: Apache-2.0
+
+"""Floating-base trees in the coupled solver: composite-rigid dynamics, continuation and coexistence."""
+
+import tempfile
+import unittest
+from pathlib import Path
+
+import numpy as np
+import warp as wp
+
+import newton
+from newton.tests.test_monolithic_joint_floating_base import floating_chain, make_solver, rotation_matrix
+from newton.tests.unittest_utils import add_function_test, get_test_devices
+from scripts.monolithic_reference.actor_contract_oracle import rigid_terms, rotation
+from scripts.monolithic_reference.articulation_oracle import skew
+
+GRAVITY = np.array([0.0, 0.0, -9.81])
+H = 1e-3
+# One step of the welded floating tree against the independent composite-rigid step from the same
+# state, from the second step on. The link-level and composite inertial objectives are equal for a
+# rigid composite once the link histories are discrete rates of one rigid motion; reset initializes
+# them from instantaneous Jacobian rates instead, so the first step differs
+# (measured 5.2e-8 in rotation, FP64). Measured from the second step: FP64 4.2e-13 m / 5e-14,
+# FP32 1.3e-7 m / 1.4e-7 (P9d PR2); the bounds leave about two orders of margin.
+COMPOSITE_TOLERANCE = {"fp64": (1e-10, 1e-11), "fp32": (1e-5, 1e-5)}
+
+
+def _composite_step(c, r, v, omega, sym, m, inertia, force, h):
+    """Independent composite-rigid step: exact COM update and a Newton solve of the rotational equation.
+
+    Like ``independent_step`` of the rigid-actor tests, with a residual criterion relative to the
+    rotational inertia scale (a composite's torque residual has roundoff far above 1e-13 N m).
+    """
+    cp, rp = c + h * v, r + h * (skew(omega) + sym) @ r
+    scale = np.trace(inertia) / h**2
+    current = r.copy()
+    for _ in range(30):
+        residual = rigid_terms(cp, current, cp, rp, m, inertia, h, force)[1][3:]
+        if np.linalg.norm(residual) <= 1e-12 * scale:
+            break
+        eps = 1e-6
+        jac = np.column_stack(
+            [
+                (
+                    rigid_terms(cp, rotation(eps * axis) @ current, cp, rp, m, inertia, h, force)[1][3:]
+                    - rigid_terms(cp, rotation(-eps * axis) @ current, cp, rp, m, inertia, h, force)[1][3:]
+                )
+                / (2 * eps)
+                for axis in np.eye(3)
+            ]
+        )
+        current = rotation(np.linalg.solve(jac, -residual)) @ current
+    else:
+        raise AssertionError("Composite rotational reference did not converge")
+    return cp + h * h * force / m, current
+
+
+def _composite(run, state):
+    """Composite COM, root rotation, COM velocity, angular velocity, symmetric rate, mass and body inertia."""
+    k, history = run._kinematics, state._monolithic_coupled
+    k.evaluate_state(state)
+    mass = k.mass.numpy().astype(np.float64)
+    com = k.com.numpy().astype(np.float64)
+    rotations = k.rotations.numpy().astype(np.float64)
+    inertia_local = run.model.body_inertia.numpy().astype(np.float64)
+    total = mass.sum()
+    center = mass @ com / total
+    velocity = mass @ history.link_v_com.numpy().astype(np.float64) / total
+    root = rotation_matrix(history.floating_rotation.numpy()[0].astype(np.float64))
+    world = np.zeros((3, 3))
+    for m, c, r, i in zip(mass, com, rotations, inertia_local, strict=True):
+        d = c - center
+        world += r @ i @ r.T + m * (d @ d * np.eye(3) - np.outer(d, d))
+    sym = history.link_vsym.numpy()[0].astype(np.float64)
+    symmetric = np.array([[sym[0], sym[3], sym[4]], [sym[3], sym[1], sym[5]], [sym[4], sym[5], sym[2]]])
+    omega = history.link_omega.numpy()[0].astype(np.float64)
+    return center, root, velocity, omega, symmetric, total, root.T @ world @ root
+
+
+def test_welded_tree_is_a_composite_rigid_body(test, device):
+    """A floating root with only FIXED descendants steps as the independent composite rigid body."""
+    for precision, (position_tolerance, rotation_tolerance) in COMPOSITE_TOLERANCE.items():
+        with test.subTest(precision=precision):
+            model = floating_chain(device, fixed_child=True)
+            run = make_solver(model, precision)
+            state, control = run.create_state(dt=H), run.create_control()
+            worst = np.zeros(2)
+            run.step(state, state, control, dt=H)
+            for _ in range(30):
+                c, r, v, omega, sym, m, inertia = _composite(run, state)
+                expected = _composite_step(c, r, v, omega, sym, m, inertia, m * GRAVITY, H)
+                run.step(state, state, control, dt=H)
+                test.assertTrue(run.last_stats.converged, run.last_stats.failure_reason)
+                actual = _composite(run, state)
+                worst = np.maximum(
+                    worst,
+                    [np.abs(actual[0] - expected[0]).max(), np.abs(actual[1] - expected[1]).max()],
+                )
+            test.assertLessEqual(worst[0], position_tolerance, f"COM error {worst[0]:.3e} m")
+            test.assertLessEqual(worst[1], rotation_tolerance, f"rotation error {worst[1]:.3e}")
+
+
+def test_checkpoint_continuation(test, device):
+    """Save, reload and continue bitwise; floating and fixed-base checkpoints are not interchangeable."""
+    model = floating_chain(device)
+    run = make_solver(model)
+    state, control = run.create_state(dt=H), run.create_control()
+    for _ in range(3):
+        run.step(state, state, control, dt=H)
+    with tempfile.TemporaryDirectory() as folder:
+        path = Path(folder) / "floating.npz"
+        run.save_checkpoint(state, path)
+        restored = run.create_state(dt=H)
+        run.load_checkpoint(restored, path)
+        for _ in range(3):
+            run.step(state, state, control, dt=H)
+            run.step(restored, restored, control, dt=H)
+        for name in ("joint_q", "joint_qd", "body_q", "body_qd"):
+            np.testing.assert_array_equal(getattr(state, name).numpy(), getattr(restored, name).numpy())
+        history, other = state._monolithic_coupled, restored._monolithic_coupled
+        for name in ("floating_com", "floating_rotation", "link_v_com", "link_omega", "link_vsym"):
+            np.testing.assert_array_equal(getattr(history, name).numpy(), getattr(other, name).numpy())
+        test.assertEqual(int(history.schema_version.numpy()[0]), 104)
+        fixed = make_solver(_fixed_base_chain(device))
+        fixed_state = fixed.create_state(dt=H)
+        with test.assertRaisesRegex(ValueError, "Unsupported checkpoint schema version"):
+            fixed.load_checkpoint(fixed_state, path)
+        fixed_path = Path(folder) / "fixed.npz"
+        fixed.save_checkpoint(fixed_state, fixed_path)
+        with test.assertRaisesRegex(ValueError, "Unsupported checkpoint schema version"):
+            run.load_checkpoint(restored, fixed_path)
+
+
+def _fixed_base_chain(device):
+    builder = newton.ModelBuilder()
+    root = builder.add_link(mass=1.0, inertia=wp.diag(wp.vec3(2e-3)))
+    child = builder.add_link(mass=0.5, inertia=wp.diag(wp.vec3(1e-3)))
+    builder.add_articulation(
+        [
+            builder.add_joint_revolute(-1, root, axis=(0, 0, 1), limit_ke=0.0, limit_kd=0.0),
+            builder.add_joint_revolute(root, child, axis=(0, 1, 0), limit_ke=0.0, limit_kd=0.0),
+        ]
+    )
+    return builder.finalize(device=device)
+
+
+def test_schema_versions(test, device):
+    """Floating-base schemas are the fixed-base ones plus 100; fixed-base scenes keep theirs."""
+
+    def two_trees(builder):
+        base = builder.add_link(mass=0.4, inertia=wp.diag(wp.vec3(1e-3)))
+        builder.add_articulation([builder.add_joint_revolute(-1, base, axis=(0, 0, 1), limit_ke=0.0, limit_kd=0.0)])
+
+    for edit, version in ((None, 104), (two_trees, 107)):
+        with test.subTest(version=version):
+            run = make_solver(floating_chain(device, edit=edit))
+            test.assertEqual(int(run.create_state(dt=H)._monolithic_coupled.schema_version.numpy()[0]), version)
+    fixed = make_solver(_fixed_base_chain(device))
+    test.assertEqual(int(fixed.create_state(dt=H)._monolithic_coupled.schema_version.numpy()[0]), 4)
+    test.assertNotIn("floating_com", fixed._states.schema)
+    # With materials (cables, cloth) and their contacts: 6, 9 and 10 plus 100.
+    from newton.tests.test_monolithic_cable_contact import DENSITY, cable_input, strands  # noqa: PLC0415
+
+    points, chains = strands()
+    added = {}
+
+    def materials(builder, cloth):
+        start = builder.particle_count
+        mass = np.zeros(len(points))
+        for chain in chains:
+            half = np.linalg.norm(np.diff(points[list(chain)], axis=0), axis=1) * DENSITY / 2
+            mass[list(chain)[:-1]] += half
+            mass[list(chain)[1:]] += half
+        for point, value in zip(points, mass, strict=True):
+            builder.add_particle(
+                tuple(np.asarray(point) + np.array([0.0, 0.0, 2.0])), (0.0, 0.0, 0.0), mass=float(value)
+            )
+        added["cables"] = [[start + i for i in chain] for chain in chains]
+        if cloth:
+            first, added["face"] = builder.particle_count, builder.tri_count
+            for x, y in ((0.0, 0.05), (0.03, 0.05), (0.0, 0.08)):
+                builder.add_particle(wp.vec3(x, y, 2.0), wp.vec3(0.0), 0.00015)
+            builder.add_triangle(first, first + 1, first + 2, tri_ke=2, tri_ka=3, tri_kd=0)
+
+    from newton.solvers.experimental.monolithic import SolverMonolithic  # noqa: PLC0415
+
+    for cable_contact, cloth, version in ((None, False, 106), (None, True, 108), ({}, False, 109), ({}, True, 110)):
+        with test.subTest(version=version):
+            model = floating_chain(device, edit=lambda builder, cloth=cloth: materials(builder, cloth))
+            options = {"cable_inputs": [cable_input(c, model.particle_q.numpy()) for c in added["cables"]]}
+            if cable_contact is not None:
+                options["cable_contact"] = cable_contact
+            if cloth:
+                options["cloth_inputs"] = [
+                    SolverMonolithic.ClothInput(
+                        triangle_ids=(added["face"],), bending=(0.01, 0.01), thickness=0.01, surface_density=1
+                    )
+                ]
+                options["cloth_contact"] = {"radius": 0.02, "normal_stiffness": 1e3, "candidate_capacity": 64}
+            run = make_solver(model, mass_mode="lumped", **options)
+            test.assertEqual(int(run.create_state(dt=H)._monolithic_coupled.schema_version.numpy()[0]), version)
+            fields = run._states.schema
+            test.assertIn("floating_com", fields)
+            test.assertEqual("cloth_contact_summary" in fields, cloth)
+            test.assertEqual("cable_contact_summary" in fields, cable_contact is not None)
+
+
+def _cloth_triangle(builder, center, z):
+    """A falling cloth triangle (lumped mass of area x density / 3 per node) above ``center``."""
+    first, face = builder.particle_count, builder.tri_count
+    for dx, dy in ((-0.01, -0.01), (0.01, -0.01), (0.0, 0.01)):
+        builder.add_particle(wp.vec3(center[0] + dx, center[1] + dy, z), wp.vec3(0.0, 0.0, -0.5), 2e-4 / 3)
+    builder.add_triangle(first, first + 1, first + 2, tri_ke=2, tri_ka=3, tri_kd=0)
+    return face
+
+
+def test_particle_contact_with_floating_trees(test, device):
+    """Cloth particles land on a floating root's box, and on a tip of a floating self-collision tree: every
+    step converges, the cloth stops at the surface and its contact force reaches the root rows (only
+    self-contact leaves them at zero)."""
+    from newton.solvers.experimental.monolithic import SolverMonolithic  # noqa: PLC0415
+    from newton.tests.test_monolithic_contact_self_collision import two_branch_builder  # noqa: PLC0415
+
+    def floating_box():
+        builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0))
+        pose = wp.transform((0.0, 0.0, 0.3), wp.quat_identity())
+        root = builder.add_link(mass=1.0, inertia=wp.diag(wp.vec3(1e-3)), xform=pose, label="root")
+        builder.add_shape_box(root, hx=0.05, hy=0.05, hz=0.01, cfg=builder.ShapeConfig(density=0.0, margin=0.0))
+        child = builder.add_link(mass=0.2, inertia=wp.diag(wp.vec3(1e-4)), label="child")
+        joints = [builder.add_joint_free(root, parent_xform=pose, label="free")]
+        joints.append(
+            builder.add_joint_revolute(
+                root,
+                child,
+                parent_xform=wp.transform((0.1, 0.0, 0.0), wp.quat_identity()),
+                axis=(0, 0, 1),
+                limit_ke=0.0,
+                limit_kd=0.0,
+            )
+        )
+        builder.add_articulation(joints)
+        return builder, _cloth_triangle(builder, (0.0, 0.0), 0.314), 0.31, None
+
+    def floating_self_tree():
+        builder, _ = two_branch_builder(root="free", tip="box", gap=2e-3)
+        for shape in range(builder.shape_count):
+            builder.shape_flags[shape] |= int(newton.ShapeFlags.COLLIDE_PARTICLES)
+        return builder, _cloth_triangle(builder, (0.1, 0.021), 0.016), 0.012, {}
+
+    for name, build in (("floating box", floating_box), ("floating self-collision tree", floating_self_tree)):
+        with test.subTest(scene=name):
+            builder, face, top, self_collision = build()
+            run = SolverMonolithic(
+                builder.finalize(device=device),
+                cloth_inputs=[
+                    SolverMonolithic.ClothInput(
+                        triangle_ids=(face,), bending=(0.01, 0.01), thickness=0.001, surface_density=1
+                    )
+                ],
+                friction_velocity_scale=0.01,
+                mass_mode="lumped",
+                contact_stiffness=1e5,
+                self_collision=self_collision,
+            )
+            state, control = run.create_state(dt=H), run.create_control()
+            lowest, root_force = np.inf, 0.0
+            for _ in range(120):
+                run.step(state, state, control, dt=H)
+                test.assertTrue(run.last_stats.converged, run.last_stats.failure_reason)
+                lowest = min(lowest, float(state.particle_q.numpy()[:, 2].min()))
+                root_force = max(root_force, float(np.abs(run.get_contact_forces(state).joint_force[:6]).max()))
+            # Measured: 0.74 mm below the box top at k = 1e5 (FP64 CPU), then the cloth rebounds.
+            test.assertGreater(lowest, top - 2e-3)
+            test.assertLess(lowest, top + 1e-3, "the cloth never reached the surface")
+            test.assertGreater(root_force, 0.0)
+
+
+def test_coexists_with_fixed_trees_and_rigid_bodies(test, device):
+    """A floating tree, a fixed-base tree and a FREE rigid body step together; the rigid body falls freely."""
+    labels = {}
+
+    def add_others(builder):
+        base = builder.add_link(mass=0.4, inertia=wp.diag(wp.vec3(1e-3)))
+        builder.add_articulation([builder.add_joint_revolute(-1, base, axis=(0, 0, 1), limit_ke=0.0, limit_kd=0.0)])
+        pose = wp.transform((1.0, 0.0, 2.0), wp.quat_identity())
+        body = builder.add_link(xform=pose, mass=0.3, inertia=wp.diag(wp.vec3(1e-3)), label="loose")
+        builder.add_articulation([builder.add_joint_free(body, parent_xform=pose)])
+        labels["loose"] = body
+
+    model = floating_chain(device, edit=add_others)
+    for precision in ("fp64", "fp32"):
+        with test.subTest(precision=precision):
+            run = make_solver(model, precision)
+            test.assertEqual([a.kind for a in run._actors.actors], ["articulation", "articulation", "rigid"])
+            state, control = run.create_state(dt=H), run.create_control()
+            z0 = float(state._monolithic_coupled.rigid_com.numpy()[0, 2])
+            steps = 20
+            for _ in range(steps):
+                run.step(state, state, control, dt=H)
+                test.assertTrue(run.last_stats.converged, run.last_stats.failure_reason)
+            # Implicit Euler free fall from rest: z_n = z_0 - g h^2 n (n + 1) / 2.
+            expected = z0 + GRAVITY[2] * H * H * steps * (steps + 1) / 2
+            # The solver stops at its residual tolerance, not at the linear law's exact root.
+            tolerance = 1e-9 if precision == "fp64" else 1e-5
+            test.assertAlmostEqual(float(state._monolithic_coupled.rigid_com.numpy()[0, 2]), expected, delta=tolerance)
+
+
+def test_predicted_point_outside_domain_restarts_from_step_start(test, device):
+    """With a floating root, a predicted start outside the local domain falls back to the whole step
+    start (native root pose and increments included) and converges to the same step."""
+    from unittest.mock import patch  # noqa: PLC0415
+
+    model = floating_chain(device)
+    reference, fallback = make_solver(model), make_solver(model)
+    states = []
+    for run in (reference, fallback):
+        state, control = run.create_state(dt=H), run.create_control()
+        run.step(state, state, control, dt=H)
+        states.append((state, control))
+    reference.step(states[0][0], states[0][0], states[0][1], dt=H)
+    original = fallback._domain
+    calls = []
+
+    def first_outside(state):
+        calls.append(state)
+        return False if len(calls) == 1 else original(state)
+
+    iterate, starts = fallback._iterate_articulation, []
+
+    def record_start(dt):
+        # The iteration starts from the restored step start: native root pose and zero increments.
+        history = fallback._accepted._monolithic_coupled
+        steps = fallback._root_steps(fallback._accepted)
+        starts.append(
+            (
+                history.floating_com.numpy().copy(),
+                history.floating_rotation.numpy().copy(),
+                steps[0].numpy().copy(),
+                steps[1].numpy().copy(),
+                fallback._original._monolithic_coupled.floating_com.numpy().copy(),
+                fallback._original._monolithic_coupled.floating_rotation.numpy().copy(),
+            )
+        )
+        return iterate(dt)
+
+    with (
+        patch.object(fallback, "_domain", side_effect=first_outside),
+        patch.object(fallback, "_iterate_articulation", side_effect=record_start),
+    ):
+        fallback.step(states[1][0], states[1][0], states[1][1], dt=H)
+    test.assertTrue(fallback.last_stats.converged, fallback.last_stats.failure_reason)
+    com, rot, step_com, step_rot, start_com, start_rot = starts[0]
+    np.testing.assert_array_equal(com, start_com)
+    np.testing.assert_array_equal(rot, start_rot)
+    np.testing.assert_array_equal(step_com, 0)
+    np.testing.assert_array_equal(step_rot, [[0.0, 0.0, 0.0, 1.0]])
+    test.assertGreater(len(calls), 1)
+    a, b = states[0][0]._monolithic_coupled, states[1][0]._monolithic_coupled
+    np.testing.assert_allclose(b.floating_com.numpy(), a.floating_com.numpy(), atol=1e-10)
+    np.testing.assert_allclose(b.floating_rotation.numpy(), a.floating_rotation.numpy(), atol=1e-10)
+    np.testing.assert_allclose(states[1][0].joint_q.numpy(), states[0][0].joint_q.numpy(), atol=1e-9)
+
+
+def test_zero_gravity_conserves_linear_momentum(test, device):
+    """Without external forces the discrete linear momentum of an articulated floating tree is constant.
+
+    The root translation rows are the total momentum balance (their Jacobian columns are e_k for every
+    link), so the drift is the nonlinear residual tolerance accumulated over the steps.
+    """
+    for precision, bound in (("fp64", 1e-9), ("fp32", 2e-5)):
+        with test.subTest(precision=precision):
+            model = floating_chain(device, gravity=(0.0, 0.0, 0.0))
+            run = make_solver(model, precision)
+            state, control = run.create_state(dt=H), run.create_control()
+            mass = model.body_mass.numpy().astype(np.float64)
+
+            initial = mass @ state._monolithic_coupled.link_v_com.numpy().astype(np.float64)
+            for _ in range(100):
+                run.step(state, state, control, dt=H)
+                test.assertTrue(run.last_stats.converged, run.last_stats.failure_reason)
+            final = mass @ state._monolithic_coupled.link_v_com.numpy().astype(np.float64)
+            drift = np.abs(final - initial).max() / np.abs(initial).max()
+            test.assertLessEqual(drift, bound, f"relative linear momentum drift {drift:.3e}")
+
+
+def test_floating_chain_contact(test, device):
+    """A floating box chain dropped on the ground: every step converges, candidates follow the moving
+    root (refreshes, nonzero sweep of every link), penetration stays at the box-sampling level, and the
+    eager diagnostic path matches the production path (CUDA graphs on CUDA)."""
+    from scripts.monolithic_reference import floating_base_integration as scene  # noqa: PLC0415
+    from scripts.monolithic_reference import floating_hand_criteria as fc  # noqa: PLC0415
+
+    for precision in ("fp64", "fp32"):
+        frames = []
+        for mode, graph in (("diagnostic", False), ("production", device.is_cuda)):
+            with test.subTest(precision=precision, mode=mode):
+                model = scene.chain(GRAVITY, ground=True).finalize(device=device)
+                run = make_solver(
+                    model,
+                    precision,
+                    contact_stiffness=1e9,
+                    publish_policy="current_iterate",
+                    pcg_mode=mode,
+                    use_cuda_graph=graph,
+                )
+                state, control = run.create_state(dt=H), run.create_control()
+                cores = {
+                    s: fc.model_core(model, s) for s in range(model.shape_count) if model.shape_body.numpy()[s] >= 0
+                }
+                worst, refreshes = 0.0, 0
+                for _ in range(60):
+                    run.step(state, state, control, dt=H)
+                    test.assertTrue(run.last_stats.converged, run.last_stats.failure_reason)
+                    refreshes += run.last_stats.variational["contact_spatial"]["refreshes"]
+                    spatial = run._contact._spatial
+                    sweep = spatial.sweep.displacement.numpy()
+                    # Candidates follow the moving root: the last refresh of the step sees at least half
+                    # the root's COM travel since the step start (the initial guess already carries h v).
+                    travel = np.linalg.norm(
+                        state._monolithic_coupled.floating_com.numpy()[0].astype(np.float64)
+                        - spatial.root_com0.numpy()[0].astype(np.float64)
+                    )
+                    test.assertTrue(np.all(sweep >= 0.5 * travel), (sweep, travel))
+                    q = state.body_q.numpy().astype(np.float64)
+                    for shape, core in cores.items():
+                        body = int(model.shape_body.numpy()[shape])
+                        worst = max(worst, -fc.plane_signed_distance(fc.world_core(core, q[body])))
+                test.assertGreater(refreshes, 0)
+                with test.assertRaisesRegex(ValueError, "current native floating-root poses"):
+                    run._contact._spatial.update(
+                        run._kinematics.gather_q(state),
+                        state.particle_q,
+                        rigid_com=state._monolithic_coupled.rigid_com,
+                    )
+                # Box sources are sampled away from their corners: a single FREE rigid box in the same
+                # pose sinks 4.2 mm at a corner, this chain 4.0 mm (CPU FP64, P9d PR2).
+                test.assertLessEqual(worst, 5e-3, f"corner penetration {worst:.3e} m")
+                test.assertGreater(worst, 0.0)
+                frames.append(np.concatenate([state.body_q.numpy().ravel(), state.body_qd.numpy().ravel()]))
+        np.testing.assert_allclose(
+            frames[1],
+            frames[0],
+            rtol=1e-4 if precision == "fp32" else 1e-8,
+            atol=1e-5 if precision == "fp32" else 1e-9,
+        )
+
+
+class TestSolverFloatingBase(unittest.TestCase):
+    pass
+
+
+for _test in (
+    test_welded_tree_is_a_composite_rigid_body,
+    test_checkpoint_continuation,
+    test_schema_versions,
+    test_coexists_with_fixed_trees_and_rigid_bodies,
+    test_particle_contact_with_floating_trees,
+    test_predicted_point_outside_domain_restarts_from_step_start,
+    test_zero_gravity_conserves_linear_momentum,
+    test_floating_chain_contact,
+):
+    add_function_test(TestSolverFloatingBase, _test.__name__, _test, devices=get_test_devices())
+
+
+if __name__ == "__main__":
+    unittest.main()

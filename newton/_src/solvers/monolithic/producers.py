@@ -15,6 +15,7 @@ from .articulation_state import _predict, _recover_step
 from .contact import ContactStatus
 from .material_batch import _DeviceRecords
 from .rigid import _matrices, _scatter_residual, _scatter_tangent
+from .rigid_pose import _pose_coordinates, _pose_difference
 from .solver_types import _StepFailure
 from .state_checks import scalar_view
 from .tet_assembly import TetScatterBuffers, assemble_tet_residual_tangent
@@ -149,31 +150,6 @@ def _material_difference(
 
 
 @wp.kernel
-def _rigid_difference(
-    ta: wp.array[Any],
-    qa: wp.array[Any],
-    tb: wp.array[Any],
-    qb: wp.array[Any],
-    rows: wp.array2d[int],
-    out: wp.array[Any],
-):
-    i = wp.tid()
-    # Left relative quaternion logarithm, using the short representative.
-    relative = qb[i] * wp.quat_inverse(qa[i])
-    vector = wp.vector(relative[0], relative[1], relative[2])
-    scalar = relative[3]
-    if scalar < out.dtype(0):
-        vector = -vector
-    length = wp.length(vector)
-    factor = out.dtype(2)
-    if length > out.dtype(0):
-        factor = out.dtype(2) * wp.atan2(length, wp.abs(scalar)) / length
-    for axis in range(3):
-        out[rows[i, axis]] = tb[i][axis] - ta[i][axis]
-        out[rows[i, axis + 3]] = factor * vector[axis]
-
-
-@wp.kernel
 def _articulation_domain(
     q: wp.array[Any],
     qn: wp.array[Any],
@@ -247,16 +223,6 @@ def _particle_coordinates(x: wp.array[Any], ids: wp.array[int], start: int, outp
 
 
 @wp.kernel
-def _rigid_coordinates(com: wp.array[Any], rotation: wp.array[Any], rows: wp.array2d[int], output: wp.array[Any]):
-    i, j = wp.tid()
-    # A rotation step q q_n^-1 near identity turns by about twice its vector part.
-    value = type(output[0])(2.0) * type(output[0])(wp.abs(rotation[i][j % 3]))
-    if j < 3:
-        value = type(output[0])(wp.abs(com[i][j]))
-    output[rows[i, j]] = value
-
-
-@wp.kernel
 def _material_coordinates(
     x: wp.array[Any], ids: wp.array[int], theta: wp.array[Any], rows: wp.array[int], output: wp.array[Any]
 ):
@@ -317,11 +283,15 @@ class ArticulationProducer(_Producer):
         super().__init__("articulation", solver._layout.articulation_indices())
         obj = solver._objective
         self.energies = ((obj, "link_energy", None), (obj, "joint_energy", None))
-        self.owners = (obj, solver._kinematics, solver._joint_terms)
+        if solver._floating.count:
+            # Root drive and wrench energy, only with floating roots (fixed-base sums keep their terms).
+            self.energies += ((solver._floating, "energy", None),)
+            self.energy_fields = (*self.energy_fields, "energy")
+        self.owners = (obj, solver._kinematics, solver._joint_terms, solver._floating)
 
     def begin_step(self, solver, state_in):
         k, obj, device = solver._kinematics, solver._objective, solver.model.device
-        obj.begin(k.gather_q(state_in))
+        obj.begin(k.gather_q(state_in), roots=k.state_roots(state_in))
         wp.copy(obj.vn, k.gather_qd(state_in))
         history = getattr(state_in, solver._states.namespace)
         dt = solver._problem.dt
@@ -360,6 +330,8 @@ class ArticulationProducer(_Producer):
             ],
             device=device,
         )
+        solver._floating.begin_step(state_in, accepted, solver._root_steps(accepted), obj, dt)
+        solver._floating.begin_drive()
 
     def candidate(self, solver, accepted, trial, direction, alpha, dt):
         k = solver._kinematics
@@ -381,11 +353,24 @@ class ArticulationProducer(_Producer):
             ],
             device=solver.model.device,
         )
+        solver._floating.trial(
+            solver._root_steps(accepted), trial, solver._root_steps(trial), direction, solver._problem.alpha
+        )
 
     def evaluate(self, solver, state, dt, residual, *, build_tangent):
         k, obj = solver._kinematics, solver._objective
         step = solver._joint_step(state)
-        obj.evaluate(k.gather_q(state), dt, build_tangent=build_tangent, step=step, dt_buffer=solver._problem.dt)
+        obj.evaluate(
+            k.gather_q(state),
+            dt,
+            build_tangent=build_tangent,
+            step=step,
+            dt_buffer=solver._problem.dt,
+            roots=k.state_roots(state),
+            root_steps=solver._root_steps(state) if k.floating_count else None,
+        )
+        if k.floating_count:
+            solver._floating.drive_terms(solver._root_steps(state), obj, solver._problem.dt, build_tangent)
         wp.launch(
             _scatter_rows,
             k.count,
@@ -406,6 +391,7 @@ class ArticulationProducer(_Producer):
         k = solver._kinematics
         q = solver._joint_step(state)
         wp.launch(_write_absolute, k.count, [q, solver._linear.q_rows, out], device=solver.model.device)
+        solver._floating.coordinates(solver._root_steps(state), out)
 
     def assemble(self, solver, assembly, dt):
         wp.launch(
@@ -429,6 +415,7 @@ class ArticulationProducer(_Producer):
             [solver._joint_step(accepted), solver._joint_step(trial), solver._linear.q_rows, out],
             device=solver.model.device,
         )
+        solver._floating.difference(solver._root_steps(accepted), solver._root_steps(trial), out)
 
     def domain(self, solver, accepted, candidate, flags):
         k, obj = solver._kinematics, solver._objective
@@ -454,7 +441,8 @@ class ArticulationProducer(_Producer):
         final = getattr(state, solver._states.namespace)
         dt = solver._problem.dt
         q = k.gather_q(state)
-        k.evaluate_step(q, solver._joint_step(state), obj.rn, obj.axes_n)
+        root_steps = solver._root_steps(state) if k.floating_count else None
+        k.evaluate_step(q, solver._joint_step(state), obj.rn, obj.axes_n, root_steps)
         wp.launch(
             _recover_step,
             k.bodies,
@@ -474,7 +462,9 @@ class ArticulationProducer(_Producer):
             ],
             device=device,
         )
-        k.evaluate(q, state=state)
+        # Root mirrors use the recovered link rates; body outputs then read them.
+        solver._floating.publish(state)
+        k.evaluate(q, state=state, roots=k.state_roots(state))
 
 
 class RigidProducer(_Producer):
@@ -521,7 +511,7 @@ class RigidProducer(_Producer):
         rigid = solver._rigid
         if rigid.count:
             steps = solver._rigid_steps(state)
-            wp.launch(_rigid_coordinates, (rigid.count, 6), [*steps, rigid.rows, out], device=solver.model.device)
+            wp.launch(_pose_coordinates, (rigid.count, 6), [*steps, rigid.rows, out], device=solver.model.device)
 
     def assemble(self, solver, assembly, dt):
         rigid = solver._rigid
@@ -541,7 +531,7 @@ class RigidProducer(_Producer):
 
     def difference(self, solver, accepted, trial, out):
         wp.launch(
-            _rigid_difference,
+            _pose_difference,
             solver._rigid.count,
             [*solver._rigid_steps(accepted), *solver._rigid_steps(trial), solver._rigid.rows, out],
             device=solver.model.device,
@@ -921,7 +911,8 @@ class ContactProducer(_Producer):
     def begin_step(self, solver, state_in):
         contact, k = solver._contact, solver._kinematics
         q = k.gather_q(state_in)
-        k.evaluate(q)
+        roots = k.state_roots(state_in)
+        k.evaluate(q, roots=roots)
         history = state_in._monolithic_coupled
         surface = contact._batch.material_surface
         if surface is not None:
@@ -934,7 +925,7 @@ class ContactProducer(_Producer):
             k.jw,
             rigid_com=history.rigid_com,
             rigid_rotation=history.rigid_rotation,
-            **({"kinematics": k, "q0": q} if solver._contact_spatial else {}),
+            **({"kinematics": k, "q0": q, "roots0": roots} if solver._contact_spatial else {}),
         )
 
     def evaluate(self, solver, state, dt, residual, *, build_tangent):

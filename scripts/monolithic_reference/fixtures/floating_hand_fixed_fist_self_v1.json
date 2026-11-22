@@ -1,0 +1,12 @@
+{
+  "schema": "p9d-floating-hand-fixed-state/v1",
+  "status": "FROZEN",
+  "approval": "Window [1100, 1300] approved by the user on 2026-11-21 (P9d PR4, K5 measurement), chosen by the plan's rule: the earliest 200-step window on the 100-step lattice from hold start + 100 with self contact on every step",
+  "recipe": "scripts/monolithic_reference/fixtures/floating_hand_e3_fist_v1.json",
+  "state": "replay the E3 recipe from t = 0 (deterministic) to the window start; hold phase with self contact acting on every step of the window (probe test/results/P9d/PR-04/perf-2c65c212/e3-probe: 5 bodies in contact on every step, contact force sum 103-113 N)",
+  "mounts": ["floating"],
+  "window_steps": [1100, 1300],
+  "precision": "fp32",
+  "use_cuda_graph": true,
+  "note": "self-collision on/off timing window (K5); self activity was checked with self-collision on at 2c65c212, contact_factor_capacity 600000 from the E3 recipe; the window still settles (186 Newton iterations per 200 steps in the probe)"
+}

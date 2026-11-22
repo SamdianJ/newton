@@ -9,7 +9,7 @@ Monolithic Coupled Solver
 .. experimental::
 
    :mod:`newton.solvers.experimental.monolithic` supports one world with
-   independent fixed-base articulations, at most one connected tetrahedral body, single-body
+   independent articulations with fixed or floating (FREE) roots, at most one connected tetrahedral body, single-body
    world-root FREE rigid actors and independent cloth/open cables. Any of these
    may be absent, but the scene needs at least one dynamic degree of freedom.
    Every scene uses the same step pipeline and contact path; see
@@ -19,7 +19,8 @@ Monolithic Coupled Solver
 
 Each articulation retains its own joint block and force/torque convergence groups
 inside a shared Newton solve. Trees may differ in topology and DoF count.
-FREE roots with descendant links and same-tree self-contact are unsupported.
+Same-tree self-contact is off unless ``self_collision`` enables it (see
+`Floating bases, capsules and self-collision`_).
 Shape contact between distinct articulations projects onto both trees and
 retains their cross blocks in the shared sparse operator. Fixed links can be
 zero-Jacobian endpoints. Articulation contacts with FREE actors and materials
@@ -49,9 +50,14 @@ evaluated with the same spatial candidates.
 
 ``contact_candidate_capacity=None`` reserves the model's complete static sample
 upper bound, and ``contact_factor_capacity=None`` reserves three times that
-bound. These are fixed capacities, not active contact counts. Explicitly
-reducing either budget can discard whole contacts; candidate or factor overflow
-fails the step and rolls it back without publishing partial forces.
+bound. These are fixed capacities, not active contact counts. The factor budget
+``F`` also bounds the contact pool: when three times the smaller of the candidate
+capacity and the summed sample supports exceeds ``F``, the pool keeps ``F / 3``
+support entries, and the linear workspace's contact triplets follow the pool.
+Scenes with many static samples (self-collision) should set ``F`` explicitly;
+the default pool holds every sample. Explicitly reducing either budget can
+discard whole contacts; candidate or factor overflow fails the step and rolls
+it back without publishing partial forces.
 
 Use the public API
 ------------------
@@ -216,7 +222,9 @@ actor ownership, layout identity and native rigid continuation fields. Multiple
 articulations use schema 7, including their topology and source mappings in the
 configuration identity. Enabled contact schemas supersede these: schema 8 with
 cloth contact, 9 with cable contact and 10 with both (see
-:doc:`monolithic_cloth` and :doc:`monolithic_cable`). Cross-layout and cross-precision
+:doc:`monolithic_cloth` and :doc:`monolithic_cable`). A floating tree adds 100
+to the schema it would otherwise have (104, 106, 107, 108, 109 or 110), with the
+native root COM and rotation fields. Cross-layout and cross-precision
 checkpoint loads are rejected. The configuration identity covers every option
 that changes the solution, the resolved contact resources and the physical,
 material and SDF digests; PCG mode and CUDA graph use are excluded. CPU and
@@ -238,8 +246,10 @@ Articulation-rigid and rigid-rigid pairs sample both surfaces at half area;
 rigid-static pairs sample the rigid surface at full area. Rigid-tet contact
 samples tet faces when the rigid shape enables particle collision. Both dynamic
 endpoints contribute to the coupled residual, tangent and published COM wrench.
-Box, sphere and mesh sources are supported; mesh targets require CUDA and a
-bound C2 SDF. New plane targets must be infinite and static. Changing collision
+Box, sphere, capsule, mesh and convex-mesh sources are supported; mesh and
+convex-mesh targets require CUDA and a bound C2 SDF, capsule targets are
+analytic on CPU and CUDA. Capsules and convex meshes are not particle (tet,
+cloth or cable) targets. New plane targets must be infinite and static. Changing collision
 flags, pair storage or participating geometry requires rebuilding the solver.
 Mixed-contact numerical qualification remains partial. Existing numerical and
 publication gates apply. Articulation-tet and tet-static contact keep their original sampling and
@@ -262,6 +272,67 @@ qualification is rejected without falling back to resampling.
 
 The coupled solver evaluates contact internally and does not accept external
 Contacts or collision scheduling configuration.
+
+Floating bases, capsules and self-collision
+-------------------------------------------
+
+**Floating bases.** A FREE joint as the first joint of a tree with descendant
+links makes a floating tree. The root contributes six rows to the tree block: the
+world COM increment and the left rotation increment of the root body. The
+solver keeps the root's native world COM and rotation; ``joint_q`` (in the
+solver precision) and the FP32 ``body_q`` are synchronized from them, and the root velocity is the COM
+linear and angular velocity in the parent joint frame, as for FREE rigid actors.
+With ``JointTerms(implicit_pd=True)`` the root is driven to a 6D pose target: the
+translational and rotational errors each pass through a PD law whose energy is
+truncated at the joint effort limit (a Huber form, convex and C1). The root's
+three linear and three angular DoFs must use ``POSITION_VELOCITY`` with equal
+``target_ke``, ``target_kd`` and effort limit within each triple; zero gains
+leave the root undriven. Targets use the coordinate layout: ``joint_target_q``
+holds the root joint frame's position and xyzw quaternion in its parent anchor
+frame (a driven root's target quaternion must be unit within 1e-5, otherwise
+``step`` raises), and ``joint_target_qd`` the target COM linear and angular
+velocity in the parent anchor frame, the convention of ``joint_qd``. ``control.joint_f`` on the root is a
+world COM wrench [N, N·m] applied once; a root torque makes energy acceptance
+heuristic. Unsupported, with an error that names the joint: FREE joints below
+the root or several per tree, kinematic floating roots, and BALL, D6 and
+DISTANCE joints. Root armature, damping, friction and limits must be zero and
+fail construction otherwise. Each published step
+reports ``Stats.variational["floating_root_saturation"]``: per root, whether its
+force and torque limits clip the drive.
+
+**Capsules and convex meshes.** CAPSULE shapes (axis along local z,
+``scale = (radius, half_height)``) are exact segment-distance fields with
+their curvature, sampled as a cylinder band and two hemispherical caps.
+CONVEX_MESH shapes follow the mesh path (CUDA and a C2 SDF); their mesh must be
+convex, which construction checks.
+
+**Self-collision.** ``SolverMonolithic(self_collision={"exclude": [[a, b], ...]})``
+enables contact between bodies of one articulation tree; the default ``None``
+leaves every scene unchanged. The pairs are the Model's ``shape_contact_pairs``
+whose shapes lie on two bodies of one tree with ``COLLIDE_SHAPES`` on both,
+minus excluded body pairs (a label matches a body's full label or its last path
+segment and must be unique) and pairs of bodies welded together. Build the
+articulation with ``enable_self_collisions=True``; Newton filters parent-child
+pairs. Same-tree shapes must be spheres, boxes or capsules. A pair of two
+moving bodies samples both surfaces at half area; a body without degrees of
+freedom (the base link of a fixed-base tree) is only a target, and the other
+surface is sampled at full area. Box sources are sampled on a face grid of
+``"box_sample_spacing"`` [m] (default 4e-3) because the 12-triangle sampling
+misses edge-to-edge crossings. The columns shared by both bodies' common
+ancestors are dropped, so self-contact force on the root and shared ancestor
+rows is exactly zero; ``contact_joint_force`` includes self-contact on the
+other rows. Rest overlap (a gap below -1e-6 m, checked in FP64 on the host)
+fails at construction, ``create_state`` and ``reset_state`` and names the
+bodies, shapes and depth; smaller gaps below ``normal_smoothing`` are listed in
+``self_collision_report``. Because a loaded penalty contact sits slightly inside
+the surface, ``create_state(source=...)`` and ``reset_state`` reject a state with
+self contact deeper than 1e-6 m; ``load_checkpoint`` does not run this check, so
+continue such a run from a checkpoint. The resolved pairs, exclusions and spacing enter the
+checkpoint identity. ``Stats.variational["self_collision"]`` counts the pairs
+and the pairs carrying force. Self-collision adds every pair's samples to the
+static contact set: set ``contact_factor_capacity`` (see above), and expect a
+per-step cost even when no pair is close. Edge-to-edge box contact has little
+penalty area, so it settles deeper than face contact at the same load.
 
 Examples and validation
 -----------------------

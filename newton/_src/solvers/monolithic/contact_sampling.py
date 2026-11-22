@@ -8,16 +8,160 @@ import numpy as np
 from ...geometry import GeoType, Mesh, ShapeFlags
 from .actors import articulation_support
 
+# CONVEX_MESH contacts through the MESH path: its own triangles as source, its texture SDF as target.
+MESH_TYPES = (GeoType.MESH, GeoType.CONVEX_MESH)
+
+
+def _check_convex(mesh, scale, label):
+    """CONVEX_MESH contacts with its own triangles and SDF, so the mesh itself must be convex."""
+    vertices = np.asarray(mesh.vertices, dtype=np.float64) * np.asarray(scale, dtype=np.float64)
+    tri = vertices[np.asarray(mesh.indices).reshape(-1, 3)]
+    normal = np.cross(tri[:, 1] - tri[:, 0], tri[:, 2] - tri[:, 0])
+    normal /= np.linalg.norm(normal, axis=1)[:, None]
+    # Signed height of every vertex above every face plane; orientation is fixed by the centroid.
+    height = np.einsum("fk,fvk->fv", normal, vertices[None, :, :] - tri[:, None, 0])
+    inward = np.einsum("fk,fk->f", normal, vertices.mean(axis=0) - tri[:, 0]) > 0
+    height[inward] *= -1
+    # Mesh vertices are stored in their own precision (FP32 for Newton meshes): coplanar hull points
+    # round off their planes by a few ulps of the coordinates.
+    eps = (
+        np.finfo(np.asarray(mesh.vertices).dtype).eps
+        if np.issubdtype(np.asarray(mesh.vertices).dtype, np.floating)
+        else 0.0
+    )
+    tolerance = 64 * max(eps, np.finfo(np.float64).eps) * float(np.abs(vertices).max())
+    if height.max() > tolerance:
+        raise ValueError(
+            f"CONVEX_MESH shape {label!r} is not convex: a vertex lies {height.max():.3e} m outside a face plane. "
+            "Monolithic contacts with the mesh triangles and SDF; pass its convex hull"
+        )
+
 
 def _sampled_source(geo, mesh):
     """Return whether a shape type can be a contact source surface."""
-    return geo in (GeoType.SPHERE, GeoType.BOX) or (geo == GeoType.MESH and isinstance(mesh, Mesh))
+    return geo in (GeoType.SPHERE, GeoType.BOX, GeoType.CAPSULE) or (geo in MESH_TYPES and isinstance(mesh, Mesh))
 
 
-def _surface_samples(geo, scale, mesh=None, *, _return_triangles=False):
-    """Return local P1Q3 points, outward normals and scaled surface weights."""
+def _sphere_grid():
+    """Unit-sphere grid of the sphere sampler: 33 polar rings (pole to pole) by 32 azimuth slices."""
+    theta, phi = np.linspace(0, np.pi, 33), np.arange(32) * (2 * np.pi / 32)
+    return np.stack(
+        (
+            np.sin(theta[:, None]) * np.cos(phi),
+            np.sin(theta[:, None]) * np.sin(phi),
+            np.broadcast_to(np.cos(theta[:, None]), (33, 32)),
+        ),
+        axis=-1,
+    )
+
+
+def _sphere_faces(grid, rings):
+    """Unit-sphere triangles of the given polar ring bands, with the pole triangles collapsed."""
+    faces = []
+    for i in rings:
+        for j in range(32):
+            a, b, c, d = grid[i, j], grid[i, (j + 1) % 32], grid[i + 1, j], grid[i + 1, (j + 1) % 32]
+            if i > 0:
+                faces.append((a, b, c))
+            if i < 31:
+                faces.append((b, d, c))
+    return np.asarray(faces)
+
+
+def _spherical_area(tri):
+    """Exact unit-sphere area of each spherical triangle (Van Oosterom-Strackee)."""
+    u, v, w = tri[:, 0], tri[:, 1], tri[:, 2]
+    return 2 * np.arctan2(abs(np.einsum("ij,ij->i", u, np.cross(v, w))), 1 + np.sum(u * v + v * w + w * u, axis=1))
+
+
+def _capsule_samples(radius, half_height, bary):
+    """P1Q3 samples of a capsule along local z: two hemispherical caps and a cylinder band.
+
+    Points lie on the exact surface with exact normals; weights are exact patch areas, so they
+    sum to 4 pi r^2 + 4 pi r h. Caps use the sphere sampler's grid split at the equator; the band
+    uses the same 32 azimuth slices and bands no taller than one slice's arc.
+    """
+    grid = _sphere_grid()
+    points, normals, areas, triangles = [], [], [], []
+    for rings, center in ((range(16), half_height), (range(16, 32), -half_height)):
+        tri = _sphere_faces(grid, rings)
+        on_sphere = np.einsum("qn,fni->fqi", bary, tri)
+        n = on_sphere / np.linalg.norm(on_sphere, axis=2)[..., None]
+        offset = np.array([0.0, 0.0, center])
+        points.append(n * radius + offset)
+        normals.append(n)
+        areas.append(radius**2 * _spherical_area(tri))
+        triangles.append(tri * radius + offset)
+    if half_height > 0:
+        bands = max(1, int(np.ceil(2 * half_height / (2 * np.pi * radius / 32))))
+        z = np.linspace(-half_height, half_height, bands + 1)
+        phi = np.arange(33) * (2 * np.pi / 32)
+        params = []
+        for k in range(bands):
+            for j in range(32):
+                a, b = (phi[j], z[k]), (phi[j + 1], z[k])
+                c, d = (phi[j], z[k + 1]), (phi[j + 1], z[k + 1])
+                params += [(a, b, c), (b, d, c)]
+        params = np.asarray(params)  # (faces, 3 corners, (phi, z))
+        sample = np.einsum("qn,fnk->fqk", bary, params)
+        n = np.stack((np.cos(sample[..., 0]), np.sin(sample[..., 0]), np.zeros(sample.shape[:2])), axis=-1)
+        points.append(n * radius + np.stack((np.zeros_like(sample[..., 1]),) * 2 + (sample[..., 1],), axis=-1))
+        normals.append(n)
+        dphi, dz = 2 * np.pi / 32, 2 * half_height / bands
+        areas.append(np.full(len(params), radius * dphi * dz / 2))
+        corners = np.stack((radius * np.cos(params[..., 0]), radius * np.sin(params[..., 0]), params[..., 1]), axis=-1)
+        triangles.append(corners)
+    return np.concatenate(points), np.concatenate(normals), np.concatenate(areas), np.concatenate(triangles)
+
+
+BOX_TRIANGLES = 12
+MAX_BOX_GRID_TRIANGLES = 1_000_000
+
+
+def _box_grid_triangles(half_extents, spacing):
+    """Box surface split into a grid of at most ``spacing`` per edge, two outward-wound triangles per cell."""
+    h = np.asarray(half_extents, dtype=np.float64)[:3]
+    if not np.isfinite(spacing) or spacing <= 0:
+        raise ValueError(f"Box sample spacing must be positive and finite, got {spacing}")
+    # The relative slack keeps an edge of an exact multiple of the spacing (FP32 scales) at that many cells.
+    cells = np.maximum(1, np.ceil(2 * h / spacing * (1 - 1e-6))).astype(int)
+    count = 4 * (cells[0] * cells[1] + cells[1] * cells[2] + cells[0] * cells[2])
+    if count > MAX_BOX_GRID_TRIANGLES:
+        raise ValueError(
+            f"Box of half extents {h.tolist()} m at box_sample_spacing {spacing} m needs {count} triangles "
+            f"(limit {MAX_BOX_GRID_TRIANGLES}); use a larger spacing"
+        )
+    tris = []
+    for axis in range(3):
+        u, v = (a for a in range(3) if a != axis)
+        gu = np.linspace(-h[u], h[u], cells[u] + 1)
+        gv = np.linspace(-h[v], h[v], cells[v] + 1)
+        for sign in (-1.0, 1.0):
+            # (e_u x e_v) . e_axis is +1 for axes 0 and 2 and -1 for axis 1.
+            flip = sign * (-1.0 if axis == 1 else 1.0) < 0
+            for i in range(len(gu) - 1):
+                for j in range(len(gv) - 1):
+                    c = np.zeros((4, 3))
+                    c[:, axis] = sign * h[axis]
+                    c[:, u] = (gu[i], gu[i + 1], gu[i + 1], gu[i])
+                    c[:, v] = (gv[j], gv[j], gv[j + 1], gv[j + 1])
+                    for tri in (c[[0, 1, 2]], c[[0, 2, 3]]):
+                        tris.append(tri[::-1] if flip else tri)
+    return np.asarray(tris)
+
+
+def _surface_samples(geo, scale, mesh=None, *, box_spacing=None, _return_triangles=False):
+    """Return local P1Q3 points, outward normals and scaled surface weights.
+
+    ``box_spacing`` [m] samples a box on a face grid of that spacing instead of its 12 triangles
+    (same-tree contact: two coarse boxes can cross edge to edge with no sample inside).
+    """
     bary = np.eye(3) * 0.5 + np.full((3, 3), 1 / 6)
-    if geo == GeoType.SPHERE:
+    if geo == GeoType.CAPSULE:
+        if not np.isfinite(scale).all() or scale[0] <= 0 or scale[1] < 0:
+            raise ValueError("Invalid source capsule scale: radius must be positive and half_height nonnegative")
+        points, normals, area, tri = _capsule_samples(float(scale[0]), float(scale[1]), bary)
+    elif geo == GeoType.SPHERE:
         if not np.isfinite(scale).all() or scale[0] <= 0:
             raise ValueError("Invalid source sphere scale")
         theta, phi = np.linspace(0, np.pi, 33), np.arange(32) * (2 * np.pi / 32)
@@ -51,17 +195,20 @@ def _surface_samples(geo, scale, mesh=None, *, _return_triangles=False):
     else:
         if not np.isfinite(scale).all() or np.any(scale <= 0):
             raise ValueError("Invalid source shape scale")
-        if geo == GeoType.BOX:
-            mesh = Mesh.create_box(1.0, compute_inertia=False)
-        elif geo != GeoType.MESH or not isinstance(mesh, Mesh):
-            raise ValueError("Unsupported contact source shape")
-        indices = np.asarray(mesh.indices)
-        vertices = np.asarray(mesh.vertices, dtype=np.float64)
-        if indices.size % 3 or vertices.ndim != 2 or vertices.shape[1] != 3 or not np.isfinite(vertices).all():
-            raise ValueError("Invalid source mesh topology")
-        if not np.issubdtype(indices.dtype, np.integer) or np.any(indices < 0) or np.any(indices >= len(vertices)):
-            raise ValueError("Invalid source mesh indices")
-        tri = (vertices * scale)[indices.reshape(-1, 3)]
+        if geo == GeoType.BOX and box_spacing is not None:
+            tri = _box_grid_triangles(scale, box_spacing)
+        else:
+            if geo == GeoType.BOX:
+                mesh = Mesh.create_box(1.0, compute_inertia=False)
+            elif geo not in MESH_TYPES or not isinstance(mesh, Mesh):
+                raise ValueError("Unsupported contact source shape")
+            indices = np.asarray(mesh.indices)
+            vertices = np.asarray(mesh.vertices, dtype=np.float64)
+            if indices.size % 3 or vertices.ndim != 2 or vertices.shape[1] != 3 or not np.isfinite(vertices).all():
+                raise ValueError("Invalid source mesh topology")
+            if not np.issubdtype(indices.dtype, np.integer) or np.any(indices < 0) or np.any(indices >= len(vertices)):
+                raise ValueError("Invalid source mesh indices")
+            tri = (vertices * scale)[indices.reshape(-1, 3)]
         cross = np.cross(tri[:, 1] - tri[:, 0], tri[:, 2] - tri[:, 0])
         area = np.linalg.norm(cross, axis=1) / 2
         if not len(area) or not np.isfinite(area).all() or np.any(area <= 0):
@@ -88,10 +235,29 @@ def _checked_contact_capacity(count, support, triplets, base=0):
         raise ValueError("Actor contact capacity exceeds int32")
 
 
+def _shared_prefix(a, b):
+    """Number of leading (column, entry) supports whose columns coincide."""
+    n = 0
+    while n < min(len(a), len(b)) and a[n][0] == b[n][0]:
+        n += 1
+    return n
+
+
 class ContactSamples:
     """Freeze Model-selected directed keys without rebuilding collision filters."""
 
-    def __init__(self, model, actors, *, radius, base_triplet_count, _expand_support=True, _materials=None):
+    def __init__(
+        self,
+        model,
+        actors,
+        *,
+        radius,
+        base_triplet_count,
+        _expand_support=True,
+        _materials=None,
+        _self_pairs=frozenset(),
+        _self_box_spacing=None,
+    ):
         if type(_expand_support) is not bool:
             raise ValueError("Contact support expansion mode must be boolean")
         self.model = model
@@ -103,6 +269,12 @@ class ContactSamples:
         self.support_size = 0
         self.fields = {}
         self.pair_kinds = {}
+        shape_types = model.shape_type.numpy()
+        if _self_box_spacing is None and any(shape_types[s] == GeoType.BOX for p in _self_pairs for s in p):
+            raise ValueError("Same-tree box pairs need a box sample spacing (the rest check samples the face grid)")
+        # Box sources with face-grid samples (same-tree pairs) -> spacing. Their grid faces are numbered
+        # after the box's 12 triangles, so a box that is also an ordinary source keeps faces 0-11.
+        self.grid_sources = {}
         self.keys, self.supports, self.selectors = [], [], []
         self.body_kind = np.full(model.body_count, -1, dtype=np.int32)
         self.body_local = np.full(model.body_count, -1, dtype=np.int32)
@@ -207,6 +379,14 @@ class ContactSamples:
                     )
         surfaces, seen = {}, set()
         targets_used = set(tet_targets)
+        # Each CONVEX_MESH shape is checked once, however many pairs and roles it takes.
+        convex_checked = set()
+
+        def check_convex(shape, scale):
+            if types[shape] == GeoType.CONVEX_MESH and shape not in convex_checked:
+                _check_convex(model.shape_source[shape], scale, model.shape_label[shape])
+                convex_checked.add(shape)
+
         # Pairs, and each pair's two directions, follow the canonical shape order.
         rank = {s: i for i, s in enumerate(_canonical_shapes(actors, range(model.shape_count)))}
         ordered = sorted(
@@ -214,7 +394,8 @@ class ContactSamples:
         )
         for a, b in ordered:
             mechanical_pair = bodies[a] in tree_support and bodies[b] in tree_support
-            if owner[a] == owner[b]:
+            self_pair = tuple(sorted((a, b))) in _self_pairs
+            if owner[a] == owner[b] and not self_pair:
                 continue
             collide = flags[a] & int(ShapeFlags.COLLIDE_SHAPES) and flags[b] & int(ShapeFlags.COLLIDE_SHAPES)
             if not collide and not (mechanical_pair or a in self.rigid_shapes or b in self.rigid_shapes):
@@ -231,7 +412,9 @@ class ContactSamples:
             if not any(dynamic):
                 continue
             kind = (
-                "A-A"
+                "A-self"
+                if self_pair
+                else "A-A"
                 if mechanical_pair
                 else "A-static"
                 if not all(dynamic) and a not in self.rigid_shapes and b not in self.rigid_shapes
@@ -242,33 +425,55 @@ class ContactSamples:
                 else "A-R"
             )
             arm = a if dynamic[0] else b
-            if kind == "A-static" and not _sampled_source(types[arm], model.shape_source[arm]):
-                # Only supported link surfaces meet the world; other link shapes,
-                # such as planes, were never contact sources and stay outside.
+            other = b if arm == a else a
+            if kind == "A-static" and types[arm] == GeoType.PLANE and types[other] == GeoType.PLANE:
+                # Two planes have no surface to sample: neither is a source. Any other static
+                # partner would lose contact with the link plane, so it fails below.
                 continue
+            if kind == "A-static" and not _sampled_source(types[arm], model.shape_source[arm]):
+                # A link surface the solver cannot sample would have no contact with the world;
+                # fail rather than drop the pair (clear COLLIDE_SHAPES to opt out).
+                label = lambda s: model.shape_label[s] if s < len(model.shape_label) else str(s)  # noqa: E731
+                body = int(bodies[arm])
+                raise ValueError(
+                    f"Link shape {label(arm)!r} (index {arm}, body {model.body_label[body]!r}, "
+                    f"{GeoType(int(types[arm])).name}) cannot be a contact source; it is paired with static "
+                    f"shape {label(other)!r}. Use a sphere, box, capsule or mesh, or clear its COLLIDE_SHAPES flag"
+                )
             self.pair_kinds[pair] = kind
             for source, target, enabled in ((a, b, dynamic[0]), (b, a, dynamic[1])):
                 if not enabled:
                     continue
-                if source not in surfaces:
-                    surfaces[source] = _surface_samples(
-                        types[source], scales[source].astype(float), model.shape_source[source]
+                # Box sources of same-tree pairs use the finer face grid; every other source is unchanged.
+                spacing = _self_box_spacing if self_pair and types[source] == GeoType.BOX else None
+                if (source, spacing) not in surfaces:
+                    surfaces[source, spacing] = _surface_samples(
+                        types[source], scales[source].astype(float), model.shape_source[source], box_spacing=spacing
                     )
-                if types[source] == GeoType.MESH:
+                if types[source] in MESH_TYPES:
                     mesh = model.shape_source[source]
+                    check_convex(source, scales[source])
                     self.meshes[source] = (mesh, np.array(mesh.vertices, copy=True), np.array(mesh.indices, copy=True))
                 targets_used.add(target)
-                ps, ns, ws = surfaces[source]
+                ps, ns, ws = surfaces[source, spacing]
+                first_face = 0
+                if spacing is not None:
+                    self.grid_sources[source] = spacing
+                    first_face = BOX_TRIANGLES
                 cols, sels = [], []
-                for end, s in enumerate((source, target)):
-                    for col, j in support.get(int(bodies[s]), ()):
+                ends = [support.get(int(bodies[s]), ()) for s in (source, target)]
+                # Same-tree ends share the columns on their common ancestors' root path (a prefix of both
+                # sorted supports); those DoFs move both ends rigidly, so they carry no self-contact column.
+                shared = _shared_prefix(ends[0], ends[1]) if self_pair else 0
+                for end, columns in enumerate(ends):
+                    for col, j in columns[shared:]:
                         cols.append(col)
                         sels.append((end, j))
                 for index, (p, n, w) in enumerate(zip(ps, ns, ws, strict=True)):
                     append(
                         source,
                         target,
-                        index // 3,
+                        first_face + index // 3,
                         index % 3,
                         p,
                         n,
@@ -281,12 +486,25 @@ class ContactSamples:
         if _materials is not None:
             from .contact_material_sampling import _append_material_samples  # noqa: PLC0415
 
-            targets_used.update(_append_material_samples(self, _materials, support, append))
+            material_targets = set(_append_material_samples(self, _materials, support, append))
+            targets_used.update(material_targets)
+        # Shapes that particles (tet surface, cloth, cable) contact. CAPSULE is a rigid/link target only.
+        particle_targets = (set(tet_targets) if len(triangles) else set()) | (
+            material_targets if _materials is not None else set()
+        )
         used_shapes = targets_used | {s for s in source_shapes if s >= 0}
         for s in used_shapes:
             geo, scale = types[s], scales[s]
-            if geo not in (GeoType.PLANE, GeoType.SPHERE, GeoType.BOX, GeoType.MESH):
+            if geo not in (GeoType.PLANE, GeoType.SPHERE, GeoType.BOX, GeoType.CAPSULE, *MESH_TYPES):
                 raise ValueError("Unsupported actor contact target")
+            if geo in (GeoType.CAPSULE, GeoType.CONVEX_MESH) and s in particle_targets:
+                raise ValueError(
+                    f"{GeoType(int(geo)).name} shape {s} is a particle (tet, cloth or cable) contact target; this "
+                    "type supports only rigid and link contact. Clear its COLLIDE_PARTICLES flag or use a sphere, "
+                    "box or mesh"
+                )
+            if geo == GeoType.CAPSULE and (scale[0] <= 0 or scale[1] < 0):
+                raise ValueError("Invalid capsule target scale: radius must be positive and half_height nonnegative")
             if not np.isfinite(scale).all() or not np.isfinite(margins[s]) or margins[s] < 0:
                 raise ValueError("Invalid target shape scale or margin")
             if geo == GeoType.PLANE and (
@@ -297,9 +515,10 @@ class ContactSamples:
                 raise ValueError("New plane target must be infinite and static outside material contact")
             if (geo == GeoType.SPHERE and scale[0] <= 0) or (geo == GeoType.BOX and np.any(scale <= 0)):
                 raise ValueError("Invalid analytic target scale")
-            if geo == GeoType.MESH:
+            if geo in MESH_TYPES:
                 mesh = model.shape_source[s]
                 _surface_samples(geo, scale.astype(float), mesh)
+                check_convex(s, scale)
                 self.meshes[s] = (mesh, np.array(mesh.vertices, copy=True), np.array(mesh.indices, copy=True))
         self.targets_used = tuple(sorted(targets_used))
         self.source_shapes = np.asarray(source_shapes, dtype=np.int32)

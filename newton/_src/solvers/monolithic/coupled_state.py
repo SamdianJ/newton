@@ -18,9 +18,12 @@ class CoupledState(ArticulationState):
     namespace = "_monolithic_coupled"
     version = 4
 
-    def __init__(self, kinematics, actors, rigid=None, materials=None, *, cloth_contact=False, cable_contact=False):
+    def __init__(
+        self, kinematics, actors, rigid=None, materials=None, *, cloth_contact=False, cable_contact=False, floating=None
+    ):
         self.actors = actors
         self.rigid = rigid
+        self.floating = floating
         self.materials = materials
         self._cloth_neighbors = []
         if materials is not None:
@@ -98,6 +101,16 @@ class CoupledState(ArticulationState):
             rigid_bound_com=((count,), self.vector),
             rigid_bound_rotation=((count,), wp.quatd if self.dtype == wp.float64 else wp.quat),
         )
+        if floating is not None and floating.count:
+            # Floating-base schemas are disjoint from every fixed-base version.
+            self.version += 100
+            quaternion = wp.quatd if self.dtype == wp.float64 else wp.quat
+            self.schema.update(
+                floating_com=((floating.count,), self.vector),
+                floating_rotation=((floating.count,), quaternion),
+                floating_bound_com=((floating.count,), self.vector),
+                floating_bound_rotation=((floating.count,), quaternion),
+            )
         self._layout_expected = {
             name: wp.array(value, dtype=self.schema[name][1], device=self.device)
             for name, value in self.layout_metadata.items()
@@ -231,6 +244,8 @@ class CoupledState(ArticulationState):
         if bound:
             if self.rigid is not None and self.rigid.count:
                 self.rigid.validate(state)
+            if self.floating is not None and self.floating.count:
+                self.floating.validate(state)
             self._layout_status.zero_()
             for index, (name, expected) in enumerate(self._layout_expected.items()):
                 if name in self.schema:
@@ -282,7 +297,10 @@ class CoupledState(ArticulationState):
                     raise ValueError("Cable coordinates/frames changed; explicitly reset coupled history")
 
     def reset(self, state, *, dt):
-        if self.materials is not None or (self.rigid is not None and self.rigid.count):
+        # Native poses (rigid actors, floating roots) are initialized before validation, so reset
+        # them in scratch: a failed reset leaves the state untouched.
+        native = (self.rigid is not None and self.rigid.count) or (self.floating is not None and self.floating.count)
+        if self.materials is not None or native:
             scratch = self._copy_unchecked(state)
             self._reset(scratch, dt=dt)
             if self.rigid is not None and self.rigid.count:
@@ -292,6 +310,10 @@ class CoupledState(ArticulationState):
             state.assign(scratch)
         else:
             self._reset(state, dt=dt)
+
+    def _initialize_roots(self, state):
+        if self.floating is not None:
+            self.floating.initialize(state)
 
     def _reset(self, state, *, dt):
         super().reset(state, dt=dt)
@@ -338,6 +360,8 @@ class CoupledState(ArticulationState):
         wp.copy(history.bound_v, state.particle_qd)
         for name in ("com", "rotation"):
             wp.copy(getattr(history, "rigid_bound_" + name), getattr(history, "rigid_" + name))
+            if self.floating is not None and self.floating.count:
+                wp.copy(getattr(history, "floating_bound_" + name), getattr(history, "floating_" + name))
         if self.materials is not None:
             for name in ("theta", "ref_director", "ref_twist"):
                 wp.copy(getattr(history, "cable_bound_" + name), getattr(history, "cable_" + name))

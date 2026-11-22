@@ -218,6 +218,9 @@ def _coordinate_trial(
     alpha = scalar_value(alpha_arg)
     h = scalar_value(h_arg)
     i = wp.tid()
+    # Floating-root rows have no scalar coordinate: their pose advances natively, the step stays zero.
+    if coords[i] < 0:
+        return
     # Advance the exact step; coordinates and rates are formed from it once.
     step[i] = accepted_step[i] + alpha * type(h)(direction[rows[i]])
     out[coords[i]] = qn[i] + step[i]
@@ -237,6 +240,8 @@ def _coordinate_predictor(
 ):
     h = scalar_value(h_arg)
     i = wp.tid()
+    if coords[i] < 0:
+        return
     step[i] = h * v[i]
     out[coords[i]] = q[i] + step[i]
     vout[dofs[i]] = step[i] / h

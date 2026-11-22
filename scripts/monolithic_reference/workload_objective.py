@@ -14,7 +14,7 @@ from scripts.monolithic_reference.profiling import SolverProfiler, capture_count
 from scripts.monolithic_reference.workload_scene import build_scene, compare_arrays
 
 # These are numerical owners, not a recursively serialized object graph.
-OWNERS = ("_objective", "_kinematics", "_tet", "_contact", "_tet_assembly")
+OWNERS = ("_objective", "_kinematics", "_tet", "_contact", "_tet_assembly", "_floating")
 SOLVER_ARRAYS = ("_frozen_force", "_frozen_gravity", "_complete_r", "_diagonal", "_tet_assembly_residual")
 HANDLES = {"table", "smooth_table"}
 TOPOLOGY = {

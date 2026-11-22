@@ -1,0 +1,73 @@
+{
+  "schema": "p9d-floating-hand/v1",
+  "status": "FROZEN",
+  "approval": "Values confirmed by the user on 2026-11-16 (P9d PRD section 2 items 6-8 and the PR0 recipe questions); frozen at P9d PR0.",
+  "stage": "P9d PR0",
+  "scene": "E3",
+  "mount": "floating",
+  "dt_s": 0.001,
+  "phases_s": {
+    "close": 1.0,
+    "hold": 1.0
+  },
+  "gravity": [
+    0.0,
+    0.0,
+    -9.81
+  ],
+  "palm_pose": [
+    0.0,
+    0.0,
+    0.3,
+    0.0,
+    0.0,
+    0.0,
+    1.0
+  ],
+  "solver": {
+    "friction_velocity_scale": 0.01,
+    "contact_stiffness": 1000000000.0,
+    "friction_coefficient": 0.8,
+    "normal_smoothing": 0.0001,
+    "publish_policy": "current_iterate",
+    "alignment_policy": "mask",
+    "newton_max_iterations": 10,
+    "linear_max_iterations": 200,
+    "contact_factor_capacity": 600000
+  },
+  "joint_terms": {
+    "implicit_pd": true,
+    "limits": true,
+    "limit_width": 0.01
+  },
+  "root_pd": {
+    "linear_ke": 20000.0,
+    "linear_kd": 200.0,
+    "angular_ke": 200.0,
+    "angular_kd": 5.0,
+    "force_limit_N": 100.0,
+    "torque_limit_Nm": 10.0
+  },
+  "self_collision": {
+    "exclude": [
+      [
+        "palm_link",
+        "link_13.0"
+      ]
+    ]
+  },
+  "hand_import": {
+    "collapse_fixed_joints": false,
+    "enable_self_collisions": true,
+    "finger_gains": {
+      "target_ke": 150.0,
+      "target_kd": 5.0,
+      "armature": 0.01
+    },
+    "urdf_dynamics": "zeroed: URDF damping 3-10 N m s/rad and friction 5-12 N m (effort limit 15 N m) are not physical for the finger joints; the task profile zeroes damping",
+    "finger_effort_limit_Nm": 0.7,
+    "finger_effort_note": "0.7 N m (Allegro V4 nominal maximum joint torque, user decision 2026-11-16); the URDF value 15 N m drove about 20 N per fingertip into a 0.1 kg object"
+  },
+  "contact_capacity_note": "contact_factor_capacity 600000 (support budget 200000; the E3 self-collision peak was 8552 at P9d PR4) bounds the contact pool, which by default holds every static sample and does not fit a 12 GB GPU with 4 mm self-collision grids; overflow rolls the step back. User decision 2026-11-19 (P9d PR4).",
+  "contact_note": "contact_stiffness 1e9 for rigid objects (user decision 2026-11-16); production Franka uses 1e7 for its soft cube"
+}

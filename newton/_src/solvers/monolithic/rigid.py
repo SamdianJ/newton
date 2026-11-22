@@ -9,9 +9,10 @@ import numpy as np
 import warp as wp
 
 from .articulation import _inner
-from .articulation_state import _initial_symmetric, _predict, _skew, _store_rates
+from .articulation_state import _initial_symmetric, _predict, _skew
 from .convergence import abs3, axial_absolute
 from .numeric_parameters import scalar_value
+from .rigid_pose import _derive_steps, _predict_pose, _recover, _rotation_step, _trial
 
 
 @wp.kernel
@@ -121,104 +122,6 @@ def _publish(
     p, r = wp.transform_get_translation(poses[i]), wp.transform_get_rotation(poses[i])
     body_q[bodies[i]] = wp.transform(wp.vec3(p), wp.quat(r))
     body_qd[bodies[i]] = wp.spatial_vector(wp.vec3(v[i]), wp.vec3(omega[i]))
-
-
-@wp.func
-def _rotation_step(q: Any):
-    """Return ``R(q) - I`` of a unit quaternion near identity without cancellation."""
-    v = type(q[0])(2.0) * wp.skew(wp.vector(q[0], q[1], q[2]))
-    return q[3] * v + type(q[0])(0.5) * (v * v)
-
-
-@wp.kernel
-def _predict_pose(
-    predicted_com: wp.array[Any],
-    predicted_step: wp.array[Any],
-    quat_n: wp.array[Any],
-    omega: wp.array[Any],
-    h_arg: Any,
-    com: wp.array[Any],
-    rotation: wp.array[Any],
-    step: wp.array[Any],
-    rotation_step: wp.array[Any],
-):
-    h = scalar_value(h_arg)
-    i = wp.tid()
-    dr = h * omega[i]
-    angle = wp.length(dr)
-    increment = type(quat_n[0])(type(h)(0.0), type(h)(0.0), type(h)(0.0), type(h)(1.0))
-    # Keep the previous initial guess if extrapolation leaves the rigid domain.
-    if angle > type(h)(0.0) and angle < type(h)(1.5707963267948966):
-        increment = wp.quat_from_axis_angle(dr / angle, angle)
-    com[i] = predicted_com[i]
-    step[i] = predicted_step[i]
-    rotation_step[i] = increment
-    rotation[i] = wp.normalize(increment * quat_n[i])
-
-
-@wp.kernel
-def _trial(
-    step: wp.array[Any],
-    rotation_step: wp.array[Any],
-    rows: wp.array2d[int],
-    direction: wp.array[Any],
-    alpha_arg: Any,
-    tn: wp.array[Any],
-    quat_n: wp.array[Any],
-    out_step: wp.array[Any],
-    out_rotation_step: wp.array[Any],
-    out_com: wp.array[Any],
-    out_rotation: wp.array[Any],
-):
-    alpha = scalar_value(alpha_arg)
-    i = wp.tid()
-    dc = type(tn[0])(
-        type(alpha)(direction[rows[i, 0]]), type(alpha)(direction[rows[i, 1]]), type(alpha)(direction[rows[i, 2]])
-    )
-    dr = alpha * type(tn[0])(
-        type(alpha)(direction[rows[i, 3]]), type(alpha)(direction[rows[i, 4]]), type(alpha)(direction[rows[i, 5]])
-    )
-    angle = wp.length(dr)
-    increment = type(quat_n[0])(type(alpha)(0.0), type(alpha)(0.0), type(alpha)(0.0), type(alpha)(1.0))
-    if angle != type(alpha)(0.0):
-        increment = wp.quat_from_axis_angle(dr / angle, angle)
-    # Advance the exact step and the rotation from the step start, then form
-    # the pose from them once.
-    out_step[i] = step[i] + alpha * dc
-    out_rotation_step[i] = wp.normalize(increment * rotation_step[i])
-    out_com[i] = tn[i] + out_step[i]
-    out_rotation[i] = wp.normalize(out_rotation_step[i] * quat_n[i])
-
-
-@wp.kernel
-def _derive_steps(
-    com: wp.array[Any],
-    rotation: wp.array[Any],
-    tn: wp.array[Any],
-    quat_n: wp.array[Any],
-    step: wp.array[Any],
-    rotation_step: wp.array[Any],
-):
-    i = wp.tid()
-    step[i] = com[i] - tn[i]
-    q = rotation[i] * wp.quat_inverse(quat_n[i])
-    if q[3] < type(q[3])(0.0):
-        q = -q
-    rotation_step[i] = q
-
-
-@wp.kernel
-def _recover(
-    step: wp.array[Any],
-    rotation_step: wp.array[Any],
-    h_arg: Any,
-    v: wp.array[Any],
-    omega: wp.array[Any],
-    sym: wp.array2d[Any],
-):
-    h = scalar_value(h_arg)
-    i = wp.tid()
-    _store_rates(step[i], _rotation_step(rotation_step[i]), h, i, v, omega, sym)
 
 
 @wp.kernel

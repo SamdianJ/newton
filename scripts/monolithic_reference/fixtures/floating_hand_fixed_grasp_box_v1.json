@@ -1,0 +1,18 @@
+{
+  "schema": "p9d-floating-hand-fixed-state/v1",
+  "status": "FROZEN",
+  "approval": "Values confirmed by the user on 2026-11-16 (P9d PRD section 2 items 6-8 and the PR0 recipe questions); frozen at P9d PR0.",
+  "recipe": "scripts/monolithic_reference/fixtures/floating_hand_wrist_box_baseline_v1.json",
+  "state": "replay the recipe from t = 0 (deterministic) to the start of the window; the window is the hold phase",
+  "mounts": [
+    "wrist",
+    "floating"
+  ],
+  "window_steps": [
+    2600,
+    2800
+  ],
+  "precision": "fp32",
+  "use_cuda_graph": true,
+  "note": "K4: analytic grasp state with a box object, so both the trunk (wrist) and P9d (wrist and floating) can run it"
+}
