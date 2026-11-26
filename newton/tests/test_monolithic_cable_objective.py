@@ -23,6 +23,45 @@ def _rotation(axis, angle):
 class TestMonolithicCableObjective(unittest.TestCase):
     device = "cpu"
 
+    def test_transverse_stretch_stiffness(self):
+        """Match transverse force derivatives in tension and keep compression PSD."""
+        x = np.array([[0.0, 0, 0], [1.0, 0, 0]])
+        theta, d = np.zeros(1), np.array([[0.0, 1, 0]])
+        frame = CableFrame(x, d)
+        objective = CableObjective(x, theta, d, (10.0, np.eye(2), 1.0), dtype=wp.float64, device=self.device)
+        direction = np.array([[0.0, 0, 0], [0.0, 1.0, 0]])
+        for length in (1.25, 0.75):
+            trial = x * length
+            _, _, tangent = objective.evaluate_host(trial, theta, frame)
+            action = tangent @ np.r_[direction.ravel(), 0.0]
+            if length > 1:
+                plus = objective.evaluate_host(trial + 1e-6 * direction, theta, frame)[1]
+                minus = objective.evaluate_host(trial - 1e-6 * direction, theta, frame)[1]
+                np.testing.assert_allclose(action, (plus - minus) / 2e-6, atol=1e-10)
+            else:
+                np.testing.assert_allclose(action, 0, atol=1e-12)
+            self.assertGreaterEqual(np.linalg.eigvalsh(tangent).min(), -1e-12)
+
+    def test_isotropic_bent_rod_common_spin(self):
+        """Preserve free common spin and retain differential twist on a deformed straight-rest rod."""
+        x = np.column_stack((np.arange(3.0), np.zeros((3, 2))))
+        theta = np.array([0.21, -0.36])
+        d = np.tile([0.0, 0.0, 1.0], (2, 1))
+        stiffness = (10.0, np.eye(2), 2.0)
+        frame = CableFrame(x, d)
+        trial = x.copy()
+        trial[-1] += [0.1, 0.55, -0.24]
+        objective = CableObjective(x, theta, d, stiffness, dtype=wp.float64, device=self.device)
+        energy, residual, tangent = objective.evaluate_host(trial, theta, frame)
+        common = np.r_[np.zeros(x.size), 1.0, 1.0]
+        np.testing.assert_allclose(tangent @ common, 0, atol=1e-12)
+        np.testing.assert_allclose(residual @ common, 0, atol=1e-12)
+        shifted = objective.evaluate_host(trial, theta + 0.8, frame)
+        for first, second in zip((energy, residual, tangent), shifted, strict=True):
+            np.testing.assert_allclose(first, second, atol=1e-12)
+        self.assertGreater(tangent[-2, -2] - tangent[-2, -1], 1)
+        self.assertGreaterEqual(np.linalg.eigvalsh(tangent).min(), -1e-11)
+
     def test_transport_chart_and_unwrapped_history(self):
         """Differentiate away from the committed chart origin without wrapping theta."""
         x = np.array([[0.0, 0, 0], [0.5, 0, 0], [1, 0, 0]])
@@ -61,6 +100,26 @@ class TestMonolithicCableObjective(unittest.TestCase):
                 _, residual, matrix = objective.evaluate_host(trial, theta, frame)
                 self.assertGreater(np.linalg.norm(matrix @ common), 1e-4)
                 self.assertGreater(abs(residual @ common), 1e-4)
+
+    def test_isotropic_intrinsic_bend_retains_common_spin_stiffness(self):
+        """Recover the rotated-strain tangent and physical torque of a precurved round rod."""
+        x = np.array([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [1.7, 0.4, 0.0]])
+        theta = np.array([0.1, 0.4])
+        d = np.tile([0.0, 0.0, 1.0], (2, 1))
+        frame = CableFrame(x, d)
+        stiffness = (10.0, np.eye(2), 2.0)
+        rest = CableReference(x, theta, d, stiffness)
+        objective = CableObjective(x, theta, d, stiffness, dtype=wp.float64, device=self.device)
+        trial = x.copy()
+        trial[1] += [0.08, 0.05, -0.15]
+        angles = theta + np.array([0.72, 0.28])
+        _, residual, tangent = objective.evaluate_host(trial, angles, frame)
+        expected_r, expected_b = cable_derivatives(rest, trial, angles, frame)
+        np.testing.assert_allclose(residual, expected_r, atol=1e-12)
+        np.testing.assert_allclose(tangent, expected_b, atol=1e-12)
+        common = np.r_[np.zeros(x.size), 1.0, 1.0]
+        self.assertGreater(common @ tangent @ common, 1e-3)
+        self.assertGreater(abs(residual @ common), 1e-3)
 
     def test_anisotropic_curved_reference(self):
         """Preserve every xyz/theta block and the natural curved, twisted shape."""

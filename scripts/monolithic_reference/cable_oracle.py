@@ -146,9 +146,15 @@ def _prepare(rest, positions, theta, frame):
 def _weighted_strains(rest, positions, theta, frame):
     lengths, curvature, twist = _strains(positions, theta, frame)
     ea, bending, gj = rest.stiffness
+    bend = (curvature - rest.curvature) @ np.linalg.cholesky(bending) / np.sqrt(rest.dual_lengths)[:, None]
+    if np.array_equal(bending, np.eye(2) * bending[0, 0]):
+        angle = 0.5 * theta[:-1] + 0.5 * theta[1:]
+        c, s = np.cos(angle), np.sin(angle)
+        x, y = bend.T
+        bend = np.column_stack((c * x - s * y, s * x + c * y))
     return (
         np.sqrt(ea / rest.lengths) * (lengths - rest.lengths),
-        ((curvature - rest.curvature) @ np.linalg.cholesky(bending) / np.sqrt(rest.dual_lengths)[:, None]).ravel(),
+        bend.ravel(),
         np.sqrt(gj / rest.dual_lengths) * (twist - rest.twist),
     )
 
@@ -169,8 +175,8 @@ def cable_derivatives(rest, positions, theta, frame):
 
     Ordering is all node-major xyz coordinates followed by one unwrapped theta
     per edge. No gauge or physical boundary is eliminated by this oracle.
-    The approximation omits strain-weighted second derivatives and is exact
-    only at zero strain. Never add artificial theta inertia to this matrix.
+    The tangent retains the positive part of the axial geometric stiffness
+    and uses Gauss-Newton bending and twist in the weighted strain frame.
     """
     positions, theta = _prepare(rest, positions, theta, frame)
     state = np.r_[positions.ravel(), theta]
@@ -186,6 +192,14 @@ def cable_derivatives(rest, positions, theta, frame):
             jacobian[:, index] = np.concatenate(strains).imag / 1e-30
             residual[index] = sum(0.5 * np.dot(s, s) for s in strains).imag / 1e-30
     tangent = jacobian.T @ jacobian
+    edges = np.diff(positions, axis=0)
+    lengths = np.linalg.norm(edges, axis=1)
+    for edge, (length, rest_length) in enumerate(zip(lengths, rest.lengths, strict=True)):
+        if length > rest_length:
+            unit = edges[edge] / length
+            transverse = rest.stiffness[0] * (1.0 / rest_length - 1.0 / length) * (np.eye(3) - np.outer(unit, unit))
+            rows = slice(3 * edge, 3 * edge + 6)
+            tangent[rows, rows] += np.block([[transverse, -transverse], [-transverse, transverse]])
     if not np.isfinite(residual).all() or not np.isfinite(tangent).all():
         raise ValueError("Nonfinite cable derivatives")
     return residual, tangent
