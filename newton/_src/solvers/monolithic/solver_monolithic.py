@@ -127,7 +127,7 @@ class SolverMonolithic(SolverBase):
     discrete detection do not guarantee material-layer spacing or no crossing.
     This configuration is fixed for the solver lifetime and checkpoint identity.
 
-    Experimental ``cable_contact`` enables frictionless cable self and inter-cable
+    Experimental ``cable_contact`` enables cable self and inter-cable
     contact on centerline positions; the contact radius of each cable is its
     ``CableInput.radius``. Its dictionary configures ``self``/``inter`` (bool,
     default True, not both False), ``normal_stiffness`` (line stiffness [N/m^2],
@@ -146,6 +146,14 @@ class SolverMonolithic(SolverBase):
     lifetime and checkpoint identity. ``get_cable_contact_diagnostics`` returns
     publication-bound counts, loads and overlaps; enabled checkpoints use schema
     9 (10 together with ``cloth_contact``).
+
+    Cable contact accepts an optional ``friction_coefficient`` (default zero) and
+    ``friction_velocity_scale`` (default 0.01 m/s). Each quadrature sample uses
+    one lagged Coulomb contact per connected loaded target arc. Its closest
+    material points, tangent plane and net compressive load are frozen at the
+    step start. The law reaches sliding friction at the velocity scale. Below
+    it, smooth friction allows creep; it carries no cross-step stick history.
+    Rolling and twist friction are outside this centerline model.
 
     Experimental ``alignment_policy="frozen"`` retains each sample's physical
     step-start orientation weight through Newton and candidate refreshes.
@@ -1153,7 +1161,6 @@ class SolverMonolithic(SolverBase):
             and not self._rigid.has_torque
             and not self._floating.has_torque
             and (self._cloth_contact is None or self._cloth_contact.mu == 0.0)
-            # v1 cable contact is frictionless; keep the condition for when friction is added.
             and (self._cable_contact is None or self._cable_contact.mu == 0.0)
         )
 

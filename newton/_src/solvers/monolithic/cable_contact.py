@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 The Newton Developers
 # SPDX-License-Identifier: Apache-2.0
 
-"""Frictionless cable self and inter-cable contact (method A') inside the monolithic transaction.
+"""Normal and optional frictional cable self and inter-cable contact (method A') inside the monolithic transaction.
 
 Gauss samples of each edge, plus one sample at each free end, are tested against
 the segments and interior vertices of other cable parts (``cable_contact_geometry``).
@@ -34,6 +34,7 @@ from .cable_contact_geometry import (
     cable_segment_response,
     cable_vertex_response,
 )
+from .cable_friction import add_friction, freeze_patches
 from .cloth_contact_point_cloud import _bucket, _cell, _finish_query
 from .contact_pipeline import _copy_pool_triplets, _reserve_pool_triplets
 from .contact_pool import _ContactPool, _ContactRows
@@ -48,6 +49,8 @@ _ALLOWED = {
     "self",
     "inter",
     "normal_stiffness",
+    "friction_coefficient",
+    "friction_velocity_scale",
     "index_exclusion",
     "arc_exclusion_factor",
     "samples_per_edge",
@@ -412,9 +415,6 @@ def self_bounds(segments, samples, *, index_span, arc_factor):
 class _CableContact:
     """Bounded sample-polyline cable contacts evaluated inside the monolithic transaction."""
 
-    #: Frictionless (v1): the contact energy is a potential.
-    mu = 0.0
-
     def __init__(self, solver, config, *, smoothing, use_cuda_graph):
         if not isinstance(config, dict):
             raise ValueError("Cable contact configuration must be a dict")
@@ -443,6 +443,12 @@ class _CableContact:
         if type(self.samples_per_edge) is not int or self.samples_per_edge not in GAUSS_RULES:
             raise ValueError(f"Cable contact samples_per_edge must be one of {sorted(GAUSS_RULES)}")
         self.smoothing = float(smoothing)
+        self.mu = _positive(
+            config.get("friction_coefficient", 0.0), "friction_coefficient", numpy_dtype, allow_zero=True
+        )
+        self.velocity_scale = _positive(
+            config.get("friction_velocity_scale", 0.01), "friction_velocity_scale", numpy_dtype
+        )
 
         ranges, positions, particles, radii = [], [], [], []
         for obj in cables:
@@ -499,6 +505,8 @@ class _CableContact:
         self.rows = array(solver._actors.maps["particle_to_global"], int)
         self.start = wp.zeros(self.model.particle_count, dtype=self.vector, device=self.device)
         self.pairs = wp.zeros(capacity, dtype=wp.vec4i, device=self.device)
+        self.lag_load = wp.zeros(capacity if self.mu else 0, dtype=self.vector, device=self.device)
+        self.lag_bary = wp.zeros(capacity if self.mu else 0, dtype=self.dtype, device=self.device)
         self._query_count = wp.zeros(1, dtype=wp.uint64, device=self.device)
         buckets = 1 << max(1, (2 * self.segment_count - 1).bit_length())
         self.heads = wp.zeros(buckets, dtype=int, device=self.device)
@@ -561,6 +569,12 @@ class _CableContact:
             "friction": "none",
             "dofs": "centerline-position",
         }
+        if self.mu:
+            self.config.update(
+                friction="lagged-patch-coulomb-v1",
+                friction_coefficient=self.mu,
+                friction_velocity_scale=self.velocity_scale,
+            )
         self.identity = np.frombuffer(json.dumps(self.config, sort_keys=True).encode(), dtype=np.uint8)
 
     @property
@@ -601,6 +615,8 @@ class _CableContact:
             self.pairs,
             self._query_count,
             self.query_flags,
+            self.lag_load,
+            self.lag_bary,
             self.pool.candidates.count,
             self.pool.candidates.overflow,
         )
@@ -649,12 +665,32 @@ class _CableContact:
         c = self.pool.candidates
         wp.launch(_finish_query, 1, [self._query_count, c.count, c.overflow, self.pairs.size], device=self.device)
 
+        if self.mu and self.pairs.size:
+            wp.launch(
+                freeze_patches,
+                self.pairs.size,
+                [
+                    self.tables,
+                    self.start,
+                    self.pairs,
+                    c.count,
+                    self.dtype(self.stiffness),
+                    self.dtype(self.smoothing),
+                    self.query_flags,
+                    self.lag_load,
+                    self.lag_bary,
+                ],
+                device=self.device,
+            )
+
     def evaluate(self, steps, dt):
-        """Write every frozen candidate's local response into the pool; ``dt`` is unused (no friction)."""
+        """Write normal and optional lagged friction responses into the pool."""
         buffers = (
             *self._table_buffers(),
             self.start,
             steps,
+            self.lag_load,
+            self.lag_bary,
             self.rows,
             self.pairs,
             self.flags,
@@ -670,12 +706,19 @@ class _CableContact:
         )
         count, capacity = self._candidate_count, self.pairs.size
         span = capacity if count is None else min(capacity, 1 << (max(1, count) - 1).bit_length()) if count else 0
-        self.graphs.run("cable_contact_response", (span,), buffers, lambda: self._evaluate(steps, span), warmup=False)
+        falloff = self.velocity_scale * dt if self.mu else 0.0
+        self.graphs.run(
+            "cable_contact_response",
+            (span, falloff),
+            buffers,
+            lambda: self._evaluate(steps, span, falloff),
+            warmup=False,
+        )
         self.pool.evaluate(candidate_count=self._candidate_count)
         self.evaluation_generation += 1
         self.assembled_generation = -1
 
-    def _evaluate(self, steps, span):
+    def _evaluate(self, steps, span, falloff):
         wp.copy(self.flags, self.query_flags)
         self._summary_counts.zero_()
         self._overlaps.zero_()
@@ -700,6 +743,24 @@ class _CableContact:
                 ],
                 device=self.device,
             )
+            if self.mu:
+                wp.launch(
+                    add_friction,
+                    span,
+                    [
+                        self.tables,
+                        steps,
+                        self.rows,
+                        self.pairs,
+                        self.lag_load,
+                        self.lag_bary,
+                        self.dtype(self.mu),
+                        self.dtype(falloff),
+                        self.pool.candidates,
+                        self.flags,
+                    ],
+                    device=self.device,
+                )
         wp.launch(_summary_count, 1, [self.flags, self.pool.candidates.count, self._load_count], device=self.device)
         sums = self._load_sums
         sums._reduce(
