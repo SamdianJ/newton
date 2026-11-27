@@ -3,10 +3,10 @@
 
 """Finite-EA DER strains and analytic first derivatives in a committed frame chart.
 
-The native-precision residual is exact. The tangent is the full
-strain-Jacobian Gauss-Newton matrix in the solver precision, including all
-position/theta blocks; it omits the stress-weighted second derivatives.
-No finite differences, numerical differentiation or theta inertia are used.
+The native-precision residual is exact. The PSD tangent includes tensile
+geometric stiffness and coupled bend/twist Gauss-Newton terms. Isotropic
+bending uses a mean-angle strain frame, preserving the material free-spin
+mode at zero natural curvature. The edge angles have no artificial inertia.
 """
 
 from typing import Any
@@ -119,6 +119,7 @@ def _edges(
     # follows those operands, zero where an axis-aligned product is exact.
     varying = (type(ea)(2.0) * _abs_dot(anchor_edge, change) + _abs_dot(change, change)) / (length + lengths0[i])
     energy[i] = type(ea)(0.5) * stiffness * extension * extension
+    transverse = stiffness * (wp.max(extension, type(ea)(0.0)) / length)
     for a in range(6):
         gradient = t[a % 3]
         if a < 3:
@@ -129,7 +130,11 @@ def _edges(
             other = t[b % 3]
             if b < 3:
                 other = -other
-            matrix[i, a, b] = stiffness * gradient * other
+            # Project the force-direction derivative onto its tensile (PSD) part.
+            identity = type(ea)(0.0)
+            if a % 3 == b % 3:
+                identity = wp.where((a < 3) == (b < 3), type(ea)(1.0), type(ea)(-1.0))
+            matrix[i, a, b] = stiffness * gradient * other + transverse * (identity - gradient * other)
 
 
 @wp.kernel
@@ -285,6 +290,14 @@ def _bend_twist(
         )
         for row in range(3):
             jacobian[i, row, a] = ds[row]
+    if bending[0, 0] == bending[1, 1] and bending[0, 1] == type(gj)(0.0):
+        # Differentiate the isotropic bending strain in the mean-angle frame.
+        # Equal rotations leave only the derivative of the rotated rest curvature.
+        common = type(t0)(rest_strain[i][1], -rest_strain[i][0], type(gj)(0.0))
+        for row in range(2):
+            relative = jacobian[i, row, 9] - jacobian[i, row, 10]
+            jacobian[i, row, 9] = type(gj)(0.5) * (common[row] + relative)
+            jacobian[i, row, 10] = type(gj)(0.5) * (common[row] - relative)
     for a in range(11):
         for b in range(11):
             matrix[i, a, b] = (

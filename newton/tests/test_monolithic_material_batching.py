@@ -382,8 +382,14 @@ def test_gauge_binding(test, device):
             if device.is_cuda:
                 captures = run._graphs.summary()["segments"]["cable_gauge_qualify"]["captures"]
                 test.assertEqual(captures, binding + 1)
-        raw[start] = 1
+        # Assembly can round equal and opposite internal torques differently.
+        # Only physical loads do work on the free common-spin direction.
+        raw[start] = np.nextafter(native(0.25), native(1.0))
         cable.raw.assign(raw)
+        run._settle_cable_gauges()
+        torque = run._cable_torque.numpy()
+        torque[cable.theta_offset] = 1
+        run._cable_torque.assign(torque)
         with test.assertRaisesRegex(_StepFailure, "incompatible net torque"):
             run._settle_cable_gauges()
         np.testing.assert_array_equal(gauges.accepted_pins.numpy(), accepted)

@@ -11,7 +11,7 @@ Experimental monolithic cables
    anisotropic bending and natural curvature/twist. Closed loops, branches,
    connectors, and cable–cloth and cable–tet contacts are outside this
    interface. Cable surfaces contact supported articulation, free rigid and
-   static shapes; experimental frictionless cable self and inter-cable contact
+   static shapes; experimental cable self and inter-cable contact
    is available through ``cable_contact``.
    Cloth can share the solve; see :doc:`monolithic_cloth`.
 
@@ -69,7 +69,7 @@ Cable contact
 -------------
 
 ``cable_contact=None`` (the default) adds nothing to the solve. An experimental
-configuration dictionary enables frictionless contact between cables and within
+configuration dictionary enables contact between cables and within
 one cable, on centerline positions only, for example ``{"self": True, "inter": True,
 "normal_stiffness": 1e5}``. Each cable's ``radius`` is its contact radius.
 
@@ -241,3 +241,21 @@ and the cross-EA shape/decay gates remain open. Their original recipes and
 failures are retained. The full matrix command still requests those experiments
 and must not be interpreted as a completed PASS. No STOP acceptance or change
 to the physical thresholds is used to grant the concession.
+
+Cable-to-cable friction
+~~~~~~~~~~~~~~~~~~~~~~~
+
+Set the experimental cable-contact dictionary's ``friction_coefficient`` to a
+nonnegative value (default zero). This coefficient is separate from shape
+friction. Both self and inter-cable contacts use it. The optional
+``friction_velocity_scale`` sets the transition to sliding in m/s (default
+0.01). For each Gauss or end sample, connected loaded target segments form
+one patch. Its normal load is the sum of segment loads less the shared
+vertex contributions. The closest target feature represents the patch.
+Its material interpolation, normal and load are lagged at step start.
+The two tangential displacement components contribute to the objective,
+residual, contact reaction and implicit tangent. The maximum shear is the
+coefficient times the lagged load. A newly formed patch gains friction next
+step. Near zero slip the response is regularized; very slow creep is possible.
+The model applies translational centerline friction without rolling or spin
+torques or a persistent static-friction anchor.

@@ -23,22 +23,37 @@ def _record_type(dtype):
     class Cable:
         raw: wp.array[dtype]
         fixed: wp.array[int]
+        rows: wp.array[int]
         jacobian: wp.array3d[dtype]
         start: int
+        theta_offset: int
         offset: int
 
     return Cable
 
 
 @wp.kernel
-def _gauge_terms(cables: wp.array[Any], jobs: wp.array[wp.vec2i], terms: wp.array2d[Any], blocked: wp.array[int]):
+def _gauge_terms(
+    cables: wp.array[Any],
+    jobs: wp.array[wp.vec2i],
+    torque: wp.array[Any],
+    contact: wp.array[Any],
+    terms: wp.array2d[wp.float64],
+    blocked: wp.array[int],
+):
     job = jobs[wp.tid()]
     actor, index = job[0], job[1]
     cable = cables[actor]
     if index < cable.fixed.shape[0]:
         value = cable.raw[cable.start + index]
-        terms[0, cable.offset + index] = value
-        square = value * value
+        # Internal material torques do zero work on a qualified common spin.
+        # Summing their assembled FP32 residuals can leave a spurious net load.
+        load = -wp.float64(torque[cable.theta_offset + index])
+        row = cable.rows[cable.start + index]
+        if row >= 0:
+            load += wp.float64(contact[row])
+        terms[0, cable.offset + index] = load
+        square = wp.float64(value) * wp.float64(value)
         if cable.fixed[index] != 0:
             square = terms.dtype(0)
         terms[1, cable.offset + index] = square
@@ -97,12 +112,12 @@ def _qualify(
 ):
     i = wp.tid()
     pins[i] = -1
-    summary[i, 0] = wp.sqrt(sums[i, 1])
+    summary[i, 0] = summary.dtype(wp.sqrt(sums[i, 1]))
     summary[i, 1] = summary.dtype(0)
     if eligible[i] != 0 and not reference:
         null = blocked[i] == 0
         if permanent[i] != 0 or null:
-            if wp.abs(sums[i, 0]) > tolerance:
+            if wp.abs(sums[i, 0]) > wp.float64(tolerance):
                 summary[i, 1] = summary.dtype(1)
         if null and permanent[i] == 0:
             pins[i] = first_rows[i]
@@ -163,8 +178,8 @@ class CableGauges:
         self.blocked = wp.zeros(count, dtype=int, device=self.device)
         self.pins = wp.full(count, -1, dtype=int, device=self.device)
         self.accepted_pins = wp.full(count, -1, dtype=int, device=self.device)
-        self.terms = wp.zeros((2, offset), dtype=self.dtype, device=self.device)
-        self.raw_reduction = SegmentedReduction(offset, groups, 2, dtype=self.dtype, device=self.device)
+        self.terms = wp.zeros((2, offset), dtype=wp.float64, device=self.device)
+        self.raw_reduction = SegmentedReduction(offset, groups, 2, dtype=wp.float64, device=self.device)
         self.summary = wp.zeros((count, 2), dtype=self.dtype, device=self.device)
         # Preserve the existing float64 mean, including for an FP32 direction.
         self.direction_terms = wp.zeros((1, n), dtype=wp.float64, device=self.device)
@@ -174,7 +189,7 @@ class CableGauges:
 
     def _views(self):
         return [
-            (c.raw, c.theta_fixed, c.objective.jacobian, 3 * c.ids.size, offset)
+            (c.raw, c.theta_fixed, c.rows, c.objective.jacobian, 3 * c.ids.size, c.theta_offset, offset)
             for c, offset in zip(self.cables, self.offsets, strict=True)
         ]
 
@@ -194,7 +209,8 @@ class CableGauges:
             self.blocked,
         ]
         bound = [self.eligible, self.permanent, self.first_rows, self.blocked, self.raw_reduction.result]
-        buffers = [*factors, *bound, self.terms, self.pins, self.summary, *self.raw_reduction.buffers()]
+        loads = [solver._cable_torque, solver._contact.residual]
+        buffers = [*factors, *bound, *loads, self.terms, self.pins, self.summary, *self.raw_reduction.buffers()]
         records_view = self._records.bind(self._views())
         buffers.extend(self._records.buffers())
 
@@ -203,7 +219,7 @@ class CableGauges:
             wp.launch(
                 _gauge_terms,
                 self._records.jobs.size,
-                [records_view, self._records.jobs, self.terms, self.blocked],
+                [records_view, self._records.jobs, *loads, self.terms, self.blocked],
                 device=self.device,
             )
             self.raw_reduction.reduce(self.terms)
